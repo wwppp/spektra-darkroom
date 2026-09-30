@@ -59,3 +59,6 @@ spektrafilm-repo/
 *~
 .DS_Store
 Thumbs.db
+
+# Documentation
+DEVELOPMENT_SUMMARY.md
