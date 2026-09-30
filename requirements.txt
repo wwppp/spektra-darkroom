@@ -8,3 +8,4 @@ tifffile>=2023.7.0
 PyOpenGL>=3.1.7
 scipy>=1.11.0
 imageio>=2.31.0
+git+https://github.com/andreavolpato/spektrafilm.git

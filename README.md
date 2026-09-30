@@ -72,8 +72,8 @@
 
 ### 1. 克隆代码仓库
 ```bash
-git clone https://github.com/<your-username>/spektra-darkroom-vulkan.git
-cd spektra-darkroom-vulkan
+git clone https://github.com/wwppp/spektra-darkroom.git
+cd spektra-darkroom
 ```
 
 ### 2. 创建并激活 Python 虚拟环境 (推荐)
@@ -85,16 +85,23 @@ python -m venv .venv
 .\.venv\Scripts\activate.bat
 ```
 
-### 3. 安装项目依赖
+### 3. 安装项目依赖与物理光学仿真内核
+本项目依赖 `spektrafilm` 官方光谱物理显影内核，可在安装依赖时一键自动拉取安装：
 ```bash
 pip install -r requirements.txt
 ```
-*(依赖核心库：`PySide6`, `numpy`, `opencv-python`, `rawpy`, `colour-science`, `Pillow`, `tifffile`)*
+> **提示**：若网络无法直接通过 pip 拉取 GitHub 源码，亦可手动拉取并以开发模式安装：
+> ```bash
+> git clone https://github.com/andreavolpato/spektrafilm.git spektrafilm-repo
+> pip install -e spektrafilm-repo
+> ```
 
 ### 4. 启动应用
-```bash
-python main.py
-```
+- **双击启动器**（推荐，无黑框）：直接双击根目录下的 **`SpektraDarkroom.exe`**；
+- **或通过命令行**：
+  ```bash
+  python main.py
+  ```
 
 ---
 
