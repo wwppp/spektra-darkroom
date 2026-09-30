@@ -1,0 +1,46 @@
+SpektraDarkroom 完整物理胶卷与相纸配置档案包
+==================================================
+
+本文件夹收录了 SpektraDarkroom 完整的 28 款物理胶卷与相纸的光谱参数档案（.json 格式）。
+这些配置未预置在软件默认精简列表中，您可以根据需要在软件左侧「胶卷库」或「相纸库」管理界面中，
+点击「导入胶卷配置 (.json)」或「导入相纸配置 (.json)」将心仪的胶片或相纸导入到软件中使用。
+
+一、 彩色负片 (Color Negative Films)
+--------------------------------------
+1. kodak_portra_160.json        - 柯达人像系列，超细腻银盐微粒与柔和肤色
+2. kodak_portra_400.json        - 柯达经典人像负片，温润中间调与高宽容度
+3. kodak_portra_800.json        - 柯达高感人像负片，弱光环境与柔和暗部
+4. kodak_portra_800_push1.json  - 柯达 Portra 800 迫冲 1 档（提升反差与微粒质感）
+5. kodak_portra_800_push2.json  - 柯达 Portra 800 迫冲 2 档（戏剧性光影与高反差）
+6. kodak_gold_200.json          - 柯达经典金胶卷，温暖金黄色调与怀旧质感
+7. kodak_ultramax_400.json      - 柯达高感街拍负片，生动原色反差与纪实风格
+8. kodak_ektar_100.json         - 柯达极致微反差与超高饱和度风景负片
+9. fujifilm_pro_400h.json       - 富士日系空气感人像负片，标志性青绿薄荷暗部与粉嫩肤色
+10. fujifilm_xtra_400.json      - 富士 Superia X-TRA 400，第四感光层洋红与青绿冷暖反差
+11. fujifilm_c200.json          - 富士经典民用负片，柔和蓝绿过渡与生活烟火气
+12. kodak_verita_200d.json      - 柯达实验性日光胶卷配方
+
+二、 电影负片 (Motion Picture Negative Films)
+--------------------------------------
+13. kodak_vision3_50d.json      - 柯达电影工业日光底片，世界级最细腻彩色负片
+14. kodak_vision3_250d.json     - 柯达主流日光电影卷，高宽容度与耐看的自然影调
+15. kodak_vision3_200t.json     - 柯达灯光型电影底片，室内与夜景钨丝灯基调
+16. kodak_vision3_500t.json     - 柯达夜景电影卷（CineStill 800T 原型），深邃冷调与光晕
+
+三、 反转片 / 正片 (Color Reversal / Slide Films)
+--------------------------------------
+17. fujifilm_velvia_100.json    - 富士风光传奇反转片，色彩浓郁饱和与深沉黑位
+18. fujifilm_provia_100f.json   - 富士真实中性反转片，业界标杆级色彩还原与平滑过渡
+19. kodak_ektachrome_100.json   - 柯达通透冷艳反转片，现代反转片杰作
+20. kodak_kodachrome_64.json    - 柯达传奇 Kodachrome 染印法反转片配方
+
+四、 放大相纸与电影正片 (Photo Papers & Print Films)
+--------------------------------------
+21. kodak_2383.json             - 柯达 Vision 2383 电影放映拷贝正片（好莱坞级胶片影调）
+22. kodak_2393.json             - 柯达 Vision 2393 电影正片，高密度与深沉黑阶
+23. kodak_portra_endura.json    - 柯达经典人像放大相纸，细腻过渡与高光纯净
+24. kodak_ultra_endura.json     - 柯达高反差商业展陈相纸
+25. kodak_supra_endura.json     - 柯达全能型专业彩色暗房相纸
+26. kodak_endura_premier.json   - 柯达数码暗房顶级旗舰相纸
+27. kodak_ektacolor_edge.json   - 柯达民用级经典彩色相纸
+28. fujifilm_crystal_archive_typeii.json - 富士水晶相纸第二代，清澈高光与冷峻反差
