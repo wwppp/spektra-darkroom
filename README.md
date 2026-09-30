@@ -22,13 +22,11 @@
 
 ---
 
-## 📖 项目缘起：写给每一位热爱胶片的摄影师
+## 📖 项目缘起
 
-作为一名长期拍摄彩色与黑白胶片的摄影爱好者，在数码暗房的调色过程中常常感到遗憾：市面上主流的胶片模拟预设（无论是 Lightroom、Capture One 还是各种 3D LUT），本质上都是**经验式的数码色彩拟合 (Digital Color Grading)**。它们通过简单的 HSL 偏置、反差曲线和静态 LUT 查找表进行感官逼近，不仅丢失了真实胶片的感光动态，更无法还原银盐乳剂在显影液中发色、抑制层扩散（DIR）、以及放大机透光冲印到底片相纸上的真正物理光学反应。
+市面上的胶片滤镜大多只是生硬的数码 LUT 映射，而开源界严谨的连续光谱物理暗房引擎（如 `spektrafilm`）此前在 Windows 平台一直缺少好用、开箱即用且具备 GPU 硬件加速的原生桌面客户端。
 
-而在开源摄影领域，**Andrea Volpato** 发起的优秀研究项目 [`spektrafilm`](https://github.com/andreavolpato/spektrafilm) 首次通过严谨的光谱测定建立了真正的全连续物理暗房仿真管线；苹果生态也随之涌现了针对 macOS 的原生实现（如基于 SwiftUI/Metal 的 SpektraLab）。**然而，庞大的 Windows PC 用户群体与摄影爱好者们，却苦于缺少一个专为 Windows 平台打造的专业级、开箱即用、具备毫秒级硬件加速的图形化物理暗房软件。**
-
-出于对真实胶片质感的极致追求与日常高频出片的需求，我基于 `spektrafilm` 物理化学光学核心开发了 **SpektraDarkroom Vulkan Edition**。本项目专为 **Windows 10 / 11** 深度定制，融合 **PySide6 专业暗黑桌面交互**与 **Modern OpenGL / Vulkan GPU 硬件渲染管线**，让每一位 Windows 摄影创作者都能在自己的工作站上，享受纯粹、严谨而沉浸的物理暗房体验。
+出于对真实胶片冲印质感的追求，我基于 `spektrafilm` 物理化学光学核心为 **Windows 平台**打造了 **SpektraDarkroom**，让 Windows 摄影爱好者也能拥有秒级交互的纯正物理暗房工作站。
 
 ---
 
