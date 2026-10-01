@@ -1,7 +1,7 @@
 import os
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF
-from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap
+from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
 from PySide6.QtWidgets import QMenu, QLabel, QWidget, QPushButton, QVBoxLayout
 from ui.window_utils import get_darkroom_menu_style
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -111,19 +111,62 @@ float smooth_cloud_noise(vec2 p) {
     return mix(nx0, nx1, s.y);
 }
 
+// Accurate Linear ProPhoto RGB to Display sRGB color space conversion
+vec3 prophoto_to_srgb(vec3 c) {
+    vec3 lin;
+    lin.r =  2.03649172 * c.r - 0.73759065 * c.g - 0.29925987 * c.b;
+    lin.g = -0.22571798 * c.r + 1.22317653 * c.g + 0.00272522 * c.b;
+    lin.b = -0.01054513 * c.r - 0.13487985 * c.g + 1.14521015 * c.b;
+    lin = max(vec3(0.0), lin);
+    vec3 higher = 1.055 * pow(lin, vec3(1.0 / 2.4)) - 0.055;
+    vec3 lower = lin * 12.92;
+    vec3 cutoff = step(vec3(0.0031308), lin);
+    return clamp(mix(lower, higher, cutoff), 0.0, 1.0);
+}
+
+// Filmic soft highlight roll-off (smooth C1 shoulder compression above threshold)
+vec3 filmic_shoulder(vec3 c, float threshold) {
+    vec3 over = max(vec3(0.0), c - threshold);
+    float span = 1.0 - threshold;
+    return min(c, vec3(threshold)) + span * (over / (span + over));
+}
+
 void main() {
     if (u_has_image == 0) {
         fragColor = vec4(0.08, 0.08, 0.08, 1.0);
         return;
     }
     
-    vec2 centered = (v_texcoord - 0.5) * 2.0;
+    float eff_screen_aspect = u_screen_aspect;
+    vec2 cur_coord = v_texcoord;
+    bool is_left = (v_texcoord.x < 0.5);
+
+    if (u_view_mode == 2) {
+        // Mode 2: Global side-by-side comparison (Both complete original and edited images)
+        float dx = fwidth(v_texcoord.x);
+        float dist_px = abs(v_texcoord.x - 0.5) / max(0.00001, dx);
+        if (dist_px < 1.0) {
+            float v_fade = smoothstep(0.0, 0.08, v_texcoord.y) * smoothstep(1.0, 0.92, v_texcoord.y);
+            vec3 line_color = mix(vec3(0.20, 0.22, 0.28), vec3(0.96, 0.62, 0.05), v_fade);
+            fragColor = vec4(line_color, 1.0);
+            return;
+        }
+
+        eff_screen_aspect = u_screen_aspect * 0.5;
+        if (is_left) {
+            cur_coord.x = v_texcoord.x * 2.0;
+        } else {
+            cur_coord.x = (v_texcoord.x - 0.5) * 2.0;
+        }
+    }
+
+    vec2 centered = (cur_coord - 0.5) * 2.0;
     
     vec2 quad_scale;
-    if (u_screen_aspect > u_image_aspect) {
-        quad_scale = vec2(u_image_aspect / u_screen_aspect, 1.0);
+    if (eff_screen_aspect > u_image_aspect) {
+        quad_scale = vec2(u_image_aspect / eff_screen_aspect, 1.0);
     } else {
-        quad_scale = vec2(1.0, u_screen_aspect / u_image_aspect);
+        quad_scale = vec2(1.0, eff_screen_aspect / u_image_aspect);
     }
     
     vec2 img_uv = (centered - u_pan) / (quad_scale * u_zoom);
@@ -151,12 +194,16 @@ void main() {
             return;
         }
         if (v_texcoord.x < u_split_x) {
-            fragColor = vec4(orig_rgb, 1.0);
+            fragColor = vec4(prophoto_to_srgb(orig_rgb), 1.0);
             return;
         }
-    } else if (u_view_mode == 2) {
-        // Mode 2: Full Original Before view (Hold compare)
-        fragColor = vec4(orig_rgb, 1.0);
+    } else if (u_view_mode == 2 && is_left) {
+        // Mode 2 Left viewport: Full complete original (Before)
+        fragColor = vec4(prophoto_to_srgb(orig_rgb), 1.0);
+        return;
+    } else if (u_view_mode == 3) {
+        // Mode 3: Temporary Full Original Before Compare (Long Press on Compare button)
+        fragColor = vec4(prophoto_to_srgb(orig_rgb), 1.0);
         return;
     }
     
@@ -230,10 +277,13 @@ void main() {
     }
 
     // 4. Physical 3D LUT sampling (Film emulsion + Paper D-max)
-    vec3 film_rgb = linear_rgb;
+    vec3 film_rgb;
     if (u_has_lut == 1) {
-        vec3 clamped_in = clamp(linear_rgb, 0.0, 1.0);
+        vec3 rolled_in = filmic_shoulder(max(vec3(0.0), linear_rgb), 0.75);
+        vec3 clamped_in = clamp(rolled_in, 0.0, 1.0);
         film_rgb = texture(u_lut, clamped_in).rgb;
+    } else {
+        film_rgb = prophoto_to_srgb(linear_rgb);
     }
     
     // 5. DIR Coupler inhibition response (Color separation & samelayer contrast)
@@ -329,12 +379,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
     requestRedo = Signal()
     requestReset = Signal()
     requestExport = Signal()
+    requestQuickExport = Signal()
     requestToggleSplit = Signal()
     importRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
 
         # Texture state
         self._image_tex_id = None
@@ -679,13 +731,36 @@ class DarkroomGLCanvas(QOpenGLWidget):
             b2_w, b2_h = 68, 26
             b1_x = int(max(16.0, min(self.width() - 140.0, split_x - b1_w - 12.0)))
             b2_x = int(max(80.0, min(self.width() - b2_w - 16.0, split_x + 12.0)))
+            self.badge_before.setText("原片")
             self.badge_before.setGeometry(b1_x, 16, b1_w, b1_h)
             self.badge_after.setGeometry(b2_x, 16, b2_w, b2_h)
             self.badge_before.show()
             self.badge_after.show()
             self.badge_before.raise_()
             self.badge_after.raise_()
+        elif self.params.get("view_mode") == 2 and self._has_image and self.width() > 0:
+            b1_w, b1_h = 56, 26
+            b2_w, b2_h = 68, 26
+            half_w = float(self.width()) / 2.0
+            b1_x = int(half_w / 2.0 - b1_w / 2.0)
+            b2_x = int(half_w + half_w / 2.0 - b2_w / 2.0)
+            self.badge_before.setText("原片")
+            self.badge_before.setGeometry(b1_x, 16, b1_w, b1_h)
+            self.badge_after.setGeometry(b2_x, 16, b2_w, b2_h)
+            self.badge_before.show()
+            self.badge_after.show()
+            self.badge_before.raise_()
+            self.badge_after.raise_()
+        elif self.params.get("view_mode") == 3 and self._has_image and self.width() > 0:
+            b1_w, b1_h = 96, 26
+            b1_x = int(self.width() / 2.0 - b1_w / 2.0)
+            self.badge_before.setText("原片 (Before)")
+            self.badge_before.setGeometry(b1_x, 16, b1_w, b1_h)
+            self.badge_before.show()
+            self.badge_before.raise_()
+            self.badge_after.hide()
         else:
+            self.badge_before.setText("原片")
             self.badge_before.hide()
             self.badge_after.hide()
 
@@ -912,6 +987,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         menu.addSeparator()
 
+        act_quick = menu.addAction("快速导出 (上次参数)")
+        act_quick.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        act_quick.triggered.connect(self.requestQuickExport.emit)
+
         act_export = menu.addAction("导出此图像 (Export)...")
         act_export.setShortcut(QKeySequence("Ctrl+E"))
         act_export.triggered.connect(self.requestExport.emit)
@@ -1001,7 +1080,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         else:
             super().mouseDoubleClickEvent(event)
 
-    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8):
+    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None):
         """Render image at target resolution on GPU using an offscreen FBO.
         Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
         """
@@ -1016,6 +1095,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.makeCurrent()
         orig_tex_id = self._image_tex_id
         temp_tex_id = None
+        temp_lut_tex_id = None
         fbo = None
         try:
             funcs = QOpenGLContext.currentContext().functions()
@@ -1039,6 +1119,23 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
             if not active_tex_id:
                 return None
+
+            if lut_override is not None:
+                size = lut_override.shape[0]
+                GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+                temp_lut_tex_id = GL.glGenTextures(1)
+                GL.glBindTexture(GL.GL_TEXTURE_3D, temp_lut_tex_id)
+                GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+                GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+                GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+                GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+                GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
+                data_lut = np.ascontiguousarray(lut_override, dtype=np.float32)
+                GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGB16F, size, size, size, 0, GL.GL_RGB, GL.GL_FLOAT, data_lut)
+                GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+                active_lut_tex_id = temp_lut_tex_id
+            else:
+                active_lut_tex_id = self._lut_tex_id
 
             # Merge params
             eff_params = dict(self.params)
@@ -1093,7 +1190,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_zoom", 1.0)
 
             u_1i("u_has_image", 1)
-            u_1i("u_has_lut", 1 if self._has_lut else 0)
+            u_1i("u_has_lut", 1 if (active_lut_tex_id and (self._has_lut or lut_override is not None)) else 0)
 
             u_1f("u_exposure", eff_params.get("exposure_ev", 0.0))
             u_1f("u_temp", eff_params.get("color_temp", 5500.0))
@@ -1135,9 +1232,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             GL.glBindTexture(GL.GL_TEXTURE_2D, active_tex_id)
             u_1i("u_image", 0)
 
-            if self._lut_tex_id:
+            if active_lut_tex_id:
                 funcs.glActiveTexture(0x84C1)  # GL_TEXTURE1
-                GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
+                GL.glBindTexture(GL.GL_TEXTURE_3D, active_lut_tex_id)
                 u_1i("u_lut", 1)
 
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
@@ -1168,6 +1265,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if temp_tex_id:
                 try:
                     GL.glDeleteTextures([temp_tex_id])
+                except Exception:
+                    pass
+            if temp_lut_tex_id:
+                try:
+                    GL.glDeleteTextures([temp_lut_tex_id])
                 except Exception:
                     pass
             if fbo:

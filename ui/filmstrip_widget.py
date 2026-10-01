@@ -15,66 +15,99 @@ class DuplicateFilesDialog(QDialog):
     """Dialog showing duplicate files that were skipped during import."""
     def __init__(self, duplicate_names, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("重复文件过滤提示")
-        self.setFixedSize(480, 320)
+        self.duplicate_names = list(duplicate_names or [])
+        self.setWindowTitle("重复底片过滤提示")
+        self.setFixedSize(540, 350)
         icon_path = os.path.join(get_resource_dir(), "app_icon.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        apply_dark_titlebar(self)
         self.setStyleSheet("""
             QDialog {
-                background: #16171b;
+                background: #14151a;
+                border: 1px solid #2b2e3b;
+                border-radius: 8px;
             }
             QLabel {
                 color: #e2e8f0;
-                font-size: 12px;
+                font-family: "Microsoft YaHei UI", sans-serif;
             }
             QTextEdit {
-                background: #111215;
-                color: #a1a1aa;
-                border: 1px solid #2f323e;
+                background: #101115;
+                color: #cbd5e1;
+                border: 1px solid #282b37;
                 border-radius: 6px;
-                padding: 8px;
-                font-family: Consolas, monospace;
+                padding: 10px;
+                font-family: Consolas, "Courier New", monospace;
                 font-size: 11.5px;
+                line-height: 1.4;
             }
             QPushButton {
                 background: #f59e0b;
-                color: #111;
+                color: #111111;
                 font-weight: bold;
                 border: none;
                 border-radius: 4px;
-                padding: 6px 22px;
+                padding: 6px 24px;
                 font-size: 12px;
+                min-width: 72px;
             }
             QPushButton:hover {
+                background: #fbbf24;
+            }
+            QPushButton:pressed {
                 background: #d97706;
             }
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(14)
 
-        lbl_head = QLabel(f"已自动过滤 {len(duplicate_names)} 个已打开的重复文件：")
-        lbl_head.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 13px;")
-        layout.addWidget(lbl_head)
+        # Header with icon and count
+        hdr = QHBoxLayout()
+        hdr.setSpacing(10)
+        badge = QLabel("ℹ")
+        badge.setFixedSize(28, 28)
+        badge.setStyleSheet("""
+            background: #261f14;
+            border: 1px solid #f59e0b;
+            border-radius: 6px;
+            color: #f59e0b;
+            font-size: 14px;
+            font-weight: bold;
+        """)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr.addWidget(badge)
 
-        txt = QTextEdit()
-        txt.setReadOnly(True)
-        txt.setPlainText("\n".join(duplicate_names))
-        layout.addWidget(txt, 1)
+        count = len(self.duplicate_names)
+        lbl_head = QLabel(f"已自动跳过 {count} 个已在暗房底片库中的重复文件：")
+        lbl_head.setStyleSheet("color: #f8fafc; font-weight: bold; font-size: 13px;")
+        hdr.addWidget(lbl_head, 1)
+        layout.addLayout(hdr)
 
+        # Files list
+        self.txt = QTextEdit()
+        self.txt.setReadOnly(True)
+        self.txt.setPlainText("\n".join(self.duplicate_names))
+        layout.addWidget(self.txt, 1)
+
+        # Footer
         btn_box = QHBoxLayout()
+        lbl_hint = QLabel("底片库已保留原有底片，不会重复添加。")
+        lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        btn_box.addWidget(lbl_hint)
         btn_box.addStretch()
+
         btn_ok = QPushButton("确定")
         btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_ok.clicked.connect(self.accept)
         btn_box.addWidget(btn_ok)
         layout.addLayout(btn_box)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        apply_dark_titlebar(self)
 
 
 class FilmstripItemWidget(QFrame):
@@ -90,16 +123,17 @@ class FilmstripItemWidget(QFrame):
 
     def __init__(self, photo_data, is_active=False, is_selected=False, parent=None):
         super().__init__(parent)
-        self.photo_id = photo_data["id"]
-        self.filename = photo_data["filename"]
-        self.file_path = photo_data.get("path", "")
+        self.photo_id = photo_data.get("id", "")
+        self.filename = photo_data.get("filename") or (os.path.basename(photo_data.get("path", "image")) if photo_data.get("path") else "image")
+        from path_utils import normalize_path
+        self.file_path = normalize_path(photo_data.get("path", ""))
         self.is_active = is_active
         self.is_selected = is_selected
         self.photo_data = photo_data
 
         self.setFixedSize(76, 82)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(f"{self.filename}\n尺寸: {photo_data.get('width', 0)} × {photo_data.get('height', 0)}")
+        self.setToolTip(f"{self.filename}\n路径: {self.file_path}\n尺寸: {photo_data.get('width', 0)} × {photo_data.get('height', 0)}")
 
         self._base_pixmap = None
         self._pixmap = None
@@ -113,8 +147,9 @@ class FilmstripItemWidget(QFrame):
     def set_item_size(self, target_w, target_h):
         self.setFixedSize(target_w, target_h)
         if self._base_pixmap and not self._base_pixmap.isNull():
-            tw = max(10, target_w - 10)
-            th = max(10, target_h - 20)
+            my = target_h * 0.14
+            tw = max(10, int(target_w - 8))
+            th = max(10, int(target_h - my * 2.0))
             self._pixmap = self._base_pixmap.scaled(
                 tw, th, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             )
@@ -142,8 +177,8 @@ class FilmstripItemWidget(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        w = self.width()
-        h = self.height()
+        w = float(self.width())
+        h = float(self.height())
 
         # 1. Base Film Negative Border & Background
         if self.is_active:
@@ -161,27 +196,31 @@ class FilmstripItemWidget(QFrame):
 
         painter.setBrush(QBrush(bg_color))
         painter.setPen(QPen(border_color, border_width))
-        painter.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 4, 4)
+        painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 4.0, 4.0)
 
-        # 2. Draw 35mm Sprocket Holes (4 holes on top, 4 on bottom)
-        sprocket_pen = QPen(QColor(32, 34, 42), 0.5)
+        # 2. Draw 35mm Sprocket Holes with strict proportional scaling (Item 9)
+        sprocket_pen = QPen(QColor(36, 38, 48), 0.5)
         sprocket_brush = QBrush(QColor(10, 11, 14))
         painter.setPen(sprocket_pen)
         painter.setBrush(sprocket_brush)
 
-        hole_w = 6.0
-        hole_h = 4.0
-        spacing = (w - 8) / 4.0
+        margin_y = h * 0.14
+        hole_h = margin_y * 0.60
+        hole_w = hole_h * 1.30
+        hole_r = max(1.0, hole_h * 0.22)
+        top_hy = (margin_y - hole_h) / 2.0
+        bot_hy = h - margin_y + (margin_y - hole_h) / 2.0
 
-        for i in range(4):
-            hx = 5.0 + i * spacing + (spacing - hole_w) / 2.0
-            # Top row
-            painter.drawRoundedRect(QRectF(hx, 3.5, hole_w, hole_h), 1.0, 1.0)
-            # Bottom row
-            painter.drawRoundedRect(QRectF(hx, h - 7.5, hole_w, hole_h), 1.0, 1.0)
+        hole_pitch = max(12.0, hole_w * 2.2)
+        num_holes = max(2, int(round((w - 10.0) / hole_pitch)))
+        spacing = (w - 8.0) / float(num_holes)
+        for i in range(num_holes):
+            hx = 4.0 + i * spacing + (spacing - hole_w) / 2.0
+            painter.drawRoundedRect(QRectF(hx, top_hy, hole_w, hole_h), hole_r, hole_r)
+            painter.drawRoundedRect(QRectF(hx, bot_hy, hole_w, hole_h), hole_r, hole_r)
 
-        # 3. Draw Thumbnail in the center
-        thumb_rect = QRectF(5, 10, w - 10, h - 20)
+        # 3. Draw Thumbnail strictly inside leader bands
+        thumb_rect = QRectF(4.0, margin_y, w - 8.0, h - margin_y * 2.0)
         painter.setClipRect(thumb_rect)
         if self._pixmap and not self._pixmap.isNull():
             px = thumb_rect.x() + (thumb_rect.width() - self._pixmap.width()) / 2.0
@@ -190,14 +229,15 @@ class FilmstripItemWidget(QFrame):
         else:
             painter.fillRect(thumb_rect, QColor(20, 20, 22))
 
-        # 4. Draw Filename Overlay at the bottom
-        overlay_h = 16.0
+        # 4. Draw Filename Overlay at the bottom of the active frame (Light translucent glass)
+        overlay_h = max(14.0, min(24.0, h * 0.20))
         overlay_rect = QRectF(thumb_rect.x(), thumb_rect.bottom() - overlay_h, thumb_rect.width(), overlay_h)
-        painter.fillRect(overlay_rect, QColor(0, 0, 0, 185))
+        painter.fillRect(overlay_rect, QColor(0, 0, 0, 80))
 
         painter.setPen(QPen(QColor(230, 230, 230)))
         font = painter.font()
-        font.setPointSize(8)
+        font_size = max(7, min(10, int(round(h * 0.09))))
+        font.setPointSize(font_size)
         painter.setFont(font)
 
         fm = QFontMetrics(font)
@@ -205,11 +245,22 @@ class FilmstripItemWidget(QFrame):
         painter.drawText(overlay_rect, Qt.AlignmentFlag.AlignCenter, elided)
 
         # 5. Draw Edited/Modified indicator badge (Item 1)
+        painter.setClipping(False)
         if self.photo_data.get("is_dirty") or self.photo_data.get("is_edited"):
-            painter.setClipping(False)
+            badge_sz = max(5.0, min(9.0, h * 0.07))
             painter.setPen(QPen(QColor(0, 0, 0, 200), 1.0))
             painter.setBrush(QBrush(QColor("#f59e0b")))
-            painter.drawEllipse(QRectF(7.0, 12.0, 6.0, 6.0))
+            painter.drawEllipse(QRectF(margin_y * 0.6, margin_y * 1.1, badge_sz, badge_sz))
+
+        # 6. Top layer: High-visibility Selection & Active Focus Border (Single and Multi-select)
+        if self.is_active:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor("#f59e0b"), 2.2))
+            painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 4.0, 4.0)
+        elif self.is_selected:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(245, 158, 11, 230), 2.0))
+            painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 4.0, 4.0)
 
     @property
     def is_dirty(self):
@@ -231,19 +282,30 @@ class FilmstripWidget(QWidget):
     photosRemoved = Signal(list)
     clearRequested = Signal()
     batchExportRequested = Signal(list)
+    quickExportRequested = Signal(list)
     addRequested = Signal()
     clearSdcRequested = Signal(list)
+    selectionChanged = Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumHeight(64)
         self.setMaximumHeight(260)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._item_widgets = {}
         self._photos_list = []
         self._active_id = None
         self._selected_ids = set()
 
         self._init_ui()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            if self._selected_ids:
+                self.photosRemoved.emit(list(self._selected_ids))
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -320,9 +382,9 @@ class FilmstripWidget(QWidget):
         self.add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.add_btn.setStyleSheet("""
             QPushButton {
-                background: #141519;
+                background: #181920;
                 color: #f59e0b;
-                border: 1px dashed #424656;
+                border: 1px solid #2d303e;
                 border-radius: 4px;
                 font-size: 11px;
                 font-weight: bold;
@@ -331,18 +393,18 @@ class FilmstripWidget(QWidget):
                 outline: none;
             }
             QPushButton:hover {
-                background: #1e2028;
+                background: #232530;
                 color: #fbbf24;
-                border: 1px dashed #f59e0b;
+                border: 1px solid #f59e0b;
             }
             QPushButton:pressed {
-                background: #101114;
+                background: #121317;
                 color: #d97706;
                 border: 1px solid #d97706;
             }
             QPushButton:focus {
                 outline: none;
-                border: 1px dashed #f59e0b;
+                border: 1px solid #2d303e;
             }
         """)
         self.add_btn.clicked.connect(self.addRequested.emit)
@@ -375,8 +437,10 @@ class FilmstripWidget(QWidget):
     def set_photos(self, photos, active_id):
         self._photos_list = photos
         self._active_id = active_id
-        if active_id and active_id not in self._selected_ids:
+        if active_id:
             self._selected_ids = {active_id}
+        else:
+            self._selected_ids = set()
 
         # Clear existing
         for w in self._item_widgets.values():
@@ -392,6 +456,7 @@ class FilmstripWidget(QWidget):
                 self._empty_lbl = QLabel("底片库为空，点击右侧「＋ 添加」或拖入文件开始导入")
                 self._empty_lbl.setStyleSheet("color: #64748b; font-size: 11px; margin-left: 14px;")
             self.scroll_layout.insertWidget(0, self._empty_lbl)
+            self.selectionChanged.emit([])
             return
 
         if hasattr(self, '_empty_lbl') and self._empty_lbl is not None:
@@ -413,6 +478,7 @@ class FilmstripWidget(QWidget):
             item.contextMenuRequested.connect(self._show_context_menu)
             self._item_widgets[pid] = item
             self.scroll_layout.insertWidget(idx, item)
+        self.selectionChanged.emit(list(self._selected_ids))
 
     def append_photo(self, photo, is_active=False):
         """Incrementally appends a single photo entry to the filmstrip without clearing."""
@@ -441,23 +507,22 @@ class FilmstripWidget(QWidget):
         self._item_widgets[pid] = item
         idx = max(0, len(self._item_widgets) - 1)
         self.scroll_layout.insertWidget(idx, item)
+        if is_active:
+            self.selectionChanged.emit(list(self._selected_ids))
 
     def set_active_photo(self, active_id):
         self._active_id = active_id
-        if active_id not in self._selected_ids:
+        if active_id and active_id not in self._selected_ids:
             self._selected_ids = {active_id}
-        for pid, w in self._item_widgets.items():
-            w.set_active(pid == active_id)
-            w.set_selected(pid in self._selected_ids)
+        self._update_items_selection()
+        self.selectionChanged.emit(list(self._selected_ids))
 
     def get_selected_photo_ids(self):
         return list(self._selected_ids) if self._selected_ids else ([self._active_id] if self._active_id else [])
 
     def select_all_photos(self):
         """Select all photos in filmstrip (Ctrl+A)."""
-        self._selected_ids = {p["id"] for p in self._photos_list}
-        for pid, w in self._item_widgets.items():
-            w.set_selected(True)
+        self.select_all()
 
     def _update_items_selection(self):
         for pid, w in self._item_widgets.items():
@@ -467,21 +532,22 @@ class FilmstripWidget(QWidget):
     def _on_item_clicked(self, photo_id, event):
         mods = event.modifiers()
         if mods & Qt.KeyboardModifier.ControlModifier:
-            # Ctrl+Click: Toggle selection (can deselect any item)
+            # Ctrl+Click: Toggle selection WITHOUT switching active canvas photo
             if photo_id in self._selected_ids:
                 if len(self._selected_ids) > 1:
                     self._selected_ids.remove(photo_id)
-                    # If active photo was deselected, switch active pointer to another selected photo
+                    # If active photo was deselected, update internal pointer without emitting photoSelected
                     if self._active_id == photo_id:
-                        new_active = next(iter(self._selected_ids))
-                        self._active_id = new_active
-                        self.photoSelected.emit(new_active)
-                    self._update_items_selection()
+                        self._active_id = next(iter(self._selected_ids))
             else:
                 self._selected_ids.add(photo_id)
-                self._active_id = photo_id
-                self._update_items_selection()
-                self.photoSelected.emit(photo_id)
+                # Keep active photo intact so canvas never switches
+                if not self._active_id:
+                    self._active_id = photo_id
+
+            self._update_items_selection()
+            self.selectionChanged.emit(list(self._selected_ids))
+            return
         elif mods & Qt.KeyboardModifier.ShiftModifier and self._active_id in self._item_widgets:
             # Shift+Click: Range selection
             pids = [p["id"] for p in self._photos_list]
@@ -497,20 +563,26 @@ class FilmstripWidget(QWidget):
             self._selected_ids = {photo_id}
             self.set_active_photo(photo_id)
             self.photoSelected.emit(photo_id)
+        self.selectionChanged.emit(list(self._selected_ids))
 
     def _show_context_menu(self, target_id, global_pos):
         # Decouple right-click: ensure target_id is selected for action scope, but DO NOT switch active canvas photo
         if target_id not in self._selected_ids:
             self._selected_ids = {target_id}
-            for pid, w in self._item_widgets.items():
-                w.set_selected(pid in self._selected_ids)
+            self._update_items_selection()
+            self.selectionChanged.emit(list(self._selected_ids))
 
         sel_count = len(self._selected_ids)
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
         icon_exp = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
+        icon_quick = os.path.join(get_resource_dir(), "icons", "quick_export.png")
         icon_del = os.path.join(get_resource_dir(), "icons", "dlg_discard.png")
+
+        quick_label = "快速导出 (上次参数)" if sel_count == 1 else f"快速导出选中底片 ({sel_count} 张)"
+        act_quick = menu.addAction(quick_label)
+        act_quick.triggered.connect(lambda: self.quickExportRequested.emit(list(self._selected_ids)))
 
         export_label = f"导出此底片..." if sel_count == 1 else f"导出选中底片 ({sel_count} 张)..."
         act_export = menu.addAction(export_label)
@@ -579,11 +651,11 @@ class FilmstripWidget(QWidget):
 
     def select_all(self):
         self._selected_ids = {p["id"] for p in self._photos_list}
-        for pid, w in self._item_widgets.items():
-            w.set_selected(True)
+        self._update_items_selection()
+        self.selectionChanged.emit(list(self._selected_ids))
 
     def invert_selection(self):
         all_ids = {p["id"] for p in self._photos_list}
         self._selected_ids = all_ids - self._selected_ids
-        for pid, w in self._item_widgets.items():
-            w.set_selected(pid in self._selected_ids)
+        self._update_items_selection()
+        self.selectionChanged.emit(list(self._selected_ids))

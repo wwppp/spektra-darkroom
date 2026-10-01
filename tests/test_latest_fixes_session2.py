@@ -71,7 +71,7 @@ class TestLatestFixesSession2(unittest.TestCase):
         dlg = PreferencesDialog(self.win)
         self.assertFalse(hasattr(dlg, "chk_confirm_exit"), "chk_confirm_exit should be removed")
         self.assertTrue(hasattr(dlg, "chk_restore_last_files"), "chk_restore_last_files should be present")
-        self.assertEqual(dlg.chk_restore_last_files.text(), "打开时回到上一次打开的文件")
+        self.assertEqual(dlg.chk_restore_last_files.text(), "启动时恢复上一次会话工程 (.sdss)")
         dlg.close()
 
 

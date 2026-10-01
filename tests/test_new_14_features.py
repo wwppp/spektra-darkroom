@@ -49,7 +49,7 @@ class TestNew14Features(unittest.TestCase):
         self.win._on_slider_live("exposure_ev", 0.5)
         self.assertTrue(self.win._photo_is_dirty)
         self.assertTrue(dummy_photo.get("is_dirty"))
-        self.assertIn("dirty_test.jpg", self.win.windowTitle())
+        self.assertTrue(self.win.windowTitle().startswith("*"))
 
         # Save resets dirty
         self.win.action_save_current()
@@ -100,7 +100,7 @@ class TestNew14Features(unittest.TestCase):
         # File menu has "退出" and "保存修改"
         file_actions = [a.text() for a in self.win.menu_bar.actions()[0].menu().actions() if not a.isSeparator()]
         self.assertIn("退出", file_actions)
-        self.assertIn("保存修改", file_actions)
+        self.assertIn("保存当前会话 (.sdss)", file_actions)
 
         # Edit menu has "胶卷库...", "相纸库...", "首选项..."
         edit_actions = [a.text() for a in self.win.menu_bar.actions()[1].menu().actions() if not a.isSeparator()]

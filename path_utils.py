@@ -27,3 +27,10 @@ def get_icon_dir():
 
 def get_icon_path(name: str):
     return os.path.join(get_icon_dir(), name)
+
+def normalize_path(path: str) -> str:
+    """Normalize file or directory path to native OS format, resolving mixed slashes and quotes."""
+    if not path:
+        return ""
+    clean = str(path).strip().strip('"').strip("'")
+    return os.path.normpath(clean)

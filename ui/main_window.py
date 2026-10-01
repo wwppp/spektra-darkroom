@@ -44,6 +44,8 @@ from version import get_app_title, get_full_version_info
 import sdc_manager
 import config_manager
 import session_cache_manager
+from ui.export_queue_manager import ExportQueueManager, ExportQueueDialog, ExportTask
+from ui.unsaved_session_dialog import UnsavedSessionDialog
 
 if sys.platform == "win32":
     from ctypes import wintypes
@@ -83,13 +85,10 @@ from ui.spinner_widget import SpinnerWidget
 from ui.histogram_widget import HistogramWidget
 
 
-def get_icon(name, target_size=13):
+def get_icon(name, target_size=None):
     path = get_icon_path(name)
     if not os.path.exists(path):
         return QIcon()
-    if target_size:
-        pix = QPixmap(path).scaled(target_size, target_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        return QIcon(pix)
     return QIcon(path)
 
 
@@ -212,10 +211,10 @@ class StockThumbnailWorker(QThread):
     film_ready = Signal(str, QPixmap)
     paper_ready = Signal(str, QPixmap)
 
-    def __init__(self, engine, thumb_rgb, film_stocks, paper_stocks, current_film, current_paper, do_films=True, do_papers=True, parent=None):
+    def __init__(self, engine, linear_thumb, film_stocks, paper_stocks, current_film, current_paper, do_films=True, do_papers=True, parent=None):
         super().__init__(parent)
         self.engine = engine
-        self.thumb_rgb = thumb_rgb.copy() if thumb_rgb is not None else None
+        self.linear_thumb = linear_thumb.copy() if linear_thumb is not None else None
         self.film_stocks = list(film_stocks)
         self.paper_stocks = list(paper_stocks)
         self.current_film = current_film
@@ -228,19 +227,30 @@ class StockThumbnailWorker(QThread):
         self._stopped = True
 
     def run(self):
-        if self.thumb_rgb is None or self._stopped:
+        if self.linear_thumb is None or self._stopped:
             return
 
-        # Scale down while strictly preserving aspect ratio so 3D LUT grading is fast
-        h, w = self.thumb_rgb.shape[:2]
+        from app_core import filmic_shoulder_np, prophoto_to_srgb
+
+        # If passed an 8-bit integer image by fallback, normalize to float32
+        if self.linear_thumb.dtype == np.uint8:
+            small_float = self.linear_thumb.astype(np.float32) / 255.0
+        else:
+            small_float = self.linear_thumb.astype(np.float32)
+
+        # Scale down while strictly preserving aspect ratio so 3D LUT grading is ultra-fast
+        h, w = small_float.shape[:2]
         max_edge = 120
         if max(h, w) > max_edge:
             scale = max_edge / float(max(h, w))
             target_w = max(1, int(round(w * scale)))
             target_h = max(1, int(round(h * scale)))
-            small_rgb = cv2.resize(self.thumb_rgb, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            small_linear = cv2.resize(small_float, (target_w, target_h), interpolation=cv2.INTER_AREA)
         else:
-            small_rgb = self.thumb_rgb
+            small_linear = small_float.copy()
+
+        # Item 3: Apply filmic soft highlight shoulder roll-off matching GLSL viewport shader
+        rolled_linear = filmic_shoulder_np(np.maximum(0.0, small_linear), 0.75)
 
         # Reference stocks to pair with when current stock is 'none' (bypass mode)
         ref_paper = self.current_paper if self.current_paper != "none" else "kodak_2383"
@@ -253,13 +263,15 @@ class StockThumbnailWorker(QThread):
                     return
                 try:
                     if sid == "none":
-                        gh, gw, gc = small_rgb.shape
-                        qimg = QImage(small_rgb.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
+                        # Bypass mode: directly convert linear ProPhoto to display sRGB
+                        srgb_u8 = (prophoto_to_srgb(small_linear) * 255.0).astype(np.uint8)
+                        gh, gw, gc = srgb_u8.shape
+                        qimg = QImage(srgb_u8.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
                         pix = QPixmap.fromImage(qimg)
                         self.film_ready.emit(sid, pix)
                     else:
                         lut = self.engine.get_3d_lut(sid, ref_paper, lut_size=17)
-                        graded = self.engine.apply_lut_to_rgb(small_rgb, lut)
+                        graded = self.engine.apply_lut_to_linear(rolled_linear, lut)
                         gh, gw, gc = graded.shape
                         qimg = QImage(graded.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
                         pix = QPixmap.fromImage(qimg)
@@ -274,13 +286,15 @@ class StockThumbnailWorker(QThread):
                     return
                 try:
                     if sid == "none":
-                        gh, gw, gc = small_rgb.shape
-                        qimg = QImage(small_rgb.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
+                        # Scan mode / Bypass mode: digital scan directly from film
+                        srgb_u8 = (prophoto_to_srgb(small_linear) * 255.0).astype(np.uint8)
+                        gh, gw, gc = srgb_u8.shape
+                        qimg = QImage(srgb_u8.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
                         pix = QPixmap.fromImage(qimg)
                         self.paper_ready.emit(sid, pix)
                     else:
                         lut = self.engine.get_3d_lut(ref_film, sid, lut_size=17)
-                        graded = self.engine.apply_lut_to_rgb(small_rgb, lut)
+                        graded = self.engine.apply_lut_to_linear(rolled_linear, lut)
                         gh, gw, gc = graded.shape
                         qimg = QImage(graded.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
                         pix = QPixmap.fromImage(qimg)
@@ -346,7 +360,8 @@ class BatchImportWorker(QThread):
                         "thumbnail_rgb": res.get("thumbnail_rgb"),
                         "float_img": res.get("float_img"),
                         "exif": res.get("exif", {}),
-                        "auto_ev": res.get("auto_ev", 0.0)
+                        "auto_ev": 0.0,
+                        "base_ev": res.get("base_ev", 0.0)
                     }
                     # Write-through: save full preview for first photo, fast thumbnail+exif for others
                     save_prev = (i == 1 and self.start_idx == 0)
@@ -588,10 +603,12 @@ class CompactExifWidget(QWidget):
         content = QWidget()
         content.setStyleSheet("background: transparent;")
         grid = QGridLayout(content)
-        grid.setHorizontalSpacing(8)
+        grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(2)
-        # Issue 5 Option 2: 14px reserved right margin so when scrollbar appears, text does not jump!
-        grid.setContentsMargins(0, 2, 14, 2)
+        grid.setContentsMargins(0, 2, 8, 2)
+        grid.setColumnMinimumWidth(0, 70)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
 
         self.labels = {}
         fields = [
@@ -615,10 +632,12 @@ class CompactExifWidget(QWidget):
 
         for row, (label_text, key) in enumerate(fields):
             lbl_k = QLabel(label_text)
+            lbl_k.setFixedWidth(70)
             lbl_k.setStyleSheet("color: #7b8092; font-size: 10px;")
             lbl_v = QLabel("-")
             lbl_v.setStyleSheet("color: #e2e8f0; font-size: 10px; font-weight: 500;")
-            lbl_v.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            lbl_v.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            lbl_v.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             grid.addWidget(lbl_k, row, 0)
             grid.addWidget(lbl_v, row, 1)
             self.labels[key] = lbl_v
@@ -630,10 +649,10 @@ class CompactExifWidget(QWidget):
 
     def set_exif_data(self, data):
         for k, lbl in self.labels.items():
-            val = str(data.get(k, "-"))
-            if len(val) > 24:
-                val = val[:22] + "..."
+            raw_val = data.get(k, "-")
+            val = str(raw_val) if raw_val is not None and str(raw_val).strip() != "" else "-"
             lbl.setText(val)
+            lbl.setToolTip(val if val != "-" else "")
 
 
 class FadingSplitterHandle(QSplitterHandle):
@@ -710,15 +729,68 @@ class FadingSplitter(QSplitter):
         self.setChildrenCollapsible(False)
         self.setStyleSheet("QSplitter { background: transparent; }")
 
-    def createHandle(self):
-        return FadingSplitterHandle(self.orientation(), self)
+class CompareButton(QPushButton):
+    """Compare button supporting:
+    - Click (< 180ms): toggle split view mode (cycles 0 -> 1 -> 2 -> 0)
+    - Long-press (>= 180ms): preview full original (Before) image, reverting to previous view on release.
+    """
+    longPressStarted = Signal()
+    longPressFinished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._press_timer = QTimer(self)
+        self._press_timer.setSingleShot(True)
+        self._press_timer.setInterval(180)
+        self._press_timer.timeout.connect(self._on_long_press_timeout)
+        self._is_long_pressing = False
+
+    def _on_long_press_timeout(self):
+        self._is_long_pressing = True
+        self.longPressStarted.emit()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._is_long_pressing = False
+            self._press_timer.start()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._press_timer.isActive():
+                self._press_timer.stop()
+            if self._is_long_pressing:
+                self._is_long_pressing = False
+                self.longPressFinished.emit()
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        if self._press_timer.isActive():
+            self._press_timer.stop()
+        if self._is_long_pressing:
+            self._is_long_pressing = False
+            self.longPressFinished.emit()
+        super().focusOutEvent(event)
+
+    def hideEvent(self, event):
+        if self._press_timer.isActive():
+            self._press_timer.stop()
+        if self._is_long_pressing:
+            self._is_long_pressing = False
+            self.longPressFinished.emit()
+        super().hideEvent(event)
 
 
 class DarkroomMainWindow(QMainWindow):
     """SpektraDarkroom Complete Application Window."""
-    def __init__(self, engine):
+    def __init__(self, engine, initial_session=None, initial_files=None):
         super().__init__()
         self.engine = engine
+        self._initial_session = initial_session
+        self._initial_files = initial_files or []
+        self._has_cli_targets = bool(initial_session or (initial_files and len(initial_files) > 0))
         self.setWindowTitle(get_app_title())
         icon_path = os.path.join(get_resource_dir(), "app_icon.png")
         if os.path.exists(icon_path):
@@ -741,7 +813,9 @@ class DarkroomMainWindow(QMainWindow):
         self._import_worker = None
         self.current_film_stock = "none"
         self.current_paper_stock = "none"
+        self.current_print_mode = "optical"
         self.current_params = {
+            "print_mode": "optical",
             "exposure_ev": 0.0,
             "color_temp": 5500.0,
             "tint": 1.0,
@@ -779,21 +853,40 @@ class DarkroomMainWindow(QMainWindow):
         self._saved_normal_geo = None
         self._current_photo_thumb = None
         self._thumb_worker = None
-        self._compare_press_mode = 0
-        self._is_compare_holding = False
-        self._compare_hold_timer = QTimer(self)
-        self._compare_hold_timer.setSingleShot(True)
-        self._compare_hold_timer.timeout.connect(self._on_compare_hold_timeout)
 
         # Central canvas & widgets
         self.canvas = DarkroomGLCanvas(self)
         self.film_cards = {}
         self.paper_cards = {}
+        self._current_session_path = None
+        self._is_temp_session = False
+        self._pending_session_map = None
+        self.export_queue = ExportQueueManager(self.engine, self.canvas, self)
+        self._is_importing = False
+        self._status_timer = QTimer(self)
+        self._status_timer.setSingleShot(True)
+        self._status_timer.timeout.connect(self._on_status_timeout)
+
+        # Backslash (\) key compare shortcut & long-press tracking
+        self._backslash_timer = QTimer(self)
+        self._backslash_timer.setSingleShot(True)
+        self._backslash_timer.setInterval(180)
+        self._backslash_timer.timeout.connect(self._on_backslash_timeout)
+        self._backslash_pressed = False
+        self._backslash_long_pressed = False
+        QApplication.instance().installEventFilter(self)
 
         self._init_ui()
+        self.export_queue.status_changed.connect(self._on_export_queue_status_changed)
         self._init_menu_and_actions()
         self._wire_canvas_events()
         self._restore_saved_state()
+
+        # If CLI session or files provided, queue their loading
+        if self._initial_session:
+            QTimer.singleShot(20, lambda: self._open_session_by_path(self._initial_session))
+        elif self._initial_files:
+            QTimer.singleShot(20, lambda: self._import_files_list(self._initial_files))
 
     def _restore_saved_state(self):
         """Restores window geometry, splitter sizes, accordion expansion, and stock selections."""
@@ -856,15 +949,19 @@ class DarkroomMainWindow(QMainWindow):
             if is_maximized:
                 self._restore_as_maximized = True
 
-            # 5. Restore last open files if preference is enabled
+            # 4. Restore film & paper stock sort order
+            film_sort = ui_cfg.get("film_sort_order", "name")
+            self._sort_and_reflow_stocks("film", film_sort, persist=False)
+            paper_sort = ui_cfg.get("paper_sort_order", "name")
+            self._sort_and_reflow_stocks("paper", paper_sort, persist=False)
+
+            # 5. Restore last session if preference is enabled and not launched with CLI session/files
             prefs = config_manager.get_preferences()
-            if prefs.get("restore_last_files", True) and not self.photos:
-                last_files, active_file = config_manager.get_session_state()
-                existing_files = [f for f in last_files if os.path.exists(f)]
-                if existing_files:
-                    if active_file and active_file in existing_files:
-                        self._target_initial_active_path = active_file
-                    QTimer.singleShot(40, lambda: self._restore_saved_session(existing_files, active_file))
+            restore_session_enabled = prefs.get("restore_last_session", prefs.get("restore_last_files", True))
+            if restore_session_enabled and not getattr(self, "_has_cli_targets", False) and not self.photos and not self._current_session_path:
+                last_session = config_manager.get_last_session_path()
+                if last_session and os.path.exists(last_session):
+                    QTimer.singleShot(40, lambda: self._open_session_by_path(last_session))
         except Exception as e:
             logger.warning(f"Error restoring application state: {e}")
 
@@ -902,24 +999,42 @@ class DarkroomMainWindow(QMainWindow):
                 uncached_files.append(p)
 
         if cached_entries:
+            # Item 13: Merge session photo metadata (params, film, paper, dirty flags)
+            if hasattr(self, "_pending_session_map") and self._pending_session_map:
+                from path_utils import normalize_path
+                for entry in cached_entries:
+                    norm_p = normalize_path(entry.get("path", ""))
+                    s_p = self._pending_session_map.get(norm_p)
+                    if s_p:
+                        entry["film_profile"] = s_p.get("film_stock", "none")
+                        entry["paper_profile"] = s_p.get("paper_stock", "none")
+                        entry["print_mode"] = s_p.get("print_mode", "optical")
+                        entry["base_ev"] = s_p.get("base_ev", entry.get("base_ev", 0.0))
+                        entry["params"] = dict(s_p.get("params") or {})
+                        is_dirty = bool(s_p.get("is_dirty", False))
+                        is_edited = bool(s_p.get("is_edited", False))
+                        entry["is_dirty"] = is_dirty
+                        entry["is_edited"] = is_edited
+
             # 1. Switch to darkroom workspace instantly
             self.stack.setCurrentIndex(1)
             self.btn_title_export.setVisible(True)
 
-            # 2. Add to recent files
-            for p in existing_files:
-                config_manager.add_recent_file(p)
-            self._update_recent_menu()
-
-            # 3. Populate filmstrip with all cached thumbnails in one go
-            self.photos.extend(cached_entries)
+            # 2. Populate filmstrip with all cached thumbnails in one go (clean replacement)
+            self.photos = list(cached_entries)
             target_entry = next((p for p in cached_entries if p.get("path") == target_path), cached_entries[0])
             target_id = target_entry["id"]
             self.filmstrip.set_photos(self.photos, target_id)
 
+            # Item 13: Restore dirty indicators on filmstrip
+            for entry in cached_entries:
+                if entry.get("is_dirty") or entry.get("is_edited"):
+                    self.filmstrip.set_photo_dirty(entry["id"], True)
+
             # 4. Activate target photo immediately
+            self.active_photo_id = None
             self.on_switch_photo(target_id)
-            self.status_label.setText(f"已恢复底片库 ({len(cached_entries)}/{len(existing_files)} 张)")
+            self.set_app_status(f"已恢复底片库 ({len(cached_entries)}/{len(existing_files)} 张)", timeout_ms=3000)
 
         # 5. If some files are uncached or were modified, import them seamlessly in background
         if uncached_files:
@@ -1559,6 +1674,7 @@ class DarkroomMainWindow(QMainWindow):
         p_header.addWidget(btn_import_paper)
         paper_layout.addLayout(p_header)
 
+
         self.paper_scroll = SmoothScrollArea()
         self.paper_scroll.setWidgetResizable(True)
         self.paper_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1625,12 +1741,26 @@ class DarkroomMainWindow(QMainWindow):
         tb_layout.setContentsMargins(10, 0, 10, 0)
         tb_layout.setSpacing(6)
 
-        # Left: Spinner & Status Label (Item 6)
+        # Permanent photo filename & zoom percentage display (never erased or overwritten by transient notifications)
+        self.lbl_photo_info = QLabel("")
+        self.lbl_photo_info.setFixedWidth(160)
+        self.lbl_photo_info.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: 500;")
+        tb_layout.addWidget(self.lbl_photo_info)
+
+        # Subtle separator between permanent photo info and transient system notification
+        self.status_sep = QLabel("│")
+        self.status_sep.setFixedWidth(10)
+        self.status_sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_sep.setStyleSheet("color: transparent; font-size: 11px;")
+        tb_layout.addWidget(self.status_sep)
+
+        # Left: Spinner & Status Label (Item 6 & 8)
         self.spinner = SpinnerWidget(size=13)
         tb_layout.addWidget(self.spinner)
 
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.status_label.mousePressEvent = self._on_status_label_clicked
         tb_layout.addWidget(self.status_label)
 
         tb_layout.addStretch(1)
@@ -1656,30 +1786,31 @@ class DarkroomMainWindow(QMainWindow):
             }
         """
 
-        self.btn_split = QPushButton()
-        self.btn_split.setFixedSize(26, 22)
+        self.btn_split = CompareButton(self)
+        self.btn_split.setFixedSize(28, 24)
         self.btn_split.setIcon(get_icon("compare.png"))
-        self.btn_split.setIconSize(QSize(13, 13))
+        self.btn_split.setIconSize(QSize(14, 14))
         self.btn_split.setCheckable(True)
-        self.btn_split.setToolTip("长按查看原片，点击开启拖动对比 (\\)")
+        self.btn_split.setToolTip("对比视图 (快捷键 \\): 点击切换分屏对比，长按查看原片")
         self.btn_split.setStyleSheet(btn_style)
-        self.btn_split.pressed.connect(self._on_compare_pressed)
-        self.btn_split.released.connect(self._on_compare_released)
+        self.btn_split.clicked.connect(self.toggle_split_view)
+        self.btn_split.longPressStarted.connect(self._on_compare_long_press_start)
+        self.btn_split.longPressFinished.connect(self._on_compare_long_press_end)
         tb_layout.addWidget(self.btn_split)
 
         btn_fit = QPushButton()
-        btn_fit.setFixedSize(26, 22)
+        btn_fit.setFixedSize(28, 24)
         btn_fit.setIcon(get_icon("fit_window.png"))
-        btn_fit.setIconSize(QSize(13, 13))
+        btn_fit.setIconSize(QSize(14, 14))
         btn_fit.setToolTip("适应图像全貌 (Ctrl+0)")
         btn_fit.setStyleSheet(btn_style)
         btn_fit.clicked.connect(self.canvas.fit_to_view)
         tb_layout.addWidget(btn_fit)
 
         btn_100 = QPushButton()
-        btn_100.setFixedSize(26, 22)
+        btn_100.setFixedSize(28, 24)
         btn_100.setIcon(get_icon("zoom_100.png"))
-        btn_100.setIconSize(QSize(13, 13))
+        btn_100.setIconSize(QSize(14, 14))
         btn_100.setToolTip("1:1 实际像素 (Ctrl+1)")
         btn_100.setStyleSheet(btn_style)
         btn_100.clicked.connect(self.canvas.set_zoom_100)
@@ -1697,7 +1828,9 @@ class DarkroomMainWindow(QMainWindow):
         self.filmstrip.clearRequested.connect(self.action_clear_photos)
         self.filmstrip.clearSdcRequested.connect(self.on_clear_sdc_config)
         self.filmstrip.batchExportRequested.connect(self._batch_export_photos)
+        self.filmstrip.quickExportRequested.connect(self.action_quick_export)
         self.filmstrip.addRequested.connect(self.action_open_files)
+        self.filmstrip.selectionChanged.connect(self._on_filmstrip_selection_changed)
         self.center_splitter.addWidget(self.filmstrip)
 
         self.center_splitter.setStretchFactor(0, 1)
@@ -1808,10 +1941,10 @@ class DarkroomMainWindow(QMainWindow):
             QTimer.singleShot(60, self.reflow_grids)
 
     def reflow_grids(self):
-        # Dynamic responsive layout: spacious, comfortable card dimensions and spacing
-        min_card_w = 110
-        spacing = 8
-        margins = 12
+        # Dynamic responsive layout: compact card dimensions to accommodate more stocks
+        min_card_w = 90
+        spacing = 6
+        margins = 8
 
         # Helper function for grid reflow with dynamic card resizing
         def _reflow_container(scroll_widget, cards_dict, grid_layout):
@@ -1819,26 +1952,22 @@ class DarkroomMainWindow(QMainWindow):
                 return
             viewport_w = scroll_widget.viewport().width()
             if viewport_w <= 0 and hasattr(self, "left_splitter"):
-                viewport_w = self.left_splitter.width() - 20
-            avail_w = max(100, viewport_w - margins)
+                viewport_w = self.left_splitter.width() - 16
+            avail_w = max(90, viewport_w - margins)
 
-            # Determine number of columns (max 3 in standard sidebar, max 4 if wide)
-            # 1 col: min_card_w = 110
-            # 2 cols: 2*110 + 8 = 228
-            # 3 cols: 3*110 + 2*8 = 346
-            # 4 cols: 4*110 + 3*8 = 464
-            if avail_w >= 464:
+            # Determine number of columns (accommodates 3-4 columns in typical sidebar widths)
+            if avail_w >= 378:
                 cols = 4
-            elif avail_w >= 346:
+            elif avail_w >= 282:
                 cols = 3
-            elif avail_w >= 228:
+            elif avail_w >= 186:
                 cols = 2
             else:
                 cols = 1
 
-            # Dynamically scale card width to fill row up to 150px max
+            # Dynamically scale card width to fill row up to 135px max
             target_card_w = int((avail_w - (cols - 1) * spacing) / cols)
-            target_card_w = max(min_card_w, min(150, target_card_w))
+            target_card_w = max(min_card_w, min(135, target_card_w))
 
             for card in cards_dict.values():
                 card.update_card_dimensions(target_card_w)
@@ -1885,41 +2014,6 @@ class DarkroomMainWindow(QMainWindow):
     def _init_exposure_section(self):
         self.sec_exposure = AccordionSection("场景曝光")
         self.sec_exposure.resetClicked.connect(lambda: self.reset_track("exposure"))
-
-        # 基准曝光测光控制行 (原作者 18% 中灰物理测光算法)
-        meter_row = QHBoxLayout()
-        meter_row.setContentsMargins(0, 0, 0, 4)
-        meter_title = QLabel("相机基准测光")
-        meter_title.setStyleSheet("color: #9ca3af; font-size: 11px; font-weight: 500;")
-
-        self.btn_auto_meter = QPushButton("⚡ 自动测光 (18% 中灰)")
-        self.btn_auto_meter.setToolTip("基于原作者物理测光算法，自动测算场景与 18% 摄影中灰的 EV 差异并校准相机基准曝光")
-        self.btn_auto_meter.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_auto_meter.setFixedHeight(22)
-        self.btn_auto_meter.setStyleSheet("""
-            QPushButton {
-                background: #23252b;
-                color: #f59e0b;
-                border: 1px solid #3c404b;
-                border-radius: 3px;
-                padding: 1px 8px;
-                font-size: 11px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: #2d3039;
-                border-color: #f59e0b;
-                color: #fbbf24;
-            }
-            QPushButton:pressed {
-                background: #18191d;
-            }
-        """)
-        self.btn_auto_meter.clicked.connect(self._action_apply_auto_meter)
-        meter_row.addWidget(meter_title)
-        meter_row.addStretch()
-        meter_row.addWidget(self.btn_auto_meter)
-        self.sec_exposure.addLayout(meter_row)
 
         self.slider_ev = AdobeScrubSlider(
             "曝光", -3.0, 3.0, 0.0, step=0.05, unit=" EV", decimals=2,
@@ -2196,16 +2290,35 @@ class DarkroomMainWindow(QMainWindow):
         act_open_folder.triggered.connect(self.action_open_folder)
         file_menu.addAction(act_open_folder)
 
-        # Recent Files Submenu (Item 8)
-        self.recent_menu = file_menu.addMenu("最近打开")
+        act_open_session = QAction("打开会话工程 (.sdss)...", self)
+        act_open_session.triggered.connect(self.action_open_session)
+        file_menu.addAction(act_open_session)
+
+        # Recent Sessions Submenu (Item 8 & 11)
+        self.recent_menu = file_menu.addMenu("最近会话")
         self._update_recent_menu()
 
         file_menu.addSeparator()
 
-        act_save = QAction("保存修改", self)
-        act_save.setShortcut(QKeySequence("Ctrl+S"))
-        act_save.triggered.connect(self.action_save_current)
-        file_menu.addAction(act_save)
+        # Item 9: Session Save & Save As
+        self.act_save_session = QAction("保存当前会话 (.sdss)", self)
+        self.act_save_session.setShortcut(QKeySequence("Ctrl+S"))
+        self.act_save_session.triggered.connect(self.action_save_session)
+        file_menu.addAction(self.act_save_session)
+
+        self.act_save_session_as = QAction("另存为会话文件 (.sdss)...", self)
+        self.act_save_session_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.act_save_session_as.triggered.connect(self.action_save_session_as)
+        file_menu.addAction(self.act_save_session_as)
+
+        file_menu.addSeparator()
+
+        # Item 4: Quick Export with last settings
+        self.act_quick_export = QAction("快速导出 (上次参数)", self)
+        self.act_quick_export.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        self.act_quick_export.triggered.connect(lambda: self.action_quick_export())
+        self.act_quick_export.setEnabled(False)
+        file_menu.addAction(self.act_quick_export)
 
         self.act_export = QAction("导出...", self)
         self.act_export.setIcon(get_icon("export.png"))
@@ -2213,6 +2326,10 @@ class DarkroomMainWindow(QMainWindow):
         self.act_export.triggered.connect(self.action_export_image)
         self.act_export.setEnabled(False)
         file_menu.addAction(self.act_export)
+
+        act_queue = QAction("导出队列管理...", self)
+        act_queue.triggered.connect(self.open_export_queue_dialog)
+        file_menu.addAction(act_queue)
 
         self.act_export_lut = QAction("导出 3D LUT (.cube)...", self)
         self.act_export_lut.triggered.connect(self.action_export_darkroom_lut)
@@ -2289,9 +2406,8 @@ class DarkroomMainWindow(QMainWindow):
         act_fit_img.triggered.connect(self.canvas.fit_to_view)
         view_menu.addAction(act_fit_img)
 
-        act_compare = QAction("对比", self)
+        act_compare = QAction("对比\t\\", self)
         act_compare.setIcon(get_icon("compare.png"))
-        act_compare.setShortcut(QKeySequence("\\"))
         act_compare.triggered.connect(self.toggle_split_view)
         view_menu.addAction(act_compare)
 
@@ -2339,30 +2455,32 @@ class DarkroomMainWindow(QMainWindow):
         self.canvas.requestRedo.connect(self.redo)
         self.canvas.requestReset.connect(self.reset_all_params)
         self.canvas.requestExport.connect(self.action_export_image)
+        self.canvas.requestQuickExport.connect(self.action_quick_export)
         self.canvas.requestToggleSplit.connect(self.toggle_split_view)
         self.canvas.importRequested.connect(self.action_open_files)
 
     def _update_recent_menu(self):
         self.recent_menu.clear()
-        recent_files = config_manager.get_recent_files()
-        if not recent_files:
-            act_none = self.recent_menu.addAction("暂无最近文件")
+        recent_sessions = config_manager.get_recent_sessions()
+        if not recent_sessions:
+            act_none = self.recent_menu.addAction("暂无最近会话")
             act_none.setEnabled(False)
             return
 
-        for path in recent_files:
+        for path in recent_sessions:
             act = self.recent_menu.addAction(os.path.basename(path))
             act.setToolTip(path)
-            act.triggered.connect(lambda checked=False, p=path: self.open_single_file(p))
+            act.triggered.connect(lambda checked=False, p=path: self._open_session_by_path(p))
 
         self.recent_menu.addSeparator()
         act_clear = self.recent_menu.addAction("清除最近记录")
-        act_clear.triggered.connect(lambda: (config_manager.clear_recent_files(), self._update_recent_menu()))
+        act_clear.triggered.connect(lambda: (config_manager.clear_recent_sessions(), self._update_recent_menu()))
 
     def _mark_current_photo_dirty(self):
         if getattr(self, '_is_updating_sliders', False) or getattr(self, '_is_switching_photo', False):
             return
         self._photo_is_dirty = True
+        self._session_is_dirty = True
         if self.active_photo_id:
             photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
             if photo:
@@ -2378,18 +2496,61 @@ class DarkroomMainWindow(QMainWindow):
         has_photo = bool(self._current_photo_path)
         if hasattr(self, 'act_export'):
             self.act_export.setEnabled(has_photo)
+        if hasattr(self, 'act_quick_export'):
+            self.act_quick_export.setEnabled(has_photo)
         if hasattr(self, 'act_export_lut'):
             self.act_export_lut.setEnabled(has_photo)
 
+        is_temp = getattr(self, "_is_temp_session", False)
+        session_name = os.path.basename(self._current_session_path) if (self._current_session_path and not is_temp) else "未命名会话"
+        dirty_flag = "*" if getattr(self, "_session_is_dirty", False) else ""
+        display_title = f"{dirty_flag}{session_name}"
+
+        self.setWindowTitle(f"{display_title} - {base_title}")
+        if hasattr(self, 'lbl_brand'):
+            self.lbl_brand.setText(display_title)
+        self._update_photo_info_display()
+
+    def _update_photo_info_display(self):
+        """Item 5: Update persistent status indicator showing active photo filename & actual zoom percentage."""
+        if not hasattr(self, "lbl_photo_info"):
+            return
         if self._current_photo_path:
-            fname = os.path.basename(self._current_photo_path)
-            self.setWindowTitle(f"{fname} - {base_title}")
-            if hasattr(self, 'lbl_brand'):
-                self.lbl_brand.setText(base_title)
+            pct = int(round(self.canvas.get_actual_zoom_ratio() * 100))
+            fn = os.path.basename(self._current_photo_path)
+            self.lbl_photo_info.setText(f"{fn}  |  {pct}%")
+            self.lbl_photo_info.setToolTip(f"{fn}  |  {pct}%")
         else:
-            self.setWindowTitle(base_title)
-            if hasattr(self, 'lbl_brand'):
-                self.lbl_brand.setText(base_title)
+            self.lbl_photo_info.setText("")
+            self.lbl_photo_info.setToolTip("")
+
+    def _on_filmstrip_selection_changed(self, selected_ids):
+        """Item 10: Permanent multi-selection notification without blinking or auto-hide."""
+        count = len(selected_ids)
+        if count > 1:
+            self._is_multi_selecting = True
+            self.set_app_status(f"已选中 {count} 张底片", spinning=False, timeout_ms=0)
+        else:
+            if getattr(self, "_is_multi_selecting", False):
+                self._is_multi_selecting = False
+                self.restore_default_status()
+
+    def restore_default_status(self):
+        """Restores transient status to default or clears it while preserving permanent photo info."""
+        self._update_photo_info_display()
+        if getattr(self, "_is_importing", False) or getattr(self, "_is_multi_selecting", False):
+            return
+        if hasattr(self, "export_queue") and self.export_queue and self.export_queue.has_active_tasks():
+            return
+        if hasattr(self, "_status_timer") and self._status_timer.isActive():
+            return
+        self.status_label.setText("")
+        self.status_label.setCursor(Qt.CursorShape.ArrowCursor)
+        self.status_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.status_label.setToolTip("")
+        self.spinner.stop()
+        if hasattr(self, "status_sep"):
+            self.status_sep.setStyleSheet("color: transparent; font-size: 11px;")
 
     def action_save_current(self):
         if self._current_photo_path:
@@ -2405,9 +2566,445 @@ class DarkroomMainWindow(QMainWindow):
                 if photo:
                     photo["is_dirty"] = False
                 self.filmstrip.set_photo_dirty(self.active_photo_id, False)
+            self._session_is_dirty = any(p.get("is_dirty", False) for p in self.photos)
             self._update_window_title()
-            self.status_label.setText(f"已保存更改: {os.path.basename(self._current_photo_path)}")
-            QTimer.singleShot(2500, lambda: self.status_label.setText("") if "已保存更改" in self.status_label.text() else None)
+            self.set_app_status(f"已保存更改: {os.path.basename(self._current_photo_path)}", timeout_ms=4000)
+
+    def _on_backslash_timeout(self):
+        if getattr(self, "_backslash_pressed", False):
+            self._backslash_long_pressed = True
+            self._on_compare_long_press_start()
+
+    def eventFilter(self, watched, event):
+        """Handle global backslash key for compare toggle / long-press preview."""
+        et = event.type()
+        if et in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            if event.key() == Qt.Key.Key_Backslash:
+                # Do not intercept if a dialog or child modal is active and event belongs to it
+                if watched and hasattr(watched, "window") and watched.window() != self:
+                    return super().eventFilter(watched, event)
+                # Do not intercept if user is typing in a text/input field
+                from PySide6.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox
+                input_types = (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)
+                focus_w = QApplication.focusWidget()
+                if isinstance(watched, input_types) or isinstance(focus_w, input_types):
+                    return super().eventFilter(watched, event)
+
+                if et == QEvent.Type.KeyPress:
+                    if event.isAutoRepeat():
+                        return True
+                    self._backslash_pressed = True
+                    self._backslash_long_pressed = False
+                    self._backslash_timer.start(180)
+                    return True
+                elif et == QEvent.Type.KeyRelease:
+                    if event.isAutoRepeat():
+                        return True
+                    if getattr(self, "_backslash_pressed", False):
+                        self._backslash_pressed = False
+                        if hasattr(self, "_backslash_timer") and self._backslash_timer.isActive():
+                            self._backslash_timer.stop()
+                        if getattr(self, "_backslash_long_pressed", False):
+                            self._backslash_long_pressed = False
+                            self._on_compare_long_press_end()
+                        else:
+                            self.toggle_split_view()
+                        return True
+
+        elif et in (QEvent.Type.WindowDeactivate, QEvent.Type.FocusOut):
+            if watched == self and getattr(self, "_backslash_pressed", False):
+                self._backslash_pressed = False
+                if hasattr(self, "_backslash_timer") and self._backslash_timer.isActive():
+                    self._backslash_timer.stop()
+                if getattr(self, "_backslash_long_pressed", False):
+                    self._backslash_long_pressed = False
+                    self._on_compare_long_press_end()
+
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        """Item 5: Support Delete / Backspace keys to delete selected photo(s) from filmstrip."""
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            focus_w = QApplication.focusWidget()
+            from PySide6.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox
+            if not isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)):
+                if hasattr(self, "filmstrip") and self.filmstrip._selected_ids:
+                    self.on_remove_multiple_photos(list(self.filmstrip._selected_ids))
+                    event.accept()
+                    return
+                elif self.active_photo_id:
+                    self.on_remove_photo(self.active_photo_id)
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
+
+    def set_app_status(self, text: str, spinning: bool = False, timeout_ms: int = 0, is_export_link: bool = False):
+        """Centralized status indicator with animated spinner and comfortable lingering timer."""
+        # Lock status during batch import so auxiliary switch events don't wipe it
+        if getattr(self, "_is_importing", False) and not text.startswith("正在导入") and not text.startswith("底片库导入完成"):
+            return
+        # Lock status during multi-selection so photo click doesn't wipe selection count
+        if getattr(self, "_is_multi_selecting", False) and not is_export_link and not spinning:
+            if not text.startswith("已选中") and not text.startswith("已全选"):
+                return
+
+        if hasattr(self, "_status_timer"):
+            self._status_timer.stop()
+
+        if spinning:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+
+        self.status_label.setText(text)
+        if hasattr(self, "status_sep"):
+            if text or spinning:
+                self.status_sep.setStyleSheet("color: #333644; font-size: 11px;")
+            else:
+                self.status_sep.setStyleSheet("color: transparent; font-size: 11px;")
+
+        if is_export_link:
+            self.status_label.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.status_label.setStyleSheet("color: #f59e0b; font-size: 11px; text-decoration: underline;")
+            self.status_label.setToolTip("正在后台冲印，点击打开导出队列管理")
+        else:
+            self.status_label.setCursor(Qt.CursorShape.ArrowCursor)
+            self.status_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+            self.status_label.setToolTip("")
+
+        if timeout_ms > 0:
+            if hasattr(self, "_status_timer"):
+                self._status_timer.start(timeout_ms)
+        elif not spinning and text and not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False) and not is_export_link:
+            # Default lingering duration: 4.0 seconds without flickering or premature wipeout
+            if hasattr(self, "_status_timer"):
+                self._status_timer.start(4000)
+
+    def _on_status_timeout(self):
+        if getattr(self, "_is_importing", False) or getattr(self, "_is_multi_selecting", False):
+            return
+        if hasattr(self, "export_queue") and self.export_queue and self.export_queue.has_active_tasks():
+            return
+        self.status_label.setText("")
+        self.spinner.stop()
+        if hasattr(self, "status_sep"):
+            self.status_sep.setStyleSheet("color: transparent; font-size: 11px;")
+
+    def _on_status_label_clicked(self, event):
+        if hasattr(self, "export_queue") and self.export_queue:
+            self.open_export_queue_dialog()
+
+    def open_export_queue_dialog(self):
+        """Item 8: Opens the Export Queue Management dialog."""
+        if hasattr(self, "export_queue") and self.export_queue:
+            dlg = ExportQueueDialog(self.export_queue, self)
+            dlg.exec()
+
+    def _on_export_queue_status_changed(self, active_count, total_count):
+        """Item 8: Live status updater for background export queue."""
+        if active_count > 0:
+            done_count = total_count - active_count
+            self.set_app_status(f"正在冲印导出 ({done_count + 1}/{total_count})...", spinning=True, is_export_link=True)
+        else:
+            if total_count > 0:
+                self.set_app_status(f"导出队列冲印完成 (共 {total_count} 项)", spinning=False, timeout_ms=4500)
+            else:
+                self.set_app_status("", spinning=False)
+
+    def action_save_session(self):
+        """Item 9 & 11: Saves current editing session (.sdss). Returns True if saved."""
+        if not self.photos:
+            self.set_app_status("当前没有打开的照片底片，无需保存会话", timeout_ms=4000)
+            return False
+
+        if not self._current_session_path or getattr(self, "_is_temp_session", False):
+            return self.action_save_session_as()
+
+        return self._do_save_session(self._current_session_path)
+
+    def action_save_session_as(self):
+        """Item 9 & 11: Prompts user to select a .sdss file path and saves session. Returns True if saved."""
+        if not self.photos:
+            self.set_app_status("当前没有打开的照片底片，无需保存会话", timeout_ms=3000)
+            return False
+
+        # Item 1: Suggest title session name rather than single image filename
+        if self._current_session_path and not getattr(self, "_is_temp_session", False):
+            default_name = os.path.basename(self._current_session_path)
+            if not default_name.lower().endswith(".sdss"):
+                default_name = f"{default_name}.sdss"
+        else:
+            default_name = "未命名会话.sdss"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "保存当前暗房会话工程", default_name, "SpektraDarkroom 会话工程 (*.sdss);;所有文件 (*.*)"
+        )
+        if file_path:
+            from path_utils import normalize_path
+            file_path = normalize_path(file_path)
+            self._current_session_path = file_path
+            self._is_temp_session = False
+            return self._do_save_session(file_path)
+        return False
+
+    def _save_auto_temp_session(self):
+        """Item 2: Auto-save temporary session state to auto_saved_session.sdss so work is preserved across restarts."""
+        if not self.photos:
+            return
+        if self._current_session_path and not getattr(self, "_is_temp_session", False):
+            return
+        try:
+            from path_utils import normalize_path
+            if self.active_photo_id:
+                photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+                if photo:
+                    photo["params"] = dict(self.current_params)
+                    photo["film_profile"] = self.current_film_stock
+                    photo["paper_profile"] = self.current_paper_stock
+                    photo["print_mode"] = getattr(self, "current_print_mode", "optical")
+
+            session_photos = []
+            for p in self.photos:
+                session_photos.append({
+                    "id": p["id"],
+                    "path": normalize_path(p["path"]),
+                    "film_stock": p.get("film_profile", "none"),
+                    "paper_stock": p.get("paper_profile", "none"),
+                    "print_mode": p.get("print_mode", "optical"),
+                    "base_ev": p.get("base_ev", 0.0),
+                    "params": p.get("params", {}),
+                    "is_dirty": p.get("is_dirty", False),
+                    "is_edited": p.get("is_edited", False)
+                })
+
+            from version import VERSION_STRING
+            session_data = {
+                "format": "SpektraDarkroomSession",
+                "version": VERSION_STRING,
+                "saved_at": datetime.now().isoformat(),
+                "active_photo_id": self.active_photo_id,
+                "active_photo_path": normalize_path(self._current_photo_path) if self._current_photo_path else None,
+                "photos": session_photos
+            }
+            temp_path = config_manager.get_auto_saved_session_path()
+            session_cache_manager.save_session_file(temp_path, session_data)
+        except Exception as e:
+            logger.warning(f"Error auto-saving temporary session: {e}")
+
+    def _do_save_session(self, file_path):
+        self.set_app_status("正在保存会话...", spinning=True)
+        # Flush current dirty photo parameters to photo dict
+        if self.active_photo_id:
+            photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+            if photo:
+                photo["params"] = dict(self.current_params)
+                photo["film_profile"] = self.current_film_stock
+                photo["paper_profile"] = self.current_paper_stock
+                photo["print_mode"] = getattr(self, "current_print_mode", "optical")
+
+        from path_utils import normalize_path
+        session_photos = []
+        for p in self.photos:
+            session_photos.append({
+                "id": p["id"],
+                "path": normalize_path(p["path"]),
+                "film_stock": p.get("film_profile", "none"),
+                "paper_stock": p.get("paper_profile", "none"),
+                "print_mode": p.get("print_mode", "optical"),
+                "base_ev": p.get("base_ev", 0.0),
+                "params": p.get("params", {}),
+                "is_dirty": p.get("is_dirty", False),
+                "is_edited": p.get("is_edited", False)
+            })
+
+        from version import VERSION_STRING
+        session_data = {
+            "format": "SpektraDarkroomSession",
+            "version": VERSION_STRING,
+            "saved_at": datetime.now().isoformat(),
+            "active_photo_id": self.active_photo_id,
+            "active_photo_path": normalize_path(self._current_photo_path) if self._current_photo_path else None,
+            "photos": session_photos
+        }
+
+        ok = session_cache_manager.save_session_file(file_path, session_data)
+        if ok:
+            fn = os.path.basename(file_path)
+            self.set_app_status(f"已成功保存会话: {fn}", timeout_ms=3500)
+            self._session_is_dirty = False
+            self._is_temp_session = False
+            self._update_window_title()
+            config_manager.add_recent_session(file_path)
+            config_manager.save_last_session_path(file_path)
+            self._update_recent_menu()
+            return True
+        else:
+            self.set_app_status("保存会话失败", timeout_ms=3500)
+            return False
+
+    def action_open_session(self):
+        """Item 9 & 11: Loads and restores session from a .sdss file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "打开暗房会话工程", "", "SpektraDarkroom 会话工程 (*.sdss);;所有文件 (*.*)"
+        )
+        if file_path:
+            self._open_session_by_path(file_path)
+
+    def _open_session_by_path(self, file_path):
+        if not file_path or not os.path.exists(file_path):
+            self.set_app_status("会话文件不存在或已被移除", timeout_ms=3500)
+            return
+
+        self.set_app_status("正在加载会话工程...", spinning=True)
+        session_data = session_cache_manager.load_session_file(file_path)
+        if not session_data or "photos" not in session_data:
+            self.set_app_status("会话文件格式无效或无法读取", timeout_ms=3500)
+            return
+
+        # 1. Clean previous session photos and workspace completely to prevent photo stacking
+        if hasattr(self, 'engine'):
+            self.engine.clear_all_photos()
+        self.photos.clear()
+        self.active_photo_id = None
+        self._current_photo_path = None
+        self.filmstrip.set_photos([], None)
+        self.canvas.set_image(None)
+
+        from path_utils import normalize_path
+        auto_temp = config_manager.get_auto_saved_session_path()
+        is_temp = (normalize_path(file_path).lower() == normalize_path(auto_temp).lower())
+        self._is_temp_session = is_temp
+        if is_temp:
+            self._current_session_path = None
+        else:
+            self._current_session_path = normalize_path(file_path)
+
+        photo_entries = session_data["photos"]
+        files = [p["path"] for p in photo_entries if os.path.exists(p.get("path", ""))]
+        if not files:
+            self.set_app_status("会话中引用的照片文件在本地均不存在", timeout_ms=3500)
+            return
+
+        # Item 13: Build lookup map for session metadata restoration
+        session_map = {}
+        for s_p in photo_entries:
+            fp = s_p.get("path")
+            if fp:
+                session_map[normalize_path(fp)] = s_p
+        self._pending_session_map = session_map
+
+        active_path = session_data.get("active_photo_path")
+        self._restore_saved_session(files, active_file=active_path)
+
+        for s_p in photo_entries:
+            file_p = s_p.get("path")
+            if not file_p:
+                continue
+            norm_fp = normalize_path(file_p)
+            params = s_p.get("params") or {}
+            film = s_p.get("film_stock", "none")
+            paper = s_p.get("paper_stock", "none")
+            p_mode = s_p.get("print_mode", "optical")
+            b_ev = s_p.get("base_ev", 0.0)
+            is_dirty = bool(s_p.get("is_dirty", False))
+            is_edited = bool(s_p.get("is_edited", False))
+            target_p = next((p for p in self.photos if normalize_path(p.get("path", "")) == norm_fp), None)
+            if target_p:
+                target_p["film_profile"] = film
+                target_p["paper_profile"] = paper
+                target_p["print_mode"] = p_mode
+                target_p["base_ev"] = b_ev
+                target_p["params"] = dict(params)
+                target_p["is_dirty"] = is_dirty
+                target_p["is_edited"] = is_edited
+                if is_dirty or is_edited:
+                    self.filmstrip.set_photo_dirty(target_p["id"], True)
+            if file_p and params:
+                sdc_manager.save_sdc(file_p, film, paper, params)
+
+        # Re-activate active photo if present to ensure canvas LUT and sliders are synced
+        if self.active_photo_id:
+            curr_id = self.active_photo_id
+            self.active_photo_id = None
+            self.on_switch_photo(curr_id)
+
+        if not is_temp:
+            config_manager.add_recent_session(file_path)
+            config_manager.save_last_session_path(file_path)
+            self._update_recent_menu()
+            self._session_is_dirty = any(p.get("is_dirty", False) for p in self.photos)
+        else:
+            self._session_is_dirty = any(p.get("is_dirty", False) or p.get("is_edited", False) for p in self.photos)
+
+        self._update_window_title()
+
+        fn = "未命名会话" if is_temp else os.path.basename(file_path)
+        self.set_app_status(f"已恢复会话工程: {fn}", timeout_ms=3500)
+
+    def action_quick_export(self, target_ids=None):
+        """Item 4: Quick export selected or active photo(s) using remembered last export settings."""
+        last_cfg = config_manager.get_last_export_settings()
+        if not last_cfg:
+            self.set_app_status("未记录上次导出参数，请先执行一次常规导出", timeout_ms=3000)
+            self.action_export_image()
+            return
+
+        if target_ids:
+            pids = target_ids
+        elif hasattr(self, "filmstrip") and self.filmstrip._selected_ids:
+            pids = list(self.filmstrip._selected_ids)
+        elif self.active_photo_id:
+            pids = [self.active_photo_id]
+        else:
+            return
+
+        photos_to_export = [p for p in self.photos if p["id"] in pids]
+        if not photos_to_export:
+            return
+
+        fmt = last_cfg.get("format", "jpeg")
+        ext = ".tif" if "tif" in str(fmt).lower() else (".png" if "png" in str(fmt).lower() else ".jpg")
+        out_dir = last_cfg.get("path", "")
+        if not out_dir or not os.path.isdir(out_dir):
+            if self._current_photo_path:
+                out_dir = os.path.dirname(self._current_photo_path)
+            else:
+                out_dir = os.path.expanduser("~")
+
+        enqueued_count = 0
+        import uuid
+        for p in photos_to_export:
+            src = p["path"]
+            base_name = os.path.splitext(os.path.basename(src))[0]
+            out_file = os.path.join(out_dir, f"{base_name}{ext}")
+
+            task_params = dict(self.current_params)
+            sdc = sdc_manager.load_sdc(src)
+            film = sdc.get("film_profile", self.current_film_stock) if sdc else self.current_film_stock
+            paper = sdc.get("paper_profile", self.current_paper_stock) if sdc else self.current_paper_stock
+            if sdc and "params" in sdc:
+                task_params.update(sdc["params"])
+
+            task_params.update(last_cfg)
+            task_params["source_path"] = src
+            task_params["film_stock"] = film
+            task_params["paper_stock"] = paper
+            task_params["print_mode"] = p.get("print_mode", getattr(self, "current_print_mode", "optical"))
+            task_params["base_ev"] = float(p.get("base_ev", 0.0))
+
+            pix = None
+            if p.get("thumbnail_rgb") is not None:
+                trgb = p["thumbnail_rgb"]
+                th, tw = trgb.shape[:2]
+                qimg = QImage(trgb.data, tw, th, tw * 3, QImage.Format.Format_RGB888)
+                pix = QPixmap.fromImage(qimg)
+
+            tid = f"task_{uuid.uuid4().hex[:8]}"
+            task = ExportTask(tid, os.path.basename(src), src, out_file, task_params, thumbnail=pix)
+            self.export_queue.enqueue(task)
+            enqueued_count += 1
+
+        self.set_app_status(f"⚡ 快速导出：已将 {enqueued_count} 张底片加入冲印队列", spinning=True, timeout_ms=3000, is_export_link=True)
 
     def push_undo_state(self):
         state = {
@@ -2465,8 +3062,12 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'filmstrip'):
             self.filmstrip.select_all_photos()
             sel_count = len(self.filmstrip.get_selected_photo_ids())
-            self.status_label.setText(f"已全选 {sel_count} 张底片")
-            QTimer.singleShot(2000, lambda: self.status_label.setText("") if "已全选" in self.status_label.text() else None)
+            if sel_count > 1:
+                self._is_multi_selecting = True
+                self.set_app_status(f"已全选 {sel_count} 张底片", timeout_ms=0)
+            elif sel_count == 1:
+                self._is_multi_selecting = False
+                self.restore_default_status()
 
     def action_copy_params(self):
         """Ctrl+C handler: Copy all physical darkroom parameters from the currently viewed photo."""
@@ -2477,14 +3078,12 @@ class DarkroomMainWindow(QMainWindow):
             "paper": self.current_paper_stock,
             "params": dict(self.current_params)
         }
-        self.status_label.setText("已复制暗房所有物理参数 (胶卷/相纸/曝光/冲印/颗粒)")
-        QTimer.singleShot(2500, lambda: self.status_label.setText("") if "已复制暗房" in self.status_label.text() else None)
+        self.set_app_status("已复制暗房所有物理参数 (胶卷/相纸/曝光/冲印/颗粒)", timeout_ms=2500)
 
     def action_paste_params(self):
         """Ctrl+V handler: Paste copied physical darkroom parameters to all selected photos."""
         if not getattr(self, '_copied_darkroom_profile', None):
-            self.status_label.setText("剪贴板中无复制的暗房参数，请先按 Ctrl+C 复制")
-            QTimer.singleShot(2500, lambda: self.status_label.setText("") if "剪贴板中无" in self.status_label.text() else None)
+            self.set_app_status("剪贴板中无复制的暗房参数，请先按 Ctrl+C 复制", timeout_ms=2500)
             return
 
         copied = self._copied_darkroom_profile
@@ -2547,8 +3146,7 @@ class DarkroomMainWindow(QMainWindow):
             self._schedule_histogram_update()
             self._mark_current_photo_dirty()
 
-        self.status_label.setText(f"已将暗房参数粘贴至 {affected_count} 张选中的底片")
-        QTimer.singleShot(3000, lambda: self.status_label.setText("") if "已将暗房参数粘贴" in self.status_label.text() else None)
+        self.set_app_status(f"已将暗房参数粘贴至 {affected_count} 张选中的底片", timeout_ms=3000)
 
     def _apply_history_state(self, state):
         self.current_film_stock = state["film"]
@@ -2662,28 +3260,20 @@ class DarkroomMainWindow(QMainWindow):
                 pass
 
     def _action_apply_auto_meter(self):
-        """Apply author's 18% middle-gray autoexposure compensation to current photo."""
+        """Reset exposure compensation to the calibrated 18% middle-gray baseline (0.00 EV)."""
         if not self._current_photo_path:
             return
         photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
         if not photo:
             return
-        auto_ev = photo.get("auto_ev")
-        if auto_ev is None:
-            float_img = photo.get("float_img")
-            if float_img is not None:
-                auto_ev = self.engine.calculate_auto_exposure_ev(float_img)
-                photo["auto_ev"] = auto_ev
-            else:
-                auto_ev = 0.0
-
-        ev_val = float(auto_ev)
+        ev_val = 0.0
         self.current_params["exposure_ev"] = ev_val
         if hasattr(self, 'slider_ev'):
             self.slider_ev.set_value(ev_val)
         self.canvas.update_params(exposure_ev=ev_val)
         self._on_slider_committed()
-        self.status_label.setText(f"已应用 18% 中灰基准测光: {ev_val:+.2f} EV")
+        base_ev = float(photo.get("base_ev", 0.0))
+        self.set_app_status(f"已校准至 18% 中灰基准测光 (0.00 EV，底片物理基准: {base_ev:+.2f} EV)", timeout_ms=3000)
 
     def reset_track(self, track_name):
         def_temp = getattr(self.slider_temp, "default_val", 5500.0)
@@ -2809,67 +3399,102 @@ class DarkroomMainWindow(QMainWindow):
         if push_undo and self._current_photo_path:
             self._refresh_card_previews(paper_only=True)
 
+    def on_switch_print_mode(self, mode, push_undo=True):
+        if mode not in ("optical", "scan"):
+            mode = "optical"
+        if push_undo and mode != getattr(self, "current_print_mode", "optical"):
+            self.push_undo_state()
+            self._mark_current_photo_dirty()
+
+        self.current_print_mode = mode
+        self.current_params["print_mode"] = mode
+
+        # Save to current photo
+        if self._current_photo_path:
+            photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+            if photo:
+                photo["print_mode"] = mode
+
+        lut_params = dict(self.current_params)
+        lut_params["print_mode"] = mode
+        lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
+        self.canvas.set_lut(lut_3d)
+        self._schedule_histogram_update()
+        if push_undo:
+            mode_name = "相纸印相模式 (Optical Print)" if mode == "optical" else "数码扫描模式 (Film Scan)"
+            self.set_app_status(f"已切换冲印模式: {mode_name}", timeout_ms=3000)
+
     def on_switch_paper(self, stock_id, push_undo=True):
         if push_undo and stock_id != self.current_paper_stock:
             self.push_undo_state()
             self._mark_current_photo_dirty()
         self.current_paper_stock = stock_id
 
-        # Intelligent pairing for bypass "none" stock
+        # Item 9: Selecting "none" (数码扫描 Film Scan) engages scan mode; selecting physical paper engages Optical Print mode
         if stock_id == "none":
-            self.current_film_stock = "none"
-            for sid, card in self.film_cards.items():
-                card.set_active(sid == "none")
-        elif self.current_film_stock == "none":
-            self.current_film_stock = "kodak_portra_400"
-            for sid, card in self.film_cards.items():
-                card.set_active(sid == "kodak_portra_400")
+            self.current_print_mode = "scan"
+            self.current_params["print_mode"] = "scan"
+        else:
+            self.current_print_mode = "optical"
+            self.current_params["print_mode"] = "optical"
 
         for sid, card in self.paper_cards.items():
             card.set_active(sid == stock_id)
 
-        lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=self.current_params)
+        # Save to current photo
+        if self._current_photo_path:
+            photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+            if photo:
+                photo["paper_profile"] = stock_id
+                photo["print_mode"] = self.current_print_mode
+
+        lut_params = dict(self.current_params)
+        lut_params["print_mode"] = self.current_print_mode
+        lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
         self.canvas.set_lut(lut_3d)
         self._schedule_histogram_update()
         if push_undo and self._current_photo_path:
             self._refresh_card_previews(film_only=True)
-
-    def _on_compare_pressed(self):
-        self._compare_press_mode = self.canvas.params.get("view_mode", 0)
-        self._is_compare_holding = False
-        self._compare_hold_timer.start(200)
-
-    def _on_compare_hold_timeout(self):
-        self._is_compare_holding = True
-        self.set_view_mode(2)  # Full original image
-
-    def _on_compare_released(self):
-        if self._is_compare_holding:
-            # User held compare: restore developed image
-            self._is_compare_holding = False
-            self.set_view_mode(self._compare_press_mode)
-        else:
-            # User clicked: toggle split compare
-            self._compare_hold_timer.stop()
-            new_mode = 0 if self._compare_press_mode == 1 else 1
-            self.set_view_mode(new_mode)
+        if push_undo:
+            mode_desc = "数码扫描 (Film Scan)" if stock_id == "none" else f"相纸印相 ({stock_id})"
+            self.set_app_status(f"已选用: {mode_desc}", timeout_ms=3000)
 
     def set_view_mode(self, mode):
         self.canvas.set_view_mode(mode)
         if hasattr(self, 'btn_split'):
-            self.btn_split.setChecked(mode == 1)
+            self.btn_split.setChecked(mode != 0)
+            if mode == 0:
+                self.btn_split.setToolTip("对比视图 (快捷键 \\): 点击切换分屏对比，长按查看原片")
+            elif mode == 1:
+                self.btn_split.setToolTip("对比视图 (快捷键 \\): 拖动分屏对比中，再次点击切换为左右全局双屏对比，长按查看原片")
+            elif mode == 2:
+                self.btn_split.setToolTip("对比视图 (快捷键 \\): 左右全局双屏对比中，再次点击恢复编辑模式，长按查看原片")
+            elif mode == 3:
+                self.btn_split.setToolTip("对比视图: 正在查看原始图像 (松开恢复)")
+
+    def _on_compare_long_press_start(self):
+        if not self._current_photo_path:
+            return
+        self._saved_view_mode_before_long_press = self.canvas.params.get("view_mode", 0)
+        self.set_view_mode(3)
+        self.set_app_status("对比原片中 (松开恢复)", timeout_ms=0)
+
+    def _on_compare_long_press_end(self):
+        if hasattr(self, "_saved_view_mode_before_long_press"):
+            prev_mode = self._saved_view_mode_before_long_press
+            delattr(self, "_saved_view_mode_before_long_press")
+            self.set_view_mode(prev_mode)
+            self.restore_default_status()
 
     def toggle_split_view(self):
-        new_mode = 0 if self.canvas.params.get("view_mode", 0) == 1 else 1
+        curr_mode = self.canvas.params.get("view_mode", 0)
+        if curr_mode == 3:
+            curr_mode = getattr(self, "_saved_view_mode_before_long_press", 0)
+        new_mode = (curr_mode + 1) % 3
         self.set_view_mode(new_mode)
 
     def _on_zoom_changed(self, zoom_val):
-        pct = int(round(zoom_val * 100))
-        if self._current_photo_path:
-            fn = os.path.basename(self._current_photo_path)
-            self.status_label.setText(f"{fn} | {pct}%")
-        else:
-            self.status_label.setText(f"{pct}%")
+        self._update_photo_info_display()
 
     def action_open_files(self):
         filt = "图像文件 (*.arw *.cr2 *.cr3 *.nef *.raf *.dng *.tif *.tiff *.png);;所有文件 (*.*)"
@@ -2915,6 +3540,15 @@ class DarkroomMainWindow(QMainWindow):
         if not new_paths:
             return
 
+        # If this is a new batch of photos without an active named session, mark as temporary session
+        if not self.photos or getattr(self, "_is_temp_session", False):
+            self._is_temp_session = True
+            self._current_session_path = None
+
+        # Always mark session dirty whenever new photos are imported
+        self._session_is_dirty = True
+        self._update_window_title()
+
         # 1. Immediately switch to edit workspace (Option B: instant switch)
         self.stack.setCurrentIndex(1)
         self.btn_title_export.setVisible(True)
@@ -2924,9 +3558,10 @@ class DarkroomMainWindow(QMainWindow):
             config_manager.add_recent_file(p)
 
         # 3. Start progress spinner & status text
-        self.spinner.start()
+        self._is_importing = True
+        self._last_import_status_time = 0.0
         total_count = len(new_paths)
-        self.status_label.setText(f"正在导入底片库 (0/{total_count})...")
+        self.set_app_status(f"正在导入底片库 (0/{total_count})...", spinning=True, timeout_ms=0)
 
         # 4. Asynchronous streaming import worker
         self._import_worker = BatchImportWorker(new_paths, self.engine, start_idx=len(self.photos), parent=self)
@@ -2935,43 +3570,67 @@ class DarkroomMainWindow(QMainWindow):
         self._import_worker.start()
 
     def _on_single_photo_imported(self, photo_entry, current_idx, total_count):
+        # Item 13: Restore session parameters if loading via session map
+        if hasattr(self, "_pending_session_map") and self._pending_session_map:
+            from path_utils import normalize_path
+            s_p = self._pending_session_map.get(normalize_path(photo_entry.get("path", "")))
+            if s_p:
+                photo_entry["film_profile"] = s_p.get("film_stock", "none")
+                photo_entry["paper_profile"] = s_p.get("paper_stock", "none")
+                photo_entry["print_mode"] = s_p.get("print_mode", "optical")
+                photo_entry["base_ev"] = s_p.get("base_ev", photo_entry.get("base_ev", 0.0))
+                photo_entry["params"] = dict(s_p.get("params") or {})
+                is_dirty = bool(s_p.get("is_dirty", False))
+                is_edited = bool(s_p.get("is_edited", False))
+                photo_entry["is_dirty"] = is_dirty
+                photo_entry["is_edited"] = is_edited
+
         self.photos.append(photo_entry)
         is_first = (len(self.photos) == 1) or (self.active_photo_id is None)
 
         # Incrementally stream into bottom filmstrip
         self.filmstrip.append_photo(photo_entry, is_active=is_first)
+        if photo_entry.get("is_dirty") or photo_entry.get("is_edited"):
+            self.filmstrip.set_photo_dirty(photo_entry["id"], True)
 
         # If this is the first photo, display it immediately on the canvas!
         if is_first:
             self.on_switch_photo(photo_entry["id"])
 
-        self.status_label.setText(f"正在导入底片库 ({current_idx}/{total_count}): {photo_entry['filename']}")
+        # Throttled status updates (every 120ms or first/last item) to eliminate label shaking/jitter
+        import time
+        now = time.time()
+        last_t = getattr(self, "_last_import_status_time", 0.0)
+        if (now - last_t >= 0.12) or current_idx == total_count or current_idx == 1:
+            self._last_import_status_time = now
+            self.set_app_status(f"正在导入底片库 ({current_idx}/{total_count})...", spinning=True, timeout_ms=0)
 
     def _on_all_photos_imported(self, total_loaded):
-        self.spinner.stop()
+        self._is_importing = False
+        self._pending_session_map = None
         self._update_recent_menu()
-        self.status_label.setText(f"已完成导入 {total_loaded} 张底片")
         target_path = getattr(self, "_target_initial_active_path", None)
         if target_path:
             self._target_initial_active_path = None
             target_entry = next((p for p in self.photos if p.get("path") == target_path), None)
             if target_entry:
                 self.on_switch_photo(target_entry["id"])
-        QTimer.singleShot(3500, lambda: self.status_label.setText("") if "已完成导入" in self.status_label.text() else None)
+        self.set_app_status(f"底片库导入完成，共 {total_loaded} 张", spinning=False, timeout_ms=5000)
 
         # Real-time session state save & cache maintenance
         try:
-            valid_paths = [p["path"] for p in self.photos if p.get("path") and os.path.exists(p["path"])]
-            config_manager.save_session_state(valid_paths, self._current_photo_path)
+            if self._current_session_path and os.path.exists(self._current_session_path):
+                config_manager.save_last_session_path(self._current_session_path)
+            elif getattr(self, "_is_temp_session", False) or not self._current_session_path:
+                self._save_auto_temp_session()
+                config_manager.save_last_session_path(config_manager.get_auto_saved_session_path())
             session_cache_manager.prune_cache_if_needed()
         except Exception:
             pass
+            pass
 
     def on_switch_photo(self, photo_id):
-        # Auto-reset compare / split-screen mode when switching to another photo
-        self._is_compare_holding = False
-        if hasattr(self, '_compare_hold_timer'):
-            self._compare_hold_timer.stop()
+        # Auto-reset compare / split-screen mode to normal edit view when switching to another photo
         self.set_view_mode(0)
 
         self._is_switching_photo = True
@@ -3020,17 +3679,21 @@ class DarkroomMainWindow(QMainWindow):
             if photo.get("params"):
                 self.current_film_stock = photo.get("film_profile", self.current_film_stock)
                 self.current_paper_stock = photo.get("paper_profile", self.current_paper_stock)
+                self.current_print_mode = photo.get("print_mode", photo["params"].get("print_mode", "optical"))
                 self.current_params.clear()
                 self.current_params.update(photo["params"])
+                self.current_params["print_mode"] = self.current_print_mode
                 self._photo_is_dirty = photo.get("is_dirty", False)
             else:
                 sdc = sdc_manager.load_sdc(self._current_photo_path)
                 if sdc:
                     self.current_film_stock = sdc.get("film_profile", self.current_film_stock)
                     self.current_paper_stock = sdc.get("paper_profile", self.current_paper_stock)
+                    self.current_print_mode = sdc.get("print_mode", sdc.get("params", {}).get("print_mode", "optical"))
                     loaded_params = sdc.get("params", {})
                     self.current_params.clear()
                     self.current_params.update(loaded_params)
+                    self.current_params["print_mode"] = self.current_print_mode
                     if "color_temp" not in loaded_params or (loaded_params.get("color_temp") == 5500.0 and base_temp != 5500.0 and not loaded_params.get("custom_wb")):
                         self.current_params["color_temp"] = base_temp
                     if "tint" not in loaded_params or (loaded_params.get("tint") == 1.0 and base_tint != 1.0 and not loaded_params.get("custom_wb")):
@@ -3038,11 +3701,12 @@ class DarkroomMainWindow(QMainWindow):
                 else:
                     self.current_film_stock = "none"
                     self.current_paper_stock = "none"
-                    init_ev = float(photo.get("auto_ev", 0.0))
+                    self.current_print_mode = "optical"
                     defaults = {
-                        "exposure_ev": init_ev, "color_temp": base_temp, "tint": base_tint,
+                        "exposure_ev": 0.0, "color_temp": base_temp, "tint": base_tint,
                         "enlarger_cyan": 0.0, "enlarger_magenta": 0.0, "enlarger_yellow": 0.0,
-                        "print_exposure": 1.0, "pre_flash": 0.0, "halation": 0.5, "grain": 0.4
+                        "print_exposure": 1.0, "pre_flash": 0.0, "halation": 0.5, "grain": 0.4,
+                        "print_mode": "optical"
                     }
                     self.current_params.clear()
                     self.current_params.update(defaults)
@@ -3057,44 +3721,53 @@ class DarkroomMainWindow(QMainWindow):
                 if cached_prev is not None:
                     photo["float_img"] = cached_prev
                 else:
+                    fn = photo.get("filename", os.path.basename(photo["path"]))
+                    if not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False):
+                        self.set_app_status(f"正在载入底片并解析 RAW ({fn})...", spinning=True, timeout_ms=0)
+                    QApplication.processEvents()
                     res = self.engine.load_image(photo["path"])
                     if res.get("success"):
                         photo["float_img"] = res.get("float_img")
                         if photo.get("thumbnail_rgb") is None:
                             photo["thumbnail_rgb"] = res.get("thumbnail_rgb")
-                        if photo.get("auto_ev") is None and res.get("auto_ev") is not None:
-                            photo["auto_ev"] = res.get("auto_ev")
+                        if "base_ev" in res:
+                            photo["base_ev"] = res["base_ev"]
                         session_cache_manager.save_photo_preview(photo["path"], photo["float_img"])
+                    if not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False):
+                        self.set_app_status(f"底片已载入: {fn}", spinning=False, timeout_ms=3000)
 
             if photo.get("float_img") is not None:
-                # 实时检测测光值，若未测过或为 0.0 则立即执行中灰测光
-                if not photo.get("auto_ev") or float(photo.get("auto_ev", 0.0)) == 0.0:
-                    photo["auto_ev"] = self.engine.calculate_auto_exposure_ev(photo["float_img"])
-
-                auto_val = float(photo.get("auto_ev", 0.0))
-                # 100% 全自动补偿：首次打开未自定义时，全自动对齐到 18% 中灰
-                has_custom_ev = bool(sdc and "exposure_ev" in sdc.get("params", {})) or photo.get("is_dirty", False) or bool(photo.get("params"))
-                if not has_custom_ev and auto_val != 0.0 and self.current_params.get("exposure_ev", 0.0) == 0.0:
-                    self.current_params["exposure_ev"] = auto_val
-
                 m_w = photo.get("width") or (photo.get("meta", {}).get("width") if isinstance(photo.get("meta"), dict) else None)
                 m_h = photo.get("height") or (photo.get("meta", {}).get("height") if isinstance(photo.get("meta"), dict) else None)
                 self.canvas.set_image(photo["float_img"], master_width=m_w, master_height=m_h)
             self.canvas.update_params(base_temp=base_temp, base_tint=base_tint, **self.current_params)
             self._update_all_sliders_from_params()
 
-            # 6. Apply film & paper LUT
+            # 6. Apply print mode, film & paper LUT
+            self.on_switch_print_mode(self.current_print_mode, push_undo=False)
             self.on_switch_film(self.current_film_stock, push_undo=False)
-            self.on_switch_paper(self.current_paper_stock, push_undo=False)
+            if self.current_print_mode == "optical":
+                self.on_switch_paper(self.current_paper_stock, push_undo=False)
 
             # 7. Update status text with 1:1 image native pixel scale percentage
-            fn = photo["filename"]
-            pct = int(round(self.canvas.get_actual_zoom_ratio() * 100))
-            self.status_label.setText(f"{fn} | {pct}%")
+            self._update_photo_info_display()
 
             # 8. Update live 2:3 thumbnails on Film & Paper cards with real film emulation
             self._current_photo_thumb = photo.get("thumbnail_rgb")
-            self._update_card_live_thumbnails(self._current_photo_thumb)
+            float_img = photo.get("float_img")
+            if float_img is None and hasattr(self, 'engine'):
+                float_img = getattr(self.engine, 'raw_preview', None)
+            if float_img is not None:
+                lh, lw = float_img.shape[:2]
+                lscale = 120.0 / float(max(lh, lw))
+                ltw = max(1, int(round(lw * lscale)))
+                lth = max(1, int(round(lh * lscale)))
+                self._current_photo_linear = cv2.resize(float_img, (ltw, lth), interpolation=cv2.INTER_AREA)
+            else:
+                self._current_photo_linear = None
+
+            thumb_to_grade = self._current_photo_linear if self._current_photo_linear is not None else self._current_photo_thumb
+            self._update_card_live_thumbnails(thumb_to_grade)
             self._schedule_histogram_update()
 
             # 9. Reset undo/redo history for newly switched photo with initial baseline state
@@ -3109,22 +3782,21 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, 'engine'):
                 self.engine.current_file_path = photo["path"]
                 self.engine.active_photo_id = photo_id
-
-            # Real-time session save: record current active photo
-            try:
-                valid_paths = [p["path"] for p in self.photos if p.get("path") and os.path.exists(p["path"])]
-                config_manager.save_session_state(valid_paths, self._current_photo_path)
-            except Exception:
-                pass
         finally:
             self._is_switching_photo = False
 
-    def _update_card_live_thumbnails(self, thumb_rgb, do_films=True, do_papers=True):
-        if thumb_rgb is None:
+    def _update_card_live_thumbnails(self, thumb_data, do_films=True, do_papers=True):
+        if thumb_data is None:
             return
 
-        h, w, c = thumb_rgb.shape
-        qimg = QImage(thumb_rgb.data, w, h, w * c, QImage.Format.Format_RGB888).copy()
+        from app_core import prophoto_to_srgb
+        if thumb_data.dtype != np.uint8:
+            base_srgb = (prophoto_to_srgb(thumb_data) * 255.0).astype(np.uint8)
+        else:
+            base_srgb = thumb_data
+
+        h, w, c = base_srgb.shape
+        qimg = QImage(base_srgb.data, w, h, w * c, QImage.Format.Format_RGB888).copy()
         base_pix = QPixmap.fromImage(qimg)
 
         # 1. Immediately show base thumbnail so cards display without delay
@@ -3145,9 +3817,9 @@ class DarkroomMainWindow(QMainWindow):
                 pass
             self._thumb_worker.wait(300)
 
-        # 3. Dedicated QThread worker applying 3D LUT asynchronously
+        # 3. Dedicated QThread worker applying 3D LUT asynchronously in linear space
         self._thumb_worker = StockThumbnailWorker(
-            self.engine, thumb_rgb,
+            self.engine, thumb_data,
             list(self.film_cards.keys()),
             list(self.paper_cards.keys()),
             self.current_film_stock,
@@ -3161,11 +3833,14 @@ class DarkroomMainWindow(QMainWindow):
         self._thumb_worker.start()
 
     def _refresh_card_previews(self, film_only=False, paper_only=False):
-        if self._current_photo_thumb is None:
+        thumb_data = getattr(self, '_current_photo_linear', None)
+        if thumb_data is None:
+            thumb_data = self._current_photo_thumb
+        if thumb_data is None:
             return
         do_films = not paper_only
         do_papers = not film_only
-        self._update_card_live_thumbnails(self._current_photo_thumb, do_films=do_films, do_papers=do_papers)
+        self._update_card_live_thumbnails(thumb_data, do_films=do_films, do_papers=do_papers)
 
     def _on_film_thumb_ready(self, stock_id, pixmap):
         card = self.film_cards.get(stock_id)
@@ -3187,11 +3862,6 @@ class DarkroomMainWindow(QMainWindow):
             next_id = self.photos[-1]["id"]
             self.filmstrip.set_photos(self.photos, next_id)
             self.on_switch_photo(next_id)
-            try:
-                valid_paths = [p["path"] for p in self.photos if p.get("path") and os.path.exists(p["path"])]
-                config_manager.save_session_state(valid_paths, self._current_photo_path)
-            except Exception:
-                pass
 
     def on_remove_multiple_photos(self, photo_ids):
         id_set = set(photo_ids)
@@ -3205,11 +3875,6 @@ class DarkroomMainWindow(QMainWindow):
             next_id = self.photos[-1]["id"]
             self.filmstrip.set_photos(self.photos, next_id)
             self.on_switch_photo(next_id)
-            try:
-                valid_paths = [p["path"] for p in self.photos if p.get("path") and os.path.exists(p["path"])]
-                config_manager.save_session_state(valid_paths, self._current_photo_path)
-            except Exception:
-                pass
 
     def on_clear_sdc_config(self, photo_ids):
         """Delete .sdc configuration sidecar and reset adjustments to baseline defaults."""
@@ -3221,6 +3886,9 @@ class DarkroomMainWindow(QMainWindow):
                 if p_path:
                     sdc_manager.delete_sdc(p_path)
                 p.pop("params", None)
+                p["film_profile"] = "none"
+                p["paper_profile"] = "none"
+                p["print_mode"] = "scan"
                 p["is_dirty"] = False
                 p["is_edited"] = False
                 self.filmstrip.set_photo_dirty(p["id"], False)
@@ -3228,9 +3896,23 @@ class DarkroomMainWindow(QMainWindow):
                     active_cleared = True
 
         if active_cleared and self.active_photo_id:
-            # Reload currently active photo without saving dirty state
+            # Item 11: Thoroughly reset active photo editing state, sliders, stocks, and canvas
             self._photo_is_dirty = False
-            self.on_switch_photo(self.active_photo_id)
+            self.reset_all_params()
+            self.on_switch_film("none", push_undo=False)
+            self.on_switch_paper("none", push_undo=False)
+            active_p = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+            if active_p:
+                active_p["params"] = dict(self.current_params)
+                active_p["film_profile"] = "none"
+                active_p["paper_profile"] = "none"
+                active_p["print_mode"] = "scan"
+                active_p["is_dirty"] = False
+                active_p["is_edited"] = False
+            self.filmstrip.set_photo_dirty(self.active_photo_id, False)
+            self._session_is_dirty = any(p.get("is_dirty", False) for p in self.photos)
+            self._update_window_title()
+            self.set_app_status("已清除暗房配置并重置为原生底片", timeout_ms=3000)
 
     def action_clear_photos(self):
         """Completely flush bottom filmstrip, engine session, and canvas without exiting to start screen."""
@@ -3247,7 +3929,12 @@ class DarkroomMainWindow(QMainWindow):
         self.photos.clear()
         self.active_photo_id = None
         self._current_photo_path = None
+        self._current_session_path = None
+        self._session_is_dirty = False
+        self._is_temp_session = False
 
+        config_manager.clear_auto_saved_session()
+        config_manager.save_last_session_path(None)
         config_manager.save_session_state([], None)
 
         # Retain darkroom workspace, do not return to start page
@@ -3258,15 +3945,36 @@ class DarkroomMainWindow(QMainWindow):
         self._update_window_title()
         if hasattr(self, 'exif_widget'):
             self.exif_widget.set_exif_data({})
-        if hasattr(self, 'histogram'):
+        if hasattr(self, 'histogram_widget'):
+            self.histogram_widget.clear()
+        elif hasattr(self, 'histogram'):
             self.histogram.clear()
+
+        # Item 6: Reset cards thumbnails to default swatch
+        self._current_photo_thumb = None
+        for card in self.film_cards.values():
+            card.set_thumbnail(None)
+        for card in self.paper_cards.values():
+            card.set_thumbnail(None)
+        self.restore_default_status()
 
     def action_export_image(self):
         if not self._current_photo_path:
             return
 
-        base, _ = os.path.splitext(self._current_photo_path)
-        default_out = f"{base}_developed.jpg"
+        last_cfg = config_manager.get_last_export_settings()
+        last_dir = ""
+        if last_cfg and "path" in last_cfg:
+            p = last_cfg["path"]
+            if os.path.isdir(p):
+                last_dir = p
+            elif p:
+                last_dir = os.path.dirname(p)
+        if not last_dir or not os.path.exists(last_dir):
+            last_dir = os.path.dirname(self._current_photo_path) if self._current_photo_path else os.path.expanduser("~")
+
+        base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0]
+        default_out = os.path.join(last_dir, f"{base_name}.jpg")
 
         dlg = ExportImageDialog(default_out, is_batch=False, parent=self)
         if dlg.exec():
@@ -3274,180 +3982,59 @@ class DarkroomMainWindow(QMainWindow):
             self._do_export_single(cfg)
 
     def _do_export_single(self, cfg):
-        self.status_label.setText("正在导出...")
-        self.spinner.start()
+        if not self._current_photo_path:
+            return
 
+        curr_p = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+        base_ev = float(curr_p.get("base_ev", 0.0)) if curr_p else 0.0
         export_params = dict(self.current_params)
         export_params.update({
             "source_path": self._current_photo_path,
             "film_stock": self.current_film_stock,
             "paper_stock": self.current_paper_stock,
+            "print_mode": getattr(self, "current_print_mode", "optical"),
+            "base_ev": base_ev,
             "base_temp": getattr(self, "_active_base_temp", 5500.0),
             "base_tint": getattr(self, "_active_base_tint", 1.0),
-            "format": cfg["format"],
-            "bit_depth": cfg["bit_depth"],
-            "colorspace": cfg["colorspace"],
-            "dpi": cfg["dpi"],
-            "quality": cfg["quality"],
+            "format": cfg.get("format", "jpeg"),
+            "bit_depth": cfg.get("bit_depth", 8),
+            "colorspace": cfg.get("colorspace", "sRGB"),
+            "dpi": cfg.get("dpi", 300),
+            "quality": cfg.get("quality", 9),
             "scale_pct": cfg.get("scale_pct", 100),
-            "subsampling": cfg["subsampling"],
-            "progressive": cfg["progressive"],
-            "tiff_compression": cfg["tiff_compression"],
-            "png_level": cfg["png_level"]
+            "subsampling": cfg.get("subsampling", "4:4:4"),
+            "progressive": cfg.get("progressive", True),
+            "tiff_compression": cfg.get("tiff_compression", "lzw"),
+            "png_level": cfg.get("png_level", 6)
         })
 
         out_path = cfg["path"].strip() if cfg.get("path") else ""
         if not out_path or os.path.isdir(out_path) or out_path.endswith(('/', '\\')):
-            base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0] if self._current_photo_path else "developed"
+            base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0] if self._current_photo_path else "image"
             fmt_str = str(cfg.get("format", "jpeg")).lower()
             ext = ".tif" if "tif" in fmt_str else (".png" if "png" in fmt_str else ".jpg")
             fallback_dir = out_path if out_path else (os.path.dirname(self._current_photo_path) if self._current_photo_path else os.path.expanduser("~"))
-            out_path = os.path.join(fallback_dir, f"{base_name}_developed{ext}")
+            out_path = os.path.join(fallback_dir, f"{base_name}{ext}")
 
-        out_dir = os.path.dirname(os.path.abspath(out_path))
-        os.makedirs(out_dir, exist_ok=True)
-        if os.path.exists(out_path):
-            try:
-                import stat
-                os.chmod(out_path, stat.S_IWRITE)
-            except Exception:
-                pass
-
-        # Check Hardware Acceleration Mode preference: "关", "仅缩略图与视口", "全局"
-        hw_mode = "global"
+        # Remember output directory for subsequent exports
         try:
-            hw_mode = config_manager.get_preferences().get("hardware_acceleration_mode", "global")
+            config_manager.save_last_export_settings({"path": os.path.dirname(out_path)})
         except Exception:
-            hw_mode = "global"
+            pass
 
-        # Try ultra-fast GPU offscreen rendering first if hardware acceleration is enabled
-        if hw_mode == "global" and hasattr(self.canvas, "render_offscreen"):
-            progress_dlg = ExportProgressDialog(title="正在导出图像", parent=self)
-            progress_dlg.set_progress(10, "正在载入 100% 全分辨率底片数据...")
-            progress_dlg.show()
-            QApplication.processEvents()
+        pix = None
+        if self._current_photo_thumb is not None:
+            trgb = self._current_photo_thumb
+            th, tw = trgb.shape[:2]
+            qimg = QImage(trgb.data, tw, th, tw * 3, QImage.Format.Format_RGB888)
+            pix = QPixmap.fromImage(qimg)
 
-            try:
-                # 1. Load full resolution 16-bit raw/image
-                raw_target = self.engine._load_full_resolution(self._current_photo_path)
-                if raw_target is None:
-                    raw_target = getattr(self.canvas, "_pending_image", None)
-                if raw_target is None:
-                    curr_photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
-                    if curr_photo:
-                        raw_target = curr_photo.get("float_img")
-
-                if raw_target is not None:
-                    src_h, src_w = raw_target.shape[:2]
-                    scale_pct = int(cfg.get("scale_pct", 100))
-                    tgt_w = max(1, int(src_w * scale_pct / 100.0))
-                    tgt_h = max(1, int(src_h * scale_pct / 100.0))
-
-                    progress_dlg.set_progress(35, f"GPU 硬件加速极速冲印 ({tgt_w}×{tgt_h})...")
-                    QApplication.processEvents()
-
-                    # 2. Render on GPU with exact aspect ratio (ZERO black bars, full bleed)
-                    bit_depth = int(cfg.get("bit_depth", 8))
-                    rendered_arr = self.canvas.render_offscreen(
-                        tgt_w, tgt_h,
-                        float_img_rgb=raw_target,
-                        params_override=export_params,
-                        bit_depth=bit_depth
-                    )
-
-                    if rendered_arr is not None:
-                        progress_dlg.set_progress(80, "正在编码并写入图像文件...")
-                        QApplication.processEvents()
-
-                        fmt_lower = str(cfg["format"]).lower()
-                        dpi_val = int(cfg.get("dpi", 300))
-
-                        from PIL import Image
-                        if "tif" in fmt_lower:
-                            comp = str(cfg.get("tiff_compression", "lzw")).lower()
-                            if bit_depth == 16:
-                                import tifffile
-                                tifffile.imwrite(out_path, rendered_arr, compression=comp if comp != 'none' else None, resolution=(dpi_val, dpi_val, 'INCH'))
-                            else:
-                                im = Image.fromarray(rendered_arr, mode='RGB')
-                                im.save(out_path, 'TIFF', dpi=(dpi_val, dpi_val), compression='tiff_lzw')
-                        elif "png" in fmt_lower:
-                            png_level = int(cfg.get("png_level", 6))
-                            if bit_depth == 16:
-                                out_bgr = cv2.cvtColor(rendered_arr, cv2.COLOR_RGB2BGR)
-                                cv2.imwrite(out_path, out_bgr, [cv2.IMWRITE_PNG_COMPRESSION, png_level])
-                            else:
-                                im = Image.fromarray(rendered_arr, mode='RGB')
-                                im.save(out_path, 'PNG', compress_level=png_level, dpi=(dpi_val, dpi_val))
-                        else:
-                            q_scale = int(cfg.get("quality", 9))
-                            q_val = max(10, min(100, 50 + q_scale * 5 if q_scale <= 10 else 95))
-                            sub_opt = str(cfg.get("subsampling", "4:4:4"))
-                            sub_val = 0 if sub_opt == "4:4:4" else (1 if sub_opt == "4:2:2" else 2)
-                            prog_val = bool(cfg.get("progressive", True))
-                            im = Image.fromarray(rendered_arr, mode='RGB')
-                            im.save(out_path, 'JPEG', quality=q_val, subsampling=sub_val, progressive=prog_val, dpi=(dpi_val, dpi_val))
-
-                        progress_dlg.set_progress(100, "导出完成")
-                        progress_dlg.accept()
-                        self.spinner.stop()
-
-                        pct = int(round(self.canvas.get_actual_zoom_ratio() * 100))
-                        if self._current_photo_path:
-                            fn = os.path.basename(self._current_photo_path)
-                            self.status_label.setText(f"{fn} | {pct}%")
-                        mb = self._create_dark_message_box("导出成功", f"已成功通过 GPU 硬件加速导出至:\n{out_path}", QMessageBox.Icon.Information)
-                        icon_exp = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
-                        if os.path.exists(icon_exp):
-                            mb.setWindowIcon(QIcon(icon_exp))
-                        mb.exec()
-                        return
-            except Exception as e_gpu:
-                print(f"[Export] GPU offscreen fallback to CPU: {e_gpu}")
-                progress_dlg.close()
-
-        # Fallback to background CPU worker
-        progress_dlg = ExportProgressDialog(title="正在导出图像", parent=self)
-
-        worker = SingleExportWorker(
-            self.engine,
-            export_params,
-            out_path,
-            format_type=cfg["format"],
-            quality=cfg["quality"],
-            source_path=self._current_photo_path
-        )
-        self._current_worker = worker
-
-        worker.progress.connect(progress_dlg.set_progress)
-        progress_dlg.cancelRequested.connect(worker.cancel)
-
-        def _on_export_done(res):
-            progress_dlg.accept()
-            self.spinner.stop()
-            if res.get("cancelled") or getattr(worker, "_is_cancelled", False):
-                self.status_label.setText("已取消导出")
-                return
-
-            pct = int(round(self.canvas.zoom * 100))
-            if self._current_photo_path:
-                fn = os.path.basename(self._current_photo_path)
-                self.status_label.setText(f"{fn} | {pct}%")
-            else:
-                self.status_label.setText(f"{pct}%")
-
-            if res.get("success"):
-                mb = self._create_dark_message_box("导出成功", f"已成功导出至:\n{out_path}", QMessageBox.Icon.Information)
-                icon_exp = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
-                if os.path.exists(icon_exp):
-                    mb.setWindowIcon(QIcon(icon_exp))
-            else:
-                mb = self._create_dark_message_box("导出失败", res.get("error", "未知错误"), QMessageBox.Icon.Critical)
-            mb.exec()
-
-        worker.finished.connect(_on_export_done)
-        worker.start()
-        progress_dlg.exec()
+        import uuid
+        tid = f"task_{uuid.uuid4().hex[:8]}"
+        task = ExportTask(tid, os.path.basename(self._current_photo_path),
+                          self._current_photo_path, out_path, export_params, thumbnail=pix)
+        self.export_queue.enqueue(task)
+        self.set_app_status("已加入导出队列，正在后台冲印...", spinning=True, is_export_link=True)
 
     def action_export_darkroom_lut(self):
         """Export full darkroom physical color profile into standard 3D .cube LUT."""
@@ -3468,12 +4055,22 @@ class DarkroomMainWindow(QMainWindow):
             self._show_warning_dialog("导出失败", f"导出 3D LUT 失败: {e}")
 
     def _batch_export_photos(self, photo_ids):
-        """Item 16: Batch export multiple photos with professional format configuration."""
+        """Item 16: Batch export multiple photos with background export queue."""
         if not photo_ids:
             return
 
-        first_photo = next((p for p in self.photos if p["id"] in photo_ids), None)
-        default_dir = os.path.dirname(first_photo["path"]) if first_photo else os.path.expanduser("~")
+        last_cfg = config_manager.get_last_export_settings()
+        last_dir = ""
+        if last_cfg and "path" in last_cfg:
+            p = last_cfg["path"]
+            if os.path.isdir(p):
+                last_dir = p
+            elif p:
+                last_dir = os.path.dirname(p)
+        if not last_dir or not os.path.exists(last_dir):
+            first_photo = next((p for p in self.photos if p["id"] in photo_ids), None)
+            last_dir = os.path.dirname(first_photo["path"]) if first_photo else os.path.expanduser("~")
+        default_dir = last_dir
 
         dialog = ExportImageDialog(default_dir, is_batch=True, batch_count=len(photo_ids), parent=self)
         if not dialog.exec():
@@ -3486,6 +4083,7 @@ class DarkroomMainWindow(QMainWindow):
 
         try:
             os.makedirs(out_dir, exist_ok=True)
+            config_manager.save_last_export_settings({"path": out_dir})
         except Exception:
             mb = QMessageBox(self)
             mb.setWindowIcon(self.windowIcon())
@@ -3503,10 +4101,8 @@ class DarkroomMainWindow(QMainWindow):
         else:
             ext = ".jpg"
 
-        self.spinner.start()
-        total = len(photo_ids)
-        tasks = []
-
+        import uuid
+        enqueued_count = 0
         for i, pid in enumerate(photo_ids):
             photo = next((p for p in self.photos if p["id"] == pid), None)
             if not photo:
@@ -3526,6 +4122,8 @@ class DarkroomMainWindow(QMainWindow):
                 "source_path": file_p,
                 "film_stock": film,
                 "paper_stock": paper,
+                "print_mode": photo.get("print_mode", params.get("print_mode", "optical")),
+                "base_ev": float(photo.get("base_ev", 0.0)),
                 "base_temp": b_temp,
                 "base_tint": b_tint,
                 "exposure_ev": params.get("exposure_ev", 0.0),
@@ -3540,6 +4138,7 @@ class DarkroomMainWindow(QMainWindow):
                 "grain": params.get("grain", 0.4),
                 "grain_size": params.get("grain_size", 1.0),
                 "grain_cloud_blur": params.get("grain_cloud_blur", 1.0),
+                "format": fmt,
                 "quality": cfg.get("quality", 9),
                 "dpi": cfg.get("dpi", 300),
                 "bit_depth": cfg.get("bit_depth", 8),
@@ -3547,46 +4146,26 @@ class DarkroomMainWindow(QMainWindow):
                 "subsampling": cfg.get("subsampling", "4:4:4"),
                 "progressive": cfg.get("progressive", True),
                 "tiff_compression": cfg.get("tiff_compression", "lzw"),
-                "png_level": cfg.get("png_level", 6)
+                "png_level": cfg.get("png_level", 6),
+                "scale_pct": cfg.get("scale_pct", 100)
             }
 
-            out_fn = f"{os.path.splitext(os.path.basename(file_p))[0]}_developed{ext}"
+            out_fn = f"{os.path.splitext(os.path.basename(file_p))[0]}{ext}"
             out_target = os.path.join(out_dir, out_fn)
-            tasks.append({
-                "source_path": file_p,
-                "export_params": export_params,
-                "out_target": out_target,
-                "format": fmt,
-                "quality": cfg.get("quality", 9)
-            })
 
-        progress_dlg = ExportProgressDialog(title=f"正在批量导出 ({total} 张底片)", parent=self)
-        worker = BatchExportWorker(self.engine, tasks, out_dir)
-        self._current_worker = worker
+            pix = None
+            if photo.get("thumbnail_rgb") is not None:
+                trgb = photo["thumbnail_rgb"]
+                th, tw = trgb.shape[:2]
+                qimg = QImage(trgb.data, tw, th, tw * 3, QImage.Format.Format_RGB888)
+                pix = QPixmap.fromImage(qimg)
 
-        progress_dlg.cancelRequested.connect(worker.cancel)
+            tid = f"task_{uuid.uuid4().hex[:8]}"
+            task = ExportTask(tid, os.path.basename(file_p), file_p, out_target, export_params, thumbnail=pix)
+            self.export_queue.enqueue(task)
+            enqueued_count += 1
 
-        def _on_batch_prog(idx, tot, msg):
-            pct = int((idx / max(1, tot)) * 100)
-            progress_dlg.set_progress(pct, msg)
-            self.status_label.setText(f"正在导出 ({idx+1}/{tot})...")
-
-        worker.itemProgress.connect(_on_batch_prog)
-
-        def _on_batch_done(succ, tot, o_dir):
-            progress_dlg.accept()
-            self.spinner.stop()
-            pct = int(round(self.canvas.zoom * 100))
-            if self._current_photo_path:
-                self.status_label.setText(f"{os.path.basename(self._current_photo_path)} | {pct}%")
-            if getattr(worker, "_is_cancelled", False):
-                self.status_label.setText("已取消批量导出")
-                return
-            self._show_info_dialog("批量导出完成", f"共 {tot} 张底片，成功导出 {succ} 张至:\n{o_dir}")
-
-        worker.finished.connect(_on_batch_done)
-        worker.start()
-        progress_dlg.exec()
+        self.set_app_status(f"已将 {enqueued_count} 张底片加入冲印队列", spinning=True, is_export_link=True)
 
     def _create_dark_message_box(self, title, text, icon=QMessageBox.Icon.Information):
         mb = QMessageBox(self)
@@ -3698,14 +4277,23 @@ class DarkroomMainWindow(QMainWindow):
         act_lib.triggered.connect(lambda: self.open_stock_manager("paper"))
         menu.exec(global_pos)
 
-    def _sort_and_reflow_stocks(self, mode="film", sort_by="name"):
+    def _sort_and_reflow_stocks(self, mode="film", sort_by="name", persist=True):
         cards_dict = self.film_cards if mode == "film" else self.paper_cards
         grid = self.film_grid if mode == "film" else self.paper_grid
         items = list(cards_dict.items())
-        if sort_by == "name":
-            items.sort(key=lambda x: x[1].clean_name.lower())
-        else: # time (reversed or custom first)
-            items.sort(key=lambda x: (not x[1].is_custom, x[0]))
+
+        # Item 6: "无 (None)" preset permanently stays at index 0 regardless of sorting
+        def _sort_key(item):
+            sid, card = item
+            is_none = (sid == "none" or getattr(card, "clean_name", "").strip() in ("无 (None)", "无", "None"))
+            if is_none:
+                return (0, "")
+            if sort_by == "name":
+                return (1, card.clean_name.lower())
+            else:
+                return (1, not card.is_custom, sid)
+
+        items.sort(key=_sort_key)
 
         # Re-populate in sorted order
         for card in cards_dict.values():
@@ -3714,6 +4302,12 @@ class DarkroomMainWindow(QMainWindow):
         for k, v in items:
             cards_dict[k] = v
         self.reflow_grids()
+
+        if persist:
+            try:
+                config_manager.set_ui_state(f"{mode}_sort_order", sort_by)
+            except Exception:
+                pass
 
     def open_stock_manager(self, mode="film"):
         dlg = StockManagerDialog(mode=mode, engine=self.engine, parent=self)
@@ -3808,6 +4402,22 @@ class DarkroomMainWindow(QMainWindow):
         super().showMinimized()
 
     def closeEvent(self, event):
+        # Prompt user to save if current session has unsaved modifications
+        is_test_env = bool(os.environ.get("FAST_TEST")) or getattr(self, '_suppress_close_confirm', False)
+        if getattr(self, '_session_is_dirty', False) and self.photos and not is_test_env:
+            sess_name = os.path.basename(self._current_session_path) if self._current_session_path else "未命名会话"
+            dialog = UnsavedSessionDialog(sess_name, self)
+            res = dialog.exec()
+            if res == UnsavedSessionDialog.CANCEL:
+                event.ignore()
+                return
+            elif res == UnsavedSessionDialog.SAVE:
+                self.action_save_session()
+                if getattr(self, '_session_is_dirty', False):
+                    event.ignore()
+                    return
+            # elif res == UnsavedSessionDialog.DISCARD: proceed to exit
+
         # Silently ensure any modified parameters are saved to .sdc
         try:
             if self._photo_is_dirty and self._current_photo_path:
@@ -3882,15 +4492,23 @@ class DarkroomMainWindow(QMainWindow):
                 last_paper_stock=self.current_paper_stock,
             )
 
-            # Save session files for next startup
-            valid_paths = [p["path"] for p in self.photos if p.get("path") and os.path.exists(p["path"])]
-            config_manager.save_session_state(valid_paths, self._current_photo_path)
+            # Item 2: Remember active session path if saved on disk, or auto-save temporary session
+            if self._current_session_path and os.path.exists(self._current_session_path) and not getattr(self, "_is_temp_session", False):
+                config_manager.save_last_session_path(self._current_session_path)
+            elif self.photos:
+                self._save_auto_temp_session()
+                config_manager.save_last_session_path(config_manager.get_auto_saved_session_path())
+            else:
+                config_manager.save_last_session_path(None)
         except Exception as e:
             logger.warning(f"Error saving config on close: {e}")
 
         if self._import_worker and self._import_worker.isRunning():
             self._import_worker.stop()
             self._import_worker.wait(300)
+
+        if hasattr(self, 'export_queue') and self.export_queue:
+            self.export_queue.close()
 
         if self._photo_is_dirty and self._current_photo_path:
             sdc_manager.save_sdc(

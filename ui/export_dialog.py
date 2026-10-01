@@ -34,7 +34,7 @@ class ExportImageDialog(QDialog):
             self.setWindowTitle("冲印参数设置")
         else:
             self.setWindowTitle("导出图像")
-        self.setFixedSize(620, 520)
+        self.setFixedSize(660, 480)
         self.setModal(True)
 
         icon_path = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
@@ -46,6 +46,81 @@ class ExportImageDialog(QDialog):
         self._current_path = default_path
         self._init_ui()
         self._apply_style()
+        self._apply_last_settings()
+
+    def accept(self):
+        try:
+            import config_manager
+            config_manager.save_last_export_settings(self.get_export_config())
+        except Exception:
+            pass
+        super().accept()
+
+    def _apply_last_settings(self):
+        try:
+            import config_manager
+            last = config_manager.get_last_export_settings()
+            if not last:
+                return
+            fmt = last.get("format", "jpeg")
+            idx = self.combo_format.findData(fmt)
+            if idx >= 0:
+                self.combo_format.setCurrentIndex(idx)
+                self._on_format_changed(idx)
+
+            cs = last.get("colorspace", "sRGB")
+            idx_cs = self.combo_colorspace.findData(cs)
+            if idx_cs >= 0:
+                self.combo_colorspace.setCurrentIndex(idx_cs)
+
+            bd = last.get("bit_depth", 8)
+            idx_bd = self.combo_depth.findData(bd)
+            if idx_bd >= 0:
+                self.combo_depth.setCurrentIndex(idx_bd)
+
+            q = last.get("quality", 9)
+            if hasattr(self, "slider_quality"):
+                self.slider_quality.setValue(min(10, max(1, int(q))))
+
+            sc = last.get("scale_pct", 100)
+            if hasattr(self, "combo_scale"):
+                idx_sc = self.combo_scale.findData(sc)
+                if idx_sc >= 0:
+                    self.combo_scale.setCurrentIndex(idx_sc)
+
+            # Item 6: Chroma Subsampling persistence
+            sub = last.get("subsampling", "4:4:4")
+            if hasattr(self, "combo_subsampling"):
+                idx_sub = self.combo_subsampling.findData(sub)
+                if idx_sub >= 0:
+                    self.combo_subsampling.setCurrentIndex(idx_sub)
+
+            # Progressive JPEG persistence
+            if hasattr(self, "chk_progressive"):
+                self.chk_progressive.setChecked(bool(last.get("progressive", True)))
+
+            # TIFF Compression persistence
+            comp = last.get("tiff_compression", "lzw")
+            if hasattr(self, "combo_tiff_comp"):
+                idx_comp = self.combo_tiff_comp.findData(comp)
+                if idx_comp >= 0:
+                    self.combo_tiff_comp.setCurrentIndex(idx_comp)
+
+            # PNG Compression level persistence
+            png_lvl = last.get("png_level", 6)
+            if hasattr(self, "combo_png_level"):
+                idx_png = self.combo_png_level.findData(png_lvl)
+                if idx_png >= 0:
+                    self.combo_png_level.setCurrentIndex(idx_png)
+
+            # DPI Print Resolution persistence
+            dpi_val = last.get("dpi", 300)
+            if hasattr(self, "combo_dpi"):
+                idx_dpi = self.combo_dpi.findData(dpi_val)
+                if idx_dpi >= 0:
+                    self.combo_dpi.setCurrentIndex(idx_dpi)
+        except Exception as e:
+            pass
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -408,11 +483,13 @@ class ExportImageDialog(QDialog):
         except Exception:
             dpi_val = 300
 
-        raw_path = self.edit_path.text().strip()
+        from path_utils import normalize_path
+        raw_path = normalize_path(self.edit_path.text().strip())
         if not self.is_batch and raw_path:
             if os.path.isdir(raw_path) or raw_path.endswith(("/", "\\")):
                 cur_name = os.path.basename(self._current_path) or "developed.jpg"
                 raw_path = os.path.join(raw_path, cur_name)
+        raw_path = normalize_path(raw_path)
 
         return {
             "format": self.combo_format.currentData(),

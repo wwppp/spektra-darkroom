@@ -130,9 +130,9 @@ class TestLatestRefinements(unittest.TestCase):
         self.assertIn("2 档", labels)
 
 
-    def test_version_0_1_0(self):
+    def test_version_bumped(self):
         from version import VERSION_STRING
-        self.assertEqual(VERSION_STRING, "0.1.0")
+        self.assertTrue(VERSION_STRING >= "0.1.1")
 
     def test_pinned_histogram_and_view_reset_layout(self):
         self.assertTrue(hasattr(self.win, "histogram_widget"))

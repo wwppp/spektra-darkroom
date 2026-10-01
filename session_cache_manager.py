@@ -61,7 +61,7 @@ def get_cache_key(file_path: str) -> str:
     except OSError:
         mtime = 0.0
         size = 0
-    token = f"{norm_path}|{mtime}|{size}".encode("utf-8")
+    token = f"prophoto_v2|{norm_path}|{mtime}|{size}".encode("utf-8")
     return hashlib.sha256(token).hexdigest()[:24]
 
 
@@ -288,3 +288,35 @@ def prune_cache_if_needed(max_size_bytes: int = 2 * 1024 * 1024 * 1024):
                 pass
     except Exception as e:
         logger.warning(f"Error during cache pruning: {e}")
+
+
+def save_session_file(file_path: str, session_data: dict) -> bool:
+    """Saves session metadata, loaded photos, and edit states to a .sdss file."""
+    try:
+        dir_name = os.path.dirname(os.path.abspath(file_path))
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(session_data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save session file to {file_path}: {e}")
+        return False
+
+
+def load_session_file(file_path: str) -> dict | None:
+    """Loads session data from a .sdss file."""
+    if not file_path or not os.path.isfile(file_path):
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("format") == "SpektraDarkroomSession":
+            return data
+        # Fallback for plain dict
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        logger.error(f"Failed to load session file from {file_path}: {e}")
+    return None
+

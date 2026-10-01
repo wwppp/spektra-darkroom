@@ -239,6 +239,7 @@ class PreferencesDialog(QDialog):
         self.combo_preview_res.addItem("小 (1080P)", 1440)
         self.combo_preview_res.addItem("中 (2K - 推荐)", 2048)
         self.combo_preview_res.addItem("大 (4K 极致)", 3840)
+        self.combo_preview_res.addItem("全分辨率 (原始尺寸，100% 细节)", 0)
         r_res.addWidget(self.combo_preview_res, 1)
         l_ren.addLayout(r_res)
 
@@ -274,13 +275,58 @@ class PreferencesDialog(QDialog):
         r_fmt.addWidget(self.combo_default_fmt, 1)
         l_dr.addLayout(r_fmt)
 
-        self.chk_restore_last_files = QCheckBox("打开时回到上一次打开的文件")
+        self.chk_restore_last_files = QCheckBox("启动时恢复上一次会话工程 (.sdss)")
         self.chk_restore_last_files.setChecked(True)
         l_dr.addWidget(self.chk_restore_last_files)
 
         self.chk_restore_geo = QCheckBox("启动时恢复上次窗口位置与工作区分割比例")
         self.chk_restore_geo.setChecked(True)
         l_dr.addWidget(self.chk_restore_geo)
+
+        # Item 3: File Association (.sdss)
+        sep_assoc = QFrame()
+        sep_assoc.setFrameShape(QFrame.Shape.HLine)
+        sep_assoc.setStyleSheet("background: #252834; max-height: 1px; margin-top: 6px; margin-bottom: 6px;")
+        l_dr.addWidget(sep_assoc)
+
+        r_assoc = QHBoxLayout()
+        r_assoc.setSpacing(10)
+        lbl_assoc_info = QLabel("系统文件关联 (.sdss 会话工程):")
+        lbl_assoc_info.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 500;")
+        r_assoc.addWidget(lbl_assoc_info, 1)
+
+        self.btn_assoc = QPushButton("一键关联 .sdss 会话工程")
+        self.btn_assoc.setToolTip("将 Windows 系统中的 .sdss 文件与 SpektraDarkroom 关联，支持双击直接启动并恢复工程")
+        self.btn_assoc.setStyleSheet("""
+            QPushButton {
+                background: #1e202a;
+                border: 1px solid #3d4255;
+                color: #f59e0b;
+                padding: 5px 14px;
+                border-radius: 4px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: #282c3c;
+                border-color: #f59e0b;
+                color: #fbbf24;
+            }
+        """)
+        if config_manager.is_sdss_file_associated():
+            self.btn_assoc.setText("✓ 已关联 .sdss 工程")
+            self.btn_assoc.setStyleSheet("""
+                QPushButton {
+                    background: #14231f;
+                    border: 1px solid #10b981;
+                    color: #10b981;
+                    padding: 5px 14px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                }
+            """)
+        self.btn_assoc.clicked.connect(self._on_register_association)
+        r_assoc.addWidget(self.btn_assoc)
+        l_dr.addLayout(r_assoc)
 
         l_dr.addStretch()
         self.tabs.addTab(tab_darkroom, "暗房与工作流")
@@ -290,18 +336,6 @@ class PreferencesDialog(QDialog):
         l_ca = QVBoxLayout(tab_cache)
         l_ca.setContentsMargins(16, 16, 16, 16)
         l_ca.setSpacing(14)
-
-        r_rec = QHBoxLayout()
-        r_rec.addWidget(QLabel("最近打开文件记录上限:"))
-        self.spin_recent_count = QSpinBox()
-        self.spin_recent_count.setFixedWidth(74)
-        self.spin_recent_count.setFixedHeight(28)
-        self.spin_recent_count.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.spin_recent_count.setRange(5, 50)
-        self.spin_recent_count.setValue(15)
-        r_rec.addWidget(self.spin_recent_count)
-        r_rec.addStretch()
-        l_ca.addLayout(r_rec)
 
         r_cache = QHBoxLayout()
         self.lbl_cache_size = QLabel("3D LUT 磁盘缓存占用: 计算中...")
@@ -353,9 +387,8 @@ class PreferencesDialog(QDialog):
         self.combo_preview_res.setCurrentIndex(idx_res if idx_res >= 0 else 1)
 
         self.chk_hq_preview.setChecked(prefs.get("hq_preview", True))
-        self.chk_restore_last_files.setChecked(prefs.get("restore_last_files", True))
+        self.chk_restore_last_files.setChecked(prefs.get("restore_last_session", prefs.get("restore_last_files", True)))
         self.chk_restore_geo.setChecked(prefs.get("restore_window_state", True))
-        self.spin_recent_count.setValue(prefs.get("recent_files_max", 15))
 
         def_fmt = prefs.get("default_film_format", 35.0)
         for i in range(self.combo_default_fmt.count()):
@@ -414,10 +447,41 @@ class PreferencesDialog(QDialog):
         prefs["hardware_acceleration"] = (hw_mode != "off")
         prefs["preview_max_edge"] = int(self.combo_preview_res.currentData())
         prefs["hq_preview"] = self.chk_hq_preview.isChecked()
-        prefs["restore_last_files"] = self.chk_restore_last_files.isChecked()
+        restore_val = self.chk_restore_last_files.isChecked()
+        prefs["restore_last_session"] = restore_val
+        prefs["restore_last_files"] = restore_val
         prefs["restore_window_state"] = self.chk_restore_geo.isChecked()
         prefs["default_film_format"] = float(self.combo_default_fmt.currentData())
-        prefs["recent_files_max"] = int(self.spin_recent_count.value())
 
         config_manager.save_config(cfg)
         self.accept()
+
+    def _on_register_association(self):
+        succ = config_manager.register_sdss_file_association()
+        if succ:
+            self.btn_assoc.setText("✓ 已关联 .sdss 工程")
+            self.btn_assoc.setToolTip("已成功关联系统中的 .sdss 文件，支持双击直接打开")
+            self.btn_assoc.setStyleSheet("""
+                QPushButton {
+                    background: #14231f;
+                    border: 1px solid #10b981;
+                    color: #10b981;
+                    padding: 5px 14px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                }
+            """)
+        else:
+            self.btn_assoc.setText("⚠ 关联失败")
+            self.btn_assoc.setToolTip("未能写入注册表，请检查安全防护软件拦截")
+            self.btn_assoc.setStyleSheet("""
+                QPushButton {
+                    background: rgba(239, 68, 68, 0.15);
+                    border: 1px solid rgba(239, 68, 68, 0.50);
+                    color: #f87171;
+                    padding: 5px 14px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                }
+            """)
+

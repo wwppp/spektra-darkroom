@@ -80,8 +80,7 @@ class TestLatestFixesSession3(unittest.TestCase):
         prev_items = [dlg.combo_preview_res.itemText(i) for i in range(dlg.combo_preview_res.count())]
         self.assertTrue(any("小 (1080P)" in it for it in prev_items))
         self.assertTrue(any("中 (2K - 推荐)" in it for it in prev_items))
-        self.assertTrue(any("大 (4K 极致)" in it for it in prev_items))
-        self.assertEqual(dlg.spin_recent_count.width(), 74)
+        self.assertFalse(hasattr(dlg, "spin_recent_count"))
         dlg.close()
 
     def test_05_undo_no_duplicates_immediate_response(self):

@@ -20,6 +20,256 @@ except ImportError:
     rawpy = None
 
 
+# Color matrices for accurate gamut transitions
+# ACES2065-1 (AP0) to ProPhoto RGB
+ACES_TO_PROPHOTO = np.array([
+    [ 1.23938034, -0.16396782, -0.07523338],
+    [ 0.00361136,  1.08961365, -0.09326579],
+    [-0.00205968, -0.00225159,  1.00458558]
+], dtype=np.float32)
+
+# sRGB (linear) to ProPhoto RGB
+SRGB_TO_PROPHOTO = np.array([
+    [0.52882410, 0.33406099, 0.13736169],
+    [0.09752941, 0.87900741, 0.02339812],
+    [0.01635990, 0.10661249, 0.87724852]
+], dtype=np.float32)
+
+# ProPhoto RGB to sRGB (linear)
+PROPHOTO_TO_SRGB = np.array([
+    [ 2.03649172, -0.73759065, -0.29925987],
+    [-0.22571798,  1.22317653,  0.00272522],
+    [-0.01054513, -0.13487985,  1.14521015]
+], dtype=np.float32)
+
+
+def srgb_to_linear(srgb):
+    """Decode standard sRGB non-linear CCTF into linear values."""
+    srgb_c = np.clip(srgb, 0.0, 1.0)
+    return np.where(srgb_c <= 0.04045, srgb_c / 12.92, np.power(np.maximum(0.0, (srgb_c + 0.055) / 1.055), 2.4)).astype(np.float32)
+
+
+def prophoto_to_srgb(lin_pro):
+    """Convert Linear ProPhoto RGB to standard Display sRGB."""
+    lin_srgb = np.maximum(0.0, lin_pro @ PROPHOTO_TO_SRGB.T)
+    srgb_disp = np.where(
+        lin_srgb <= 0.0031308,
+        12.92 * lin_srgb,
+        1.055 * np.power(np.maximum(lin_srgb, 1e-6), 1.0 / 2.4) - 0.055
+    )
+    return np.clip(srgb_disp, 0.0, 1.0).astype(np.float32)
+
+
+def filmic_shoulder_np(c, threshold=0.75):
+    """Filmic soft highlight roll-off (smooth C1 shoulder compression above threshold)."""
+    over = np.maximum(0.0, c - threshold)
+    span = 1.0 - threshold
+    return (np.minimum(c, threshold) + span * (over / (span + over))).astype(np.float32)
+
+
+def convert_image_colorspace(img_rgb_float, target_colorspace="sRGB"):
+    """Convert an image in sRGB non-linear color space [0, 1] to target color space."""
+    target = str(target_colorspace).strip()
+    if target in ("sRGB", "srgb", "", None):
+        return np.clip(img_rgb_float, 0.0, 1.0)
+
+    try:
+        import colour
+        t_low = target.lower()
+        if "p3" in t_low:
+            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'Display P3')
+        elif "adobe" in t_low:
+            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'Adobe RGB (1998)')
+        elif "prophoto" in t_low:
+            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'ProPhoto RGB')
+        else:
+            out = img_rgb_float
+        return np.clip(out.astype(np.float32), 0.0, 1.0)
+    except Exception as e:
+        print(f"[SpektraEngine] Colorspace conversion error ({target}): {e}")
+        return np.clip(img_rgb_float, 0.0, 1.0)
+
+
+def get_icc_profile_bytes(target_colorspace="sRGB"):
+    """Retrieve standard embedded ICC profile bytes for target colorspace."""
+    from path_utils import get_resource_dir
+    target = str(target_colorspace).strip().lower()
+    icc_dir = os.path.join(get_resource_dir(), "icc")
+
+    cand_file = None
+    if "p3" in target:
+        cand_file = os.path.join(icc_dir, "DisplayP3.icc")
+    elif "adobe" in target:
+        cand_file = os.path.join(icc_dir, "AdobeRGB1998.icc")
+    elif "prophoto" in target:
+        cand_file = os.path.join(icc_dir, "ProPhotoRGB.icc")
+    else:
+        cand_file = os.path.join(icc_dir, "sRGB.icc")
+
+    if cand_file and os.path.exists(cand_file):
+        try:
+            with open(cand_file, "rb") as f:
+                return f.read()
+        except Exception:
+            pass
+    return None
+
+
+def extract_exif_bundle(source_path):
+    """Extract complete camera metadata from original photo or RAW negative (ARW, CR2, NEF, DNG, RAF, JPG, TIF, PNG).
+    Returns (pil_exif, exif_bytes, tiff_tags) for embedding into exported JPEG, TIFF, and PNG images.
+    """
+    if not source_path or not os.path.exists(source_path):
+        return None, None, []
+
+    from PIL import Image
+    ext = os.path.splitext(source_path)[1].lower()
+    pil_exif = Image.Exif()
+    sub_exif = pil_exif.get_ifd(0x8769)
+    sub_gps = pil_exif.get_ifd(0x8825)
+
+    SUBTAG_MAP = {
+        'ExposureTime': 0x829a, 'FNumber': 0x829d, 'ExposureProgram': 0x8822,
+        'ISOSpeedRatings': 0x8827, 'SensitivityType': 0x8830, 'RecommendedExposureIndex': 0x8832,
+        'ExifVersion': 0x9000, 'DateTimeOriginal': 0x9003, 'DateTimeDigitized': 0x9004,
+        'OffsetTime': 0x9010, 'OffsetTimeOriginal': 0x9011, 'OffsetTimeDigitized': 0x9012,
+        'BrightnessValue': 0x9203, 'ExposureBiasValue': 0x9204, 'MaxApertureValue': 0x9205,
+        'MeteringMode': 0x9207, 'LightSource': 0x9208, 'Flash': 0x9209,
+        'FocalLength': 0x920a, 'MakerNote': 0x927c, 'UserComment': 0x9286,
+        'SubsecTime': 0x9290, 'SubsecTimeOriginal': 0x9291, 'SubsecTimeDigitized': 0x9292,
+        'FlashpixVersion': 0xa000, 'ColorSpace': 0xa001, 'PixelXDimension': 0xa002, 'PixelYDimension': 0xa003,
+        'CustomRendered': 0xa401, 'ExposureMode': 0xa402, 'WhiteBalance': 0xa403,
+        'DigitalZoomRatio': 0xa404, 'FocalLengthIn35mmFilm': 0xa405, 'SceneCaptureType': 0xa406,
+        'Contrast': 0xa408, 'Saturation': 0xa409, 'Sharpness': 0xa40a,
+        'BodySerialNumber': 0xa431, 'LensSpecification': 0xa432, 'LensMake': 0xa433, 'LensModel': 0xa434,
+    }
+
+    # 1. Try reading with PIL directly (works for JPG, TIFF, PNG, DNG)
+    try:
+        with Image.open(source_path) as im:
+            loaded_exif = im.getexif()
+            if loaded_exif:
+                for k, v in loaded_exif.items():
+                    try:
+                        pil_exif[k] = v
+                    except Exception:
+                        pass
+                if 0x8769 in loaded_exif:
+                    for sk, sv in loaded_exif.get_ifd(0x8769).items():
+                        try:
+                            sub_exif[sk] = sv
+                        except Exception:
+                            pass
+                if 0x8825 in loaded_exif:
+                    for gk, gv in loaded_exif.get_ifd(0x8825).items():
+                        try:
+                            sub_gps[gk] = gv
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+    # 2. Fuji RAF embedded JPEG preview header
+    if ext == '.raf':
+        try:
+            with open(source_path, 'rb') as rf:
+                hdr = rf.read(128)
+                if hdr.startswith(b'FUJIFILMCCD-RAW'):
+                    import struct
+                    off_jpg = struct.unpack('>I', hdr[84:88])[0]
+                    len_jpg = struct.unpack('>I', hdr[88:92])[0]
+                    rf.seek(off_jpg)
+                    jpg_bytes = rf.read(len_jpg)
+                    with Image.open(io.BytesIO(jpg_bytes)) as j_img:
+                        loaded_exif = j_img.getexif()
+                        if loaded_exif:
+                            for k, v in loaded_exif.items():
+                                try:
+                                    pil_exif[k] = v
+                                except Exception:
+                                    pass
+                            if 0x8769 in loaded_exif:
+                                for sk, sv in loaded_exif.get_ifd(0x8769).items():
+                                    try:
+                                        sub_exif[sk] = sv
+                                    except Exception:
+                                        pass
+                            if 0x8825 in loaded_exif:
+                                for gk, gv in loaded_exif.get_ifd(0x8825).items():
+                                    try:
+                                        sub_gps[gk] = gv
+                                    except Exception:
+                                        pass
+        except Exception:
+            pass
+
+    # 3. Tifffile for RAW negative formats (ARW, CR2, NEF, DNG, TIFF)
+    try:
+        import tifffile
+        with tifffile.TiffFile(source_path) as tf:
+            for page in tf.pages:
+                for tag in page.tags:
+                    code = tag.code
+                    val = tag.value
+                    if code in (0x014a, 0x0201, 0x0202, 0x00fe, 0x0103, 0x011a, 0x011b, 0x0128, 0x0100, 0x0101):
+                        continue
+                    if tag.name == 'ExifTag' and isinstance(val, dict):
+                        for sk, sv in val.items():
+                            sub_code = sk if isinstance(sk, int) else SUBTAG_MAP.get(sk)
+                            if sub_code:
+                                try:
+                                    sub_exif[sub_code] = sv
+                                except Exception:
+                                    pass
+                    elif isinstance(code, int) and code < 0xffff:
+                        try:
+                            if code not in pil_exif:
+                                pil_exif[code] = val
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+    # Force orientation to 1 (normal upright) because raw decoding already renders pixels upright
+    pil_exif[0x0112] = 1
+
+    exif_bytes = None
+    try:
+        exif_bytes = pil_exif.tobytes()
+    except Exception:
+        pass
+
+    tiff_tags = []
+    # Tags that tifffile manages internally or should not be written to extratags
+    skip_tiff_codes = {
+        0x8769, 0x8825, 270, 305, 256, 257, 258, 259, 262, 273, 277, 278, 279, 284
+    }
+    seen_codes = set()
+
+    def _add_tiff_tag(c, v):
+        if c in skip_tiff_codes or c in seen_codes:
+            return
+        if c == 0x0112:
+            v = 1
+        seen_codes.add(c)
+        if isinstance(v, (int, np.integer)) and not isinstance(v, bool):
+            tiff_tags.append((c, "I", 1, int(v), True))
+        elif hasattr(v, "numerator") and hasattr(v, "denominator"):
+            tiff_tags.append((c, "2I", 1, (int(v.numerator), int(v.denominator)), True))
+        elif isinstance(v, str):
+            tiff_tags.append((c, "s", 0, v, True))
+        elif isinstance(v, tuple) and len(v) == 2 and isinstance(v[0], int) and isinstance(v[1], int):
+            tiff_tags.append((c, "2I", 1, (int(v[0]), int(v[1])), True))
+
+    for code, val in pil_exif.items():
+        _add_tiff_tag(code, val)
+
+    for code, val in sub_exif.items():
+        _add_tiff_tag(code, val)
+
+    return pil_exif, exif_bytes, tiff_tags
+
+
 class SpektraEngine:
     def __init__(self, resources_dir="resources"):
         self.resources_dir = os.path.abspath(resources_dir)
@@ -213,9 +463,9 @@ class SpektraEngine:
         return [
             {
                 "id": "none",
-                "name": "无相纸 (直出透传)",
-                "badge": "原生",
-                "desc": "不加载任何暗房放大机与相纸印放模型，呈现数码直出透传影调。"
+                "name": "数码扫描 (Film Scan)",
+                "badge": "数码直扫",
+                "desc": "跳过相纸印相，呈现底片直接数码扫描的通透细节与宽容度。"
             },
             {
                 "id": "kodak_2383",
@@ -275,9 +525,16 @@ class SpektraEngine:
                     return list(paper_dict[illuminant_key][film_stock])
         return [0.0, 50.0, 50.0]
 
-    def get_3d_lut(self, film_stock="kodak_portra_400", paper_stock="kodak_2383", lut_size=33, params_dict=None):
+    def get_3d_lut(self, film_stock="kodak_portra_400", paper_stock="kodak_2383", lut_size=33, params_dict=None, print_mode=None):
         """Build and cache a 3D LUT (N x N x N x 3 float32) for the film + paper combination."""
         params_dict = params_dict or {}
+        if print_mode is None:
+            print_mode = str(params_dict.get("print_mode", "optical")).lower()
+        else:
+            print_mode = str(print_mode).lower()
+        if print_mode not in ("optical", "scan"):
+            print_mode = "optical"
+
         illuminant = str(params_dict.get("enlarger_illuminant", "TH-KG3"))
         dir_amt = round(float(params_dict.get("dir_amount", 1.0)), 2)
         dir_intl = round(float(params_dict.get("dir_interlayer", 1.0)), 2)
@@ -291,21 +548,23 @@ class SpektraEngine:
             abs(morph_gamma - 1.0) < 0.01 and abs(dev_exh) < 0.01
         )
 
-        cache_key = (film_stock, paper_stock, lut_size, illuminant, dir_amt, dir_intl, dir_same, morph_gamma, dev_exh)
+        eff_paper = "scan" if print_mode == "scan" else paper_stock
+        cache_key = (film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same, morph_gamma, dev_exh)
         if cache_key in self._lut_cache:
             return self._lut_cache[cache_key]
 
-        # 1. Bypass mode: 胶卷或相纸任一为 "none" 时，直接返回单位恒等映射 LUT (纯透传原图)
-        if film_stock == "none" or paper_stock == "none":
+        # 1. Bypass mode: 胶卷为 "none" 时，生成从 Linear ProPhoto RGB -> Display sRGB 的单位转换表 (保持无滤镜自然色彩)
+        if film_stock == "none":
             lin = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
             b, g, r = np.meshgrid(lin, lin, lin, indexing='ij')
-            identity_lut = np.stack([r, g, b], axis=-1).astype(np.float32)
+            lattice = np.stack([r, g, b], axis=-1).astype(np.float32)
+            identity_lut = prophoto_to_srgb(lattice)
             self._lut_cache[cache_key] = identity_lut
             return identity_lut
 
         cache_dir = os.path.join(self.resources_dir, ".lut_cache")
         if is_default_params:
-            cache_file = os.path.join(cache_dir, f"{film_stock}__{paper_stock}__{lut_size}.npy")
+            cache_file = os.path.join(cache_dir, f"v2__{film_stock}__{eff_paper}__{lut_size}.npy")
             if os.path.exists(cache_file):
                 try:
                     lut_3d = np.load(cache_file)
@@ -314,7 +573,7 @@ class SpektraEngine:
                 except Exception:
                     pass
 
-        print(f"[SpektraEngine] 正在为 GPU 生成物理 3D LUT: {film_stock} + {paper_stock} (光源: {illuminant}, DIR: {dir_intl}, 尺寸: {lut_size})...")
+        print(f"[SpektraEngine] 正在为 GPU 生成物理 3D LUT: {film_stock} + {eff_paper} (模式: {print_mode}, 光源: {illuminant}, DIR: {dir_intl}, 尺寸: {lut_size})...")
         t0 = time.time()
         
         lin = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
@@ -324,9 +583,39 @@ class SpektraEngine:
 
         params = init_params()
         params.film = self._load_profile(film_stock)
-        params.print = self._load_profile(paper_stock)
-        if paper_stock == "none" or (params.film and hasattr(params.film, 'info') and getattr(params.film.info, 'type', None) == 'positive'):
+
+        # Check if positive (slide/reversal) or negative film
+        is_pos = (params.film and hasattr(params.film, 'is_positive') and params.film.is_positive) or \
+                 (params.film and hasattr(params.film, 'info') and getattr(params.film.info, 'type', None) == 'positive')
+
+        if is_pos:
+            # Positive slide film: inherently positive, no photographic print paper
             params.io.scan_film = True
+            params.print = None
+            params.settings.neutral_print_filters_from_database = False
+            base_paper = "none"
+        elif print_mode == "scan":
+            # Negative film in digital scan mode: digital lab scanner inversion paper (Kodak Ektacolor Edge)
+            params.io.scan_film = False
+            scan_paper = "kodak_ektacolor_edge"
+            params.print = self._load_profile(scan_paper)
+            params.settings.neutral_print_filters_from_database = True
+            base_paper = scan_paper
+        else:
+            # Negative film in optical print mode: optical enlarger onto positive photographic paper
+            params.io.scan_film = False
+            opt_paper = "kodak_2383" if paper_stock == "none" else paper_stock
+            params.print = self._load_profile(opt_paper)
+            params.settings.neutral_print_filters_from_database = True
+            base_paper = opt_paper
+
+        # CRITICAL: Enable lut_mode for deterministic, un-biased 3D LUT generation
+        # This completely disables auto_exposure on the synthetic cube lattice,
+        # preventing the catastrophic -1.44 EV darkening!
+        params.debug.lut_mode = True
+        params.camera.auto_exposure = False
+        params.camera.exposure_compensation_ev = 0.0
+
         params.settings.preview_mode = True
         params.settings.use_enlarger_lut = True
         params.settings.use_scanner_lut = True
@@ -349,7 +638,7 @@ class SpektraEngine:
             developer_exhaustion=dev_exh
         )
 
-        base_filter = self.get_neutral_filter(paper_stock, film_stock)
+        base_filter = self.get_neutral_filter(base_paper, film_stock)
         params.enlarger.filter_cyan = base_filter[0]
         params.enlarger.filter_magenta = base_filter[1]
         params.enlarger.filter_yellow = base_filter[2]
@@ -635,7 +924,7 @@ class SpektraEngine:
             if float(np.nanmean(sample_img)) < 1e-4:
                 return 0.0
             # 与原作者 official pipeline 严格保持 100% 一致：输入数据已是线性空间，apply_cctf_decoding=False
-            ev = measure_autoexposure_ev(sample_img, color_space='sRGB', apply_cctf_decoding=False, method='center_weighted')
+            ev = measure_autoexposure_ev(sample_img, color_space='ProPhoto RGB', apply_cctf_decoding=False, method='center_weighted')
             if np.isnan(ev) or np.isinf(ev):
                 return 0.0
             return float(np.clip(round(ev, 2), -3.0, 3.0))
@@ -680,12 +969,13 @@ class SpektraEngine:
                 with open(file_path, "rb") as fp:
                     with rawpy.imread(fp) as raw:
                         try:
-                            # Half size 16-bit extraction (instant decode in ~200ms)
+                            # 16-bit linear ACES half-size extraction (instant decode in ~200ms)
                             rgb16 = raw.postprocess(
                                 use_camera_wb=True,
                                 half_size=True,
                                 no_auto_bright=True,
-                                output_color=rawpy.ColorSpace.sRGB,
+                                output_color=rawpy.ColorSpace.ACES,
+                                gamma=(1, 1),
                                 output_bps=16
                             )
                         except Exception:
@@ -693,11 +983,16 @@ class SpektraEngine:
                                 use_auto_wb=True,
                                 half_size=True,
                                 no_auto_bright=True,
-                                output_color=rawpy.ColorSpace.sRGB,
+                                output_color=rawpy.ColorSpace.ACES,
+                                gamma=(1, 1),
                                 output_bps=16
                             )
                 post_h, post_w = rgb16.shape[:2]
                 w, h = post_w * 2, post_h * 2
+                # Convert linear ACES2065-1 to linear ProPhoto RGB
+                rgb_aces = rgb16.astype(np.float32) / 65535.0
+                rgb_linear_pro = np.maximum(0.0, rgb_aces @ ACES_TO_PROPHOTO.T)
+                del rgb16, rgb_aces
             else:
                 img_bgr = None
                 try:
@@ -716,7 +1011,7 @@ class SpektraEngine:
                                 pil_arr = cv2.cvtColor(pil_arr, cv2.COLOR_GRAY2RGB)
                             elif pil_arr.shape[2] == 4:
                                 pil_arr = cv2.cvtColor(pil_arr, cv2.COLOR_RGBA2RGB)
-                            rgb16 = pil_arr
+                            rgb_raw = pil_arr
                     except Exception:
                         try:
                             import tifffile
@@ -725,7 +1020,7 @@ class SpektraEngine:
                                 tif_arr = cv2.cvtColor(tif_arr, cv2.COLOR_GRAY2RGB)
                             elif tif_arr.shape[2] == 4:
                                 tif_arr = cv2.cvtColor(tif_arr, cv2.COLOR_RGBA2RGB)
-                            rgb16 = tif_arr
+                            rgb_raw = tif_arr
                         except Exception as e_tif:
                             return {"success": False, "error": f"无法解码该图片文件: {e_tif}"}
                 else:
@@ -733,66 +1028,65 @@ class SpektraEngine:
                         img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
                     elif img_bgr.shape[2] == 4:
                         img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
-                    rgb16 = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                    rgb_raw = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-                h, w = rgb16.shape[:2]
+                h, w = rgb_raw.shape[:2]
+                if np.issubdtype(rgb_raw.dtype, np.floating):
+                    f_img = np.clip(rgb_raw.astype(np.float32), 0.0, 1.0)
+                elif rgb_raw.dtype == np.uint16:
+                    f_img = rgb_raw.astype(np.float32) / 65535.0
+                else:
+                    f_img = rgb_raw.astype(np.float32) / 255.0
+                del rgb_raw
+                # Convert standard sRGB image to linear ProPhoto RGB
+                lin_srgb = srgb_to_linear(f_img)
+                rgb_linear_pro = np.maximum(0.0, lin_srgb @ SRGB_TO_PROPHOTO.T)
+                del f_img, lin_srgb
 
             self.original_meta["width"] = w
             self.original_meta["height"] = h
             self.original_meta["resolution"] = f"{w} × {h}"
 
             # Downscale slightly for GPU preview texture according to user preference (1080P/2K/4K)
-            cur_h, cur_w = rgb16.shape[:2]
+            cur_h, cur_w = rgb_linear_pro.shape[:2]
             max_edge = 2048
             try:
                 import config_manager
                 max_edge = int(config_manager.get_preferences().get("preview_max_edge", 2048))
             except Exception:
                 max_edge = 2048
-            if max(cur_h, cur_w) > max_edge:
+            if max_edge > 0 and max(cur_h, cur_w) > max_edge:
                 scale = max_edge / float(max(cur_h, cur_w))
                 new_w = int(cur_w * scale)
                 new_h = int(cur_h * scale)
-                preview_small = cv2.resize(rgb16, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                preview_small = cv2.resize(rgb_linear_pro, (new_w, new_h), interpolation=cv2.INTER_AREA)
             else:
-                preview_small = rgb16
+                preview_small = rgb_linear_pro
+            del rgb_linear_pro
 
-            if np.issubdtype(preview_small.dtype, np.floating):
-                self.raw_preview = preview_small.astype(np.float32)
-                max_v = float(np.nanmax(self.raw_preview)) if self.raw_preview.size > 0 else 1.0
-                if max_v > 255.0:
-                    self.raw_preview = self.raw_preview / 65535.0
-                elif max_v > 1.0:
-                    self.raw_preview = self.raw_preview / 255.0
-            elif preview_small.dtype == np.uint16:
-                self.raw_preview = preview_small.astype(np.float32) / 65535.0
+            is_raw_file = (ext in raw_exts)
+            if is_raw_file:
+                # Calculate auto-exposure on Linear ProPhoto RGB image
+                auto_ev = self.calculate_auto_exposure_ev(preview_small)
+                base_ev = auto_ev
+                # Calibrate underlying preview image to 18% middle-gray baseline
+                self.raw_preview = (preview_small * float(np.exp2(base_ev))).astype(np.float32)
             else:
-                self.raw_preview = preview_small.astype(np.float32) / 255.0
-            del rgb16
+                auto_ev = 0.0
+                base_ev = 0.0
+                self.raw_preview = preview_small.astype(np.float32)
+            del preview_small
 
             # Small filmstrip negative thumbnail (height 72px)
             th_h = 72
             th_w = max(48, int(self.raw_preview.shape[1] * (th_h / float(self.raw_preview.shape[0]))))
             th_img = cv2.resize(self.raw_preview, (th_w, th_h), interpolation=cv2.INTER_AREA)
-
-            # If input image was float (scene-linear HDR/TIFF) and very dark in linear space, apply sRGB EOTF to thumbnail
-            if np.issubdtype(preview_small.dtype, np.floating) or (ext in {".tif", ".tiff", ".dng"} and float(np.nanmean(th_img)) < 0.12):
-                th_clamped = np.clip(th_img, 0.0, 1.0)
-                # Apply standard sRGB / Rec.709 transfer function for human visual perception
-                th_disp = np.where(
-                    th_clamped <= 0.0031308,
-                    12.92 * th_clamped,
-                    1.055 * np.power(np.maximum(th_clamped, 1e-6), 1.0 / 2.4) - 0.055
-                )
-                th_u8 = (np.clip(th_disp, 0.0, 1.0) * 255.0).astype(np.uint8)
-            else:
-                th_u8 = (np.clip(th_img, 0.0, 1.0) * 255.0).astype(np.uint8)
+            th_u8 = (prophoto_to_srgb(th_img) * 255.0).astype(np.uint8)
 
             # Store in session photos
             existing = next((p for p in self.session_photos if p["path"] == file_path), None)
             photo_id = existing["id"] if existing else f"film_{uuid.uuid4().hex[:8]}"
 
-            auto_ev = self.calculate_auto_exposure_ev(self.raw_preview)
             photo_item = {
                 "id": photo_id,
                 "path": file_path,
@@ -802,8 +1096,9 @@ class SpektraEngine:
                 "thumbnail_rgb": th_u8,
                 "raw_preview": self.raw_preview,
                 "meta": dict(self.original_meta),
-                "is_raw": (ext in raw_exts),
-                "auto_ev": auto_ev
+                "is_raw": is_raw_file,
+                "base_ev": base_ev,
+                "auto_ev": 0.0
             }
 
             if existing:
@@ -828,7 +1123,8 @@ class SpektraEngine:
                 "exif": dict(self.original_meta),
                 "photos": self.get_session_photos(),
                 "active_id": photo_id,
-                "auto_ev": auto_ev
+                "auto_ev": auto_ev,
+                "base_ev": base_ev
             }
         except Exception as e:
             import traceback
@@ -922,8 +1218,8 @@ class SpektraEngine:
         self.current_file_path = None
         return {"success": True, "photos": [], "active_id": None}
 
-    def _load_full_resolution(self, file_path):
-        """Full 16-bit float32 loader for master export on demand."""
+    def _load_full_resolution(self, file_path, base_ev=0.0):
+        """Full 16-bit float32 loader for master export on demand in Linear ProPhoto RGB."""
         ext = os.path.splitext(file_path)[1].lower()
         raw_exts = {".arw", ".srf", ".sr2", ".arq", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".raf", ".dng", ".rw2", ".orf", ".ori", ".pef", ".ptx", ".3fr", ".fff", ".x3f"}
         if ext in raw_exts:
@@ -934,7 +1230,8 @@ class SpektraEngine:
                             use_camera_wb=True,
                             half_size=False,
                             no_auto_bright=True,
-                            output_color=rawpy.ColorSpace.sRGB,
+                            output_color=rawpy.ColorSpace.ACES,
+                            gamma=(1, 1),
                             output_bps=16
                         )
                     except Exception:
@@ -942,10 +1239,15 @@ class SpektraEngine:
                             use_auto_wb=True,
                             half_size=False,
                             no_auto_bright=True,
-                            output_color=rawpy.ColorSpace.sRGB,
+                            output_color=rawpy.ColorSpace.ACES,
+                            gamma=(1, 1),
                             output_bps=16
                         )
-                    return rgb16.astype(np.float32) / 65535.0
+                    rgb_aces = rgb16.astype(np.float32) / 65535.0
+                    rgb_pro = np.maximum(0.0, rgb_aces @ ACES_TO_PROPHOTO.T)
+                    if abs(base_ev) > 0.0001:
+                        rgb_pro *= float(np.exp2(base_ev))
+                    return rgb_pro
         else:
             img_bgr = None
             try:
@@ -985,13 +1287,18 @@ class SpektraEngine:
                 out = img_rgb.astype(np.float32)
                 max_v = float(np.nanmax(out)) if out.size > 0 else 1.0
                 if max_v > 255.0:
-                    return out / 65535.0
+                    f_img = out / 65535.0
                 elif max_v > 1.0:
-                    return out / 255.0
-                return out
+                    f_img = out / 255.0
+                else:
+                    f_img = out
             elif img_rgb.dtype == np.uint16:
-                return img_rgb.astype(np.float32) / 65535.0
-            return img_rgb.astype(np.float32) / 255.0
+                f_img = img_rgb.astype(np.float32) / 65535.0
+            else:
+                f_img = img_rgb.astype(np.float32) / 255.0
+
+            lin_srgb = srgb_to_linear(f_img)
+            return np.maximum(0.0, lin_srgb @ SRGB_TO_PROPHOTO.T)
 
     def export_image(self, params_dict, output_path, format_type="tiff16", quality=9, source_path=None, progress_cb=None, cancel_cb=None):
         """Render at 100% full resolution and write to disk."""
@@ -1004,10 +1311,16 @@ class SpektraEngine:
 
             target_src = source_path or params_dict.get("source_path") or self.current_file_path
             raw_target = None
+            base_ev = float(params_dict.get("base_ev", 0.0))
+            if not base_ev and target_src:
+                matched_p = next((p for p in self.session_photos if p["path"] == target_src), None)
+                if matched_p and "base_ev" in matched_p:
+                    base_ev = float(matched_p["base_ev"])
+
             if target_src:
                 try:
-                    print(f"[SpektraEngine] 正在为高精度成片载入 100% 全分辨率底片: {target_src}")
-                    raw_target = self._load_full_resolution(target_src)
+                    print(f"[SpektraEngine] 正在为高精度成片载入 100% 全分辨率底片: {target_src} (基准EV: {base_ev:+.2f})")
+                    raw_target = self._load_full_resolution(target_src, base_ev=base_ev)
                 except Exception as ex_load:
                     print(f"[SpektraEngine] 全分辨率载入异常，回退至GPU底片: {ex_load}")
 
@@ -1094,7 +1407,9 @@ class SpektraEngine:
                         chunk_linear = chunk_linear * 0.985 + 0.015 * diff_strength
 
                 # 3. 3D LUT sampling (Film emulsion + Paper D-max)
-                coords = np.clip(chunk_linear * (lut_size - 1), 0.0, lut_size - 1.0001)
+                # Apply filmic highlight shoulder roll-off to avoid hard highlight clipping
+                shoulder_linear = filmic_shoulder_np(chunk_linear, 0.75)
+                coords = np.clip(shoulder_linear * (lut_size - 1), 0.0, lut_size - 1.0001)
                 idx0 = coords.astype(np.int32)
                 idx1 = np.minimum(idx0 + 1, lut_size - 1)
                 d = coords - idx0
@@ -1182,40 +1497,85 @@ class SpektraEngine:
             dpi_val = int(params_dict.get("dpi", 300))
             fmt_lower = str(format_type).lower()
 
+            colorspace = params_dict.get("colorspace", "sRGB")
+            rendered_float = convert_image_colorspace(rendered_float, colorspace)
+            icc_bytes = get_icc_profile_bytes(colorspace)
+
+            # Issue 1: Extract complete camera EXIF metadata from original photo or RAW file
+            pil_exif, exif_bytes, tiff_tags = extract_exif_bundle(target_src)
+
             if "tif" in fmt_lower:
                 comp = str(params_dict.get("tiff_compression", "lzw")).lower()
+                if comp in ("none", "uncompressed"):
+                    comp_val = None
+                elif comp in ("zip", "deflate", "zlib"):
+                    comp_val = "deflate"
+                else:
+                    comp_val = "lzw"
+
+                extratags = []
+                if icc_bytes:
+                    extratags.append((34675, 'B', len(icc_bytes), icc_bytes, False))
+                if tiff_tags:
+                    extratags.extend(tiff_tags)
+
+                def _safe_tifffile_write(path, data):
+                    import tifffile
+                    # Attempt desired compression; fall back gracefully to deflate or uncompressed if codec missing
+                    for attempt in [comp_val, "deflate", None]:
+                        try:
+                            tifffile.imwrite(path, data, compression=attempt, resolution=(dpi_val, dpi_val, 'INCH'), photometric='rgb', extratags=extratags if extratags else None)
+                            return
+                        except Exception:
+                            continue
+                    tifffile.imwrite(path, data, resolution=(dpi_val, dpi_val, 'INCH'), photometric='rgb', extratags=extratags if extratags else None)
+
                 if bit_depth == 32:
                     out_f32 = rendered_float.astype(np.float32)
-                    try:
-                        import tifffile
-                        tifffile.imwrite(output_path, out_f32, compression=comp if comp != 'none' else None, resolution=(dpi_val, dpi_val, 'INCH'))
-                    except Exception:
-                        out_u16 = (rendered_float * 65535.0).astype(np.uint16)
-                        im = Image.fromarray(out_u16, mode='RGB')
-                        im.save(output_path, 'TIFF', dpi=(dpi_val, dpi_val), compression='tiff_lzw')
+                    _safe_tifffile_write(output_path, out_f32)
                 elif bit_depth == 16:
-                    out_u16 = (rendered_float * 65535.0).astype(np.uint16)
-                    try:
-                        import tifffile
-                        tifffile.imwrite(output_path, out_u16, compression=comp if comp != 'none' else None, resolution=(dpi_val, dpi_val, 'INCH'))
-                    except Exception:
-                        im = Image.fromarray(out_u16, mode='I;16')
-                        im.save(output_path, 'TIFF', dpi=(dpi_val, dpi_val))
+                    out_u16 = (np.clip(rendered_float, 0.0, 1.0) * 65535.0).astype(np.uint16)
+                    _safe_tifffile_write(output_path, out_u16)
                 else:
-                    out_u8 = (rendered_float * 255.0).astype(np.uint8)
-                    im = Image.fromarray(out_u8, mode='RGB')
-                    im.save(output_path, 'TIFF', dpi=(dpi_val, dpi_val), compression='tiff_lzw')
+                    out_u8 = (np.clip(rendered_float, 0.0, 1.0) * 255.0).astype(np.uint8)
+                    _safe_tifffile_write(output_path, out_u8)
 
             elif "png" in fmt_lower:
                 png_level = int(params_dict.get("png_level", 6))
                 if bit_depth == 16:
-                    out_u16 = (rendered_float * 65535.0).astype(np.uint16)
-                    out_bgr = cv2.cvtColor(out_u16, cv2.COLOR_RGB2BGR)
-                    cv2.imwrite(output_path, out_bgr, [cv2.IMWRITE_PNG_COMPRESSION, png_level])
+                    out_u16 = (np.clip(rendered_float, 0.0, 1.0) * 65535.0).astype(np.uint16)
+                    cv2.imwrite(output_path, cv2.cvtColor(out_u16, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_PNG_COMPRESSION, png_level])
+                    # Inject EXIF and ICC into 16-bit PNG
+                    try:
+                        with open(output_path, 'rb') as pf:
+                            pdata = pf.read()
+                        if pdata.startswith(b'\x89PNG\r\n\x1a\n'):
+                            import struct, zlib
+                            idx = 8
+                            ihdr_len = struct.unpack('>I', pdata[idx:idx+4])[0]
+                            insert_pos = idx + 8 + ihdr_len + 4
+                            injected_chunks = []
+                            if icc_bytes:
+                                comp_icc = zlib.compress(icc_bytes)
+                                cdata = b'ICC Profile\x00\x00' + comp_icc
+                                injected_chunks.append(struct.pack('>I', len(cdata)) + b'iCCP' + cdata + struct.pack('>I', zlib.crc32(b'iCCP' + cdata) & 0xffffffff))
+                            if exif_bytes:
+                                clean_exif = exif_bytes[6:] if exif_bytes.startswith(b'Exif\x00\x00') else exif_bytes
+                                injected_chunks.append(struct.pack('>I', len(clean_exif)) + b'eXIf' + clean_exif + struct.pack('>I', zlib.crc32(b'eXIf' + clean_exif) & 0xffffffff))
+                            if injected_chunks:
+                                with open(output_path, 'wb') as pf:
+                                    pf.write(pdata[:insert_pos] + b''.join(injected_chunks) + pdata[insert_pos:])
+                    except Exception as ex_png:
+                        print(f"[SpektraEngine] Warning: PNG 16-bit metadata injection failed: {ex_png}")
                 else:
-                    out_u8 = (rendered_float * 255.0).astype(np.uint8)
+                    out_u8 = (np.clip(rendered_float, 0.0, 1.0) * 255.0).astype(np.uint8)
                     im = Image.fromarray(out_u8, mode='RGB')
-                    im.save(output_path, 'PNG', compress_level=png_level, dpi=(dpi_val, dpi_val))
+                    save_kw = {'compress_level': png_level, 'dpi': (dpi_val, dpi_val)}
+                    if icc_bytes:
+                        save_kw['icc_profile'] = icc_bytes
+                    if exif_bytes:
+                        save_kw['exif'] = exif_bytes
+                    im.save(output_path, 'PNG', **save_kw)
 
             else:  # jpeg
                 q_scale = int(quality) if quality is not None else int(params_dict.get("quality", 9))
@@ -1234,7 +1594,17 @@ class SpektraEngine:
                     out_u8 = cv2.resize(out_u8, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
                 im = Image.fromarray(out_u8, mode='RGB')
-                im.save(output_path, 'JPEG', quality=q_val, subsampling=sub_val, progressive=prog_val, dpi=(dpi_val, dpi_val))
+                save_kw = {
+                    'quality': q_val,
+                    'subsampling': sub_val,
+                    'progressive': prog_val,
+                    'dpi': (dpi_val, dpi_val)
+                }
+                if icc_bytes:
+                    save_kw['icc_profile'] = icc_bytes
+                if exif_bytes:
+                    save_kw['exif'] = exif_bytes
+                im.save(output_path, 'JPEG', **save_kw)
 
             if progress_cb:
                 progress_cb(100, "导出完成")
@@ -1251,6 +1621,45 @@ class SpektraEngine:
             return {"success": False, "error": f"导出失败: {str(e)}"}
 
     render_full_res = export_image
+
+    def apply_lut_to_linear(self, linear_f32, lut_3d):
+        """Vectorized trilinear 3D LUT application to linear input (H, W, 3) float32 in [0, 1]."""
+        if lut_3d is None or linear_f32 is None:
+            return linear_f32
+        lut_size = lut_3d.shape[0]
+        coords = np.clip(linear_f32, 0.0, 1.0) * (lut_size - 1)
+        coords = np.clip(coords, 0.0, lut_size - 1.0001)
+
+        idx0 = coords.astype(np.int32)
+        idx1 = np.minimum(idx0 + 1, lut_size - 1)
+        d = coords - idx0
+
+        r0, g0, b0 = idx0[..., 0], idx0[..., 1], idx0[..., 2]
+        r1, g1, b1 = idx1[..., 0], idx1[..., 1], idx1[..., 2]
+
+        c000 = lut_3d[b0, g0, r0]
+        c100 = lut_3d[b0, g0, r1]
+        c010 = lut_3d[b0, g1, r0]
+        c110 = lut_3d[b0, g1, r1]
+        c001 = lut_3d[b1, g0, r0]
+        c101 = lut_3d[b1, g0, r1]
+        c011 = lut_3d[b1, g1, r0]
+        c111 = lut_3d[b1, g1, r1]
+
+        dr = d[..., 0:1]
+        dg = d[..., 1:2]
+        db = d[..., 2:3]
+
+        c00 = c000 * (1 - dr) + c100 * dr
+        c01 = c001 * (1 - dr) + c101 * dr
+        c10 = c010 * (1 - dr) + c110 * dr
+        c11 = c011 * (1 - dr) + c111 * dr
+
+        c0 = c00 * (1 - dg) + c10 * dg
+        c1 = c01 * (1 - dg) + c11 * dg
+
+        out = c0 * (1 - db) + c1 * db
+        return (np.clip(out, 0.0, 1.0) * 255.0).astype(np.uint8)
 
     def apply_lut_to_rgb(self, rgb_u8, lut_3d):
         """Fast vectorized trilinear 3D LUT application to thumbnail (H, W, 3) uint8."""

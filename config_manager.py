@@ -41,13 +41,17 @@ DEFAULT_CONFIG = {
         "export_quality": 95,
         "export_dpi": 300,
         "auto_save_sdc": True,
+        "restore_last_session": True,
         "restore_last_files": True,
         "hardware_acceleration_mode": "global",
         "preview_max_edge": 2048,
         "color_space": "sRGB",
         "preview_quality": "full",
+        "auto_meter_on_import": False,
     },
     "recent_files": [],
+    "recent_sessions": [],
+    "last_session_path": None,
     "last_session": {
         "files": [],
         "active_file": None,
@@ -305,11 +309,85 @@ def clear_recent_files():
 
 
 # =========================================================================
-# Session State APIs (Restore last opened files on startup)
+# Recent Sessions APIs
 # =========================================================================
 
-def save_session_state(file_paths: list, active_file: str = None):
+def get_recent_sessions() -> list:
     cfg = load_config()
+    recent = cfg.get("recent_sessions", [])
+    return [p for p in recent if os.path.exists(p)]
+
+
+def add_recent_session(path: str):
+    if not path or not os.path.exists(path):
+        return
+    norm_path = os.path.abspath(path)
+    cfg = load_config()
+    recent = cfg.get("recent_sessions", [])
+    if norm_path in recent:
+        recent.remove(norm_path)
+    recent.insert(0, norm_path)
+    cfg["recent_sessions"] = recent[:MAX_RECENT_FILES]
+    save_config(cfg)
+
+
+def clear_recent_sessions():
+    cfg = load_config()
+    cfg["recent_sessions"] = []
+    save_config(cfg)
+
+
+def get_auto_saved_session_path() -> str:
+    """Returns the persistent path for auto-saving temporary unsaved darkroom sessions."""
+    app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    sess_dir = os.path.join(app_data, "SpektraDarkroom")
+    os.makedirs(sess_dir, exist_ok=True)
+    return os.path.normpath(os.path.join(sess_dir, "auto_saved_session.sdss"))
+
+
+def has_auto_saved_session() -> bool:
+    """Returns True if a valid auto-saved temporary session exists on disk."""
+    p = get_auto_saved_session_path()
+    return os.path.exists(p) and os.path.getsize(p) > 20
+
+
+def clear_auto_saved_session():
+    """Removes the auto-saved temporary session file."""
+    p = get_auto_saved_session_path()
+    if os.path.exists(p):
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+
+
+def save_last_session_path(session_path: str = None):
+    """Saves the last opened or saved .sdss session file path."""
+    cfg = load_config()
+    if session_path and os.path.exists(session_path):
+        cfg["last_session_path"] = os.path.abspath(session_path)
+    else:
+        cfg["last_session_path"] = None
+    save_config(cfg)
+
+
+def get_last_session_path() -> str:
+    """Returns the last opened or saved .sdss session file path if it exists on disk,
+    or falls back to auto_saved_session.sdss if available.
+    """
+    cfg = load_config()
+    p = cfg.get("last_session_path")
+    if p and os.path.exists(p):
+        return os.path.abspath(p)
+    if has_auto_saved_session():
+        return get_auto_saved_session_path()
+    return None
+
+
+def save_session_state(file_paths: list = None, active_file: str = None):
+    cfg = load_config()
+    if file_paths is None:
+        file_paths = []
     norm_paths = [os.path.abspath(p) for p in file_paths if p and os.path.exists(p)]
     norm_active = os.path.abspath(active_file) if active_file and os.path.exists(active_file) else None
     cfg["last_session"] = {
@@ -328,4 +406,100 @@ def get_session_state() -> tuple:
     if active and not os.path.exists(active):
         active = None
     return files, active
+
+
+def get_last_export_settings() -> dict:
+    """Returns last used export settings dictionary."""
+    cfg = load_config()
+    return cfg.get("preferences", {}).get("last_export_settings", {
+        "format": "jpeg",
+        "bit_depth": 8,
+        "quality": 95,
+        "scale_pct": 100,
+        "color_space": "sRGB",
+        "sharpen": False,
+        "sharpen_strength": 0.5,
+        "output_dir": ""
+    })
+
+
+def save_last_export_settings(settings: dict):
+    """Persists last export settings dictionary."""
+    cfg = load_config()
+    if "preferences" not in cfg:
+        cfg["preferences"] = {}
+    current = cfg["preferences"].get("last_export_settings", {})
+    current.update(settings)
+    cfg["preferences"]["last_export_settings"] = current
+    save_config(cfg)
+
+
+def register_sdss_file_association() -> bool:
+    """Item 3: Associate .sdss session files with SpektraDarkroom in HKCU registry.
+    Requires no administrator elevation because it modifies HKCU\\Software\\Classes.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        import ctypes
+
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        exe_path = os.path.join(app_dir, "SpektraDarkroom.exe")
+        if not os.path.exists(exe_path):
+            exe_path = sys.executable
+
+        ico_path = os.path.join(app_dir, "resources", "sdss_icon.ico")
+        if not os.path.exists(ico_path):
+            ico_path = os.path.join(app_dir, "resources", "sdss_icon.png")
+        if not os.path.exists(ico_path):
+            ico_path = os.path.join(app_dir, "resources", "app_icon.ico")
+
+        prog_id = "SpektraDarkroom.Session"
+        file_desc = "SpektraDarkroom 暗房会话工程"
+
+        # 1. Register .sdss extension under HKCU\Software\Classes\.sdss
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\.sdss") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, prog_id)
+
+        # 2. Register ProgID under HKCU\Software\Classes\SpektraDarkroom.Session
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{prog_id}") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, file_desc)
+
+        if os.path.exists(ico_path):
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{prog_id}\DefaultIcon") as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{ico_path}",0')
+
+        # Open command: "exe_path" "%1"
+        cmd_str = f'"{exe_path}" "%1"'
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{prog_id}\shell\open\command") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd_str)
+
+        # 3. Notify Windows Shell of file association change
+        try:
+            SHCNE_ASSOCCHANGED = 0x08000000
+            SHCNF_IDLIST = 0x0000
+            ctypes.windll.shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+        except Exception:
+            pass
+
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to register .sdss file association: {e}")
+        return False
+
+
+def is_sdss_file_associated() -> bool:
+    """Checks if .sdss is registered to SpektraDarkroom in HKCU."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\.sdss") as k:
+            val, _ = winreg.QueryValueEx(k, "")
+            return val == "SpektraDarkroom.Session"
+    except Exception:
+        return False
+
+
 

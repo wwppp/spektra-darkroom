@@ -31,12 +31,14 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QPalette, QColor
 
-from app_core import SpektraEngine
-from ui.main_window import DarkroomMainWindow
 from version import get_app_title
 
 
 def main():
+    launched_from_exe = "--launched-from-exe" in sys.argv
+    if launched_from_exe:
+        sys.argv.remove("--launched-from-exe")
+
     if sys.platform == "win32":
         try:
             import ctypes
@@ -56,18 +58,26 @@ def main():
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
-    # Item 19: Single instance check
-    mutex_name = "SpektraDarkroom_Vulkan_SingleInstance_Mutex"
-    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
-    last_error = ctypes.windll.kernel32.GetLastError()
-    if last_error == 183:  # ERROR_ALREADY_EXISTS
-        msg = QMessageBox()
-        msg.setWindowTitle("SpektraDarkroom")
-        msg.setText("SpektraDarkroom 已经在运行中，请勿重复打开。")
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.exec()
+    # Single-instance IPC: forward arguments to running instance or start local server
+    from PySide6.QtNetwork import QLocalSocket, QLocalServer
+    ipc_name = "SpektraDarkroom_IPC_SingleInstance"
+
+    ipc_sock = QLocalSocket()
+    ipc_sock.connectToServer(ipc_name)
+    if ipc_sock.waitForConnected(400):
+        # Already running: pass all path arguments to the primary instance and exit immediately
+        args_to_send = [os.path.abspath(a) for a in sys.argv[1:] if a and not a.startswith("--")]
+        payload = "\n".join(args_to_send).encode("utf-8")
+        ipc_sock.write(payload)
+        ipc_sock.flush()
+        ipc_sock.waitForBytesWritten(1000)
+        ipc_sock.close()
         sys.exit(0)
+
+    # Primary instance: create server
+    local_server = QLocalServer()
+    local_server.removeServer(ipc_name)
+    local_server.listen(ipc_name)
 
     # Set Adobe Pro Dark Theme Palette
     palette = QPalette()
@@ -99,13 +109,117 @@ def main():
     font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)
 
-    from path_utils import get_resource_dir
+    splash = None
+    if not launched_from_exe:
+        from PySide6.QtWidgets import QSplashScreen
+        from PySide6.QtGui import QPixmap
+        splash_path = os.path.join(get_resource_dir(), "splash.png")
+        if os.path.exists(splash_path):
+            pix = QPixmap(splash_path)
+            pix.setDevicePixelRatio(2.0)
+            splash = QSplashScreen(pix, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+            splash.show()
+            app.processEvents()
+
+    def notify_status(msg):
+        print(f"[SPLASH] {msg}", flush=True)
+        if splash and not launched_from_exe:
+            splash.showMessage(f"  {msg}", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft, QColor("#cbd5e1"))
+            app.processEvents()
+
+    notify_status("正在解析 Qt 核心组件与图形环境...")
+
+    notify_status("正在装载 Rawpy 图像解码动态库...")
+    try:
+        import rawpy
+    except Exception:
+        pass
+
+    notify_status("正在装载 OpenCV 图像处理引擎...")
+    try:
+        import cv2
+    except Exception:
+        pass
+
+    notify_status("正在装载胶卷与相纸光谱配置文件...")
+    from app_core import SpektraEngine
     resources_dir = get_resource_dir()
     engine = SpektraEngine(resources_dir=resources_dir)
 
-    win = DarkroomMainWindow(engine)
+    # Check CLI arguments for .sdss session file or image files passed via OS association
+    target_session = None
+    target_files = []
+    for arg in sys.argv[1:]:
+        if arg and os.path.exists(arg):
+            if arg.lower().endswith(".sdss"):
+                target_session = os.path.abspath(arg)
+            else:
+                target_files.append(os.path.abspath(arg))
+
+    notify_status("正在构建暗房工作台界面...")
+    from ui.main_window import DarkroomMainWindow
+    win = DarkroomMainWindow(engine, initial_session=target_session, initial_files=target_files)
+
+    notify_status("就绪")
     win.show()
 
+    def handle_ipc_connection():
+        while local_server.hasPendingConnections():
+            client = local_server.nextPendingConnection()
+            if not client:
+                continue
+
+            def process_incoming_args(sock=client):
+                try:
+                    data = bytes(sock.readAll())
+                    raw = data.decode("utf-8-sig", errors="ignore")
+                    lines = [line.strip().strip('"').strip("'").lstrip('\ufeff') for line in raw.splitlines() if line.strip()]
+                    target_sess = None
+                    target_imgs = []
+                    for p in lines:
+                        if not p:
+                            continue
+                        norm_p = os.path.abspath(p)
+                        if os.path.exists(norm_p):
+                            if norm_p.lower().endswith(".sdss"):
+                                target_sess = norm_p
+                            else:
+                                target_imgs.append(norm_p)
+                    if target_sess:
+                        win._open_session_by_path(target_sess)
+                    elif target_imgs:
+                        win._import_files_list(target_imgs)
+
+                    # Bring window to foreground
+                    win.setWindowState(win.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+                    win.show()
+                    win.raise_()
+                    win.activateWindow()
+                    if sys.platform == "win32":
+                        try:
+                            import ctypes
+                            hwnd = int(win.winId())
+                            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                            ctypes.windll.user32.SetForegroundWindow(hwnd)
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+
+            client.readyRead.connect(process_incoming_args)
+            if client.bytesAvailable() > 0:
+                process_incoming_args()
+
+    local_server.newConnection.connect(handle_ipc_connection)
+    app._ipc_server = local_server
+
+    if splash and not launched_from_exe:
+        splash.finish(win)
+
+    print("[READY]", flush=True)
     sys.exit(app.exec())
 
 

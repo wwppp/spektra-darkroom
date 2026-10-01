@@ -3,16 +3,19 @@ import os
 from PySide6.QtCore import Qt, Signal, QPoint, QSize
 from PySide6.QtGui import QCursor, QFont, QIcon
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox
+    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication
 )
 
 from path_utils import get_icon_path
 
 
 class ScrubLabel(QLabel):
-    """Adobe Camera Raw style scrubbable label:
-    Hover shows SizeHorCursor (⬌); drag horizontally to scrub value.
-    Double-click resets to default.
+    """Adobe Camera Raw / Premiere style scrubbable parameter title:
+    - Left-click and drag horizontally to smoothly scrub values.
+    - Global mouse grab ensures dragging continues even if cursor leaves widget.
+    - Seamless cursor wrapping across screen boundaries for infinite continuous dragging.
+    - Modifier keys: Ctrl/Alt for ultra-fine (0.2x), Shift for accelerated (2.5x).
+    - Double-click resets to default value.
     """
     scrubDelta = Signal(float)
     scrubFinished = Signal()
@@ -22,7 +25,7 @@ class ScrubLabel(QLabel):
         super().__init__(text, parent)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
         self._dragging = False
-        self._last_x = 0
+        self._last_global_x = 0.0
         self.setMinimumWidth(10)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.setStyleSheet("""
@@ -44,19 +47,51 @@ class ScrubLabel(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
-            self._last_x = event.globalPosition().x()
-            self._accum_delta = 0.0
+            self._last_global_x = float(event.globalPosition().x())
+            try:
+                self.grabMouse(Qt.CursorShape.SizeHorCursor)
+            except Exception:
+                pass
+            QApplication.setOverrideCursor(Qt.CursorShape.SizeHorCursor)
             event.accept()
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._dragging:
-            cur_x = event.globalPosition().x()
-            delta = cur_x - self._last_x
-            self._last_x = cur_x
-            # Micro-adjustment scaling: 0.15 for ultra-fine precision
-            self.scrubDelta.emit(delta * 0.15)
+            cur_global_pos = event.globalPosition()
+            cur_x = float(cur_global_pos.x())
+            delta = cur_x - self._last_global_x
+            if delta != 0.0:
+                modifiers = event.modifiers()
+                if (modifiers & Qt.KeyboardModifier.ControlModifier) or (modifiers & Qt.KeyboardModifier.AltModifier):
+                    speed_mult = 0.20   # Ultra-fine precision
+                elif modifiers & Qt.KeyboardModifier.ShiftModifier:
+                    speed_mult = 2.50   # Accelerated range sweep
+                else:
+                    speed_mult = 1.00   # Standard smooth tactile micro-adjustment
+
+                self.scrubDelta.emit(delta * speed_mult)
+
+                # Seamless cursor wrapping across screen boundaries for infinite continuous dragging
+                screen = QApplication.screenAt(cur_global_pos.toPoint()) or QApplication.primaryScreen()
+                if screen:
+                    geo = screen.geometry()
+                    margin = 4
+                    warp_to_x = None
+                    if cur_x >= geo.right() - margin:
+                        warp_to_x = geo.left() + margin + 1
+                    elif cur_x <= geo.left() + margin:
+                        warp_to_x = geo.right() - margin - 1
+
+                    if warp_to_x is not None:
+                        target_pt = QPoint(int(warp_to_x), int(cur_global_pos.y()))
+                        QCursor.setPos(target_pt)
+                        self._last_global_x = float(warp_to_x)
+                    else:
+                        self._last_global_x = cur_x
+                else:
+                    self._last_global_x = cur_x
             event.accept()
         else:
             super().mouseMoveEvent(event)
@@ -65,10 +100,31 @@ class ScrubLabel(QLabel):
         if event.button() == Qt.MouseButton.LeftButton:
             if self._dragging:
                 self._dragging = False
+                try:
+                    self.releaseMouse()
+                except Exception:
+                    pass
+                try:
+                    QApplication.restoreOverrideCursor()
+                except Exception:
+                    pass
                 self.scrubFinished.emit()
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    def hideEvent(self, event):
+        if self._dragging:
+            self._dragging = False
+            try:
+                self.releaseMouse()
+            except Exception:
+                pass
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+        super().hideEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -224,7 +280,7 @@ class AdobeScrubSlider(QWidget):
         clean_tip = re.sub(r'\s{2,}', ' ', clean_tip)
         self.label.setToolTip(clean_tip)
         self.label.scrubDelta.connect(self._on_scrub)
-        self.label.scrubFinished.connect(self.sliderReleased)
+        self.label.scrubFinished.connect(self._on_scrub_finished)
         self.label.doubleClicked.connect(self.reset)
         header_layout.addWidget(self.label, 1)
 
@@ -312,9 +368,11 @@ class AdobeScrubSlider(QWidget):
         val = self.min_val + ratio * (self.max_val - self.min_val)
         return round(val, self.decimals)
 
-    def _update_display(self, val):
+    def _update_display(self, val, sync_precise=True):
         self._is_updating = True
         self.current_val = val
+        if sync_precise:
+            self._precise_val = float(val)
         self.slider.setValue(self._val_to_slider(val))
         
         # Format text with +/- and unit
@@ -342,25 +400,39 @@ class AdobeScrubSlider(QWidget):
             return
         val = self._slider_to_val(pos)
         self.current_val = val
-        self._update_display(val)
+        self._precise_val = float(val)
+        self._update_display(val, sync_precise=True)
         self.valueChanged.emit(val)
 
     def _on_slider_released(self):
         self.sliderReleased.emit()
 
     def _on_scrub(self, delta_x):
-        step_factor = self.step
-        new_val = self.current_val + (delta_x * step_factor)
-        new_val = max(self.min_val, min(self.max_val, new_val))
-        if round(new_val, self.decimals) != self.current_val:
-            self._update_display(round(new_val, self.decimals))
+        if not hasattr(self, "_precise_val") or self._precise_val is None:
+            self._precise_val = float(self.current_val)
+
+        # Micro-adjustment rate calibrated: 0.05 * step per pixel
+        # Eliminates rapid jumping and ensures smooth, continuous analog response
+        step_factor = self.step * 0.05
+        self._precise_val += (delta_x * step_factor)
+        self._precise_val = max(self.min_val, min(self.max_val, self._precise_val))
+
+        rounded_val = round(self._precise_val, self.decimals)
+        if rounded_val != self.current_val:
+            self.current_val = rounded_val
+            self._update_display(rounded_val, sync_precise=False)
             self.valueChanged.emit(self.current_val)
+
+    def _on_scrub_finished(self):
+        self._precise_val = float(self.current_val)
+        self.sliderReleased.emit()
 
     def _on_text_edited(self):
         text = self.value_edit.text().replace(self.unit, "").replace("+", "").strip()
         try:
             val = float(text)
             val = max(self.min_val, min(self.max_val, val))
+            self._precise_val = float(val)
             self._update_display(round(val, self.decimals))
             self.valueChanged.emit(self.current_val)
             self.sliderReleased.emit()
@@ -373,6 +445,7 @@ class AdobeScrubSlider(QWidget):
     def setValue(self, val):
         val = max(self.min_val, min(self.max_val, float(val)))
         self.current_val = round(val, self.decimals)
+        self._precise_val = float(self.current_val)
         self._update_display(self.current_val)
         self.valueChanged.emit(self.current_val)
 
