@@ -1,4 +1,5 @@
 """SpektraDarkroom Version Configuration
+规范：每次小修复/优化后，自动修改版本号，末位 Patch 递增 1 位（例如 v0.1.0 -> v0.1.1 -> v0.1.2）。
 """
 
 APP_NAME = "SpektraDarkroom"
@@ -8,7 +9,7 @@ VERSION_PATCH = 0
 BUILD_NUMBER = 1
 RELEASE_DATE = "2026-10-01"
 
-VERSION_STRING = f"{VERSION_MAJOR}.{VERSION_MINOR}"
+VERSION_STRING = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
 FULL_VERSION_STRING = f"v{VERSION_STRING} (Build {BUILD_NUMBER})"
 
 

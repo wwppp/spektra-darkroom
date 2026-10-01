@@ -105,7 +105,7 @@ pip install -r requirements.txt
 
 ## ⚖️ 开源许可协议 (Licenses)
 
-本项目本着回馈摄影与开源社区的精神，采用双重规范开源许可：
+本项目采用双重规范开源许可：
 
 1. **软件源代码部分**：遵循 **[GNU General Public License v3.0 (GPLv3)](LICENSE)** 协议开源。任何基于本项目的二次分发或衍生软件必须保持开源并遵循相同协议。
 2. **物理胶卷与相纸测定配置文件 (`resources/profiles/`)**：基于光谱测定与官方技术数据数字化，遵循 **[CC BY-SA 4.0 (知识共享 署名-相同方式共享 4.0 国际许可协议)](https://creativecommons.org/licenses/by-sa/4.0/)**。
