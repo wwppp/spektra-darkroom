@@ -3380,24 +3380,36 @@ class DarkroomMainWindow(QMainWindow):
             self._mark_current_photo_dirty()
         self.current_film_stock = stock_id
 
-        # Intelligent pairing for bypass "none" stock
+        # Selecting "none" film (Bypass / original raw) also sets paper to "none" (scan / bypass)
         if stock_id == "none":
             self.current_paper_stock = "none"
+            self.current_print_mode = "scan"
+            self.current_params["print_mode"] = "scan"
             for pid, card in self.paper_cards.items():
                 card.set_active(pid == "none")
-        elif self.current_paper_stock == "none":
-            self.current_paper_stock = "kodak_2383"
-            for pid, card in self.paper_cards.items():
-                card.set_active(pid == "kodak_2383")
 
         for sid, card in self.film_cards.items():
             card.set_active(sid == stock_id)
 
-        lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=self.current_params)
+        # Save to current photo
+        if self._current_photo_path:
+            photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+            if photo:
+                photo["film_profile"] = stock_id
+                if stock_id == "none":
+                    photo["paper_profile"] = "none"
+                    photo["print_mode"] = "scan"
+
+        lut_params = dict(self.current_params)
+        lut_params["print_mode"] = self.current_print_mode
+        lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
         self.canvas.set_lut(lut_3d)
         self._schedule_histogram_update()
         if push_undo and self._current_photo_path:
             self._refresh_card_previews(paper_only=True)
+        if push_undo:
+            film_desc = "无胶卷 (原图)" if stock_id == "none" else f"胶卷 ({stock_id})"
+            self.set_app_status(f"已选用: {film_desc}", timeout_ms=3000)
 
     def on_switch_print_mode(self, mode, push_undo=True):
         if mode not in ("optical", "scan"):
