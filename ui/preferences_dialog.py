@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from path_utils import get_resource_dir
 from ui.window_utils import apply_dark_titlebar
 import config_manager
+import session_cache_manager
 
 
 class PreferencesDialog(QDialog):
@@ -293,7 +294,7 @@ class PreferencesDialog(QDialog):
         r_rec = QHBoxLayout()
         r_rec.addWidget(QLabel("最近打开文件记录上限:"))
         self.spin_recent_count = QSpinBox()
-        self.spin_recent_count.setFixedWidth(82)
+        self.spin_recent_count.setFixedWidth(74)
         self.spin_recent_count.setFixedHeight(28)
         self.spin_recent_count.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.spin_recent_count.setRange(5, 50)
@@ -305,10 +306,18 @@ class PreferencesDialog(QDialog):
         r_cache = QHBoxLayout()
         self.lbl_cache_size = QLabel("3D LUT 磁盘缓存占用: 计算中...")
         r_cache.addWidget(self.lbl_cache_size, 1)
-        btn_clean_cache = QPushButton("清理缓存")
+        btn_clean_cache = QPushButton("清理 LUT 缓存")
         btn_clean_cache.clicked.connect(self._clean_lut_cache)
         r_cache.addWidget(btn_clean_cache)
         l_ca.addLayout(r_cache)
+
+        r_sess = QHBoxLayout()
+        self.lbl_sess_cache_size = QLabel("底片会话快显缓存: 计算中...")
+        r_sess.addWidget(self.lbl_sess_cache_size, 1)
+        btn_clean_sess = QPushButton("清理底片缓存")
+        btn_clean_sess.clicked.connect(self._clean_sess_cache)
+        r_sess.addWidget(btn_clean_sess)
+        l_ca.addLayout(r_sess)
 
         l_ca.addStretch()
         self.tabs.addTab(tab_cache, "性能与缓存")
@@ -368,6 +377,12 @@ class PreferencesDialog(QDialog):
         except Exception:
             self.lbl_cache_size.setText("3D LUT 磁盘缓存: 0.0 MB")
 
+        try:
+            sess_mb = session_cache_manager.get_cache_size_mb()
+            self.lbl_sess_cache_size.setText(f"底片会话快显缓存: {sess_mb:.1f} MB")
+        except Exception:
+            self.lbl_sess_cache_size.setText("底片会话快显缓存: 0.0 MB")
+
     def _clean_lut_cache(self):
         try:
             cache_dir = os.path.join(get_resource_dir(), ".lut_cache")
@@ -379,6 +394,14 @@ class PreferencesDialog(QDialog):
             QMessageBox.information(self, "完成", "3D LUT 物理缓存已清空。")
         except Exception as e:
             QMessageBox.warning(self, "错误", f"清理失败: {e}")
+
+    def _clean_sess_cache(self):
+        try:
+            session_cache_manager.clear_cache()
+            self._refresh_cache_size()
+            QMessageBox.information(self, "完成", "底片会话快显缓存已清空。")
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"清理底片缓存失败: {e}")
 
     def _save_preferences(self):
         cfg = config_manager.load_config()

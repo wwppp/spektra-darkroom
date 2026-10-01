@@ -29,8 +29,8 @@ DEFAULT_CONFIG = {
             "enlarger": True,
             "optics": True,
         },
-        "last_film_stock": "kodak_portra_400",
-        "last_paper_stock": "kodak_2383",
+        "last_film_stock": "none",
+        "last_paper_stock": "none",
         "last_active_tab": 0,
     },
     "preferences": {
@@ -238,9 +238,9 @@ def save_ui_state(
     ui_st = cfg.setdefault("ui_state", {})
     if sections_expanded is not None:
         ui_st["sections_expanded"] = sections_expanded
-    if last_film_stock:
+    if last_film_stock is not None:
         ui_st["last_film_stock"] = last_film_stock
-    if last_paper_stock:
+    if last_paper_stock is not None:
         ui_st["last_paper_stock"] = last_paper_stock
     if last_active_tab is not None:
         ui_st["last_active_tab"] = int(last_active_tab)

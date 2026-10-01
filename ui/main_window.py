@@ -43,6 +43,7 @@ from path_utils import get_icon_path, get_resource_dir
 from version import get_app_title, get_full_version_info
 import sdc_manager
 import config_manager
+import session_cache_manager
 
 if sys.platform == "win32":
     from ctypes import wintypes
@@ -102,42 +103,48 @@ class WindowCaptionButton(QPushButton):
         self.is_maximized_state = False
 
     def set_maximized_state(self, is_max):
-        self.is_maximized_state = is_max
-        self.update()
+        if self.is_maximized_state != is_max:
+            self.is_maximized_state = is_max
+            self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
+        # 1. 始终彻底填充背景，防止重绘/DPI变换时的残影与双边伪影
         if self.isDown():
             bg = QColor(241, 112, 122) if self.btn_type == "close" else QColor(38, 40, 50)
-            painter.fillRect(self.rect(), bg)
         elif self.underMouse():
             bg = QColor(232, 17, 35) if self.btn_type == "close" else QColor(48, 50, 60)
-            painter.fillRect(self.rect(), bg)
+        else:
+            bg = QColor(20, 21, 24)
+        painter.fillRect(self.rect(), bg)
 
         icon_color = QColor(255, 255, 255) if (self.underMouse() and self.btn_type == "close") else QColor(220, 222, 230)
-        pen = QPen(icon_color, 1.0)
-        painter.setPen(pen)
-
         cx, cy = self.width() // 2, self.height() // 2
 
         if self.btn_type == "min":
-            painter.drawLine(cx - 5, cy, cx + 5, cy)
-        elif self.btn_type == "max":
-            if not self.is_maximized_state:
-                painter.drawRect(cx - 5, cy - 5, 10, 10)
-            else:
-                painter.drawRect(cx - 3, cy - 6, 8, 8)
-                painter.fillRect(cx - 6, cy - 3, 8, 8, QColor(20, 20, 24) if not self.underMouse() else QColor(48, 50, 60))
-                painter.drawRect(cx - 6, cy - 3, 8, 8)
-        elif self.btn_type == "close":
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            x0 = cx - 5
-            y0 = cy - 5
-            for i in range(10):
-                painter.drawPoint(x0 + i, y0 + i)
-                painter.drawPoint(x0 + i, y0 + 9 - i)
+            pen = QPen(icon_color, 1.0)
+            painter.setPen(pen)
+            painter.drawLine(cx - 5, cy, cx + 4, cy)
+        elif self.btn_type == "max":
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            pen = QPen(icon_color, 1.0)
+            painter.setPen(pen)
+            if not self.is_maximized_state:
+                # 绘制单框 (精准 10x10 像素矢量方框: [cx-5 .. cx+4], [cy-5 .. cy+4])
+                painter.drawRect(cx - 5, cy - 5, 9, 9)
+            else:
+                # 绘制双框还原图标 (后框 + 前框带背景遮罩，各精准 8x8 像素)
+                painter.drawRect(cx - 3, cy - 6, 7, 7)
+                painter.fillRect(cx - 6, cy - 3, 8, 8, bg)
+                painter.drawRect(cx - 6, cy - 3, 7, 7)
+        elif self.btn_type == "close":
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(icon_color, 1.1)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(cx - 4.5, cy - 4.5), QPointF(cx + 4.5, cy + 4.5))
+            painter.drawLine(QPointF(cx + 4.5, cy - 4.5), QPointF(cx - 4.5, cy + 4.5))
 
 
 class DraggableTitleBar(QFrame):
@@ -146,11 +153,13 @@ class DraggableTitleBar(QFrame):
         super().__init__()
         self.main_window = main_window
         self._press_pos = None
+        self._drag_started_while_maximized = False
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_pos = event.position().toPoint()
-            if not self.main_window.isMaximized():
+            self._drag_started_while_maximized = bool(self.main_window.isMaximized())
+            if not self._drag_started_while_maximized:
                 handle = self.main_window.windowHandle()
                 if handle:
                     handle.startSystemMove()
@@ -160,9 +169,11 @@ class DraggableTitleBar(QFrame):
 
     def mouseMoveEvent(self, event):
         if self._press_pos is not None and (event.buttons() & Qt.MouseButton.LeftButton):
-            if self.main_window.isMaximized():
+            # 只有当拖拽起始于【已最大化状态】且明确向下拉动时，才触发还原
+            # 普通窗口拖到屏幕顶部被 Windows Aero Snap 最大化时不会误触发
+            if self._drag_started_while_maximized and self.main_window.isMaximized():
                 delta = event.position().toPoint() - self._press_pos
-                if delta.manhattanLength() > 4:
+                if delta.y() > 10:
                     norm_geo = getattr(self.main_window, '_saved_normal_geo', None)
                     norm_w = norm_geo.width() if norm_geo else 1440
                     norm_h = norm_geo.height() if norm_geo else 900
@@ -173,6 +184,7 @@ class DraggableTitleBar(QFrame):
                     new_y = int(event.globalPosition().y() - self._press_pos.y())
                     self.main_window.move(new_x, new_y)
                     self._press_pos = None
+                    self._drag_started_while_maximized = False
                     handle = self.main_window.windowHandle()
                     if handle:
                         handle.startSystemMove()
@@ -182,10 +194,13 @@ class DraggableTitleBar(QFrame):
 
     def mouseReleaseEvent(self, event):
         self._press_pos = None
+        self._drag_started_while_maximized = False
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = None
+            self._drag_started_while_maximized = False
             self.main_window.toggle_maximize()
             event.accept()
         else:
@@ -227,33 +242,49 @@ class StockThumbnailWorker(QThread):
         else:
             small_rgb = self.thumb_rgb
 
-        # 1. Process Film stocks (paired with current paper)
+        # Reference stocks to pair with when current stock is 'none' (bypass mode)
+        ref_paper = self.current_paper if self.current_paper != "none" else "kodak_2383"
+        ref_film = self.current_film if self.current_film != "none" else "kodak_portra_400"
+
+        # 1. Process Film stocks (paired with current paper or reference paper)
         if self.do_films:
             for sid in self.film_stocks:
                 if self._stopped:
                     return
                 try:
-                    lut = self.engine.get_3d_lut(sid, self.current_paper, lut_size=17)
-                    graded = self.engine.apply_lut_to_rgb(small_rgb, lut)
-                    gh, gw, gc = graded.shape
-                    qimg = QImage(graded.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
-                    pix = QPixmap.fromImage(qimg)
-                    self.film_ready.emit(sid, pix)
+                    if sid == "none":
+                        gh, gw, gc = small_rgb.shape
+                        qimg = QImage(small_rgb.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
+                        pix = QPixmap.fromImage(qimg)
+                        self.film_ready.emit(sid, pix)
+                    else:
+                        lut = self.engine.get_3d_lut(sid, ref_paper, lut_size=17)
+                        graded = self.engine.apply_lut_to_rgb(small_rgb, lut)
+                        gh, gw, gc = graded.shape
+                        qimg = QImage(graded.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
+                        pix = QPixmap.fromImage(qimg)
+                        self.film_ready.emit(sid, pix)
                 except Exception:
                     pass
 
-        # 2. Process Paper stocks (paired with current film)
+        # 2. Process Paper stocks (paired with current film or reference film)
         if self.do_papers:
             for sid in self.paper_stocks:
                 if self._stopped:
                     return
                 try:
-                    lut = self.engine.get_3d_lut(self.current_film, sid, lut_size=17)
-                    graded = self.engine.apply_lut_to_rgb(small_rgb, lut)
-                    gh, gw, gc = graded.shape
-                    qimg = QImage(graded.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
-                    pix = QPixmap.fromImage(qimg)
-                    self.paper_ready.emit(sid, pix)
+                    if sid == "none":
+                        gh, gw, gc = small_rgb.shape
+                        qimg = QImage(small_rgb.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
+                        pix = QPixmap.fromImage(qimg)
+                        self.paper_ready.emit(sid, pix)
+                    else:
+                        lut = self.engine.get_3d_lut(ref_film, sid, lut_size=17)
+                        graded = self.engine.apply_lut_to_rgb(small_rgb, lut)
+                        gh, gw, gc = graded.shape
+                        qimg = QImage(graded.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
+                        pix = QPixmap.fromImage(qimg)
+                        self.paper_ready.emit(sid, pix)
                 except Exception:
                     pass
 
@@ -282,6 +313,27 @@ class BatchImportWorker(QThread):
             if self._stopped:
                 break
             try:
+                # 1. Fast path: check valid session cache (preview loaded only for first photo)
+                should_load_prev = (i == 1 and self.start_idx == 0)
+                cached_data = session_cache_manager.get_photo_cache(p, load_preview=should_load_prev)
+                if cached_data is not None:
+                    pid = f"photo_{self.start_idx + loaded}_{os.path.basename(p)}"
+                    photo_entry = {
+                        "id": pid,
+                        "filename": os.path.basename(p),
+                        "path": p,
+                        "width": cached_data.get("width", 0),
+                        "height": cached_data.get("height", 0),
+                        "thumbnail_rgb": cached_data.get("thumbnail_rgb"),
+                        "float_img": cached_data.get("float_img"),
+                        "exif": cached_data.get("exif", {}),
+                        "auto_ev": cached_data.get("auto_ev", 0.0)
+                    }
+                    loaded += 1
+                    self.photoLoaded.emit(photo_entry, i, total)
+                    continue
+
+                # 2. Slow path: decode via engine
                 res = self.engine.load_image(p)
                 if res.get("success"):
                     pid = f"photo_{self.start_idx + loaded}_{os.path.basename(p)}"
@@ -293,8 +345,12 @@ class BatchImportWorker(QThread):
                         "height": res.get("height", 0),
                         "thumbnail_rgb": res.get("thumbnail_rgb"),
                         "float_img": res.get("float_img"),
-                        "exif": res.get("exif", {})
+                        "exif": res.get("exif", {}),
+                        "auto_ev": res.get("auto_ev", 0.0)
                     }
+                    # Write-through: save full preview for first photo, fast thumbnail+exif for others
+                    save_prev = (i == 1 and self.start_idx == 0)
+                    session_cache_manager.save_photo_cache(p, photo_entry, save_preview=save_prev)
                     loaded += 1
                     self.photoLoaded.emit(photo_entry, i, total)
             except Exception as e:
@@ -683,8 +739,8 @@ class DarkroomMainWindow(QMainWindow):
         self._photo_is_dirty = False
         self._current_worker = None
         self._import_worker = None
-        self.current_film_stock = "kodak_portra_400"
-        self.current_paper_stock = "kodak_2383"
+        self.current_film_stock = "none"
+        self.current_paper_stock = "none"
         self.current_params = {
             "exposure_ev": 0.0,
             "color_temp": 5500.0,
@@ -709,6 +765,7 @@ class DarkroomMainWindow(QMainWindow):
             "halation_decay": 0.5,
             "halation_boost": 0.0,
             "grain": 0.4,
+            "grain_size": 1.0,
             "grain_cloud_blur": 1.0,
             "split_x": 0.5,
             "view_mode": 0
@@ -788,18 +845,13 @@ class DarkroomMainWindow(QMainWindow):
             if "optics" in sections_expanded and hasattr(self, "sec_optical"):
                 self.sec_optical.set_expanded(sections_expanded["optics"])
 
-            # 4. Last selected film / paper stocks
-            last_film = ui_cfg.get("last_film_stock")
-            if last_film and hasattr(self, "film_cards") and last_film in self.film_cards:
-                self.current_film_stock = last_film
-                for sid, card in self.film_cards.items():
-                    card.set_active(sid == last_film)
-
-            last_paper = ui_cfg.get("last_paper_stock")
-            if last_paper and hasattr(self, "paper_cards") and last_paper in self.paper_cards:
-                self.current_paper_stock = last_paper
-                for sid, card in self.paper_cards.items():
-                    card.set_active(sid == last_paper)
+            # 4. Default to 'none' (Bypass mode: 无胶卷与无相纸透传) for all photos
+            self.current_film_stock = "none"
+            self.current_paper_stock = "none"
+            for sid, card in getattr(self, "film_cards", {}).items():
+                card.set_active(sid == "none")
+            for sid, card in getattr(self, "paper_cards", {}).items():
+                card.set_active(sid == "none")
 
             if is_maximized:
                 self._restore_as_maximized = True
@@ -812,9 +864,69 @@ class DarkroomMainWindow(QMainWindow):
                 if existing_files:
                     if active_file and active_file in existing_files:
                         self._target_initial_active_path = active_file
-                    QTimer.singleShot(100, lambda: self._import_files_list(existing_files))
+                    QTimer.singleShot(40, lambda: self._restore_saved_session(existing_files, active_file))
         except Exception as e:
             logger.warning(f"Error restoring application state: {e}")
+
+    def _restore_saved_session(self, existing_files, active_file=None):
+        """Ultra-fast session restoration: loads cached filmstrip thumbnails and EXIF in <100ms.
+        Any uncached or changed files are streamed in background without freezing the UI.
+        """
+        if not existing_files:
+            return
+
+        cached_entries = []
+        uncached_files = []
+
+        target_path = active_file if (active_file and active_file in existing_files) else existing_files[0]
+        self._target_initial_active_path = target_path
+
+        for idx, p in enumerate(existing_files):
+            is_target = (p == target_path)
+            cache_item = session_cache_manager.get_photo_cache(p, load_preview=is_target)
+            if cache_item is not None:
+                pid = f"photo_{idx}_{os.path.basename(p)}"
+                photo_entry = {
+                    "id": pid,
+                    "filename": os.path.basename(p),
+                    "path": p,
+                    "width": cache_item.get("width", 0),
+                    "height": cache_item.get("height", 0),
+                    "thumbnail_rgb": cache_item.get("thumbnail_rgb"),
+                    "float_img": cache_item.get("float_img"),
+                    "exif": cache_item.get("exif", {}),
+                    "auto_ev": cache_item.get("auto_ev", 0.0)
+                }
+                cached_entries.append(photo_entry)
+            else:
+                uncached_files.append(p)
+
+        if cached_entries:
+            # 1. Switch to darkroom workspace instantly
+            self.stack.setCurrentIndex(1)
+            self.btn_title_export.setVisible(True)
+
+            # 2. Add to recent files
+            for p in existing_files:
+                config_manager.add_recent_file(p)
+            self._update_recent_menu()
+
+            # 3. Populate filmstrip with all cached thumbnails in one go
+            self.photos.extend(cached_entries)
+            target_entry = next((p for p in cached_entries if p.get("path") == target_path), cached_entries[0])
+            target_id = target_entry["id"]
+            self.filmstrip.set_photos(self.photos, target_id)
+
+            # 4. Activate target photo immediately
+            self.on_switch_photo(target_id)
+            self.status_label.setText(f"已恢复底片库 ({len(cached_entries)}/{len(existing_files)} 张)")
+
+        # 5. If some files are uncached or were modified, import them seamlessly in background
+        if uncached_files:
+            self._import_files_list(uncached_files)
+        elif not cached_entries:
+            # None was cached, full import fallback
+            self._import_files_list(existing_files)
 
     def _apply_win11_corners(self, is_max=False):
         if sys.platform != "win32":
@@ -827,13 +939,16 @@ class DarkroomMainWindow(QMainWindow):
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, byref(corner_pref), ctypes.sizeof(corner_pref)
             )
-            # Enable Windows native Aero Snap, edge snapping and snap assist
+            # Enable Windows native Aero Snap, edge snapping and native minimize/maximize animations
             GWL_STYLE = -16
             style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+            WS_CAPTION = 0x00C00000
             WS_THICKFRAME = 0x00040000
             WS_MAXIMIZEBOX = 0x00010000
             WS_MINIMIZEBOX = 0x00020000
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)
+            ctypes.windll.user32.SetWindowLongW(
+                hwnd, GWL_STYLE, style | WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX
+            )
             SWP_NOZORDER = 0x0004
             SWP_NOMOVE = 0x0002
             SWP_NOSIZE = 0x0001
@@ -865,7 +980,10 @@ class DarkroomMainWindow(QMainWindow):
         super().changeEvent(event)
 
     def nativeEvent(self, eventType, message):
-        """Win32 WM_NCHITTEST edge resizing when not maximized."""
+        """Win32 native event handling for frameless window:
+        - WM_NCCALCSIZE: Hides default non-client frame/titlebar while preserving DWM animations
+        - WM_NCHITTEST: Native hardware-accelerated edge resizing with accurate cursor feedback
+        """
         if sys.platform == "win32":
             try:
                 from ctypes import wintypes
@@ -880,15 +998,25 @@ class DarkroomMainWindow(QMainWindow):
                     ]
                 msg = MSG.from_address(int(message))
 
-                WM_NCHITTEST = 0x0084
-                if msg.message == WM_NCHITTEST and not self.isMaximized():
-                    border_width = 8
+                # 1. WM_NCCALCSIZE (0x0083): Remove standard title bar and frame while keeping DWM animations
+                if msg.message == 0x0083:
+                    return True, 0
+
+                # 2. WM_NCHITTEST (0x0084): Handle border resize hover and dragging with physical coords
+                if msg.message == 0x0084 and not self.isMaximized():
+                    rect = wintypes.RECT()
+                    ctypes.windll.user32.GetWindowRect(msg.hwnd, ctypes.byref(rect))
                     x = ctypes.c_short(msg.lParam & 0xFFFF).value
                     y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-                    g_pos = QPoint(x, y)
-                    w_pos = self.mapFromGlobal(g_pos)
-                    w, h = self.width(), self.height()
-                    rx, ry = w_pos.x(), w_pos.y()
+
+                    rx = x - rect.left
+                    ry = y - rect.top
+                    w = rect.right - rect.left
+                    h = rect.bottom - rect.top
+
+                    # Dynamic border width taking DPI into account
+                    dpr = self.devicePixelRatio() if hasattr(self, 'devicePixelRatio') else 1.0
+                    border_width = max(8, int(8 * dpr))
 
                     if 0 <= rx <= w and 0 <= ry <= h:
                         left = rx < border_width
@@ -896,14 +1024,14 @@ class DarkroomMainWindow(QMainWindow):
                         top = ry < border_width
                         bottom = ry > (h - border_width)
 
-                        if top and left: return True, 13
-                        if top and right: return True, 14
-                        if bottom and left: return True, 16
-                        if bottom and right: return True, 17
-                        if left: return True, 10
-                        if right: return True, 11
-                        if top: return True, 12
-                        if bottom: return True, 15
+                        if top and left: return True, 13      # HTTOPLEFT
+                        if top and right: return True, 14     # HTTOPRIGHT
+                        if bottom and left: return True, 16   # HTBOTTOMLEFT
+                        if bottom and right: return True, 17  # HTBOTTOMRIGHT
+                        if left: return True, 10              # HTLEFT
+                        if right: return True, 11             # HTRIGHT
+                        if top: return True, 12               # HTTOP
+                        if bottom: return True, 15            # HTBOTTOM
             except Exception:
                 pass
         return super().nativeEvent(eventType, message)
@@ -1758,6 +1886,41 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_exposure = AccordionSection("场景曝光")
         self.sec_exposure.resetClicked.connect(lambda: self.reset_track("exposure"))
 
+        # 基准曝光测光控制行 (原作者 18% 中灰物理测光算法)
+        meter_row = QHBoxLayout()
+        meter_row.setContentsMargins(0, 0, 0, 4)
+        meter_title = QLabel("相机基准测光")
+        meter_title.setStyleSheet("color: #9ca3af; font-size: 11px; font-weight: 500;")
+
+        self.btn_auto_meter = QPushButton("⚡ 自动测光 (18% 中灰)")
+        self.btn_auto_meter.setToolTip("基于原作者物理测光算法，自动测算场景与 18% 摄影中灰的 EV 差异并校准相机基准曝光")
+        self.btn_auto_meter.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_auto_meter.setFixedHeight(22)
+        self.btn_auto_meter.setStyleSheet("""
+            QPushButton {
+                background: #23252b;
+                color: #f59e0b;
+                border: 1px solid #3c404b;
+                border-radius: 3px;
+                padding: 1px 8px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #2d3039;
+                border-color: #f59e0b;
+                color: #fbbf24;
+            }
+            QPushButton:pressed {
+                background: #18191d;
+            }
+        """)
+        self.btn_auto_meter.clicked.connect(self._action_apply_auto_meter)
+        meter_row.addWidget(meter_title)
+        meter_row.addStretch()
+        meter_row.addWidget(self.btn_auto_meter)
+        self.sec_exposure.addLayout(meter_row)
+
         self.slider_ev = AdobeScrubSlider(
             "曝光", -3.0, 3.0, 0.0, step=0.05, unit=" EV", decimals=2,
             tooltip="模拟相机物理感光曝光调节，以真实 EV 档位线性增减画面总进光量"
@@ -1996,6 +2159,14 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_grain.valueChanged.connect(lambda v: self._on_slider_live("grain", v))
         self.slider_grain.sliderReleased.connect(self._on_slider_committed)
         self.sec_texture.addWidget(self.slider_grain)
+
+        self.slider_grain_size = AdobeScrubSlider(
+            "颗粒物理尺寸", 0.5, 2.5, 1.0, step=0.05, unit="x", decimals=2,
+            tooltip="微调胶卷感光乳剂中卤化银微晶与发色染料微云的物理直径大小 (0.50x 细腻 ~ 2.50x 粗犷)"
+        )
+        self.slider_grain_size.valueChanged.connect(lambda v: self._on_slider_live("grain_size", v))
+        self.slider_grain_size.sliderReleased.connect(self._on_slider_committed)
+        self.sec_texture.addWidget(self.slider_grain_size)
 
         self.slider_grain_cloud = AdobeScrubSlider(
             "染料云团柔化", 0.5, 2.5, 1.0, step=0.05, unit=" um", decimals=2,
@@ -2490,6 +2661,30 @@ class DarkroomMainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _action_apply_auto_meter(self):
+        """Apply author's 18% middle-gray autoexposure compensation to current photo."""
+        if not self._current_photo_path:
+            return
+        photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+        if not photo:
+            return
+        auto_ev = photo.get("auto_ev")
+        if auto_ev is None:
+            float_img = photo.get("float_img")
+            if float_img is not None:
+                auto_ev = self.engine.calculate_auto_exposure_ev(float_img)
+                photo["auto_ev"] = auto_ev
+            else:
+                auto_ev = 0.0
+
+        ev_val = float(auto_ev)
+        self.current_params["exposure_ev"] = ev_val
+        if hasattr(self, 'slider_ev'):
+            self.slider_ev.set_value(ev_val)
+        self.canvas.update_params(exposure_ev=ev_val)
+        self._on_slider_committed()
+        self.status_label.setText(f"已应用 18% 中灰基准测光: {ev_val:+.2f} EV")
+
     def reset_track(self, track_name):
         def_temp = getattr(self.slider_temp, "default_val", 5500.0)
         def_tint = getattr(self.slider_tint, "default_val", 1.0)
@@ -2512,11 +2707,11 @@ class DarkroomMainWindow(QMainWindow):
             },
             "texture": {
                 "halation": 0.5, "halation_bounces": 2, "halation_decay": 0.5, "halation_boost": 0.0,
-                "grain": 0.4, "grain_cloud_blur": 1.0
+                "grain": 0.4, "grain_size": 1.0, "grain_cloud_blur": 1.0
             },
             "optical": {
                 "halation": 0.5, "halation_bounces": 2, "halation_decay": 0.5, "halation_boost": 0.0,
-                "grain": 0.4, "grain_cloud_blur": 1.0
+                "grain": 0.4, "grain_size": 1.0, "grain_cloud_blur": 1.0
             }
         }
         if track_name in defaults:
@@ -2542,7 +2737,7 @@ class DarkroomMainWindow(QMainWindow):
             "print_exposure": 1.0, "pre_flash": 0.0,
             "morph_gamma": 1.0, "developer_exhaustion": 0.0,
             "halation": 0.5, "halation_bounces": 2, "halation_decay": 0.5, "halation_boost": 0.0,
-            "grain": 0.4, "grain_cloud_blur": 1.0,
+            "grain": 0.4, "grain_size": 1.0, "grain_cloud_blur": 1.0,
             "custom_wb": False
         }
         self.current_params.update(defaults)
@@ -2584,6 +2779,7 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, 'slider_halation_decay'): self.slider_halation_decay.set_value(p.get("halation_decay", 0.5))
             if hasattr(self, 'slider_halation_boost'): self.slider_halation_boost.set_value(p.get("halation_boost", 0.0))
             if hasattr(self, 'slider_grain'): self.slider_grain.set_value(p.get("grain", 0.4))
+            if hasattr(self, 'slider_grain_size'): self.slider_grain_size.set_value(p.get("grain_size", 1.0))
             if hasattr(self, 'slider_grain_cloud'): self.slider_grain_cloud.set_value(p.get("grain_cloud_blur", 1.0))
         finally:
             self._is_updating_sliders = False
@@ -2593,6 +2789,17 @@ class DarkroomMainWindow(QMainWindow):
             self.push_undo_state()
             self._mark_current_photo_dirty()
         self.current_film_stock = stock_id
+
+        # Intelligent pairing for bypass "none" stock
+        if stock_id == "none":
+            self.current_paper_stock = "none"
+            for pid, card in self.paper_cards.items():
+                card.set_active(pid == "none")
+        elif self.current_paper_stock == "none":
+            self.current_paper_stock = "kodak_2383"
+            for pid, card in self.paper_cards.items():
+                card.set_active(pid == "kodak_2383")
+
         for sid, card in self.film_cards.items():
             card.set_active(sid == stock_id)
 
@@ -2607,6 +2814,17 @@ class DarkroomMainWindow(QMainWindow):
             self.push_undo_state()
             self._mark_current_photo_dirty()
         self.current_paper_stock = stock_id
+
+        # Intelligent pairing for bypass "none" stock
+        if stock_id == "none":
+            self.current_film_stock = "none"
+            for sid, card in self.film_cards.items():
+                card.set_active(sid == "none")
+        elif self.current_film_stock == "none":
+            self.current_film_stock = "kodak_portra_400"
+            for sid, card in self.film_cards.items():
+                card.set_active(sid == "kodak_portra_400")
+
         for sid, card in self.paper_cards.items():
             card.set_active(sid == stock_id)
 
@@ -2741,6 +2959,14 @@ class DarkroomMainWindow(QMainWindow):
                 self.on_switch_photo(target_entry["id"])
         QTimer.singleShot(3500, lambda: self.status_label.setText("") if "已完成导入" in self.status_label.text() else None)
 
+        # Real-time session state save & cache maintenance
+        try:
+            valid_paths = [p["path"] for p in self.photos if p.get("path") and os.path.exists(p["path"])]
+            config_manager.save_session_state(valid_paths, self._current_photo_path)
+            session_cache_manager.prune_cache_if_needed()
+        except Exception:
+            pass
+
     def on_switch_photo(self, photo_id):
         # Auto-reset compare / split-screen mode when switching to another photo
         self._is_compare_holding = False
@@ -2790,9 +3016,11 @@ class DarkroomMainWindow(QMainWindow):
             self.slider_tint.set_default_value(base_tint)
 
             # 4. Check for in-memory edits or SDC sidecar configuration
+            sdc = None
             if photo.get("params"):
                 self.current_film_stock = photo.get("film_profile", self.current_film_stock)
                 self.current_paper_stock = photo.get("paper_profile", self.current_paper_stock)
+                self.current_params.clear()
                 self.current_params.update(photo["params"])
                 self._photo_is_dirty = photo.get("is_dirty", False)
             else:
@@ -2801,26 +3029,57 @@ class DarkroomMainWindow(QMainWindow):
                     self.current_film_stock = sdc.get("film_profile", self.current_film_stock)
                     self.current_paper_stock = sdc.get("paper_profile", self.current_paper_stock)
                     loaded_params = sdc.get("params", {})
+                    self.current_params.clear()
                     self.current_params.update(loaded_params)
                     if "color_temp" not in loaded_params or (loaded_params.get("color_temp") == 5500.0 and base_temp != 5500.0 and not loaded_params.get("custom_wb")):
                         self.current_params["color_temp"] = base_temp
                     if "tint" not in loaded_params or (loaded_params.get("tint") == 1.0 and base_tint != 1.0 and not loaded_params.get("custom_wb")):
                         self.current_params["tint"] = base_tint
                 else:
+                    self.current_film_stock = "none"
+                    self.current_paper_stock = "none"
+                    init_ev = float(photo.get("auto_ev", 0.0))
                     defaults = {
-                        "exposure_ev": 0.0, "color_temp": base_temp, "tint": base_tint,
+                        "exposure_ev": init_ev, "color_temp": base_temp, "tint": base_tint,
                         "enlarger_cyan": 0.0, "enlarger_magenta": 0.0, "enlarger_yellow": 0.0,
                         "print_exposure": 1.0, "pre_flash": 0.0, "halation": 0.5, "grain": 0.4
                     }
+                    self.current_params.clear()
                     self.current_params.update(defaults)
                 self._photo_is_dirty = False
 
             self.filmstrip.set_photo_dirty(photo_id, self._photo_is_dirty)
             self._update_window_title()
 
-            # 5. Upload photo to OpenGL canvas texture
+            # 5. Upload photo to OpenGL canvas texture (lazy load preview or RAW if needed)
+            if photo.get("float_img") is None:
+                cached_prev = session_cache_manager.get_photo_preview(photo["path"])
+                if cached_prev is not None:
+                    photo["float_img"] = cached_prev
+                else:
+                    res = self.engine.load_image(photo["path"])
+                    if res.get("success"):
+                        photo["float_img"] = res.get("float_img")
+                        if photo.get("thumbnail_rgb") is None:
+                            photo["thumbnail_rgb"] = res.get("thumbnail_rgb")
+                        if photo.get("auto_ev") is None and res.get("auto_ev") is not None:
+                            photo["auto_ev"] = res.get("auto_ev")
+                        session_cache_manager.save_photo_preview(photo["path"], photo["float_img"])
+
             if photo.get("float_img") is not None:
-                self.canvas.set_image(photo["float_img"])
+                # 实时检测测光值，若未测过或为 0.0 则立即执行中灰测光
+                if not photo.get("auto_ev") or float(photo.get("auto_ev", 0.0)) == 0.0:
+                    photo["auto_ev"] = self.engine.calculate_auto_exposure_ev(photo["float_img"])
+
+                auto_val = float(photo.get("auto_ev", 0.0))
+                # 100% 全自动补偿：首次打开未自定义时，全自动对齐到 18% 中灰
+                has_custom_ev = bool(sdc and "exposure_ev" in sdc.get("params", {})) or photo.get("is_dirty", False) or bool(photo.get("params"))
+                if not has_custom_ev and auto_val != 0.0 and self.current_params.get("exposure_ev", 0.0) == 0.0:
+                    self.current_params["exposure_ev"] = auto_val
+
+                m_w = photo.get("width") or (photo.get("meta", {}).get("width") if isinstance(photo.get("meta"), dict) else None)
+                m_h = photo.get("height") or (photo.get("meta", {}).get("height") if isinstance(photo.get("meta"), dict) else None)
+                self.canvas.set_image(photo["float_img"], master_width=m_w, master_height=m_h)
             self.canvas.update_params(base_temp=base_temp, base_tint=base_tint, **self.current_params)
             self._update_all_sliders_from_params()
 
@@ -2845,6 +3104,18 @@ class DarkroomMainWindow(QMainWindow):
                 "params": dict(self.current_params)
             }]
             self._redo_stack.clear()
+
+            # Synchronize engine state
+            if hasattr(self, 'engine'):
+                self.engine.current_file_path = photo["path"]
+                self.engine.active_photo_id = photo_id
+
+            # Real-time session save: record current active photo
+            try:
+                valid_paths = [p["path"] for p in self.photos if p.get("path") and os.path.exists(p["path"])]
+                config_manager.save_session_state(valid_paths, self._current_photo_path)
+            except Exception:
+                pass
         finally:
             self._is_switching_photo = False
 
@@ -2864,10 +3135,15 @@ class DarkroomMainWindow(QMainWindow):
             for card in self.paper_cards.values():
                 card.set_thumbnail(base_pix)
 
-        # 2. Stop any existing background worker
+        # 2. Stop any existing background worker and disconnect signals to avoid race condition
         if getattr(self, '_thumb_worker', None) is not None and self._thumb_worker.isRunning():
             self._thumb_worker.stop()
-            self._thumb_worker.wait(80)
+            try:
+                self._thumb_worker.film_ready.disconnect()
+                self._thumb_worker.paper_ready.disconnect()
+            except Exception:
+                pass
+            self._thumb_worker.wait(300)
 
         # 3. Dedicated QThread worker applying 3D LUT asynchronously
         self._thumb_worker = StockThumbnailWorker(
@@ -2911,6 +3187,11 @@ class DarkroomMainWindow(QMainWindow):
             next_id = self.photos[-1]["id"]
             self.filmstrip.set_photos(self.photos, next_id)
             self.on_switch_photo(next_id)
+            try:
+                valid_paths = [p["path"] for p in self.photos if p.get("path") and os.path.exists(p["path"])]
+                config_manager.save_session_state(valid_paths, self._current_photo_path)
+            except Exception:
+                pass
 
     def on_remove_multiple_photos(self, photo_ids):
         id_set = set(photo_ids)
@@ -2924,6 +3205,11 @@ class DarkroomMainWindow(QMainWindow):
             next_id = self.photos[-1]["id"]
             self.filmstrip.set_photos(self.photos, next_id)
             self.on_switch_photo(next_id)
+            try:
+                valid_paths = [p["path"] for p in self.photos if p.get("path") and os.path.exists(p["path"])]
+                config_manager.save_session_state(valid_paths, self._current_photo_path)
+            except Exception:
+                pass
 
     def on_clear_sdc_config(self, photo_ids):
         """Delete .sdc configuration sidecar and reset adjustments to baseline defaults."""
@@ -2982,7 +3268,7 @@ class DarkroomMainWindow(QMainWindow):
         base, _ = os.path.splitext(self._current_photo_path)
         default_out = f"{base}_developed.jpg"
 
-        dlg = ExportImageDialog(default_out, self)
+        dlg = ExportImageDialog(default_out, is_batch=False, parent=self)
         if dlg.exec():
             cfg = dlg.get_export_config()
             self._do_export_single(cfg)
@@ -3010,7 +3296,22 @@ class DarkroomMainWindow(QMainWindow):
             "png_level": cfg["png_level"]
         })
 
-        out_path = cfg["path"]
+        out_path = cfg["path"].strip() if cfg.get("path") else ""
+        if not out_path or os.path.isdir(out_path) or out_path.endswith(('/', '\\')):
+            base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0] if self._current_photo_path else "developed"
+            fmt_str = str(cfg.get("format", "jpeg")).lower()
+            ext = ".tif" if "tif" in fmt_str else (".png" if "png" in fmt_str else ".jpg")
+            fallback_dir = out_path if out_path else (os.path.dirname(self._current_photo_path) if self._current_photo_path else os.path.expanduser("~"))
+            out_path = os.path.join(fallback_dir, f"{base_name}_developed{ext}")
+
+        out_dir = os.path.dirname(os.path.abspath(out_path))
+        os.makedirs(out_dir, exist_ok=True)
+        if os.path.exists(out_path):
+            try:
+                import stat
+                os.chmod(out_path, stat.S_IWRITE)
+            except Exception:
+                pass
 
         # Check Hardware Acceleration Mode preference: "关", "仅缩略图与视口", "全局"
         hw_mode = "global"
@@ -3019,41 +3320,83 @@ class DarkroomMainWindow(QMainWindow):
         except Exception:
             hw_mode = "global"
 
-        # If "global" GPU acceleration enabled, try GPU offscreen rendering
+        # Try ultra-fast GPU offscreen rendering first if hardware acceleration is enabled
         if hw_mode == "global" and hasattr(self.canvas, "render_offscreen"):
-            try:
-                orig_w = getattr(self.engine, "original_meta", {}).get("width")
-                orig_h = getattr(self.engine, "original_meta", {}).get("height")
-                scale_pct = int(cfg.get("scale_pct", 100))
-                if not orig_w or not orig_h:
-                    orig_w = self.canvas._image_width
-                    orig_h = self.canvas._image_height
-                if orig_w > 0 and orig_h > 0:
-                    tgt_w = max(1, int(orig_w * scale_pct / 100.0))
-                    tgt_h = max(1, int(orig_h * scale_pct / 100.0))
+            progress_dlg = ExportProgressDialog(title="正在导出图像", parent=self)
+            progress_dlg.set_progress(10, "正在载入 100% 全分辨率底片数据...")
+            progress_dlg.show()
+            QApplication.processEvents()
 
-                    rendered_u8 = self.canvas.render_offscreen(tgt_w, tgt_h)
-                    if rendered_u8 is not None:
-                        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-                        from PIL import Image
-                        im = Image.fromarray(rendered_u8, mode='RGB')
+            try:
+                # 1. Load full resolution 16-bit raw/image
+                raw_target = self.engine._load_full_resolution(self._current_photo_path)
+                if raw_target is None:
+                    raw_target = getattr(self.canvas, "_pending_image", None)
+                if raw_target is None:
+                    curr_photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+                    if curr_photo:
+                        raw_target = curr_photo.get("float_img")
+
+                if raw_target is not None:
+                    src_h, src_w = raw_target.shape[:2]
+                    scale_pct = int(cfg.get("scale_pct", 100))
+                    tgt_w = max(1, int(src_w * scale_pct / 100.0))
+                    tgt_h = max(1, int(src_h * scale_pct / 100.0))
+
+                    progress_dlg.set_progress(35, f"GPU 硬件加速极速冲印 ({tgt_w}×{tgt_h})...")
+                    QApplication.processEvents()
+
+                    # 2. Render on GPU with exact aspect ratio (ZERO black bars, full bleed)
+                    bit_depth = int(cfg.get("bit_depth", 8))
+                    rendered_arr = self.canvas.render_offscreen(
+                        tgt_w, tgt_h,
+                        float_img_rgb=raw_target,
+                        params_override=export_params,
+                        bit_depth=bit_depth
+                    )
+
+                    if rendered_arr is not None:
+                        progress_dlg.set_progress(80, "正在编码并写入图像文件...")
+                        QApplication.processEvents()
+
                         fmt_lower = str(cfg["format"]).lower()
                         dpi_val = int(cfg.get("dpi", 300))
+
+                        from PIL import Image
                         if "tif" in fmt_lower:
-                            im.save(out_path, 'TIFF', dpi=(dpi_val, dpi_val))
+                            comp = str(cfg.get("tiff_compression", "lzw")).lower()
+                            if bit_depth == 16:
+                                import tifffile
+                                tifffile.imwrite(out_path, rendered_arr, compression=comp if comp != 'none' else None, resolution=(dpi_val, dpi_val, 'INCH'))
+                            else:
+                                im = Image.fromarray(rendered_arr, mode='RGB')
+                                im.save(out_path, 'TIFF', dpi=(dpi_val, dpi_val), compression='tiff_lzw')
                         elif "png" in fmt_lower:
-                            im.save(out_path, 'PNG', dpi=(dpi_val, dpi_val))
+                            png_level = int(cfg.get("png_level", 6))
+                            if bit_depth == 16:
+                                out_bgr = cv2.cvtColor(rendered_arr, cv2.COLOR_RGB2BGR)
+                                cv2.imwrite(out_path, out_bgr, [cv2.IMWRITE_PNG_COMPRESSION, png_level])
+                            else:
+                                im = Image.fromarray(rendered_arr, mode='RGB')
+                                im.save(out_path, 'PNG', compress_level=png_level, dpi=(dpi_val, dpi_val))
                         else:
                             q_scale = int(cfg.get("quality", 9))
                             q_val = max(10, min(100, 50 + q_scale * 5 if q_scale <= 10 else 95))
-                            im.save(out_path, 'JPEG', quality=q_val, dpi=(dpi_val, dpi_val))
+                            sub_opt = str(cfg.get("subsampling", "4:4:4"))
+                            sub_val = 0 if sub_opt == "4:4:4" else (1 if sub_opt == "4:2:2" else 2)
+                            prog_val = bool(cfg.get("progressive", True))
+                            im = Image.fromarray(rendered_arr, mode='RGB')
+                            im.save(out_path, 'JPEG', quality=q_val, subsampling=sub_val, progressive=prog_val, dpi=(dpi_val, dpi_val))
 
+                        progress_dlg.set_progress(100, "导出完成")
+                        progress_dlg.accept()
                         self.spinner.stop()
-                        pct = int(round(self.canvas.zoom * 100))
+
+                        pct = int(round(self.canvas.get_actual_zoom_ratio() * 100))
                         if self._current_photo_path:
                             fn = os.path.basename(self._current_photo_path)
                             self.status_label.setText(f"{fn} | {pct}%")
-                        mb = self._create_dark_message_box("导出成功", f"已成功导出至:\n{out_path}", QMessageBox.Icon.Information)
+                        mb = self._create_dark_message_box("导出成功", f"已成功通过 GPU 硬件加速导出至:\n{out_path}", QMessageBox.Icon.Information)
                         icon_exp = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
                         if os.path.exists(icon_exp):
                             mb.setWindowIcon(QIcon(icon_exp))
@@ -3061,6 +3404,7 @@ class DarkroomMainWindow(QMainWindow):
                         return
             except Exception as e_gpu:
                 print(f"[Export] GPU offscreen fallback to CPU: {e_gpu}")
+                progress_dlg.close()
 
         # Fallback to background CPU worker
         progress_dlg = ExportProgressDialog(title="正在导出图像", parent=self)
@@ -3194,6 +3538,8 @@ class DarkroomMainWindow(QMainWindow):
                 "pre_flash": params.get("pre_flash", 0.0),
                 "halation": params.get("halation", 0.5),
                 "grain": params.get("grain", 0.4),
+                "grain_size": params.get("grain_size", 1.0),
+                "grain_cloud_blur": params.get("grain_cloud_blur", 1.0),
                 "quality": cfg.get("quality", 9),
                 "dpi": cfg.get("dpi", 300),
                 "bit_depth": cfg.get("bit_depth", 8),
@@ -3451,27 +3797,15 @@ class DarkroomMainWindow(QMainWindow):
     def toggle_maximize(self):
         if self.isMaximized():
             self.showNormal()
-            if self._saved_normal_geo:
-                self.setGeometry(self._saved_normal_geo)
         else:
             self._saved_normal_geo = self.geometry()
             self.showMaximized()
         if hasattr(self, 'btn_max'):
             self.btn_max.set_maximized_state(self.isMaximized())
 
-    def _on_minimized_done(self):
-        super().showMinimized()
-        self.setWindowOpacity(1.0)
-
     def showMinimized(self):
-        anim = QPropertyAnimation(self, b"windowOpacity", self)
-        anim.setDuration(180)
-        anim.setStartValue(1.0)
-        anim.setEndValue(0.0)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.finished.connect(self._on_minimized_done)
-        anim.start()
-        self._min_anim = anim
+        # Native DWM minimize animation
+        super().showMinimized()
 
     def closeEvent(self, event):
         # Silently ensure any modified parameters are saved to .sdc

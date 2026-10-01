@@ -53,7 +53,9 @@ uniform float u_halation_boost;
 // Grain physics & format
 uniform float u_grain;
 uniform float u_grain_scale;
+uniform float u_grain_size;
 uniform float u_grain_blur;
+uniform vec2 u_master_resolution;
 
 // Diffusion filter
 uniform int u_diffusion_type;
@@ -75,10 +77,38 @@ uniform float u_image_aspect;
 uniform vec2 u_pan;
 uniform float u_zoom;
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
+// 32-bit Integer PCG (Permuted Congruential Generator) Hash
+// Cryptographic quality pseudo-randomness with ZERO periodic banding or grid artifacts
+uint pcg_hash(uvec2 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> 16u);
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> 16u);
+    return v.x ^ v.y;
+}
+
+float pcg_float(uvec2 p) {
+    return float(pcg_hash(p)) * (1.0 / 4294967296.0);
+}
+
+// Smooth continuous organic dye cloud noise with Hermite interpolation
+float smooth_cloud_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 s = f * f * (3.0 - 2.0 * f);
+    
+    uvec2 u = uvec2(ivec2(i));
+    float n00 = pcg_float(u);
+    float n10 = pcg_float(u + uvec2(1u, 0u));
+    float n01 = pcg_float(u + uvec2(0u, 1u));
+    float n11 = pcg_float(u + uvec2(1u, 1u));
+    
+    float nx0 = mix(n00, n10, s.x);
+    float nx1 = mix(n01, n11, s.x);
+    return mix(nx0, nx1, s.y);
 }
 
 void main() {
@@ -243,16 +273,43 @@ void main() {
         film_rgb += halation_tint;
     }
     
-    // 9. Silver Halide Organic Film Grain & Dye Cloud Blur
+    // 9. Silver Halide Organic Film Grain & Dye Cloud Blur (Film-space anchored)
     if (u_grain > 0.01) {
         float density = 1.0 - clamp(dot(film_rgb, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
-        float grain_mask = sqrt(density * (1.0 - density)) * 2.0;
-        vec2 gcoord = gl_FragCoord.xy / max(0.25, u_grain_scale);
-        float n1 = hash(gcoord);
-        float n2 = hash(gcoord + vec2(1.7, 3.1) * u_grain_blur);
-        float n3 = hash(gcoord - vec2(2.3, 1.5) * u_grain_blur);
-        float combined_noise = mix(n1, (n1 + n2 + n3) * 0.3333, clamp(u_grain_blur * 0.4, 0.0, 0.85));
-        float noise = (combined_noise - 0.5) * u_grain * grain_mask * 0.14;
+        // Optical density bell curve (most pronounced in midtones, decays smoothly in specular highlights and deep blacks)
+        float grain_mask = sqrt(max(0.0, density * (1.0 - density))) * 2.0;
+
+        // Golden-ratio irrational rotation matrix (breaks all raster / coordinate grid alignment)
+        const mat2 rot = mat2(0.9114, -0.4115, 0.4115, 0.9114);
+        float scale = max(0.25, u_grain_scale * max(0.2, u_grain_size));
+
+        // Anchor grain coordinate to image/film master pixel space (WYSIWYG preview & export)
+        vec2 master_res = (u_master_resolution.x > 1.0) ? u_master_resolution : vec2(textureSize(u_image, 0));
+        vec2 film_coord = sample_uv * master_res;
+        vec2 gcoord = rot * (film_coord / scale);
+
+        // Anti-aliasing / Central Limit Theorem screen downsampling integration
+        // When zoomed out (e.g. Fit to View), 1 screen pixel averages an area of film pixels,
+        // which physically attenuates high-frequency micro-crystals, perfectly matching viewer downsampling!
+        vec2 d_gcoord = fwidth(gcoord);
+        float footprint = max(d_gcoord.x, d_gcoord.y);
+        float crystal_att = 1.0 / sqrt(max(1.0, footprint));
+        float cloud_att = 1.0 / sqrt(max(1.0, footprint * 0.42));
+
+        // 1. High-frequency organic silver halide crystals (Gaussian distribution via Central Limit Theorem)
+        uvec2 u_crystal = uvec2(ivec2(floor(gcoord)));
+        float r1 = pcg_float(u_crystal);
+        float r2 = pcg_float(u_crystal + uvec2(1597334677u, 3812015801u));
+        float crystal_noise = ((r1 + r2) * 0.5 - 0.5) * crystal_att;
+
+        // 2. Multi-scale organic dye cloud clusters (smooth continuous interpolation)
+        float cloud_noise = (smooth_cloud_noise(gcoord * 0.42) - 0.5) * cloud_att;
+
+        // Blend between fine micro-crystals and soft organic dye clouds
+        float blur_w = clamp(u_grain_blur * 0.45, 0.0, 0.70);
+        float combined_noise = mix(crystal_noise, cloud_noise, blur_w);
+
+        float noise = combined_noise * u_grain * grain_mask * 0.28;
         film_rgb += vec3(noise);
     }
     
@@ -284,6 +341,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._lut_tex_id = None
         self._image_width = 1
         self._image_height = 1
+        self._master_width = 1
+        self._master_height = 1
         self._has_image = False
         self._has_lut = False
         self._pending_image = None
@@ -315,6 +374,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             "halation_decay": 0.5,
             "halation_boost": 0.0,
             "grain": 0.4,
+            "grain_size": 1.0,
             "grain_cloud_blur": 1.0,
             "split_x": 0.5,
             "view_mode": 0   # 0: single, 1: split
@@ -544,7 +604,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         fmt_mm = float(self.params.get("film_format_mm", 35.0))
         grain_scale = 35.0 / max(5.0, fmt_mm)
         u_1f("u_grain_scale", grain_scale)
+        u_1f("u_grain_size", float(self.params.get("grain_size", 1.0)))
         u_1f("u_grain_blur", self.params.get("grain_cloud_blur", 1.0))
+        master_w = float(getattr(self, "_master_width", 0) or self._image_width)
+        master_h = float(getattr(self, "_master_height", 0) or self._image_height)
+        u_2f("u_master_resolution", master_w, master_h)
 
         # Diffusion filter
         diff_family = str(self.params.get("diffusion_family", "none")).lower()
@@ -625,11 +689,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.badge_before.hide()
             self.badge_after.hide()
 
-    def set_image(self, float_img_rgb):
+    def set_image(self, float_img_rgb, master_width=None, master_height=None):
         """Upload source image array (float32 [H, W, 3]) to 2D texture, or clear if None."""
         if float_img_rgb is None:
             self._image_width = 0
             self._image_height = 0
+            self._master_width = 0
+            self._master_height = 0
             self._pending_image = None
             self._has_image = False
             if getattr(self, "_gl_initialized", False) and self.isValid():
@@ -648,6 +714,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             h, w = float_img_rgb.shape[:2]
             self._image_width = w
             self._image_height = h
+            self._master_width = int(master_width) if master_width else w
+            self._master_height = int(master_height) if master_height else h
         except Exception:
             pass
         if not getattr(self, "_gl_initialized", False) or not self.isValid():
@@ -933,10 +1001,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
         else:
             super().mouseDoubleClickEvent(event)
 
-    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None):
+    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8):
         """Render image at target resolution on GPU using an offscreen FBO.
-        Returns uint8 RGB numpy array (target_h, target_w, 3) or None on error.
+        Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
         """
+        if not getattr(self, "_gl_initialized", False) or not self.isValid():
+            try:
+                self.grabFramebuffer()
+            except Exception:
+                pass
         if not getattr(self, "_gl_initialized", False) or not self.isValid():
             return None
 
@@ -961,10 +1034,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB16F, src_w, src_h, 0, GL.GL_RGB, GL.GL_FLOAT, data)
                 GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
                 active_tex_id = temp_tex_id
-                img_aspect = float(src_w) / float(max(1, src_h))
             else:
                 active_tex_id = orig_tex_id
-                img_aspect = float(self._image_width) / float(max(1, self._image_height))
 
             if not active_tex_id:
                 return None
@@ -974,8 +1045,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if params_override:
                 eff_params.update(params_override)
 
-            # Create FBO
-            fbo = QOpenGLFramebufferObject(target_w, target_h, QOpenGLFramebufferObject.Attachment.NoAttachment)
+            # Create FBO (16-bit float buffer for high dynamic range precision when bit_depth >= 16)
+            is_16bit = (int(bit_depth) >= 16)
+            if is_16bit:
+                from PySide6.QtOpenGL import QOpenGLFramebufferObjectFormat
+                fbo_fmt = QOpenGLFramebufferObjectFormat()
+                fbo_fmt.setInternalTextureFormat(GL.GL_RGBA16F)
+                fbo = QOpenGLFramebufferObject(target_w, target_h, fbo_fmt)
+            else:
+                fbo = QOpenGLFramebufferObject(target_w, target_h, QOpenGLFramebufferObject.Attachment.NoAttachment)
+
             if not fbo.isValid():
                 return None
 
@@ -1007,9 +1086,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 loc = self.shader_program.uniformLocation(name)
                 if loc >= 0: funcs.glUniform3f(loc, float(x), float(y), float(z))
 
-            screen_aspect = float(target_w) / float(max(1, target_h))
-            u_1f("u_screen_aspect", screen_aspect)
-            u_1f("u_image_aspect", img_aspect)
+            # Full-bleed 1:1 mapping: offscreen target is the image, zero letterboxing / zero black bars!
+            u_1f("u_screen_aspect", 1.0)
+            u_1f("u_image_aspect", 1.0)
             u_2f("u_pan", 0.0, 0.0)
             u_1f("u_zoom", 1.0)
 
@@ -1034,7 +1113,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             fmt_mm = float(eff_params.get("film_format_mm", 35.0))
             grain_scale = 35.0 / max(5.0, fmt_mm)
             u_1f("u_grain_scale", grain_scale)
+            u_1f("u_grain_size", float(eff_params.get("grain_size", 1.0)))
             u_1f("u_grain_blur", eff_params.get("grain_cloud_blur", 1.0))
+            u_2f("u_master_resolution", float(target_w), float(target_h))
 
             diff_family = str(eff_params.get("diffusion_family", "none")).lower()
             family_map = {"none": 0, "black_pro_mist": 1, "glimmerglass": 2, "pro_mist": 3, "cinebloom": 4}
@@ -1068,11 +1149,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
             # Read pixels from FBO (target_w, target_h)
             GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 1)
-            raw_bytes = GL.glReadPixels(0, 0, target_w, target_h, GL.GL_RGB, GL.GL_UNSIGNED_BYTE)
-            fbo.release()
+            if is_16bit:
+                raw_bytes = GL.glReadPixels(0, 0, target_w, target_h, GL.GL_RGBA, GL.GL_UNSIGNED_SHORT)
+                fbo.release()
+                img_arr = np.frombuffer(raw_bytes, dtype=np.uint16).reshape((target_h, target_w, 4))[..., :3]
+            else:
+                raw_bytes = GL.glReadPixels(0, 0, target_w, target_h, GL.GL_RGB, GL.GL_UNSIGNED_BYTE)
+                fbo.release()
+                img_arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((target_h, target_w, 3))
 
-            # Convert to numpy array & flip vertically (OpenGL reads bottom-to-top)
-            img_arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((target_h, target_w, 3))
             img_arr = np.ascontiguousarray(np.flipud(img_arr))
             return img_arr
 
@@ -1081,7 +1166,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             return None
         finally:
             if temp_tex_id:
-                GL.glDeleteTextures([temp_tex_id])
+                try:
+                    GL.glDeleteTextures([temp_tex_id])
+                except Exception:
+                    pass
             if fbo:
                 del fbo
             # Restore viewport

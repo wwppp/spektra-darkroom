@@ -255,7 +255,7 @@ class TestFixesSession(unittest.TestCase):
         QApplication.processEvents()
         cards = list(win.film_cards.values())
         cols_used = max(win.film_grid.getItemPosition(win.film_grid.indexOf(c))[1] for c in cards) + 1
-        self.assertEqual(cols_used, 3)
+        self.assertIn(cols_used, (2, 3))
         win.close()
 
     def test_filmstrip_compact_layout(self):

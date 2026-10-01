@@ -35,9 +35,13 @@ class TestLatestFixesSession3(unittest.TestCase):
         papers = self.engine.get_paper_stocks()
         all_paper_ids = [p["id"] for p in papers]
 
-        self.assertEqual(len(all_film_ids), 20, f"Expected 20 films, got {len(all_film_ids)}")
-        self.assertEqual(len(all_paper_ids), 8, f"Expected 8 papers, got {len(all_paper_ids)}")
-        self.assertEqual(len(all_film_ids) + len(all_paper_ids), 28)
+        film_stocks_only = [fid for fid in all_film_ids if fid != "none"]
+        paper_stocks_only = [pid for pid in all_paper_ids if pid != "none"]
+        self.assertEqual(len(film_stocks_only), 20, f"Expected 20 films, got {len(film_stocks_only)}")
+        self.assertEqual(len(paper_stocks_only), 8, f"Expected 8 papers, got {len(paper_stocks_only)}")
+        self.assertEqual(len(film_stocks_only) + len(paper_stocks_only), 28)
+        self.assertIn("none", all_film_ids)
+        self.assertIn("none", all_paper_ids)
         self.assertIn("kodak_kodachrome_64", all_film_ids)
         self.assertIn("kodak_verita_200d", all_film_ids)
         self.assertIn("kodak_2393", all_paper_ids)

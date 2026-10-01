@@ -23,8 +23,12 @@ from ui.window_utils import apply_dark_titlebar
 
 class ExportImageDialog(QDialog):
     def __init__(self, default_path, is_batch=False, batch_count=0, parent=None):
+        if isinstance(is_batch, QWidget):
+            parent = is_batch
+            is_batch = False
+            batch_count = 0
         super().__init__(parent)
-        self.is_batch = is_batch
+        self.is_batch = bool(is_batch)
         self.batch_count = batch_count
         if self.is_batch:
             self.setWindowTitle("冲印参数设置")
@@ -393,6 +397,9 @@ class ExportImageDialog(QDialog):
 
         path, _ = QFileDialog.getSaveFileName(self, "选择保存路径", self.edit_path.text(), filt)
         if path:
+            if os.path.isdir(path) or path.endswith(("/", "\\")):
+                cur_name = os.path.basename(self._current_path) or "developed.jpg"
+                path = os.path.join(path, cur_name)
             self.edit_path.setText(path)
 
     def get_export_config(self):
@@ -400,6 +407,12 @@ class ExportImageDialog(QDialog):
             dpi_val = int(str(self.combo_dpi.currentText()).split()[0])
         except Exception:
             dpi_val = 300
+
+        raw_path = self.edit_path.text().strip()
+        if not self.is_batch and raw_path:
+            if os.path.isdir(raw_path) or raw_path.endswith(("/", "\\")):
+                cur_name = os.path.basename(self._current_path) or "developed.jpg"
+                raw_path = os.path.join(raw_path, cur_name)
 
         return {
             "format": self.combo_format.currentData(),
@@ -412,7 +425,7 @@ class ExportImageDialog(QDialog):
             "tiff_compression": self.combo_tiff_comp.currentData(),
             "png_level": self.combo_png_level.currentData(),
             "scale_pct": int(self.combo_scale.currentData()) if hasattr(self, 'combo_scale') and self.combo_format.currentData() == "jpeg" else 100,
-            "path": self.edit_path.text().strip()
+            "path": raw_path
         }
 
     def _apply_style(self):

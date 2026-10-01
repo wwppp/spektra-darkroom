@@ -53,12 +53,25 @@ class SpektraEngine:
         self._render_lock = threading.Lock()
 
     def _load_profile(self, stock_id):
+        if not stock_id or stock_id == "none":
+            return None
         if stock_id not in self._profile_cache:
             self._profile_cache[stock_id] = load_processed_profile(stock_id)
         return self._profile_cache[stock_id]
 
     def get_film_stocks(self):
         return [
+            {
+                "category": "数码原生 (Bypass)",
+                "stocks": [
+                    {
+                        "id": "none",
+                        "name": "无胶卷 (原图直显)",
+                        "badge": "原生",
+                        "desc": "不加载任何胶卷乳剂模拟，直接呈现数码传感器原生原始色彩与反差。"
+                    }
+                ]
+            },
             {
                 "category": "顶流色彩负片 (Color Negative)",
                 "stocks": [
@@ -199,6 +212,12 @@ class SpektraEngine:
     def get_paper_stocks(self):
         return [
             {
+                "id": "none",
+                "name": "无相纸 (直出透传)",
+                "badge": "原生",
+                "desc": "不加载任何暗房放大机与相纸印放模型，呈现数码直出透传影调。"
+            },
+            {
                 "id": "kodak_2383",
                 "name": "Kodak Vision 2383 放映相纸",
                 "badge": "好莱坞标准",
@@ -276,6 +295,14 @@ class SpektraEngine:
         if cache_key in self._lut_cache:
             return self._lut_cache[cache_key]
 
+        # 1. Bypass mode: 胶卷或相纸任一为 "none" 时，直接返回单位恒等映射 LUT (纯透传原图)
+        if film_stock == "none" or paper_stock == "none":
+            lin = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
+            b, g, r = np.meshgrid(lin, lin, lin, indexing='ij')
+            identity_lut = np.stack([r, g, b], axis=-1).astype(np.float32)
+            self._lut_cache[cache_key] = identity_lut
+            return identity_lut
+
         cache_dir = os.path.join(self.resources_dir, ".lut_cache")
         if is_default_params:
             cache_file = os.path.join(cache_dir, f"{film_stock}__{paper_stock}__{lut_size}.npy")
@@ -298,7 +325,7 @@ class SpektraEngine:
         params = init_params()
         params.film = self._load_profile(film_stock)
         params.print = self._load_profile(paper_stock)
-        if params.film and hasattr(params.film, 'info') and getattr(params.film.info, 'type', None) == 'positive':
+        if paper_stock == "none" or (params.film and hasattr(params.film, 'info') and getattr(params.film.info, 'type', None) == 'positive'):
             params.io.scan_film = True
         params.settings.preview_mode = True
         params.settings.use_enlarger_lut = True
@@ -591,6 +618,31 @@ class SpektraEngine:
 
         return meta
 
+    def calculate_auto_exposure_ev(self, float_img):
+        """Calculate recommended base exposure compensation using author's 18% middle-gray meter."""
+        if float_img is None or not isinstance(float_img, np.ndarray):
+            return 0.0
+        try:
+            from spektrafilm.utils.autoexposure import measure_autoexposure_ev
+            h, w = float_img.shape[:2]
+            max_dim = 256
+            if max(h, w) > max_dim:
+                scale = max_dim / float(max(h, w))
+                sw, sh = max(16, int(w * scale)), max(16, int(h * scale))
+                sample_img = cv2.resize(float_img, (sw, sh), interpolation=cv2.INTER_AREA)
+            else:
+                sample_img = float_img
+            if float(np.nanmean(sample_img)) < 1e-4:
+                return 0.0
+            # 与原作者 official pipeline 严格保持 100% 一致：输入数据已是线性空间，apply_cctf_decoding=False
+            ev = measure_autoexposure_ev(sample_img, color_space='sRGB', apply_cctf_decoding=False, method='center_weighted')
+            if np.isnan(ev) or np.isinf(ev):
+                return 0.0
+            return float(np.clip(round(ev, 2), -3.0, 3.0))
+        except Exception as e:
+            print(f"[SpektraEngine] 测光计算异常: {e}")
+            return 0.0
+
     def load_image(self, file_path):
         """Load RAW or high-fidelity image into float32 array for GPU texture."""
         try:
@@ -627,7 +679,6 @@ class SpektraEngine:
                 
                 with open(file_path, "rb") as fp:
                     with rawpy.imread(fp) as raw:
-                        w, h = raw.sizes.width, raw.sizes.height
                         try:
                             # Half size 16-bit extraction (instant decode in ~200ms)
                             rgb16 = raw.postprocess(
@@ -645,6 +696,8 @@ class SpektraEngine:
                                 output_color=rawpy.ColorSpace.sRGB,
                                 output_bps=16
                             )
+                post_h, post_w = rgb16.shape[:2]
+                w, h = post_w * 2, post_h * 2
             else:
                 img_bgr = None
                 try:
@@ -686,6 +739,7 @@ class SpektraEngine:
 
             self.original_meta["width"] = w
             self.original_meta["height"] = h
+            self.original_meta["resolution"] = f"{w} × {h}"
 
             # Downscale slightly for GPU preview texture according to user preference (1080P/2K/4K)
             cur_h, cur_w = rgb16.shape[:2]
@@ -738,6 +792,7 @@ class SpektraEngine:
             existing = next((p for p in self.session_photos if p["path"] == file_path), None)
             photo_id = existing["id"] if existing else f"film_{uuid.uuid4().hex[:8]}"
 
+            auto_ev = self.calculate_auto_exposure_ev(self.raw_preview)
             photo_item = {
                 "id": photo_id,
                 "path": file_path,
@@ -747,7 +802,8 @@ class SpektraEngine:
                 "thumbnail_rgb": th_u8,
                 "raw_preview": self.raw_preview,
                 "meta": dict(self.original_meta),
-                "is_raw": (ext in raw_exts)
+                "is_raw": (ext in raw_exts),
+                "auto_ev": auto_ev
             }
 
             if existing:
@@ -757,7 +813,7 @@ class SpektraEngine:
 
             self.active_photo_id = photo_id
 
-            print(f"[SpektraEngine] 成功载入 {self.original_meta['filename']}: 原始尺寸 {w}x{h}，GPU 纹理尺寸 {self.raw_preview.shape[1]}x{self.raw_preview.shape[0]}")
+            print(f"[SpektraEngine] 成功载入 {self.original_meta['filename']}: 原始尺寸 {w}x{h}，GPU 纹理尺寸 {self.raw_preview.shape[1]}x{self.raw_preview.shape[0]}，基准测光: {auto_ev:+.2f} EV")
             return {
                 "success": True,
                 "id": photo_id,
@@ -771,7 +827,8 @@ class SpektraEngine:
                 "raw_preview": self.raw_preview,
                 "exif": dict(self.original_meta),
                 "photos": self.get_session_photos(),
-                "active_id": photo_id
+                "active_id": photo_id,
+                "auto_ev": auto_ev
             }
         except Exception as e:
             import traceback
@@ -978,8 +1035,9 @@ class SpektraEngine:
             hal_decay = float(params_dict.get("halation_decay", 0.5))
             hal_boost = float(params_dict.get("halation_boost", 0.0))
             grain = float(params_dict.get("grain", 0.4))
+            grain_size = float(params_dict.get("grain_size", 1.0))
             fmt_mm = float(params_dict.get("film_format_mm", 35.0))
-            grain_scale = 35.0 / max(5.0, fmt_mm)
+            grain_scale = (35.0 / max(5.0, fmt_mm)) * max(0.2, grain_size)
             diff_family = str(params_dict.get("diffusion_family", "none")).lower()
             diff_strength = float(params_dict.get("diffusion_strength", 0.0))
             diff_warmth = float(params_dict.get("diffusion_warmth", 0.0))
@@ -1085,12 +1143,13 @@ class SpektraEngine:
                     chunk_film[..., 1] += hal_glow[..., 0] * 0.14
                     chunk_film[..., 2] += hal_glow[..., 0] * 0.04
 
-                # 6. Silver Halide Organic Film Grain
+                # 6. Silver Halide Organic Film Grain (Pure Luminance Density Grain, Zero Chroma Noise)
                 if grain > 0.01:
                     luma_film = 0.299 * chunk_film[..., 0] + 0.587 * chunk_film[..., 1] + 0.114 * chunk_film[..., 2]
                     density = 1.0 - np.clip(luma_film, 0.0, 1.0)
                     grain_mask = np.sqrt(np.maximum(0.0, density * (1.0 - density))) * 2.0
-                    noise = (np.random.rand(*(chunk_film.shape)).astype(np.float32) - 0.5) * (grain * grain_scale * 0.14)
+                    # Single-channel 2D luminance noise broadcasted across RGB to avoid digital color confetti
+                    noise = (np.random.rand(chunk_film.shape[0], chunk_film.shape[1], 1).astype(np.float32) - 0.5) * (grain * grain_scale * 0.14)
                     chunk_film += noise * grain_mask[..., None]
 
                 rendered_float[y0:y1] = np.clip(chunk_film, 0.0, 1.0)
@@ -1101,7 +1160,21 @@ class SpektraEngine:
             if progress_cb:
                 progress_cb(92, "正在编码并写入图像文件...")
 
-            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            if os.path.isdir(output_path) or output_path.endswith(('/', '\\')):
+                src = source_path or params_dict.get("source_path") or self.current_file_path or "developed"
+                base_name = os.path.splitext(os.path.basename(src))[0]
+                fmt_str = str(format_type).lower()
+                ext = ".tif" if "tif" in fmt_str else (".png" if "png" in fmt_str else ".jpg")
+                output_path = os.path.join(output_path, f"{base_name}_developed{ext}")
+
+            out_dir = os.path.dirname(os.path.abspath(output_path))
+            os.makedirs(out_dir, exist_ok=True)
+            if os.path.exists(output_path):
+                try:
+                    import stat
+                    os.chmod(output_path, stat.S_IWRITE)
+                except Exception:
+                    pass
 
             from PIL import Image
 

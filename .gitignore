@@ -50,6 +50,9 @@ venv.bak/
 *.sdc
 config.json
 spektrafilm-repo/
+.lut_cache/
+.session_cache/
+*.npy
 
 # IDE & Editor files
 .vscode/
