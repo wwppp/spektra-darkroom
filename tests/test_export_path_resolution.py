@@ -73,6 +73,8 @@ class TestExportPathResolution(unittest.TestCase):
 
     def test_portrait_export_no_black_bars(self):
         """Verify that portrait RAW images export with correct orientation and no pillarbox black bars."""
+        if os.environ.get("FAST_TEST") == "1":
+            self.skipTest("Skipping 24MP slow RAW CPU export in FAST_TEST mode")
         import glob
         from PIL import Image
         arws = glob.glob("**/*DSC02461.ARW", recursive=True)
