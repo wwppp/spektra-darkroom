@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar,
     QScrollArea, QWidget, QFrame
 )
-from PySide6.QtGui import QPixmap, QImage, QColor
+from PySide6.QtGui import QPixmap, QImage, QColor, QIcon
 
 from ui.window_utils import apply_dark_titlebar
 
@@ -20,64 +20,11 @@ logger = logging.getLogger("SpektraDarkroom.ExportQueue")
 
 
 def _save_rendered_file(rendered_arr, output_path, params_dict):
-    """Encodes and saves the rendered image array to disk according to parameters."""
-    out_dir = os.path.dirname(os.path.abspath(output_path))
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-
-    if os.path.exists(output_path):
-        try:
-            import stat
-            os.chmod(output_path, stat.S_IWRITE)
-        except Exception:
-            pass
-
-    from PIL import Image
-    fmt_lower = str(params_dict.get("format", "jpeg")).lower()
-    dpi_val = int(params_dict.get("dpi", 300))
-    bit_depth = int(params_dict.get("bit_depth", 8))
-
-    if "tif" in fmt_lower:
-        comp = str(params_dict.get("tiff_compression", "lzw")).lower()
-        if bit_depth >= 16:
-            try:
-                import tifffile
-                tifffile.imwrite(output_path, rendered_arr, compression=comp if comp != 'none' else None, resolution=(dpi_val, dpi_val, 'INCH'))
-            except Exception:
-                im = Image.fromarray(rendered_arr)
-                im.save(output_path, 'TIFF', dpi=(dpi_val, dpi_val), compression='tiff_lzw')
-        else:
-            im = Image.fromarray(rendered_arr, mode='RGB')
-            im.save(output_path, 'TIFF', dpi=(dpi_val, dpi_val), compression='tiff_lzw')
-
-    elif "png" in fmt_lower:
-        png_level = int(params_dict.get("png_level", 6))
-        if bit_depth >= 16:
-            try:
-                import cv2
-                out_bgr = cv2.cvtColor(rendered_arr, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(output_path, out_bgr, [cv2.IMWRITE_PNG_COMPRESSION, png_level])
-            except Exception:
-                im = Image.fromarray(rendered_arr)
-                im.save(output_path, 'PNG', compress_level=png_level, dpi=(dpi_val, dpi_val))
-        else:
-            im = Image.fromarray(rendered_arr, mode='RGB')
-            im.save(output_path, 'PNG', compress_level=png_level, dpi=(dpi_val, dpi_val))
-
-    else:  # JPEG
-        q_scale = int(params_dict.get("quality", 9))
-        q_val = max(10, min(100, 50 + q_scale * 5 if q_scale <= 10 else 95))
-        sub_opt = str(params_dict.get("subsampling", "4:4:4"))
-        sub_val = 0 if sub_opt == "4:4:4" else (1 if sub_opt == "4:2:2" else 2)
-        prog_val = bool(params_dict.get("progressive", True))
-        if rendered_arr.dtype == np.uint16:
-            arr8 = (rendered_arr / 256).astype(np.uint8)
-        elif rendered_arr.dtype != np.uint8:
-            arr8 = (rendered_arr * 255.0).clip(0, 255).astype(np.uint8)
-        else:
-            arr8 = rendered_arr
-        im = Image.fromarray(arr8, mode='RGB')
-        im.save(output_path, 'JPEG', quality=q_val, subsampling=sub_val, progressive=prog_val, dpi=(dpi_val, dpi_val))
+    """Encodes and saves the rendered image array to disk according to parameters,
+    embedding complete camera EXIF metadata bundle and target colorspace ICC profile.
+    """
+    from app_core import save_encoded_image
+    return save_encoded_image(rendered_arr, output_path, params_dict)
 
 
 class ExportTask:
@@ -276,23 +223,45 @@ class ExportQueueManager(QObject):
         return sum(1 for t in self.tasks if t.status in ("queued", "running"))
 
     def cancel_task(self, task_id):
+        cancelled_current = False
         for task in self.tasks:
             if task.task_id == task_id:
                 if task.status in ("queued", "running"):
                     task.status = "cancelled"
-                    if task is self._current_task and self._current_worker:
-                        if hasattr(self._current_worker, "cancel"):
-                            self._current_worker.cancel()
+                    task.error_msg = "任务已取消"
+                    if task is self._current_task:
+                        cancelled_current = True
+                        if self._current_worker and hasattr(self._current_worker, "cancel"):
+                            try:
+                                self._current_worker.cancel()
+                            except Exception:
+                                pass
+                        self._current_task = None
+                        self._current_worker = None
+                    self.task_progress.emit(task.task_id, task.progress)
                     self.queue_changed.emit()
                     self._update_overall_status()
                 break
+        if cancelled_current:
+            QTimer.singleShot(20, self._process_next)
 
     def cancel_all(self):
+        cancelled_any_current = False
         for task in self.tasks:
             if task.status in ("queued", "running"):
                 task.status = "cancelled"
+                task.error_msg = "任务已取消"
+                self.task_progress.emit(task.task_id, task.progress)
+                if task is self._current_task:
+                    cancelled_any_current = True
         if self._current_worker and hasattr(self._current_worker, "cancel"):
-            self._current_worker.cancel()
+            try:
+                self._current_worker.cancel()
+            except Exception:
+                pass
+        if cancelled_any_current:
+            self._current_task = None
+            self._current_worker = None
         self.queue_changed.emit()
         self._update_overall_status()
 
@@ -312,7 +281,12 @@ class ExportQueueManager(QObject):
         if not self._is_active:
             return
         if self._current_task is not None:
-            return
+            # If current task is already in inactive state, release lock immediately
+            if self._current_task.status in ("cancelled", "finished", "failed"):
+                self._current_task = None
+                self._current_worker = None
+            else:
+                return
 
         next_task = None
         for t in self.tasks:
@@ -339,17 +313,28 @@ class ExportQueueManager(QObject):
         except Exception:
             hw_mode = "global"
 
-        # Ultra-fast GPU Pipeline:
+        # Check engine mode
+        engine_mode = str(next_task.params.get("engine", "wysiwyg")).lower()
+
+        # Ultra-fast GPU Pipeline (only for WYSIWYG engine when hardware acceleration is enabled):
         # Step 1 (Thread): Load 100% full-resolution RAW image in background
         # Step 2 (Main Thread): Render on GPU via FBO shader in ~20ms (zero freeze!)
         # Step 3 (Thread): Compress & write image to disk in background
-        can_use_gpu = (hw_mode != "off" and self.canvas is not None and hasattr(self.canvas, "render_offscreen"))
+        can_use_gpu = (
+            engine_mode != "official"
+            and hw_mode != "off"
+            and self.canvas is not None
+            and hasattr(self.canvas, "render_offscreen")
+        )
         if can_use_gpu:
             self._start_gpu_export(next_task)
         else:
             self._start_cpu_export(next_task)
 
     def _start_gpu_export(self, task):
+        task.params.setdefault("source_path", task.photo_path)
+        task.params.setdefault("format", task.format_type or "jpeg")
+        task.params.setdefault("bit_depth", task.bit_depth or 8)
         base_ev = float(task.params.get("base_ev", 0.0))
         worker = _LoadImageWorker(self.engine, task.photo_path, base_ev=base_ev)
         self._current_worker = worker
@@ -413,7 +398,8 @@ class ExportQueueManager(QObject):
             self._current_worker = save_worker
 
             def _on_save_done(succ, err):
-                self._current_worker = None
+                if self._current_worker is save_worker:
+                    self._current_worker = None
                 if task.status == "cancelled":
                     self._finish_task(task, False, "任务已取消")
                 elif succ:
@@ -437,7 +423,8 @@ class ExportQueueManager(QObject):
                 self.task_progress.emit(task.task_id, val)
 
         def _on_done(succ, err):
-            self._current_worker = None
+            if self._current_worker is worker:
+                self._current_worker = None
             if task.status == "cancelled":
                 self._finish_task(task, False, "任务已取消")
             elif succ:
@@ -461,7 +448,9 @@ class ExportQueueManager(QObject):
 
         self.task_progress.emit(task.task_id, task.progress)
         self.queue_changed.emit()
-        self._current_task = None
+        if self._current_task is task or self._current_task is None or getattr(self._current_task, "status", "") in ("cancelled", "finished", "failed"):
+            self._current_task = None
+            self._current_worker = None
         self._update_overall_status()
 
         # Chain immediately to next task
@@ -502,6 +491,16 @@ class ExportQueueDialog(QDialog):
         self.setWindowTitle("导出队列管理")
         self.setFixedSize(680, 420)
 
+        try:
+            from path_utils import get_resource_dir
+            ico_path = os.path.join(get_resource_dir(), "app_icon.ico")
+            png_path = os.path.join(get_resource_dir(), "app_icon.png")
+            icon_file = ico_path if os.path.exists(ico_path) else png_path
+            if os.path.exists(icon_file):
+                self.setWindowIcon(QIcon(icon_file))
+        except Exception:
+            pass
+
         # Explicitly configure window flags to ensure WindowCloseButtonHint is 100% active on Windows
         self.setWindowFlags(
             Qt.WindowType.Dialog |
@@ -526,9 +525,42 @@ class ExportQueueDialog(QDialog):
                 padding: 4px 10px;
                 border-radius: 4px;
             }
+            QPushButton:pressed {
+                padding-top: 5px;
+                padding-bottom: 3px;
+            }
             QScrollArea {
                 border: none;
                 background: transparent;
+            }
+            QScrollBar:vertical {
+                background: rgba(20, 22, 28, 0.6);
+                width: 6px;
+                margin: 0px;
+                border-radius: 3px;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: #474d61;
+                min-height: 24px;
+                border-radius: 3px;
+                border: none;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #f59e0b;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #d97706;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                width: 0px;
+                background: none;
+                border: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+                border: none;
             }
         """)
 
@@ -574,6 +606,11 @@ class ExportQueueDialog(QDialog):
                 background: rgba(239, 68, 68, 0.28);
                 color: #ffffff;
             }
+            QPushButton:pressed {
+                background: rgba(220, 38, 38, 0.50);
+                color: #ffffff;
+                border-color: #ef4444;
+            }
         """)
         self.btn_cancel_all.clicked.connect(self.queue_mgr.cancel_all)
         hdr.addWidget(self.btn_cancel_all)
@@ -589,6 +626,11 @@ class ExportQueueDialog(QDialog):
             QPushButton:hover {
                 background: #282b37;
                 color: #e2e8f0;
+            }
+            QPushButton:pressed {
+                background: #14151a;
+                color: #cbd5e1;
+                border-color: #282b37;
             }
         """)
         self.btn_clear_hist.clicked.connect(self.queue_mgr.clear_history)
@@ -804,6 +846,11 @@ class ExportQueueDialog(QDialog):
                 background: rgba(239, 68, 68, 0.25);
                 color: #ef4444;
                 border-color: #ef4444;
+            }
+            QPushButton:pressed {
+                background: rgba(220, 38, 38, 0.50);
+                color: #ffffff;
+                border-color: #dc2626;
             }
         """)
         btn_x.clicked.connect(lambda checked=False, tid=task.task_id: self.queue_mgr.cancel_task(tid))

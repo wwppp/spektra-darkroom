@@ -27,11 +27,11 @@ else:
         sys.path.insert(0, _spektrafilm_src)
 
 import ctypes
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QPalette, QColor
+from PySide6.QtGui import QFont, QPalette, QColor, QPainter, QPen, QBrush, QPixmap
 
-from version import get_app_title
+from version import VERSION_STRING, get_app_title
 
 
 def main():
@@ -54,9 +54,11 @@ def main():
 
     from path_utils import get_resource_dir
     from PySide6.QtGui import QIcon
-    icon_path = os.path.join(get_resource_dir(), "app_icon.png")
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+    ico_path = os.path.join(get_resource_dir(), "app_icon.ico")
+    png_path = os.path.join(get_resource_dir(), "app_icon.png")
+    icon_file = ico_path if os.path.exists(ico_path) else png_path
+    if os.path.exists(icon_file):
+        app.setWindowIcon(QIcon(icon_file))
 
     # Single-instance IPC: forward arguments to running instance or start local server
     from PySide6.QtNetwork import QLocalSocket, QLocalServer
@@ -111,11 +113,30 @@ def main():
 
     splash = None
     if not launched_from_exe:
-        from PySide6.QtWidgets import QSplashScreen
-        from PySide6.QtGui import QPixmap
         splash_path = os.path.join(get_resource_dir(), "splash.png")
         if os.path.exists(splash_path):
             pix = QPixmap(splash_path)
+            try:
+                painter = QPainter(pix)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                ver_text = f"v{VERSION_STRING}"
+                font_ver = QFont("Segoe UI", 16, QFont.Weight.Bold)
+                painter.setFont(font_ver)
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(ver_text)
+                th = fm.height()
+                bw = tw + 24
+                bh = th + 8
+                bx = 898
+                by = 233
+                painter.setBrush(QBrush(QColor(20, 22, 28, 170)))
+                painter.setPen(QPen(QColor(245, 158, 11, 210), 2.0))
+                painter.drawRoundedRect(bx, by, bw, bh, 7, 7)
+                painter.setPen(QPen(QColor(245, 158, 11)))
+                painter.drawText(bx, by, bw, bh, Qt.AlignmentFlag.AlignCenter, ver_text)
+                painter.end()
+            except Exception:
+                pass
             pix.setDevicePixelRatio(2.0)
             splash = QSplashScreen(pix, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
             splash.show()

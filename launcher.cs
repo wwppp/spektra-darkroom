@@ -51,14 +51,26 @@ namespace SpektraDarkroom
             Application.SetCompatibleTextRenderingDefault(false);
 
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string pythonExe = Path.Combine(baseDir, ".venv", "Scripts", "python.exe");
+            string pythonExe = Path.Combine(baseDir, "runtime", "python.exe");
+            if (!File.Exists(pythonExe))
+            {
+                pythonExe = Path.Combine(baseDir, "runtime", "pythonw.exe");
+            }
+            if (!File.Exists(pythonExe))
+            {
+                pythonExe = Path.Combine(baseDir, "python", "python.exe");
+            }
+            if (!File.Exists(pythonExe))
+            {
+                pythonExe = Path.Combine(baseDir, ".venv", "Scripts", "python.exe");
+            }
             if (!File.Exists(pythonExe))
             {
                 pythonExe = Path.Combine(baseDir, ".venv", "Scripts", "pythonw.exe");
             }
             if (!File.Exists(pythonExe))
             {
-                MessageBox.Show("找不到 Python 虚拟环境 (.venv/Scripts/python.exe)。请确保软件目录完整。", 
+                MessageBox.Show("找不到 Python 运行环境 (runtime/python.exe 或 .venv/Scripts/python.exe)。请确保软件目录完整。", 
                                 "SpektraDarkroom", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
@@ -70,8 +82,9 @@ namespace SpektraDarkroom
                 return;
             }
 
+            string appVersion = GetAppVersion(baseDir);
             string splashPath = Path.Combine(baseDir, "resources", "splash.png");
-            SplashForm splash = new SplashForm(splashPath);
+            SplashForm splash = new SplashForm(splashPath, appVersion);
             splash.Show();
             Application.DoEvents();
 
@@ -169,17 +182,40 @@ namespace SpektraDarkroom
 
             Application.Run(splash);
         }
+
+        static string GetAppVersion(string baseDir)
+        {
+            try
+            {
+                string verFile = Path.Combine(baseDir, "version.py");
+                if (File.Exists(verFile))
+                {
+                    string content = File.ReadAllText(verFile, System.Text.Encoding.UTF8);
+                    var mMaj = System.Text.RegularExpressions.Regex.Match(content, @"VERSION_MAJOR\s*=\s*(\d+)");
+                    var mMin = System.Text.RegularExpressions.Regex.Match(content, @"VERSION_MINOR\s*=\s*(\d+)");
+                    var mPat = System.Text.RegularExpressions.Regex.Match(content, @"VERSION_PATCH\s*=\s*(\d+)");
+                    if (mMaj.Success && mMin.Success && mPat.Success)
+                    {
+                        return mMaj.Groups[1].Value + "." + mMin.Groups[1].Value + "." + mPat.Groups[1].Value;
+                    }
+                }
+            }
+            catch { }
+            return "0.1.16";
+        }
     }
 
     class SplashForm : Form
     {
         private Image splashImage;
+        private string appVersion;
         private string currentStatus = "正在初始化环境与启动暗房内核...";
         private System.Windows.Forms.Timer fadeTimer;
         private float currentOpacity = 1.0f;
 
-        public SplashForm(string imagePath)
+        public SplashForm(string imagePath, string version = "")
         {
+            this.appVersion = version;
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.CenterScreen;
             this.ShowInTaskbar = false;
@@ -238,6 +274,41 @@ namespace SpektraDarkroom
                 g.DrawImage(splashImage, new Rectangle(0, 0, this.ClientSize.Width, this.ClientSize.Height));
             }
 
+            if (!string.IsNullOrEmpty(appVersion))
+            {
+                string verText = appVersion.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? appVersion : "v" + appVersion;
+                using (Font verFont = new Font("Segoe UI", 8.0f, FontStyle.Bold))
+                {
+                    SizeF textSize = g.MeasureString(verText, verFont);
+                    float padH = 6f;
+                    float padV = 2f;
+                    float badgeW = textSize.Width + padH * 2;
+                    float badgeH = textSize.Height + padV * 2;
+                    float badgeX = 450f;
+                    float badgeY = 117f;
+
+                    RectangleF badgeRect = new RectangleF(badgeX, badgeY, badgeW, badgeH);
+                    using (GraphicsPath path = CreateRoundedRectanglePath(badgeRect, 3.5f))
+                    {
+                        using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(170, 20, 22, 28)))
+                        {
+                            g.FillPath(bgBrush, path);
+                        }
+                        using (Pen borderPen = new Pen(Color.FromArgb(210, 245, 158, 11), 1.0f))
+                        {
+                            g.DrawPath(borderPen, path);
+                        }
+                    }
+                    using (SolidBrush textBrush = new SolidBrush(Color.FromArgb(245, 158, 11)))
+                    {
+                        using (StringFormat sf = new StringFormat() { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                        {
+                            g.DrawString(verText, verFont, textBrush, new RectangleF(badgeX, badgeY + 0.5f, badgeW, badgeH), sf);
+                        }
+                    }
+                }
+            }
+
             int barY = this.ClientSize.Height - 44;
             using (SolidBrush barBrush = new SolidBrush(Color.FromArgb(230, 11, 12, 16)))
             {
@@ -258,6 +329,18 @@ namespace SpektraDarkroom
             {
                 g.DrawString(currentStatus, font, textBrush, new PointF(46, barY + 13));
             }
+        }
+
+        private static GraphicsPath CreateRoundedRectanglePath(RectangleF rect, float radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            float d = radius * 2.0f;
+            path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+            path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+            path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+            path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
         }
     }
 }

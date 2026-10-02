@@ -140,8 +140,9 @@ from PySide6.QtGui import QCursor, QFont, QIcon, QPainter, QColor, QPen
 
 class RoundScrubSlider(QSlider):
     """Horizontal slider with custom vector anti-aliased circular knob,
-    immediate click-to-reposition, double-click to reset,
-    and ignored wheel event to prevent sidebar scrolling conflict.
+    infinitely continuous smooth visual knob movement (no jerky stepping feel),
+    stepped discrete value quantization, optional color gradient track,
+    and center detent indicator.
     """
     doubleClicked = Signal()
 
@@ -149,6 +150,9 @@ class RoundScrubSlider(QSlider):
         super().__init__(orientation, parent)
         self._hover = False
         self._pressed = False
+        self._smooth_x = None
+        self.track_gradient = None
+        self.has_center_detent = False
         self.setFixedHeight(18)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -162,26 +166,62 @@ class RoundScrubSlider(QSlider):
         self.update()
         super().leaveEvent(event)
 
+    def _update_from_mouse_x(self, mouse_x):
+        w = self.width()
+        r = 6.0
+        x_start = r + 2.0
+        x_end = w - r - 2.0
+        span = max(1.0, x_end - x_start)
+
+        # 1. Continuous smooth visual position (sub-pixel precision)
+        clamped_x = max(x_start, min(x_end, float(mouse_x)))
+        self._smooth_x = clamped_x
+
+        # 2. Stepped integer value quantization
+        frac = (clamped_x - x_start) / span
+        step_val = self.minimum() + frac * (self.maximum() - self.minimum())
+        quantized = int(round(step_val))
+        if quantized != self.value():
+            self.setValue(quantized)
+        self.update()
+
+    def set_continuous_ratio(self, ratio: float):
+        """Set continuous floating visual knob position from external continuous ratio [0.0..1.0]."""
+        w = self.width()
+        r = 6.0
+        x_start = r + 2.0
+        x_end = w - r - 2.0
+        span = max(1.0, x_end - x_start)
+        clamped_ratio = max(0.0, min(1.0, float(ratio)))
+        self._smooth_x = x_start + clamped_ratio * span
+        self.update()
+
+    def clear_continuous(self):
+        """Clear external continuous visual knob position and snap to quantized value."""
+        self._smooth_x = None
+        self.update()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._pressed = True
-            w = max(1, self.width() - 14)
-            val = self.minimum() + ((event.position().x() - 7) / float(w)) * (self.maximum() - self.minimum())
-            self.setValue(int(round(max(self.minimum(), min(self.maximum(), val)))))
-            self.update()
-        super().mousePressEvent(event)
+            self._update_from_mouse_x(event.position().x())
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._pressed:
-            w = max(1, self.width() - 14)
-            val = self.minimum() + ((event.position().x() - 7) / float(w)) * (self.maximum() - self.minimum())
-            self.setValue(int(round(max(self.minimum(), min(self.maximum(), val)))))
-            self.update()
-        super().mouseMoveEvent(event)
+            self._update_from_mouse_x(event.position().x())
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._pressed = False
-        self.update()
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._pressed = False
+            self._smooth_x = None
+            self.update()
+            event.accept()
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -207,21 +247,43 @@ class RoundScrubSlider(QSlider):
         x_end = w - r - 2.0
         span = max(1.0, x_end - x_start)
 
-        frac = 0.0
-        if self.maximum() > self.minimum():
-            frac = (self.value() - self.minimum()) / float(self.maximum() - self.minimum())
-            frac = max(0.0, min(1.0, frac))
+        # Knob center X calculation: continuous if dragging/scrubbing, snapped if idle
+        if self._smooth_x is not None:
+            knob_cx = max(x_start, min(x_end, self._smooth_x))
+        else:
+            frac = 0.0
+            if self.maximum() > self.minimum():
+                frac = (self.value() - self.minimum()) / float(self.maximum() - self.minimum())
+                frac = max(0.0, min(1.0, frac))
+            knob_cx = x_start + frac * span
 
-        knob_cx = x_start + frac * span
-
-        # 1. Background Groove
+        # 1. Background Groove (Strict 3.0px height as requested)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(42, 44, 52))
-        painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
+        if self.track_gradient:
+            from PySide6.QtGui import QLinearGradient
+            grad = QLinearGradient(x_start, cy, x_end, cy)
+            for stop, color in self.track_gradient:
+                grad.setColorAt(stop, color)
+            painter.setBrush(grad)
+            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
+            # Subtle 0.5px border to ensure contrast on dark backgrounds
+            painter.setPen(QColor(0, 0, 0, 100))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
+            painter.setPen(Qt.PenStyle.NoPen)
+        else:
+            painter.setBrush(QColor(42, 44, 52))
+            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
+            # Active subpage track for normal uncolored slider
+            painter.setBrush(QColor(90, 95, 110))
+            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, max(0.0, knob_cx - x_start), 3.0), 1.5, 1.5)
 
-        # 2. Active subpage track
-        painter.setBrush(QColor(90, 95, 110))
-        painter.drawRoundedRect(QRectF(x_start, cy - 1.5, max(0.0, knob_cx - x_start), 3.0), 1.5, 1.5)
+        # 2. Optional Center Detent tick mark (1px clean mark for center-balanced sliders)
+        if self.has_center_detent:
+            mid_x = x_start + span * 0.5
+            painter.setPen(QColor(255, 255, 255, 150))
+            painter.drawLine(QPointF(mid_x, cy - 2.5), QPointF(mid_x, cy + 2.5))
+            painter.setPen(Qt.PenStyle.NoPen)
 
         # 3. Vector circular knob
         if self._pressed:
@@ -248,7 +310,8 @@ class AdobeScrubSlider(QWidget):
     valueChanged = Signal(float)
     sliderReleased = Signal()
 
-    def __init__(self, label_text, min_val, max_val, default_val, step=0.01, unit="", decimals=2, tooltip="", parent=None):
+    def __init__(self, label_text, min_val, max_val, default_val, step=0.01, unit="", decimals=2, tooltip="",
+                 track_gradient=None, has_center_detent=False, parent=None):
         super().__init__(parent)
         self.min_val = float(min_val)
         self.max_val = float(max_val)
@@ -258,6 +321,8 @@ class AdobeScrubSlider(QWidget):
         self.unit = unit
         self.decimals = decimals
         self.tooltip_text = tooltip
+        self.track_gradient = track_gradient
+        self.has_center_detent = has_center_detent
         self._is_updating = False
 
         self.steps_total = int(round((self.max_val - self.min_val) / self.step))
@@ -285,6 +350,7 @@ class AdobeScrubSlider(QWidget):
         header_layout.addWidget(self.label, 1)
 
         self.value_edit = QLineEdit()
+        self.value_edit.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.value_edit.setFixedWidth(52)
         self.value_edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.value_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -309,6 +375,7 @@ class AdobeScrubSlider(QWidget):
         header_layout.addWidget(self.value_edit)
 
         self.reset_btn = QPushButton()
+        self.reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.reset_btn.setFixedSize(16, 16)
         self.reset_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -339,6 +406,9 @@ class AdobeScrubSlider(QWidget):
             QPushButton:hover {
                 background: #282a36;
             }
+            QPushButton:pressed {
+                background: #1e202a;
+            }
         """)
         self.reset_btn.clicked.connect(self.reset)
         header_layout.addWidget(self.reset_btn)
@@ -347,6 +417,8 @@ class AdobeScrubSlider(QWidget):
 
         # Slider track with perfectly round knob
         self.slider = RoundScrubSlider(Qt.Orientation.Horizontal)
+        self.slider.track_gradient = self.track_gradient
+        self.slider.has_center_detent = self.has_center_detent
         self.slider.setMinimumWidth(30)
         self.slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.slider.setRange(0, self.steps_total)
@@ -356,6 +428,14 @@ class AdobeScrubSlider(QWidget):
         self.slider.sliderReleased.connect(self._on_slider_released)
         self.slider.doubleClicked.connect(self.reset)
         main_layout.addWidget(self.slider)
+
+    def set_track_gradient(self, gradient, center_detent=False):
+        self.track_gradient = gradient
+        self.has_center_detent = center_detent
+        if hasattr(self, 'slider'):
+            self.slider.track_gradient = gradient
+            self.slider.has_center_detent = center_detent
+            self.slider.update()
 
         self._update_display(self.default_val)
 
@@ -411,13 +491,22 @@ class AdobeScrubSlider(QWidget):
         if not hasattr(self, "_precise_val") or self._precise_val is None:
             self._precise_val = float(self.current_val)
 
-        # Micro-adjustment rate calibrated: 0.05 * step per pixel
-        # Eliminates rapid jumping and ensures smooth, continuous analog response
-        step_factor = self.step * 0.05
+        # Micro-adjustment rate: 0.10 * step per pixel
+        step_factor = self.step * 0.10
         self._precise_val += (delta_x * step_factor)
         self._precise_val = max(self.min_val, min(self.max_val, self._precise_val))
 
-        rounded_val = round(self._precise_val, self.decimals)
+        # Drive visual continuous slider knob smoothly without jumping
+        val_range = float(self.max_val - self.min_val)
+        if val_range > 0:
+            ratio = (self._precise_val - self.min_val) / val_range
+            self.slider.set_continuous_ratio(ratio)
+
+        # Discrete quantization for value and engine updates
+        quantized_steps = round((self._precise_val - self.min_val) / self.step)
+        rounded_val = self.min_val + quantized_steps * self.step
+        rounded_val = round(max(self.min_val, min(self.max_val, rounded_val)), self.decimals)
+
         if rounded_val != self.current_val:
             self.current_val = rounded_val
             self._update_display(rounded_val, sync_precise=False)
@@ -425,6 +514,7 @@ class AdobeScrubSlider(QWidget):
 
     def _on_scrub_finished(self):
         self._precise_val = float(self.current_val)
+        self.slider.clear_continuous()
         self.sliderReleased.emit()
 
     def _on_text_edited(self):

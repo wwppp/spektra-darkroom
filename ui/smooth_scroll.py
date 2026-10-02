@@ -18,6 +18,72 @@ class SmoothScrollArea(QScrollArea):
         self.setWidgetResizable(True)
         self._target_value = None
 
+        # Unified Darkroom Industrial Scrollbar Stylesheet
+        self.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: rgba(18, 19, 24, 0.75);
+                width: 6px;
+                margin: 0px;
+                border-radius: 3px;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: #474d61;
+                min-height: 24px;
+                border-radius: 3px;
+                border: none;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #f59e0b;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #d97706;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                width: 0px;
+                background: none;
+                border: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+                border: none;
+            }
+            QScrollBar:horizontal {
+                background: rgba(18, 19, 24, 0.75);
+                height: 6px;
+                margin: 0px;
+                border-radius: 3px;
+                border: none;
+            }
+            QScrollBar::handle:horizontal {
+                background: #474d61;
+                min-width: 24px;
+                border-radius: 3px;
+                border: none;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #f59e0b;
+            }
+            QScrollBar::handle:horizontal:pressed {
+                background: #d97706;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                height: 0px;
+                width: 0px;
+                background: none;
+                border: none;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
+                border: none;
+            }
+        """)
+
         # Animated property on scrollbar
         sb = self.horizontalScrollBar() if self.is_horizontal else self.verticalScrollBar()
         self._anim = QPropertyAnimation(sb, b"value", self)

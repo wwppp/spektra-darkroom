@@ -62,6 +62,11 @@ class ExportImageDialog(QDialog):
             last = config_manager.get_last_export_settings()
             if not last:
                 return
+            eng = last.get("engine", "wysiwyg")
+            idx_eng = self.combo_engine.findData(eng)
+            if idx_eng >= 0:
+                self.combo_engine.setCurrentIndex(idx_eng)
+
             fmt = last.get("format", "jpeg")
             idx = self.combo_format.findData(fmt)
             if idx >= 0:
@@ -166,6 +171,20 @@ class ExportImageDialog(QDialog):
         """)
         card_layout = QVBoxLayout(card)
         card_layout.setSpacing(12)
+
+        # Row 0: Rendering Engine Selection
+        r0 = QHBoxLayout()
+        r0.setSpacing(12)
+        lbl_eng = QLabel("冲印引擎:")
+        lbl_eng.setFixedWidth(65)
+        r0.addWidget(lbl_eng)
+        self.combo_engine = QComboBox()
+        self.combo_engine.addItem("多核暗房 (所见即所得)", "wysiwyg")
+        self.combo_engine.addItem("官方光谱基准", "official")
+        self.combo_engine.setItemData(0, "多核并行高精度冲印，与视口画面 100% 视觉对齐", Qt.ItemDataRole.ToolTipRole)
+        self.combo_engine.setItemData(1, "官方 spektrafilm 原生端到端物理光谱模拟管线", Qt.ItemDataRole.ToolTipRole)
+        r0.addWidget(self.combo_engine, 1)
+        card_layout.addLayout(r0)
 
         # Row 1: Format & Color Space
         r1 = QHBoxLayout()
@@ -492,6 +511,7 @@ class ExportImageDialog(QDialog):
         raw_path = normalize_path(raw_path)
 
         return {
+            "engine": self.combo_engine.currentData() if hasattr(self, 'combo_engine') else "wysiwyg",
             "format": self.combo_format.currentData(),
             "colorspace": self.combo_colorspace.currentData(),
             "bit_depth": self.combo_depth.currentData(),

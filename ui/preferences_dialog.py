@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from path_utils import get_resource_dir
-from ui.window_utils import apply_dark_titlebar
+from ui.window_utils import apply_dark_titlebar, show_dark_message_box
 import config_manager
 import session_cache_manager
 
@@ -25,8 +25,8 @@ import session_cache_manager
 class PreferencesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("首选项 (Preferences)")
-        self.setFixedSize(540, 420)
+        self.setWindowTitle("首选项")
+        self.setFixedSize(520, 440)
         self.setModal(True)
 
         icon_path = os.path.join(get_resource_dir(), "icons", "dlg_prefs.png")
@@ -206,6 +206,35 @@ class PreferencesDialog(QDialog):
             QPushButton#btnSave:pressed {{
                 background: #b45309;
             }}
+            QScrollBar:vertical {{
+                background: rgba(18, 19, 24, 0.75);
+                width: 6px;
+                margin: 0px;
+                border-radius: 3px;
+                border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #474d61;
+                min-height: 24px;
+                border-radius: 3px;
+                border: none;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: #f59e0b;
+            }}
+            QScrollBar::handle:vertical:pressed {{
+                background: #d97706;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+                width: 0px;
+                background: none;
+                border: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+                border: none;
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -221,38 +250,38 @@ class PreferencesDialog(QDialog):
         l_ren.setSpacing(14)
 
         r_hw = QHBoxLayout()
-        lbl_hw = QLabel("硬件加速模式:")
-        lbl_hw.setFixedWidth(115)
+        lbl_hw = QLabel("硬件加速:")
+        lbl_hw.setFixedWidth(100)
         r_hw.addWidget(lbl_hw)
         self.combo_hw_accel = QComboBox()
-        self.combo_hw_accel.addItem("关 (纯 CPU 渲染)", "off")
-        self.combo_hw_accel.addItem("仅缩略图与视口", "preview_only")
-        self.combo_hw_accel.addItem("全局 (GPU 加速导出)", "global")
+        self.combo_hw_accel.addItem("关闭", "off")
+        self.combo_hw_accel.addItem("视口与缩略图", "preview_only")
+        self.combo_hw_accel.addItem("全局", "global")
         r_hw.addWidget(self.combo_hw_accel, 1)
         l_ren.addLayout(r_hw)
 
         r_res = QHBoxLayout()
-        lbl_res = QLabel("视口实时预览分辨率:")
-        lbl_res.setFixedWidth(115)
+        lbl_res = QLabel("预览分辨率:")
+        lbl_res.setFixedWidth(100)
         r_res.addWidget(lbl_res)
         self.combo_preview_res = QComboBox()
-        self.combo_preview_res.addItem("小 (1080P)", 1440)
-        self.combo_preview_res.addItem("中 (2K - 推荐)", 2048)
-        self.combo_preview_res.addItem("大 (4K 极致)", 3840)
-        self.combo_preview_res.addItem("全分辨率 (原始尺寸，100% 细节)", 0)
+        self.combo_preview_res.addItem("1080P", 1440)
+        self.combo_preview_res.addItem("2K", 2048)
+        self.combo_preview_res.addItem("4K", 3840)
+        self.combo_preview_res.addItem("全分辨率", 0)
         r_res.addWidget(self.combo_preview_res, 1)
         l_ren.addLayout(r_res)
 
-        self.chk_hq_preview = QCheckBox("高画质视口双线性平滑与抗锯齿 (HQ Viewport Anti-Aliasing)")
+        self.chk_hq_preview = QCheckBox("视口平滑与抗锯齿")
         self.chk_hq_preview.setChecked(True)
         l_ren.addWidget(self.chk_hq_preview)
 
         r_cs = QHBoxLayout()
-        lbl_cs = QLabel("默认工作色彩空间:")
-        lbl_cs.setFixedWidth(115)
+        lbl_cs = QLabel("工作色彩空间:")
+        lbl_cs.setFixedWidth(100)
         r_cs.addWidget(lbl_cs)
         self.combo_default_cs = QComboBox()
-        self.combo_default_cs.addItems(["sRGB (标准通用)", "Display P3 (广色域屏)", "Adobe RGB (1998)"])
+        self.combo_default_cs.addItems(["sRGB", "Display P3", "Adobe RGB"])
         r_cs.addWidget(self.combo_default_cs, 1)
         l_ren.addLayout(r_cs)
 
@@ -266,65 +295,39 @@ class PreferencesDialog(QDialog):
         l_dr.setSpacing(14)
 
         r_fmt = QHBoxLayout()
-        r_fmt.addWidget(QLabel("默认底片画幅规格:"))
+        lbl_fmt = QLabel("默认画幅:")
+        lbl_fmt.setFixedWidth(100)
+        r_fmt.addWidget(lbl_fmt)
         self.combo_default_fmt = QComboBox()
-        self.combo_default_fmt.addItem("35mm 标准全画幅", 35.0)
-        self.combo_default_fmt.addItem("16mm 独立电影卷", 16.0)
-        self.combo_default_fmt.addItem("120 中画幅 (6x6)", 60.0)
-        self.combo_default_fmt.addItem("4x5 大画幅", 100.0)
+        self.combo_default_fmt.addItem("35mm", 35.0)
+        self.combo_default_fmt.addItem("16mm", 16.0)
+        self.combo_default_fmt.addItem("120 (6x6)", 60.0)
+        self.combo_default_fmt.addItem("4x5", 100.0)
         r_fmt.addWidget(self.combo_default_fmt, 1)
         l_dr.addLayout(r_fmt)
 
-        self.chk_restore_last_files = QCheckBox("启动时恢复上一次会话工程 (.sdss)")
+        self.chk_restore_last_files = QCheckBox("启动时打开上次工程")
         self.chk_restore_last_files.setChecked(True)
         l_dr.addWidget(self.chk_restore_last_files)
 
-        self.chk_restore_geo = QCheckBox("启动时恢复上次窗口位置与工作区分割比例")
+        self.chk_restore_geo = QCheckBox("记住窗口位置与布局")
         self.chk_restore_geo.setChecked(True)
         l_dr.addWidget(self.chk_restore_geo)
 
-        # Item 3: File Association (.sdss)
         sep_assoc = QFrame()
         sep_assoc.setFrameShape(QFrame.Shape.HLine)
-        sep_assoc.setStyleSheet("background: #252834; max-height: 1px; margin-top: 6px; margin-bottom: 6px;")
+        sep_assoc.setStyleSheet("background: #252834; max-height: 1px; margin-top: 4px; margin-bottom: 4px;")
         l_dr.addWidget(sep_assoc)
 
         r_assoc = QHBoxLayout()
         r_assoc.setSpacing(10)
-        lbl_assoc_info = QLabel("系统文件关联 (.sdss 会话工程):")
+        lbl_assoc_info = QLabel("文件关联:")
         lbl_assoc_info.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 500;")
         r_assoc.addWidget(lbl_assoc_info, 1)
 
-        self.btn_assoc = QPushButton("一键关联 .sdss 会话工程")
-        self.btn_assoc.setToolTip("将 Windows 系统中的 .sdss 文件与 SpektraDarkroom 关联，支持双击直接启动并恢复工程")
-        self.btn_assoc.setStyleSheet("""
-            QPushButton {
-                background: #1e202a;
-                border: 1px solid #3d4255;
-                color: #f59e0b;
-                padding: 5px 14px;
-                border-radius: 4px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #282c3c;
-                border-color: #f59e0b;
-                color: #fbbf24;
-            }
-        """)
-        if config_manager.is_sdss_file_associated():
-            self.btn_assoc.setText("✓ 已关联 .sdss 工程")
-            self.btn_assoc.setStyleSheet("""
-                QPushButton {
-                    background: #14231f;
-                    border: 1px solid #10b981;
-                    color: #10b981;
-                    padding: 5px 14px;
-                    border-radius: 4px;
-                    font-weight: 500;
-                }
-            """)
-        self.btn_assoc.clicked.connect(self._on_register_association)
+        self.btn_assoc = QPushButton()
+        self._update_assoc_button()
+        self.btn_assoc.clicked.connect(self._on_toggle_association)
         r_assoc.addWidget(self.btn_assoc)
         l_dr.addLayout(r_assoc)
 
@@ -337,18 +340,45 @@ class PreferencesDialog(QDialog):
         l_ca.setContentsMargins(16, 16, 16, 16)
         l_ca.setSpacing(14)
 
+        r_max_size = QHBoxLayout()
+        lbl_max_size = QLabel("缓存容量上限:")
+        lbl_max_size.setFixedWidth(100)
+        r_max_size.addWidget(lbl_max_size)
+        self.combo_cache_max_size = QComboBox()
+        self.combo_cache_max_size.addItem("500 MB", 0.5)
+        self.combo_cache_max_size.addItem("1 GB", 1.0)
+        self.combo_cache_max_size.addItem("2 GB", 2.0)
+        self.combo_cache_max_size.addItem("5 GB", 5.0)
+        self.combo_cache_max_size.addItem("10 GB", 10.0)
+        self.combo_cache_max_size.addItem("不限制", 0.0)
+        r_max_size.addWidget(self.combo_cache_max_size, 1)
+        l_ca.addLayout(r_max_size)
+
+        r_interval = QHBoxLayout()
+        lbl_interval = QLabel("自动清理周期:")
+        lbl_interval.setFixedWidth(100)
+        r_interval.addWidget(lbl_interval)
+        self.combo_clean_interval = QComboBox()
+        self.combo_clean_interval.addItem("7 天", 7)
+        self.combo_clean_interval.addItem("10 天", 10)
+        self.combo_clean_interval.addItem("15 天", 15)
+        self.combo_clean_interval.addItem("30 天", 30)
+        self.combo_clean_interval.addItem("从不", 0)
+        r_interval.addWidget(self.combo_clean_interval, 1)
+        l_ca.addLayout(r_interval)
+
         r_cache = QHBoxLayout()
-        self.lbl_cache_size = QLabel("3D LUT 磁盘缓存占用: 计算中...")
+        self.lbl_cache_size = QLabel("LUT 缓存: 计算中...")
         r_cache.addWidget(self.lbl_cache_size, 1)
-        btn_clean_cache = QPushButton("清理 LUT 缓存")
+        btn_clean_cache = QPushButton("清理")
         btn_clean_cache.clicked.connect(self._clean_lut_cache)
         r_cache.addWidget(btn_clean_cache)
         l_ca.addLayout(r_cache)
 
         r_sess = QHBoxLayout()
-        self.lbl_sess_cache_size = QLabel("底片会话快显缓存: 计算中...")
+        self.lbl_sess_cache_size = QLabel("底片缓存: 计算中...")
         r_sess.addWidget(self.lbl_sess_cache_size, 1)
-        btn_clean_sess = QPushButton("清理底片缓存")
+        btn_clean_sess = QPushButton("清理")
         btn_clean_sess.clicked.connect(self._clean_sess_cache)
         r_sess.addWidget(btn_clean_sess)
         l_ca.addLayout(r_sess)
@@ -365,7 +395,7 @@ class PreferencesDialog(QDialog):
         btn_cancel.clicked.connect(self.reject)
         footer.addWidget(btn_cancel)
 
-        btn_save = QPushButton("保存设置", objectName="btnSave")
+        btn_save = QPushButton("保存", objectName="btnSave")
         btn_save.clicked.connect(self._save_preferences)
         footer.addWidget(btn_save)
 
@@ -396,7 +426,74 @@ class PreferencesDialog(QDialog):
                 self.combo_default_fmt.setCurrentIndex(i)
                 break
 
+        max_gb = float(prefs.get("session_cache_max_gb", 2.0))
+        idx_max = -1
+        for i in range(self.combo_cache_max_size.count()):
+            if abs(float(self.combo_cache_max_size.itemData(i)) - max_gb) < 0.05:
+                idx_max = i
+                break
+        self.combo_cache_max_size.setCurrentIndex(idx_max if idx_max >= 0 else 2)
+
+        interval_days = int(prefs.get("session_cache_clean_interval_days", 7))
+        idx_intv = self.combo_clean_interval.findData(interval_days)
+        self.combo_clean_interval.setCurrentIndex(idx_intv if idx_intv >= 0 else 0)
+
         self._refresh_cache_size()
+
+    def _update_assoc_button(self):
+        if config_manager.is_sdss_file_associated():
+            self.btn_assoc.setText("取消关联")
+            self.btn_assoc.setToolTip("清除注册表中的 .sdss 文件关联")
+            self.btn_assoc.setStyleSheet("""
+                QPushButton {
+                    background: #2a1619;
+                    border: 1px solid #7f1d1d;
+                    color: #f87171;
+                    padding: 5px 14px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background: #3c1a20;
+                    border-color: #ef4444;
+                    color: #fca5a5;
+                }
+                QPushButton:pressed {
+                    background: #200f13;
+                    border-color: #b91c1c;
+                    color: #f87171;
+                }
+            """)
+        else:
+            self.btn_assoc.setText("关联 .sdss")
+            self.btn_assoc.setToolTip("关联 .sdss 文件，支持双击直接打开")
+            self.btn_assoc.setStyleSheet("""
+                QPushButton {
+                    background: #1e202a;
+                    border: 1px solid #3d4255;
+                    color: #f59e0b;
+                    padding: 5px 14px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background: #282c3c;
+                    border-color: #f59e0b;
+                    color: #fbbf24;
+                }
+                QPushButton:pressed {
+                    background: #14151a;
+                    border-color: #d97706;
+                    color: #d97706;
+                }
+            """)
+
+    def _on_toggle_association(self):
+        if config_manager.is_sdss_file_associated():
+            config_manager.unregister_sdss_file_association()
+        else:
+            config_manager.register_sdss_file_association()
+        self._update_assoc_button()
 
     def _refresh_cache_size(self):
         try:
@@ -404,17 +501,17 @@ class PreferencesDialog(QDialog):
             if os.path.exists(cache_dir):
                 total_bytes = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in os.listdir(cache_dir) if os.path.isfile(os.path.join(cache_dir, f)))
                 sz_mb = total_bytes / (1024.0 * 1024.0)
-                self.lbl_cache_size.setText(f"3D LUT 磁盘缓存: {sz_mb:.1f} MB")
+                self.lbl_cache_size.setText(f"LUT 缓存: {sz_mb:.1f} MB")
             else:
-                self.lbl_cache_size.setText("3D LUT 磁盘缓存: 0.0 MB")
+                self.lbl_cache_size.setText("LUT 缓存: 0.0 MB")
         except Exception:
-            self.lbl_cache_size.setText("3D LUT 磁盘缓存: 0.0 MB")
+            self.lbl_cache_size.setText("LUT 缓存: 0.0 MB")
 
         try:
             sess_mb = session_cache_manager.get_cache_size_mb()
-            self.lbl_sess_cache_size.setText(f"底片会话快显缓存: {sess_mb:.1f} MB")
+            self.lbl_sess_cache_size.setText(f"底片缓存: {sess_mb:.1f} MB")
         except Exception:
-            self.lbl_sess_cache_size.setText("底片会话快显缓存: 0.0 MB")
+            self.lbl_sess_cache_size.setText("底片缓存: 0.0 MB")
 
     def _clean_lut_cache(self):
         try:
@@ -424,17 +521,17 @@ class PreferencesDialog(QDialog):
                 shutil.rmtree(cache_dir, ignore_errors=True)
                 os.makedirs(cache_dir, exist_ok=True)
             self._refresh_cache_size()
-            QMessageBox.information(self, "完成", "3D LUT 物理缓存已清空。")
+            show_dark_message_box(self, "完成", "LUT 缓存已清空。")
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"清理失败: {e}")
+            show_dark_message_box(self, "错误", f"清理失败: {e}", icon=QMessageBox.Icon.Warning)
 
     def _clean_sess_cache(self):
         try:
             session_cache_manager.clear_cache()
             self._refresh_cache_size()
-            QMessageBox.information(self, "完成", "底片会话快显缓存已清空。")
+            show_dark_message_box(self, "完成", "底片缓存已清空。")
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"清理底片缓存失败: {e}")
+            show_dark_message_box(self, "错误", f"清理失败: {e}", icon=QMessageBox.Icon.Warning)
 
     def _save_preferences(self):
         cfg = config_manager.load_config()
@@ -452,36 +549,9 @@ class PreferencesDialog(QDialog):
         prefs["restore_last_files"] = restore_val
         prefs["restore_window_state"] = self.chk_restore_geo.isChecked()
         prefs["default_film_format"] = float(self.combo_default_fmt.currentData())
+        prefs["session_cache_max_gb"] = float(self.combo_cache_max_size.currentData())
+        prefs["session_cache_clean_interval_days"] = int(self.combo_clean_interval.currentData())
 
         config_manager.save_config(cfg)
         self.accept()
-
-    def _on_register_association(self):
-        succ = config_manager.register_sdss_file_association()
-        if succ:
-            self.btn_assoc.setText("✓ 已关联 .sdss 工程")
-            self.btn_assoc.setToolTip("已成功关联系统中的 .sdss 文件，支持双击直接打开")
-            self.btn_assoc.setStyleSheet("""
-                QPushButton {
-                    background: #14231f;
-                    border: 1px solid #10b981;
-                    color: #10b981;
-                    padding: 5px 14px;
-                    border-radius: 4px;
-                    font-weight: 500;
-                }
-            """)
-        else:
-            self.btn_assoc.setText("⚠ 关联失败")
-            self.btn_assoc.setToolTip("未能写入注册表，请检查安全防护软件拦截")
-            self.btn_assoc.setStyleSheet("""
-                QPushButton {
-                    background: rgba(239, 68, 68, 0.15);
-                    border: 1px solid rgba(239, 68, 68, 0.50);
-                    color: #f87171;
-                    padding: 5px 14px;
-                    border-radius: 4px;
-                    font-weight: 500;
-                }
-            """)
 

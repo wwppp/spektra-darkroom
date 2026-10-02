@@ -56,6 +56,7 @@ class ParameterGroupCard(QWidget):
         header_layout.addWidget(self.title_label, 1)
 
         self.reset_btn = QPushButton("重置")
+        self.reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.reset_btn.setStyleSheet("""
             QPushButton {
@@ -93,6 +94,41 @@ class ParameterGroupCard(QWidget):
 
     def addLayout(self, layout):
         self.content_layout.addLayout(layout)
+
+    def set_reset_enabled(self, enabled: bool):
+        """Enable or disable the section's reset button, graying it out when disabled."""
+        self.reset_btn.setEnabled(enabled)
+        if enabled:
+            self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.reset_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    color: #7b8092;
+                    font-size: 10.5px;
+                    padding: 2px 4px;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    color: #f59e0b;
+                    background: rgba(245, 158, 11, 0.12);
+                }
+                QPushButton:pressed {
+                    color: #d97706;
+                    background: rgba(245, 158, 11, 0.22);
+                }
+            """)
+        else:
+            self.reset_btn.setCursor(Qt.CursorShape.ArrowCursor)
+            self.reset_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    color: #383a48;
+                    font-size: 10.5px;
+                    padding: 2px 4px;
+                }
+            """)
 
     def set_expanded(self, expanded: bool, animate: bool = False):
         """No-op compatibility stub (groups are always tiled and expanded)."""

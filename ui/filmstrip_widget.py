@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 )
 import sdc_manager
 from path_utils import get_icon_path, get_resource_dir
-from ui.window_utils import apply_dark_titlebar, get_darkroom_menu_style
+from ui.window_utils import apply_dark_titlebar, get_darkroom_menu_style, get_icon
 from ui.smooth_scroll import SmoothScrollArea
 
 
@@ -270,6 +270,9 @@ class FilmstripItemWidget(QFrame):
         self.photo_data["is_dirty"] = is_dirty
         if is_dirty:
             self.photo_data["is_edited"] = True
+        else:
+            p_path = self.photo_data.get("path")
+            self.photo_data["is_edited"] = bool(p_path and sdc_manager.has_sdc(p_path))
         self.update()
 
 
@@ -576,24 +579,19 @@ class FilmstripWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
-        icon_exp = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
-        icon_quick = os.path.join(get_resource_dir(), "icons", "quick_export.png")
-        icon_del = os.path.join(get_resource_dir(), "icons", "dlg_discard.png")
-
         quick_label = "快速导出 (上次参数)" if sel_count == 1 else f"快速导出选中底片 ({sel_count} 张)"
         act_quick = menu.addAction(quick_label)
+        act_quick.setIcon(get_icon("quick_export.png"))
         act_quick.triggered.connect(lambda: self.quickExportRequested.emit(list(self._selected_ids)))
 
         export_label = f"导出此底片..." if sel_count == 1 else f"导出选中底片 ({sel_count} 张)..."
         act_export = menu.addAction(export_label)
-        if os.path.exists(icon_exp):
-            act_export.setIcon(QIcon(icon_exp))
+        act_export.setIcon(get_icon("dlg_export.png"))
         act_export.triggered.connect(lambda: self.batchExportRequested.emit(list(self._selected_ids)))
 
         remove_label = "从底片库移除" if sel_count == 1 else f"从底片库移除 ({sel_count} 项)"
         act_remove = menu.addAction(remove_label)
-        if os.path.exists(icon_del):
-            act_remove.setIcon(QIcon(icon_del))
+        act_remove.setIcon(get_icon("dlg_discard.png"))
         act_remove.triggered.connect(lambda: self.photosRemoved.emit(list(self._selected_ids)))
 
         menu.addSeparator()
@@ -609,6 +607,7 @@ class FilmstripWidget(QWidget):
 
         sdc_label = "删除暗房配置 (.sdc)" if sel_count == 1 else f"删除暗房配置 (.sdc) ({sel_count} 项)"
         act_clear_sdc = menu.addAction(sdc_label)
+        act_clear_sdc.setIcon(get_icon("reset.png"))
         act_clear_sdc.setEnabled(can_clear_sdc)
         act_clear_sdc.triggered.connect(lambda: self.clearSdcRequested.emit(list(self._selected_ids)))
 
@@ -628,12 +627,8 @@ class FilmstripWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
-        icon_imp = os.path.join(get_resource_dir(), "icons", "dlg_import.png")
-        icon_del = os.path.join(get_resource_dir(), "icons", "dlg_discard.png")
-
         act_add = menu.addAction("导入底片...")
-        if os.path.exists(icon_imp):
-            act_add.setIcon(QIcon(icon_imp))
+        act_add.setIcon(get_icon("dlg_import.png"))
         act_add.triggered.connect(self.addRequested.emit)
 
         menu.addSeparator()
@@ -643,8 +638,7 @@ class FilmstripWidget(QWidget):
 
         if self._photos_list:
             act_clear = menu.addAction("清空底片库")
-            if os.path.exists(icon_del):
-                act_clear.setIcon(QIcon(icon_del))
+            act_clear.setIcon(get_icon("dlg_discard.png"))
             act_clear.triggered.connect(self.clearRequested.emit)
 
         menu.exec(global_pos)

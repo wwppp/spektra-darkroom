@@ -48,6 +48,9 @@ DEFAULT_CONFIG = {
         "color_space": "sRGB",
         "preview_quality": "full",
         "auto_meter_on_import": False,
+        "session_cache_max_gb": 2.0,
+        "session_cache_clean_interval_days": 7,
+        "session_cache_last_clean_time": 0.0,
     },
     "recent_files": [],
     "recent_sessions": [],
@@ -373,14 +376,12 @@ def save_last_session_path(session_path: str = None):
 
 def get_last_session_path() -> str:
     """Returns the last opened or saved .sdss session file path if it exists on disk,
-    or falls back to auto_saved_session.sdss if available.
+    or None if no session was active or record is empty.
     """
     cfg = load_config()
     p = cfg.get("last_session_path")
     if p and os.path.exists(p):
         return os.path.abspath(p)
-    if has_auto_saved_session():
-        return get_auto_saved_session_path()
     return None
 
 
@@ -412,6 +413,7 @@ def get_last_export_settings() -> dict:
     """Returns last used export settings dictionary."""
     cfg = load_config()
     return cfg.get("preferences", {}).get("last_export_settings", {
+        "engine": "wysiwyg",
         "format": "jpeg",
         "bit_depth": 8,
         "quality": 95,
@@ -500,6 +502,47 @@ def is_sdss_file_associated() -> bool:
             return val == "SpektraDarkroom.Session"
     except Exception:
         return False
+
+
+def unregister_sdss_file_association() -> bool:
+    """Removes .sdss file association and ProgID from HKCU registry."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+
+        def delete_key_tree(root_key, subkey):
+            try:
+                with winreg.OpenKey(root_key, subkey, 0, winreg.KEY_ALL_ACCESS) as hkey:
+                    while True:
+                        try:
+                            child = winreg.EnumKey(hkey, 0)
+                            delete_key_tree(hkey, child)
+                        except OSError:
+                            break
+                winreg.DeleteKey(root_key, subkey)
+            except FileNotFoundError:
+                pass
+
+        # 1. Delete HKCU\Software\Classes\.sdss
+        delete_key_tree(winreg.HKEY_CURRENT_USER, r"Software\Classes\.sdss")
+
+        # 2. Delete HKCU\Software\Classes\SpektraDarkroom.Session
+        delete_key_tree(winreg.HKEY_CURRENT_USER, r"Software\Classes\SpektraDarkroom.Session")
+
+        # 3. Notify Windows Shell of association change
+        try:
+            SHCNE_ASSOCCHANGED = 0x08000000
+            SHCNF_IDLIST = 0x0000
+            ctypes.windll.shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+        except Exception:
+            pass
+
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to unregister .sdss file association: {e}")
+        return False
+
 
 
 

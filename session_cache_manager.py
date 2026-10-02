@@ -10,6 +10,7 @@ refresh if original media files are modified or replaced.
 
 import os
 import sys
+import time
 import json
 import hashlib
 import logging
@@ -61,7 +62,13 @@ def get_cache_key(file_path: str) -> str:
     except OSError:
         mtime = 0.0
         size = 0
-    token = f"prophoto_v2|{norm_path}|{mtime}|{size}".encode("utf-8")
+    max_edge = 2048
+    try:
+        import config_manager
+        max_edge = int(config_manager.get_preferences().get("preview_max_edge", 2048))
+    except Exception:
+        max_edge = 2048
+    token = f"prophoto_v3|{norm_path}|{mtime}|{size}|res_{max_edge}".encode("utf-8")
     return hashlib.sha256(token).hexdigest()[:24]
 
 
@@ -92,7 +99,9 @@ def save_photo_cache(file_path: str, photo_data: dict, preview_array: np.ndarray
             "width": int(photo_data.get("width", 0)),
             "height": int(photo_data.get("height", 0)),
             "exif": photo_data.get("exif", {}),
-            "auto_ev": float(photo_data.get("auto_ev", 0.0))
+            "auto_ev": float(photo_data.get("auto_ev", 0.0)),
+            "base_ev": float(photo_data.get("base_ev", 0.0)),
+            "is_raw": bool(photo_data.get("is_raw", False))
         }
         meta_json = json.dumps(meta, default=str, ensure_ascii=False)
 
@@ -109,28 +118,43 @@ def save_photo_cache(file_path: str, photo_data: dict, preview_array: np.ndarray
                 thumb = thumb.astype(np.uint8)
 
         # Atomic write entry
-        pid = os.getpid()
-        tmp_entry = os.path.join(cache_dir, f"{key}_entry_tmp_{pid}.npz")
+        import threading
+        nonce = f"{os.getpid()}_{threading.get_ident()}_{time.time_ns()}"
+        tmp_entry = os.path.join(cache_dir, f"{key}_entry_tmp_{nonce}.npz")
         np.savez(tmp_entry, thumb=thumb, meta=meta_json)
         if os.path.exists(entry_path):
             try:
                 os.remove(entry_path)
             except Exception:
                 pass
-        os.replace(tmp_entry, entry_path)
+        try:
+            os.replace(tmp_entry, entry_path)
+        except Exception:
+            if os.path.exists(tmp_entry):
+                try:
+                    os.remove(tmp_entry)
+                except Exception:
+                    pass
 
         # 3. Save preview if enabled and available
         if save_preview:
             preview = preview_array if preview_array is not None else photo_data.get("float_img")
             if preview is not None and isinstance(preview, np.ndarray):
-                tmp_prev = os.path.join(cache_dir, f"{key}_preview_tmp_{pid}.npy")
+                tmp_prev = os.path.join(cache_dir, f"{key}_preview_tmp_{nonce}.npy")
                 np.save(tmp_prev, preview.astype(np.float16))
                 if os.path.exists(preview_path):
                     try:
                         os.remove(preview_path)
                     except Exception:
                         pass
-                os.replace(tmp_prev, preview_path)
+                try:
+                    os.replace(tmp_prev, preview_path)
+                except Exception:
+                    if os.path.exists(tmp_prev):
+                        try:
+                            os.remove(tmp_prev)
+                        except Exception:
+                            pass
 
         return True
     except Exception as e:
@@ -143,18 +167,26 @@ def save_photo_preview(file_path: str, preview_array: np.ndarray) -> bool:
     if not file_path or not os.path.isfile(file_path) or preview_array is None:
         return False
     try:
+        import threading
+        nonce = f"{os.getpid()}_{threading.get_ident()}_{time.time_ns()}"
         cache_dir = get_cache_dir()
         key = get_cache_key(file_path)
         preview_path = os.path.join(cache_dir, f"{key}_preview.npy")
-        pid = os.getpid()
-        tmp_prev = os.path.join(cache_dir, f"{key}_preview_tmp_{pid}.npy")
+        tmp_prev = os.path.join(cache_dir, f"{key}_preview_tmp_{nonce}.npy")
         np.save(tmp_prev, preview_array.astype(np.float16))
         if os.path.exists(preview_path):
             try:
                 os.remove(preview_path)
             except Exception:
                 pass
-        os.replace(tmp_prev, preview_path)
+        try:
+            os.replace(tmp_prev, preview_path)
+        except Exception:
+            if os.path.exists(tmp_prev):
+                try:
+                    os.remove(tmp_prev)
+                except Exception:
+                    pass
         return True
     except Exception as e:
         logger.warning(f"Failed to save preview cache for {file_path}: {e}")
@@ -188,7 +220,9 @@ def get_photo_cache(file_path: str, load_preview: bool = False) -> dict | None:
             "thumbnail_rgb": thumb,
             "float_img": float_img,
             "exif": meta.get("exif", {}),
-            "auto_ev": meta.get("auto_ev", 0.0)
+            "auto_ev": float(meta.get("auto_ev", 0.0)),
+            "base_ev": float(meta.get("base_ev", 0.0)),
+            "is_raw": bool(meta.get("is_raw", False))
         }
     except Exception as e:
         logger.warning(f"Failed to load session cache for {file_path}: {e}")
@@ -253,51 +287,172 @@ def clear_cache() -> bool:
         return False
 
 
-def prune_cache_if_needed(max_size_bytes: int = 2 * 1024 * 1024 * 1024):
-    """Prunes oldest cache files (LRU) if cache directory exceeds max_size_bytes."""
+def prune_cache_by_age(max_days: float = 7.0) -> int:
+    """Removes cache files older than max_days. Returns count of deleted files."""
+    if max_days <= 0:
+        return 0
+    cache_dir = get_cache_dir()
+    if not os.path.exists(cache_dir):
+        return 0
+    cutoff = time.time() - (float(max_days) * 86400.0)
+    deleted = 0
     try:
-        cache_dir = get_cache_dir()
-        if not os.path.exists(cache_dir):
-            return
+        for f in os.listdir(cache_dir):
+            if f.endswith("_entry.npz") or f.endswith("_preview.npy"):
+                fp = os.path.join(cache_dir, f)
+                try:
+                    if os.path.isfile(fp) and os.stat(fp).st_mtime < cutoff:
+                        os.remove(fp)
+                        deleted += 1
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f"Error during prune_cache_by_age: {e}")
+    return deleted
 
-        files = []
+
+def prune_cache_by_size(max_size_bytes: int) -> int:
+    """Prunes oldest cache files (LRU) if cache exceeds max_size_bytes.
+    Tiered strategy: Prioritizes deleting heavy .npy viewport preview textures (~35MB)
+    first, while fiercely preserving lightweight .npz filmstrip thumbnails (~14KB).
+    """
+    if max_size_bytes <= 0:
+        return 0
+    cache_dir = get_cache_dir()
+    if not os.path.exists(cache_dir):
+        return 0
+
+    deleted = 0
+    try:
+        preview_files = []
+        entry_files = []
         total_size = 0
+
         for f in os.listdir(cache_dir):
             fp = os.path.join(cache_dir, f)
             if os.path.isfile(fp):
                 try:
                     st = os.stat(fp)
-                    total_size += st.st_size
-                    files.append((fp, st.st_mtime, st.st_size))
+                    sz = st.st_size
+                    total_size += sz
+                    if f.endswith(".npy"):
+                        preview_files.append((fp, st.st_mtime, sz))
+                    elif f.endswith(".npz"):
+                        entry_files.append((fp, st.st_mtime, sz))
+                    else:
+                        preview_files.append((fp, st.st_mtime, sz))
                 except OSError:
                     pass
 
         if total_size <= max_size_bytes:
-            return
+            return 0
 
-        # Sort by mtime ascending (oldest first)
-        files.sort(key=lambda x: x[1])
-        target_size = int(max_size_bytes * 0.75)
-        for fp, _, sz in files:
+        target_size = int(max_size_bytes * 0.85)
+
+        # 1. First Tier: Oldest preview textures (.npy) first
+        preview_files.sort(key=lambda x: x[1])
+        for fp, _, sz in preview_files:
             try:
                 os.remove(fp)
                 total_size -= sz
+                deleted += 1
                 if total_size <= target_size:
-                    break
+                    return deleted
+            except Exception:
+                pass
+
+        # 2. Second Tier: If still exceeding (rare), prune oldest entries (.npz)
+        entry_files.sort(key=lambda x: x[1])
+        for fp, _, sz in entry_files:
+            try:
+                os.remove(fp)
+                total_size -= sz
+                deleted += 1
+                if total_size <= target_size:
+                    return deleted
             except Exception:
                 pass
     except Exception as e:
-        logger.warning(f"Error during cache pruning: {e}")
+        logger.warning(f"Error during prune_cache_by_size: {e}")
+    return deleted
+
+
+def prune_cache_if_needed(max_size_bytes: int = None):
+    """Wrapper for backward compatibility and auto-pruning."""
+    if max_size_bytes is None:
+        try:
+            import config_manager
+            prefs = config_manager.get_preferences()
+            max_gb = float(prefs.get("session_cache_max_gb", 2.0))
+            preview_res = int(prefs.get("preview_max_edge", 2048))
+            if preview_res == 0 and max_gb < 8.0:
+                max_gb = max(8.0, max_gb)
+            if max_gb <= 0:
+                return  # No limit
+            max_size_bytes = int(max_gb * 1024 * 1024 * 1024)
+        except Exception:
+            max_size_bytes = 2 * 1024 * 1024 * 1024
+    prune_cache_by_size(max_size_bytes)
+
+
+def check_and_auto_clean():
+    """Performs scheduled cache cleanup based on user preferences."""
+    try:
+        import config_manager
+        prefs = config_manager.get_preferences()
+        interval_days = int(prefs.get("session_cache_clean_interval_days", 7))
+        last_clean = float(prefs.get("session_cache_last_clean_time", 0.0))
+        now = time.time()
+
+        # 1. Clean by age if scheduled interval reached
+        if interval_days > 0:
+            if now - last_clean >= interval_days * 86400.0:
+                prune_cache_by_age(interval_days)
+                config_manager.set_preference("session_cache_last_clean_time", now)
+
+        # 2. Check total size limit
+        max_gb = float(prefs.get("session_cache_max_gb", 2.0))
+        preview_res = int(prefs.get("preview_max_edge", 2048))
+        if preview_res == 0 and max_gb < 8.0:
+            max_gb = max(8.0, max_gb)
+        if max_gb > 0:
+            max_bytes = int(max_gb * 1024 * 1024 * 1024)
+            prune_cache_by_size(max_bytes)
+    except Exception as e:
+        logger.warning(f"Error in check_and_auto_clean: {e}")
 
 
 def save_session_file(file_path: str, session_data: dict) -> bool:
-    """Saves session metadata, loaded photos, and edit states to a .sdss file."""
+    """Saves session metadata, loaded photos, and edit states to a .sdss file.
+    v2.0 Architecture: Strips redundant per-photo params to ensure .sdc remains
+    the Single Source of Truth for photo development profiles.
+    """
     try:
         dir_name = os.path.dirname(os.path.abspath(file_path))
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
+
+        clean_photos = []
+        raw_photos = session_data.get("photos", [])
+        for item in raw_photos:
+            if isinstance(item, str):
+                clean_photos.append(os.path.abspath(item))
+            elif isinstance(item, dict) and "path" in item:
+                clean_photos.append(os.path.abspath(item["path"]))
+
+        clean_data = {
+            "format": "SpektraDarkroomSession",
+            "version": "2.0",
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "active_photo_path": session_data.get("active_photo_path"),
+            "active_photo_id": session_data.get("active_photo_id"),
+            "view_mode": session_data.get("view_mode", 0),
+            "split_x": session_data.get("split_x", 0.5),
+            "photos": clean_photos
+        }
+
         with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(session_data, f, ensure_ascii=False, indent=2)
+            json.dump(clean_data, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
         logger.error(f"Failed to save session file to {file_path}: {e}")
@@ -305,17 +460,42 @@ def save_session_file(file_path: str, session_data: dict) -> bool:
 
 
 def load_session_file(file_path: str) -> dict | None:
-    """Loads session data from a .sdss file."""
+    """Loads session data from a .sdss file.
+    Seamless backward compatibility:
+    - Supports v2.0 clean path array format;
+    - If legacy v1.0 file with embedded params is detected, auto-migrates missing .sdc sidecars.
+    """
     if not file_path or not os.path.isfile(file_path):
         return None
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict) and data.get("format") == "SpektraDarkroomSession":
-            return data
-        # Fallback for plain dict
-        if isinstance(data, dict):
-            return data
+        if not isinstance(data, dict):
+            return None
+
+        # Normalize photos array
+        raw_photos = data.get("photos", [])
+        norm_photos = []
+        import sdc_manager
+
+        for item in raw_photos:
+            if isinstance(item, str):
+                norm_photos.append({"path": os.path.abspath(item)})
+            elif isinstance(item, dict) and "path" in item:
+                photo_path = os.path.abspath(item["path"])
+                # Legacy migration: If old session has params and .sdc does not exist, save sidecar
+                params = item.get("params")
+                film = item.get("film_stock", "none")
+                paper = item.get("paper_stock", "none")
+                if (params or film != "none" or paper != "none") and not sdc_manager.has_sdc(photo_path):
+                    try:
+                        sdc_manager.save_sdc(photo_path, film, paper, params or {})
+                    except Exception:
+                        pass
+                norm_photos.append({"path": photo_path})
+
+        data["photos"] = norm_photos
+        return data
     except Exception as e:
         logger.error(f"Failed to load session file from {file_path}: {e}")
     return None

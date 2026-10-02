@@ -47,6 +47,8 @@ venv.bak/
 
 # Testing & local user media
 测试底片/
+tests/
+scratch/
 *.sdc
 config.json
 spektrafilm-repo/
@@ -63,5 +65,7 @@ spektrafilm-repo/
 .DS_Store
 Thumbs.db
 
-# Documentation
+# Excluded documentation and planning files
+CHANGELOG.md
 DEVELOPMENT_SUMMARY.md
+FIX_PLAN_13_ISSUES.md

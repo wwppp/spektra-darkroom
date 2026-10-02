@@ -3,7 +3,7 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF
 from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
 from PySide6.QtWidgets import QMenu, QLabel, QWidget, QPushButton, QVBoxLayout
-from ui.window_utils import get_darkroom_menu_style
+from ui.window_utils import get_darkroom_menu_style, get_icon
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
     QOpenGLShaderProgram, QOpenGLShader, QOpenGLBuffer, QOpenGLFramebufferObject
@@ -131,6 +131,35 @@ vec3 filmic_shoulder(vec3 c, float threshold) {
     return min(c, vec3(threshold)) + span * (over / (span + over));
 }
 
+// Hermite soft-knee thresholding: smoothly blends from zero to highlight glow
+float soft_knee_hl(float luma, float thr, float knee) {
+    float lo = max(0.001, thr - knee);
+    float hi = thr + knee;
+    float t = clamp((luma - lo) / max(0.0001, (hi - lo)), 0.0, 1.0);
+    float smooth_t = t * t * (3.0 - 2.0 * t);
+    return smooth_t * max(0.0, luma - lo);
+}
+
+// 16-tap isotropic Vogel spiral disc offsets
+const vec2 VOGEL_TAPS[16] = vec2[](
+    vec2( 0.17066,  0.03847),
+    vec2(-0.21957,  0.22227),
+    vec2( 0.07168, -0.38914),
+    vec2( 0.21175,  0.42065),
+    vec2(-0.48512, -0.21272),
+    vec2( 0.54011, -0.19827),
+    vec2(-0.30154,  0.56306),
+    vec2(-0.13454, -0.67205),
+    vec2( 0.57393,  0.43961),
+    vec2(-0.76019,  0.03043),
+    vec2( 0.55180, -0.56943),
+    vec2(-0.06820,  0.84478),
+    vec2(-0.52458, -0.71615),
+    vec2( 0.88410,  0.25209),
+    vec2(-0.80665,  0.46323),
+    vec2( 0.32353, -0.93043)
+);
+
 void main() {
     if (u_has_image == 0) {
         fragColor = vec4(0.08, 0.08, 0.08, 1.0);
@@ -218,61 +247,95 @@ void main() {
     linear_rgb.b *= (1.0 - temp_factor * 0.22);
     linear_rgb.g *= (u_tint / b_tint);
     
-    // 3. Optical Diffusion Filter (Physical Convolution Bloom)
+    // 3. Optical Diffusion Filter (Physical Convolution Bloom with Vogel Spiral & Trilinear LOD)
     int eff_diff_type = u_diffusion_type;
     if (eff_diff_type == 0 && u_diffusion_strength > 0.001) {
         eff_diff_type = 1; // Default to Black Pro-Mist if strength > 0
     }
     if (eff_diff_type > 0 && u_diffusion_strength > 0.001) {
-        float base_rad = 0.010 * max(0.25, u_diffusion_strength);
-        if (eff_diff_type == 4) {
-            base_rad *= 1.8; // CineBloom: wide cinematic atmospheric flare
+        // Physical radius scaled by strength
+        float base_rad = 0.012 * max(0.20, u_diffusion_strength);
+        float thr = 0.35;
+        float knee = 0.18;
+        float halo_w = 0.65;
+        float intensity = 1.05;
+
+        // Align per-family optical profile to spektrafilm physical specs
+        if (eff_diff_type == 1) {
+            // Black Pro-Mist: Punchy core + halo, fast falloff, deep clean blacks intact
+            thr = 0.36;
+            knee = 0.16;
+            base_rad *= 1.0;
+            intensity = 1.05;
+            halo_w = 0.65;
         } else if (eff_diff_type == 2) {
-            base_rad *= 0.85; // Glimmerglass: crisp subtle micro-bloom
+            // Glimmerglass: Ultra-clean micro-bloom, crisp highlights, minimal veiling
+            thr = 0.42;
+            knee = 0.14;
+            base_rad *= 0.75;
+            intensity = 0.85;
+            halo_w = 0.0;
         } else if (eff_diff_type == 3) {
-            base_rad *= 1.4; // Pro-Mist: classic milky luminous mist
+            // Pro-Mist: Classic atmospheric pastel haze, balanced halo & veil
+            thr = 0.24;
+            knee = 0.20;
+            base_rad *= 1.45;
+            intensity = 1.25;
+            halo_w = 0.40;
+        } else if (eff_diff_type == 4) {
+            // CineBloom: Wide cinematic atmospheric flare, heavy tail
+            thr = 0.20;
+            knee = 0.22;
+            base_rad *= 1.85;
+            intensity = 1.40;
+            halo_w = 0.85;
         }
-        
+
         vec2 tex_sz = max(vec2(100.0), vec2(textureSize(u_image, 0)));
-        vec2 spread = max(vec2(1.0) / tex_sz * 2.0, vec2(base_rad));
-        
+        // Correct aspect ratio so the bloom spread is physically isotropic (circular)
+        float aspect = tex_sz.x / tex_sz.y;
+        vec2 spread = vec2(base_rad, base_rad * aspect);
+
         vec3 bloom_accum = vec3(0.0);
         float total_weight = 0.0;
-        
-        // 8-tap concentric kernel
-        vec2 offsets[8] = vec2[](
-            vec2( 1.0,  0.0), vec2(-1.0,  0.0),
-            vec2( 0.0,  1.0), vec2( 0.0, -1.0),
-            vec2( 0.707,  0.707) * 1.5, vec2(-0.707, -0.707) * 1.5,
-            vec2(-0.707,  0.707) * 2.2, vec2( 0.707, -0.707) * 2.2
-        );
-        
-        // Black Pro-Mist has higher threshold to keep deep blacks clean
-        float thr = (eff_diff_type == 1) ? 0.35 : 0.25;
-        
-        for (int i = 0; i < 8; i++) {
-            vec2 tap_uv = clamp(sample_uv + offsets[i] * spread, 0.0, 1.0);
-            vec3 tap_rgb = texture(u_image, tap_uv).rgb * exp2(u_exposure);
+
+        // Trilinear Mipmap LOD level: higher LOD for outer taps guarantees continuous pre-filtering
+        float lod_base = clamp(log2(base_rad * max(tex_sz.x, tex_sz.y) * 0.15), 0.0, 4.0);
+
+        for (int i = 0; i < 16; i++) {
+            vec2 offset = VOGEL_TAPS[i];
+            float r_norm = length(offset);
+            vec2 tap_uv = clamp(sample_uv + offset * spread, 0.0, 1.0);
+            
+            // Sample with hardware trilinear mipmap pre-filtering
+            float tap_lod = clamp(lod_base + r_norm * 1.8, 0.0, 4.5);
+            vec3 tap_rgb = textureLod(u_image, tap_uv, tap_lod).rgb * exp2(u_exposure);
+            
             float tap_luma = dot(tap_rgb, vec3(0.2126, 0.7152, 0.0722));
-            float hl = max(0.0, tap_luma - thr);
-            float w = 1.0 / (1.0 + float(i) * 0.35);
+            float hl = soft_knee_hl(tap_luma, thr, knee);
+
+            // Isotropic exponential falloff weighting
+            float w = exp(-r_norm * 1.8);
             bloom_accum += tap_rgb * (hl * w);
             total_weight += w;
         }
-        bloom_accum /= max(0.001, total_weight);
-        
+        bloom_accum /= max(0.0001, total_weight);
+
+        // Physical halo warmth tint (outer rim warm yellow-orange, core cool)
+        float eff_warmth = clamp(halo_w + u_diffusion_warmth, -1.5, 1.5);
         vec3 diff_tint = vec3(
-            1.0 + u_diffusion_warmth * 0.35,
-            1.0 + u_diffusion_warmth * 0.08,
-            1.0 - u_diffusion_warmth * 0.35
+            1.0 + eff_warmth * 0.35,
+            1.0 + eff_warmth * 0.08,
+            1.0 - eff_warmth * 0.35
         );
-        
-        float intensity = (eff_diff_type == 3) ? 1.25 : ((eff_diff_type == 4) ? 1.45 : 1.10);
+
         linear_rgb += bloom_accum * (u_diffusion_strength * intensity) * diff_tint;
-        
-        // Classic Pro-Mist lifts shadows slightly
+
+        // Classic Pro-Mist & CineBloom lift deep shadows slightly (veiling glare)
         if (eff_diff_type == 3) {
-            linear_rgb = mix(linear_rgb, linear_rgb + vec3(0.015 * u_diffusion_strength), 0.25);
+            linear_rgb = mix(linear_rgb, linear_rgb + vec3(0.015 * u_diffusion_strength), 0.20);
+        } else if (eff_diff_type == 4) {
+            linear_rgb = mix(linear_rgb, linear_rgb + vec3(0.022 * u_diffusion_strength), 0.25);
         }
     }
 
@@ -764,7 +827,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.badge_before.hide()
             self.badge_after.hide()
 
-    def set_image(self, float_img_rgb, master_width=None, master_height=None):
+    def set_image(self, float_img_rgb, master_width=None, master_height=None, reset_zoom=True):
         """Upload source image array (float32 [H, W, 3]) to 2D texture, or clear if None."""
         if float_img_rgb is None:
             self._image_width = 0
@@ -801,7 +864,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self._do_upload_image(float_img_rgb)
         finally:
             self.doneCurrent()
-        self.fit_to_view()
+        if reset_zoom:
+            self.fit_to_view()
         self._update_badges()
         self.update()
 
@@ -817,13 +881,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
         self._image_tex_id = GL.glGenTextures(1)
         GL.glBindTexture(GL.GL_TEXTURE_2D, self._image_tex_id)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
 
         data = np.ascontiguousarray(float_img_rgb, dtype=np.float32)
         GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB16F, w, h, 0, GL.GL_RGB, GL.GL_FLOAT, data)
+        try:
+            GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR_MIPMAP_LINEAR)
+        except Exception:
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
         GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
         self._has_image = True
 
@@ -875,15 +943,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def get_actual_zoom_ratio(self) -> float:
         """Calculate zoom ratio relative to full photo native resolution (1.0 = 100% 1:1 pixel scale)."""
-        if self._image_width <= 10 or self._image_height <= 10 or self.width() <= 0 or self.height() <= 0:
+        ref_w = float(getattr(self, "_master_width", 0) or self._image_width)
+        ref_h = float(getattr(self, "_master_height", 0) or self._image_height)
+        if ref_w <= 10 or ref_h <= 10 or self.width() <= 0 or self.height() <= 0:
             return 1.0
-        aspect = float(self._image_width) / float(max(1, self._image_height))
-        screen_aspect = float(self.width()) / float(max(1, self.height()))
+        aspect = ref_w / float(max(1.0, ref_h))
+        screen_aspect = float(self.width()) / float(max(1.0, self.height()))
         if screen_aspect > aspect:
             base_w = self.height() * aspect
         else:
             base_w = self.width()
-        zoom_100 = float(self._image_width) / float(max(1, base_w))
+        zoom_100 = ref_w / float(max(1.0, base_w))
         if zoom_100 <= 0:
             return 1.0
         return self.zoom / zoom_100
@@ -919,15 +989,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.update()
 
     def set_zoom_100(self, animate=True):
-        # 1:1 image pixel to screen pixel
-        if self._image_width > 0 and self.width() > 0:
-            aspect = float(self._image_width) / float(max(1, self._image_height))
-            screen_aspect = float(self.width()) / float(max(1, self.height()))
+        # 1:1 camera sensor native pixel to screen display pixel (100% scale)
+        ref_w = float(getattr(self, "_master_width", 0) or self._image_width)
+        ref_h = float(getattr(self, "_master_height", 0) or self._image_height)
+        if ref_w > 0 and self.width() > 0:
+            aspect = float(ref_w) / float(max(1.0, ref_h))
+            screen_aspect = float(self.width()) / float(max(1.0, self.height()))
             if screen_aspect > aspect:
                 base_w = self.height() * aspect
             else:
                 base_w = self.width()
-            target_zoom = float(self._image_width) / float(max(1, base_w))
+            target_zoom = float(ref_w) / float(max(1.0, base_w))
         else:
             target_zoom = 1.0
         if animate:
@@ -939,59 +1011,86 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.zoomChanged.emit(self.get_actual_zoom_ratio())
             self.update()
 
-    def zoom_in(self):
-        new_zoom = min(8.0, self.zoom * 1.25)
-        self.animate_to(new_zoom, self.pan_x, self.pan_y)
+    def zoom_in(self, animate=True):
+        ref_w = float(getattr(self, "_master_width", 0) or self._image_width)
+        ref_h = float(getattr(self, "_master_height", 0) or self._image_height)
+        aspect = ref_w / float(max(1.0, ref_h)) if ref_w > 0 else 1.0
+        screen_aspect = float(self.width()) / float(max(1.0, self.height())) if self.width() > 0 else 1.0
+        base_w = self.height() * aspect if screen_aspect > aspect else self.width()
+        zoom_100 = (ref_w / float(max(1.0, base_w))) if (ref_w > 0 and base_w > 0) else 1.0
+        max_zoom = max(24.0, zoom_100 * 4.0)
+        new_zoom = min(max_zoom, self.zoom * 1.25)
+        if animate:
+            self.animate_to(new_zoom, self.pan_x, self.pan_y)
+        else:
+            self.zoom = new_zoom
+            self.zoomChanged.emit(self.get_actual_zoom_ratio())
+            self.update()
 
-    def zoom_out(self):
+    def zoom_out(self, animate=True):
         new_zoom = max(0.2, self.zoom * 0.8)
-        self.animate_to(new_zoom, self.pan_x, self.pan_y)
+        if animate:
+            self.animate_to(new_zoom, self.pan_x, self.pan_y)
+        else:
+            self.zoom = new_zoom
+            self.zoomChanged.emit(self.get_actual_zoom_ratio())
+            self.update()
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
         act_in = menu.addAction("放大 (Zoom In)")
+        act_in.setIcon(get_icon("zoom_in.png"))
         act_in.setShortcut(QKeySequence("Ctrl++"))
         act_in.triggered.connect(self.zoom_in)
 
         act_out = menu.addAction("缩小 (Zoom Out)")
+        act_out.setIcon(get_icon("zoom_out.png"))
         act_out.setShortcut(QKeySequence("Ctrl+-"))
         act_out.triggered.connect(self.zoom_out)
 
         act_fit = menu.addAction("适应图像 (Fit Image)")
+        act_fit.setIcon(get_icon("fit_window.png"))
         act_fit.setShortcut(QKeySequence("Ctrl+0"))
         act_fit.triggered.connect(self.fit_to_view)
 
         act_100 = menu.addAction("1:1 实际像素 (100%)")
+        act_100.setIcon(get_icon("zoom_100.png"))
         act_100.setShortcut(QKeySequence("Ctrl+1"))
         act_100.triggered.connect(self.set_zoom_100)
 
         act_split = menu.addAction("原片前后对比")
+        act_split.setIcon(get_icon("compare.png"))
         act_split.setShortcut(QKeySequence("\\"))
         act_split.triggered.connect(self.requestToggleSplit.emit)
 
         menu.addSeparator()
 
         act_undo = menu.addAction("撤销 (Undo)")
+        act_undo.setIcon(get_icon("undo.png"))
         act_undo.setShortcut(QKeySequence("Ctrl+Z"))
         act_undo.triggered.connect(self.requestUndo.emit)
 
         act_redo = menu.addAction("重做 (Redo)")
+        act_redo.setIcon(get_icon("redo.png"))
         act_redo.setShortcut(QKeySequence("Ctrl+Y"))
         act_redo.triggered.connect(self.requestRedo.emit)
 
         act_reset = menu.addAction("重置所有参数 (Reset All)")
+        act_reset.setIcon(get_icon("reset.png"))
         act_reset.setShortcut(QKeySequence("Ctrl+R"))
         act_reset.triggered.connect(self.requestReset.emit)
 
         menu.addSeparator()
 
         act_quick = menu.addAction("快速导出 (上次参数)")
+        act_quick.setIcon(get_icon("quick_export.png"))
         act_quick.setShortcut(QKeySequence("Ctrl+Shift+E"))
         act_quick.triggered.connect(self.requestQuickExport.emit)
 
         act_export = menu.addAction("导出此图像 (Export)...")
+        act_export.setIcon(get_icon("export.png"))
         act_export.setShortcut(QKeySequence("Ctrl+E"))
         act_export.triggered.connect(self.requestExport.emit)
 
@@ -1002,9 +1101,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if delta == 0:
             return
 
+        ref_w = float(getattr(self, "_master_width", 0) or self._image_width)
+        ref_h = float(getattr(self, "_master_height", 0) or self._image_height)
+        aspect = ref_w / float(max(1.0, ref_h)) if ref_w > 0 else 1.0
+        screen_aspect = float(self.width()) / float(max(1.0, self.height())) if self.width() > 0 else 1.0
+        base_w = self.height() * aspect if screen_aspect > aspect else self.width()
+        zoom_100 = (ref_w / float(max(1.0, base_w))) if (ref_w > 0 and base_w > 0) else 1.0
+        max_zoom = max(24.0, zoom_100 * 4.0)
+
         factor = 1.15 if delta > 0 else 0.87
         old_zoom = self.zoom
-        new_zoom = max(0.2, min(8.0, self.zoom * factor))
+        new_zoom = max(0.2, min(max_zoom, self.zoom * factor))
         self.zoom = new_zoom
 
         # Mouse relative zoom
@@ -1106,12 +1213,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
                 temp_tex_id = GL.glGenTextures(1)
                 GL.glBindTexture(GL.GL_TEXTURE_2D, temp_tex_id)
-                GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
                 GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
                 GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
                 GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
                 data = np.ascontiguousarray(float_img_rgb, dtype=np.float32)
                 GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB16F, src_w, src_h, 0, GL.GL_RGB, GL.GL_FLOAT, data)
+                try:
+                    GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
+                    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR_MIPMAP_LINEAR)
+                except Exception:
+                    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
                 GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
                 active_tex_id = temp_tex_id
             else:
