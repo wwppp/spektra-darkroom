@@ -33,8 +33,8 @@ class ExportImageDialog(QDialog):
         if self.is_batch:
             self.setWindowTitle("冲印参数设置")
         else:
-            self.setWindowTitle("导出图像")
-        self.setFixedSize(660, 480)
+            self.setWindowTitle("冲印照片")
+        self.setFixedSize(660, 455)
         self.setModal(True)
 
         icon_path = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
@@ -146,7 +146,7 @@ class ExportImageDialog(QDialog):
         if self.is_batch:
             lbl_title = QLabel(f"冲印设置 (共 {self.batch_count} 张底片)")
         else:
-            lbl_title = QLabel("导出图像")
+            lbl_title = QLabel("冲印照片")
         lbl_title.setStyleSheet("font-size: 14.5px; font-weight: bold; color: #f59e0b;")
         h_layout.addWidget(lbl_title, 0, Qt.AlignmentFlag.AlignVCenter)
         h_layout.addStretch()
@@ -179,9 +179,9 @@ class ExportImageDialog(QDialog):
         lbl_eng.setFixedWidth(65)
         r0.addWidget(lbl_eng)
         self.combo_engine = QComboBox()
-        self.combo_engine.addItem("多核暗房 (所见即所得)", "wysiwyg")
-        self.combo_engine.addItem("官方光谱基准", "official")
-        self.combo_engine.setItemData(0, "多核并行高精度冲印，与视口画面 100% 视觉对齐", Qt.ItemDataRole.ToolTipRole)
+        self.combo_engine.addItem("spektradarkroom（较快）", "wysiwyg")
+        self.combo_engine.addItem("spektrafilm（极慢）", "official")
+        self.combo_engine.setItemData(0, "多核并行硬件加速冲印，与视口画面 100% 视觉对齐", Qt.ItemDataRole.ToolTipRole)
         self.combo_engine.setItemData(1, "官方 spektrafilm 原生端到端物理光谱模拟管线", Qt.ItemDataRole.ToolTipRole)
         r0.addWidget(self.combo_engine, 1)
         card_layout.addLayout(r0)
@@ -237,18 +237,22 @@ class ExportImageDialog(QDialog):
 
         # Row 3: Format-Specific Settings Stack (Zero layout shift)
         self.stack_settings = QStackedWidget()
-        self.stack_settings.setFixedHeight(115)
+        self.stack_settings.setFixedHeight(85)
 
         # --- Stack Page 0: JPEG Options ---
         page_jpeg = QWidget()
         l_jpeg = QVBoxLayout(page_jpeg)
         l_jpeg.setContentsMargins(0, 4, 0, 0)
-        l_jpeg.setSpacing(8)
+        l_jpeg.setSpacing(10)
 
-        row_scale = QHBoxLayout()
+        # Row 0.1: Size + Subsampling + Progressive in a clean balanced horizontal flow
+        row_jpeg_opts = QHBoxLayout()
+        row_jpeg_opts.setSpacing(10)
+
         lbl_scale = QLabel("输出尺寸:")
         lbl_scale.setFixedWidth(65)
-        row_scale.addWidget(lbl_scale)
+        row_jpeg_opts.addWidget(lbl_scale)
+
         self.combo_scale = QComboBox()
         self.combo_scale.addItem("100% (原始尺寸)", 100)
         self.combo_scale.addItem("80%", 80)
@@ -257,10 +261,35 @@ class ExportImageDialog(QDialog):
         self.combo_scale.addItem("33%", 33)
         self.combo_scale.addItem("25%", 25)
         self.combo_scale.setCurrentIndex(0)
-        row_scale.addWidget(self.combo_scale, 1)
-        l_jpeg.addLayout(row_scale)
+        self.combo_scale.setFixedWidth(130)
+        row_jpeg_opts.addWidget(self.combo_scale)
 
+        row_jpeg_opts.addSpacing(14)
+
+        lbl_sub = QLabel("色彩抽样:")
+        lbl_sub.setFixedWidth(60)
+        row_jpeg_opts.addWidget(lbl_sub)
+
+        self.combo_subsampling = QComboBox()
+        self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
+        self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
+        self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
+        self.combo_subsampling.setFixedWidth(135)
+        row_jpeg_opts.addWidget(self.combo_subsampling)
+
+        row_jpeg_opts.addSpacing(12)
+
+        self.chk_progressive = QCheckBox("渐进式")
+        self.chk_progressive.setChecked(True)
+        self.chk_progressive.setStyleSheet("color: #bbb; font-size: 11.5px;")
+        row_jpeg_opts.addWidget(self.chk_progressive)
+        row_jpeg_opts.addStretch()
+
+        l_jpeg.addLayout(row_jpeg_opts)
+
+        # Row 0.2: Quality Slider
         row_q = QHBoxLayout()
+        row_q.setSpacing(10)
         lbl_q = QLabel("画质档位:")
         lbl_q.setFixedWidth(65)
         row_q.addWidget(lbl_q)
@@ -274,26 +303,10 @@ class ExportImageDialog(QDialog):
         row_q.addWidget(self.slider_quality, 1)
 
         self.lbl_quality_val = QLabel("9 档 (90%)")
-        self.lbl_quality_val.setFixedWidth(90)
+        self.lbl_quality_val.setFixedWidth(85)
         self.lbl_quality_val.setStyleSheet("color: #f59e0b; font-size: 12px; font-weight: bold;")
         row_q.addWidget(self.lbl_quality_val)
         l_jpeg.addLayout(row_q)
-
-        row_jpeg_adv = QHBoxLayout()
-        lbl_sub = QLabel("色彩抽样:")
-        lbl_sub.setFixedWidth(65)
-        row_jpeg_adv.addWidget(lbl_sub)
-        self.combo_subsampling = QComboBox()
-        self.combo_subsampling.addItem("4:4:4", "4:4:4")
-        self.combo_subsampling.addItem("4:2:2", "4:2:2")
-        self.combo_subsampling.addItem("4:2:0", "4:2:0")
-        row_jpeg_adv.addWidget(self.combo_subsampling, 1)
-
-        self.chk_progressive = QCheckBox("渐进式 (Progressive)")
-        self.chk_progressive.setChecked(True)
-        self.chk_progressive.setStyleSheet("color: #bbb; font-size: 11.5px;")
-        row_jpeg_adv.addWidget(self.chk_progressive)
-        l_jpeg.addLayout(row_jpeg_adv)
 
         self.stack_settings.addWidget(page_jpeg)
 
@@ -304,6 +317,7 @@ class ExportImageDialog(QDialog):
         l_tiff.setSpacing(8)
 
         row_t_comp = QHBoxLayout()
+        row_t_comp.setSpacing(10)
         lbl_t_comp = QLabel("压缩算法:")
         lbl_t_comp.setFixedWidth(65)
         row_t_comp.addWidget(lbl_t_comp)
@@ -311,7 +325,9 @@ class ExportImageDialog(QDialog):
         self.combo_tiff_comp.addItem("无压缩 (None)", "none")
         self.combo_tiff_comp.addItem("LZW 压缩", "lzw")
         self.combo_tiff_comp.addItem("ZIP 压缩", "deflate")
-        row_t_comp.addWidget(self.combo_tiff_comp, 1)
+        self.combo_tiff_comp.setFixedWidth(200)
+        row_t_comp.addWidget(self.combo_tiff_comp)
+        row_t_comp.addStretch()
         l_tiff.addLayout(row_t_comp)
 
         lbl_t_hint = QLabel("支持高动态位深，适合专业冲印与调色归档。")
@@ -327,6 +343,7 @@ class ExportImageDialog(QDialog):
         l_png.setSpacing(8)
 
         row_p_comp = QHBoxLayout()
+        row_p_comp.setSpacing(10)
         lbl_p_comp = QLabel("压缩级别:")
         lbl_p_comp.setFixedWidth(65)
         row_p_comp.addWidget(lbl_p_comp)
@@ -334,7 +351,9 @@ class ExportImageDialog(QDialog):
         self.combo_png_level.addItem("标准压缩 (Level 6)", 6)
         self.combo_png_level.addItem("极限压缩 (Level 9)", 9)
         self.combo_png_level.addItem("快速存储 (Level 1)", 1)
-        row_p_comp.addWidget(self.combo_png_level, 1)
+        self.combo_png_level.setFixedWidth(200)
+        row_p_comp.addWidget(self.combo_png_level)
+        row_p_comp.addStretch()
         l_png.addLayout(row_p_comp)
 
         lbl_p_hint = QLabel("PNG 支持 8位 与 16位 无损透明通道与极佳网络兼容性。")
@@ -408,7 +427,7 @@ class ExportImageDialog(QDialog):
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
 
-        btn_export = QPushButton("导出")
+        btn_export = QPushButton("冲印")
         save_icon_path = get_icon_path("export_dark.png")
         if not os.path.exists(save_icon_path):
             save_icon_path = get_icon_path("save.png")
@@ -476,7 +495,7 @@ class ExportImageDialog(QDialog):
 
     def _browse_save_path(self):
         if self.is_batch:
-            dir_chosen = QFileDialog.getExistingDirectory(self, "选择批量导出输出文件夹", self.edit_path.text())
+            dir_chosen = QFileDialog.getExistingDirectory(self, "选择批量冲印输出文件夹", self.edit_path.text())
             if dir_chosen:
                 self.edit_path.setText(dir_chosen)
             return
@@ -644,7 +663,7 @@ class ExportProgressDialog(QDialog):
     """Modern darkroom responsive export progress dialog with progress bar and cancel button."""
     cancelRequested = Signal()
 
-    def __init__(self, title="导出图像", parent=None):
+    def __init__(self, title="冲印照片", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setFixedSize(440, 155)
@@ -705,7 +724,7 @@ class ExportProgressDialog(QDialog):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
-        self.lbl_title = QLabel("正在导出...")
+        self.lbl_title = QLabel("正在冲印...")
         self.lbl_title.setStyleSheet("font-weight: bold; color: #f59e0b; font-size: 13px;")
         layout.addWidget(self.lbl_title)
 
@@ -731,7 +750,7 @@ class ExportProgressDialog(QDialog):
         apply_dark_titlebar(self)
 
     def _on_cancel_clicked(self):
-        self.lbl_detail.setText("正在取消导出...")
+        self.lbl_detail.setText("正在取消冲印...")
         self.btn_cancel.setEnabled(False)
         self.cancelRequested.emit()
         self.reject()
@@ -782,7 +801,7 @@ class SingleExportWorker(QThread):
                 if os.path.exists(self.out_path):
                     try: os.remove(self.out_path)
                     except Exception: pass
-                self.finished.emit({"success": False, "cancelled": True, "error": "用户已取消导出"})
+                self.finished.emit({"success": False, "cancelled": True, "error": "用户已取消冲印"})
             else:
                 self.finished.emit(res)
         except Exception as e:

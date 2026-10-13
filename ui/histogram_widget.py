@@ -117,9 +117,6 @@ class HistogramWidget(QWidget):
             painter.drawLine(gx, pad_y + 2, gx, pad_y + plot_h - 2)
 
         if not self._has_data:
-            painter.setPen(QColor("#4e5264"))
-            painter.setFont(QFont("Segoe UI", 9))
-            painter.drawText(QRectF(pad_x, pad_y, plot_w, plot_h), Qt.AlignmentFlag.AlignCenter, "直方图 (载入底片后显示)")
             return
 
         # Helper to construct QPainterPath

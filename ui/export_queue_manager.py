@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar,
     QScrollArea, QWidget, QFrame
 )
-from PySide6.QtGui import QPixmap, QImage, QColor, QIcon
+from PySide6.QtGui import QPixmap, QImage, QColor, QIcon, QFontMetrics
 
 from ui.window_utils import apply_dark_titlebar
 
@@ -33,10 +33,10 @@ class ExportTask:
         if output_path is not None:
             # Called as ExportTask(tid, title, source_path, output_path, params, thumbnail=pix)
             self.task_id = str(task_id_or_path)
-            self.filename = str(title_or_output)
             from path_utils import normalize_path
             self.photo_path = normalize_path(source_path)
             self.output_path = normalize_path(output_path)
+            self.filename = os.path.basename(self.output_path) if self.output_path else (str(title_or_output) if title_or_output else "image")
             self.params = dict(params or {})
             self.thumb_img = thumbnail
             self.bit_depth = self.params.get("bit_depth", 8)
@@ -48,8 +48,8 @@ class ExportTask:
             self.photo_path = normalize_path(task_id_or_path)
             self.output_path = normalize_path(title_or_output)
             self.params = dict(source_path or {})
-            self.filename = kwargs.get("filename") or (os.path.basename(self.photo_path) if self.photo_path else "image")
-            self.thumb_img = kwargs.get("thumb_img") or thumbnail
+            self.filename = kwargs.get("filename") or (os.path.basename(self.output_path) if self.output_path else (os.path.basename(self.photo_path) if self.photo_path else "image"))
+            self.thumb_img = kwargs.get("thumb_img") if kwargs.get("thumb_img") is not None else thumbnail
             self.bit_depth = kwargs.get("bit_depth", self.params.get("bit_depth", 8))
             self.format_type = kwargs.get("format_type", self.params.get("format", "jpeg"))
         self.status = "queued"  # queued, running, finished, cancelled, failed
@@ -170,7 +170,7 @@ class _CpuExportWorker(QThread):
             elif res.get("success"):
                 self.finished_export.emit(True, "")
             else:
-                err = str(res.get("error") or "导出显影失败")
+                err = str(res.get("error") or "冲印显影失败")
                 self.finished_export.emit(False, err)
         except Exception as e:
             self.finished_export.emit(False, str(e))
@@ -444,7 +444,7 @@ class ExportQueueManager(QObject):
         else:
             if task.status != "cancelled":
                 task.status = "failed"
-                task.error_msg = str(error_msg or "导出失败")
+                task.error_msg = str(error_msg or "冲印失败")
 
         self.task_progress.emit(task.task_id, task.progress)
         self.queue_changed.emit()
@@ -462,7 +462,7 @@ class ExportQueueManager(QObject):
         if not active:
             finished = [t for t in self.tasks if t.status == "finished"]
             if finished:
-                self.status_updated.emit("所有导出任务已完成", False)
+                self.status_updated.emit("所有冲印任务已完成", False)
             else:
                 self.status_updated.emit("", False)
             return
@@ -472,7 +472,7 @@ class ExportQueueManager(QObject):
         if running:
             self.status_updated.emit(f"正在冲印: {running.filename} (队列中剩余 {total_active - 1} 张)", True)
         else:
-            self.status_updated.emit(f"导出排队中 ({total_active} 项待处理)...", True)
+            self.status_updated.emit(f"冲印排队中 ({total_active} 项待处理)...", True)
 
     def close(self):
         self._is_active = False
@@ -488,7 +488,7 @@ class ExportQueueDialog(QDialog):
     def __init__(self, queue_mgr: ExportQueueManager, parent=None):
         super().__init__(parent)
         self.queue_mgr = queue_mgr
-        self.setWindowTitle("导出队列管理")
+        self.setWindowTitle("冲印队列管理")
         self.setFixedSize(680, 420)
 
         try:
@@ -589,7 +589,7 @@ class ExportQueueDialog(QDialog):
 
         # Header Bar
         hdr = QHBoxLayout()
-        title = QLabel("导出队列")
+        title = QLabel("冲印队列")
         title.setStyleSheet("font-size: 14px; font-weight: bold; color: #f59e0b;")
         hdr.addWidget(title)
         hdr.addStretch()
@@ -678,7 +678,7 @@ class ExportQueueDialog(QDialog):
                 self._cards.clear()
 
                 if not self._empty_label:
-                    self._empty_label = QLabel("当前暂无导出任务")
+                    self._empty_label = QLabel("当前暂无冲印任务")
                     self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     self._empty_label.setStyleSheet("color: #64748b; font-size: 12px; padding: 40px;")
                     self.item_layout.insertWidget(0, self._empty_label)
@@ -724,21 +724,21 @@ class ExportQueueDialog(QDialog):
         status_map = {
             "queued": ("排队中", "#94a3b8"),
             "running": ("冲印中...", "#f59e0b"),
-            "finished": ("已完成", "#10b981"),
+            "finished": ("已完成", "#f59e0b"),
             "cancelled": ("已取消", "#64748b"),
             "failed": (f"失败: {task.error_msg}", "#ef4444"),
         }
         st_txt, st_col = status_map.get(task.status, (task.status, "#94a3b8"))
         if st_lbl:
             st_lbl.setText(st_txt)
-            st_lbl.setStyleSheet(f"font-size: 10px; color: {st_col}; font-weight: bold;")
+            st_lbl.setStyleSheet(f"font-size: 10px; color: {st_col}; font-weight: bold; background: transparent; border: none;")
 
         if pbar:
             pbar.setValue(task.progress if task.status != "queued" else 0)
-            pbar_color = "#f59e0b" if task.status == "running" else ("#10b981" if task.status == "finished" else "#ef4444")
+            pbar_color = "#f59e0b" if task.status in ("running", "finished") else ("#64748b" if task.status == "cancelled" else "#ef4444")
             pbar.setStyleSheet(f"""
                 QProgressBar {{
-                    background: #252834;
+                    background: #20232e;
                     border: none;
                     border-radius: 2px;
                 }}
@@ -756,41 +756,58 @@ class ExportQueueDialog(QDialog):
 
     def _build_task_card(self, task: ExportTask):
         card = QFrame()
+        card.setObjectName("exportTaskCard")
         card.setStyleSheet("""
-            QFrame {
-                background: #1a1c23;
-                border: 1px solid #282b37;
+            QFrame#exportTaskCard {
+                background: #171922;
+                border: 1px solid #262937;
                 border-radius: 6px;
-                padding: 6px;
+            }
+            QFrame#exportTaskCard QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
             }
         """)
         h = QHBoxLayout(card)
-        h.setContentsMargins(8, 6, 8, 6)
-        h.setSpacing(10)
+        h.setContentsMargins(12, 10, 12, 10)
+        h.setSpacing(14)
 
-        # Thumbnail
+        # Thumbnail with genuine original aspect ratio (enlarged container, fit aspect)
         lbl_th = QLabel()
-        lbl_th.setFixedSize(40, 40)
-        lbl_th.setStyleSheet("background: #0f1014; border: 1px solid #262834; border-radius: 3px;")
+        lbl_th.setObjectName("exportTaskThumb")
+        lbl_th.setFixedSize(96, 64)
+        lbl_th.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_th.setStyleSheet("""
+            QLabel#exportTaskThumb {
+                background: #0f1015;
+                border: none;
+                border-radius: 4px;
+            }
+        """)
+        
+        orig_pix = None
         if isinstance(task.thumb_img, QPixmap) and not task.thumb_img.isNull():
-            pix = task.thumb_img.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            lbl_th.setPixmap(pix)
-            lbl_th.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            orig_pix = task.thumb_img
         elif task.thumb_img is not None and isinstance(task.thumb_img, np.ndarray):
             h_im, w_im = task.thumb_img.shape[:2]
             qim = QImage(task.thumb_img.data, w_im, h_im, w_im * 3, QImage.Format.Format_RGB888).copy()
-            pix = QPixmap.fromImage(qim).scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            orig_pix = QPixmap.fromImage(qim)
+
+        if orig_pix and not orig_pix.isNull():
+            pix = orig_pix.scaled(92, 60, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             lbl_th.setPixmap(pix)
-            lbl_th.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_th.setAlignment(Qt.AlignmentFlag.AlignCenter)
         h.addWidget(lbl_th)
 
         # Info & Progress
         mid = QVBoxLayout()
-        mid.setSpacing(4)
+        mid.setSpacing(6)
 
         info_row = QHBoxLayout()
         fn_lbl = QLabel(task.filename)
-        fn_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #f1f5f9;")
+        fn_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #f1f5f9; background: transparent; border: none;")
         info_row.addWidget(fn_lbl)
         info_row.addStretch()
 
@@ -798,25 +815,62 @@ class ExportQueueDialog(QDialog):
         status_map = {
             "queued": ("排队中", "#94a3b8"),
             "running": ("冲印中...", "#f59e0b"),
-            "finished": ("已完成", "#10b981"),
+            "finished": ("已完成", "#f59e0b"),
             "cancelled": ("已取消", "#64748b"),
             "failed": (f"失败: {task.error_msg}", "#ef4444"),
         }
         st_txt, st_col = status_map.get(task.status, (task.status, "#94a3b8"))
         st_lbl = QLabel(st_txt)
-        st_lbl.setStyleSheet(f"font-size: 10px; color: {st_col}; font-weight: bold;")
+        st_lbl.setStyleSheet(f"font-size: 10px; color: {st_col}; font-weight: bold; background: transparent; border: none;")
         info_row.addWidget(st_lbl)
         mid.addLayout(info_row)
+
+        # Target directory path with underline and click-to-reveal
+        path_text = task.output_path or ""
+        metrics = QFontMetrics(self.font())
+        elided_path = metrics.elidedText(path_text, Qt.TextElideMode.ElideMiddle, 460)
+        path_lbl = QLabel(elided_path)
+        path_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        path_lbl.setToolTip(f"点击在文件资源管理器中定位:\n{path_text}")
+        path_lbl.setStyleSheet("""
+            QLabel {
+                font-size: 10px;
+                color: #94a3b8;
+                text-decoration: underline;
+                background: transparent;
+                border: none;
+            }
+            QLabel:hover {
+                color: #f59e0b;
+            }
+        """)
+
+        def _make_reveal_handler(out_p):
+            def _reveal(ev):
+                if not out_p:
+                    return
+                import subprocess
+                norm_p = os.path.abspath(out_p)
+                if os.path.exists(norm_p):
+                    subprocess.Popen(f'explorer /select,"{norm_p}"')
+                else:
+                    dir_p = os.path.dirname(norm_p)
+                    if os.path.exists(dir_p):
+                        os.startfile(dir_p)
+            return _reveal
+
+        path_lbl.mousePressEvent = _make_reveal_handler(task.output_path)
+        mid.addWidget(path_lbl)
 
         # Progress bar
         pbar = QProgressBar()
         pbar.setFixedHeight(4)
         pbar.setTextVisible(False)
         pbar.setValue(task.progress if task.status != "queued" else 0)
-        pbar_color = "#f59e0b" if task.status == "running" else ("#10b981" if task.status == "finished" else "#ef4444")
+        pbar_color = "#f59e0b" if task.status in ("running", "finished") else ("#64748b" if task.status == "cancelled" else "#ef4444")
         pbar.setStyleSheet(f"""
             QProgressBar {{
-                background: #252834;
+                background: #20232e;
                 border: none;
                 border-radius: 2px;
             }}
@@ -831,7 +885,7 @@ class ExportQueueDialog(QDialog):
         # Cancel Button
         btn_x = QPushButton("✕")
         btn_x.setFixedSize(22, 22)
-        btn_x.setToolTip("取消该导出任务")
+        btn_x.setToolTip("取消该冲印任务")
         btn_x.setStyleSheet("""
             QPushButton {
                 background: transparent;

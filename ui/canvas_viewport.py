@@ -34,21 +34,26 @@ uniform sampler2D u_image;
 uniform sampler3D u_lut;
 uniform int u_has_image;
 uniform int u_has_lut;
+uniform int u_is_bypass;
 
 uniform float u_exposure;
 uniform float u_temp;
 uniform float u_tint;
 uniform float u_base_temp;
 uniform float u_base_tint;
+uniform float u_highlights;
+uniform float u_shadows;
 uniform vec3 u_cmy;
 uniform float u_print_exposure;
 uniform float u_preflash;
 
-// Halation physics
-uniform float u_halation;
-uniform int u_halation_bounces;
-uniform float u_halation_decay;
-uniform float u_halation_boost;
+// Halation physics (Official Spektrafilm Model)
+uniform float u_halation;           // halation_amount (1.0 = physical default)
+uniform float u_hal_spatial_scale;  // halation_spatial_scale (1.0 = physical default)
+uniform float u_scatter_amount;     // scatter_amount (1.0 = physical default)
+uniform float u_halation_boost;     // boost_ev (0.0 = physical default)
+uniform vec3  u_hal_strength_rgb;   // profile-driven RGB preset
+uniform float u_hal_sigma_um;       // profile-driven first bounce sigma (um)
 
 // Grain physics & format
 uniform float u_grain;
@@ -76,6 +81,7 @@ uniform float u_screen_aspect;
 uniform float u_image_aspect;
 uniform vec2 u_pan;
 uniform float u_zoom;
+uniform vec2 u_viewport_size;
 
 // 32-bit Integer PCG (Permuted Congruential Generator) Hash
 // Cryptographic quality pseudo-randomness with ZERO periodic banding or grid artifacts
@@ -118,10 +124,22 @@ vec3 prophoto_to_srgb(vec3 c) {
     lin.g = -0.22571798 * c.r + 1.22317653 * c.g + 0.00272522 * c.b;
     lin.b = -0.01054513 * c.r - 0.13487985 * c.g + 1.14521015 * c.b;
     lin = max(vec3(0.0), lin);
+    // Smooth highlight compression knee before display transfer
+    vec3 over = max(vec3(0.0), lin - vec3(0.8));
+    lin = min(lin, vec3(0.8)) + 0.2 * (over / (0.2 + over * 0.5));
     vec3 higher = 1.055 * pow(lin, vec3(1.0 / 2.4)) - 0.055;
     vec3 lower = lin * 12.92;
     vec3 cutoff = step(vec3(0.0031308), lin);
     return clamp(mix(lower, higher, cutoff), 0.0, 1.0);
+}
+
+// Log Shaper: maps scene-linear ProPhoto [0.0, 8.0] into quasi-log space [0.0, 1.0]
+const float SHAPER_C = 60.0;
+const float SHAPER_INV_LOG = 0.16192058; // 1.0 / log(1.0 + 60.0 * 8.0)
+
+vec3 linear_to_shaper(vec3 lin) {
+    vec3 c = max(vec3(0.0), lin);
+    return clamp(log(vec3(1.0) + c * SHAPER_C) * SHAPER_INV_LOG, 0.0, 1.0);
 }
 
 // Filmic soft highlight roll-off (smooth C1 shoulder compression above threshold)
@@ -160,6 +178,32 @@ const vec2 VOGEL_TAPS[16] = vec2[](
     vec2( 0.32353, -0.93043)
 );
 
+// Computes scene-linear radiance accounting for exposure, white balance tint, and highlights/shadows shaping
+vec3 compute_scene_radiance(vec3 raw_c) {
+    vec3 col = raw_c * exp2(u_exposure);
+    float b_temp = (u_base_temp > 1000.0) ? u_base_temp : 5500.0;
+    float b_tint = (u_base_tint > 0.1) ? u_base_tint : 1.0;
+    float temp_factor = (u_temp - b_temp) / 3000.0;
+    col.r *= (1.0 + temp_factor * 0.22);
+    col.b *= (1.0 - temp_factor * 0.22);
+    col.g *= (u_tint / b_tint);
+
+    if (abs(u_highlights) > 0.001 || abs(u_shadows) > 0.001) {
+        float y_lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+        if (y_lum > 0.00001) {
+            float z = log2(y_lum / 0.18);
+            float w_sh = clamp(-z * 0.25, 0.0, 1.0);
+            w_sh = w_sh * w_sh * (3.0 - 2.0 * w_sh);
+            float w_hl = clamp(z * 0.25, 0.0, 1.0);
+            w_hl = w_hl * w_hl * (3.0 - 2.0 * w_hl);
+            float delta_z = (u_shadows * 0.02) * w_sh + (u_highlights * 0.02) * w_hl;
+            float y_target = 0.18 * exp2(z + delta_z);
+            col *= (y_target / y_lum);
+        }
+    }
+    return col;
+}
+
 void main() {
     if (u_has_image == 0) {
         fragColor = vec4(0.08, 0.08, 0.08, 1.0);
@@ -172,12 +216,14 @@ void main() {
 
     if (u_view_mode == 2) {
         // Mode 2: Global side-by-side comparison (Both complete original and edited images)
-        float dx = fwidth(v_texcoord.x);
-        float dist_px = abs(v_texcoord.x - 0.5) / max(0.00001, dx);
-        if (dist_px < 1.0) {
-            float v_fade = smoothstep(0.0, 0.08, v_texcoord.y) * smoothstep(1.0, 0.92, v_texcoord.y);
-            vec3 line_color = mix(vec3(0.20, 0.22, 0.28), vec3(0.96, 0.62, 0.05), v_fade);
-            fragColor = vec4(line_color, 1.0);
+        float vp_w = (u_viewport_size.x > 1.0) ? u_viewport_size.x : (1.0 / max(0.00001, fwidth(v_texcoord.x)));
+        float dist_px = abs(v_texcoord.x - 0.5) * vp_w;
+        if (dist_px <= 2.2) {
+            vec3 amber_gold = vec3(0.96, 0.62, 0.05);
+            vec3 core_hl   = vec3(1.00, 0.88, 0.45);
+            vec3 dark_edge  = vec3(0.05, 0.05, 0.06);
+            vec3 line_col = (dist_px <= 0.8) ? mix(core_hl, amber_gold, dist_px / 0.8) : mix(amber_gold, dark_edge, clamp((dist_px - 0.8) / 1.4, 0.0, 1.0));
+            fragColor = vec4(line_col, 1.0);
             return;
         }
 
@@ -211,41 +257,70 @@ void main() {
     }
     
     vec3 orig_rgb = texture(u_image, sample_uv).rgb;
-    
-    // Split screen divider hairline (Mode 1: Before / After drag compare)
+
+    // Accurate untouched base display color (Before / 原片)
+    vec3 before_color = (u_is_bypass == 2) ? clamp(orig_rgb, 0.0, 1.0) : clamp(prophoto_to_srgb(orig_rgb), 0.0, 1.0);
+
+    // -------------------------------------------------------------
+    // Compare Modes (Must execute BEFORE bypass early return!)
+    // -------------------------------------------------------------
     if (u_view_mode == 1) {
-        float dx = fwidth(v_texcoord.x);
-        float dist_px = abs(v_texcoord.x - u_split_x) / max(0.00001, dx);
-        if (dist_px < 1.0) {
-            float v_fade = smoothstep(0.0, 0.08, v_texcoord.y) * smoothstep(1.0, 0.92, v_texcoord.y);
-            vec3 line_color = mix(vec3(0.20, 0.22, 0.28), vec3(0.96, 0.62, 0.05), v_fade);
-            fragColor = vec4(line_color, 1.0);
+        // Mode 1: Split screen drag compare (Before / After)
+        float vp_w = (u_viewport_size.x > 1.0) ? u_viewport_size.x : (1.0 / max(0.00001, fwidth(v_texcoord.x)));
+        float dist_px = abs(v_texcoord.x - u_split_x) * vp_w;
+
+        // High-visibility dual-layer hairline divider (solid amber gold core + drop shadow rim)
+        // 100% visible against bright snow, highlights, and deep shadows!
+        if (dist_px <= 2.2) {
+            vec3 amber_gold = vec3(0.96, 0.62, 0.05); // #f59e0b
+            vec3 core_hl   = vec3(1.00, 0.88, 0.45);
+            vec3 dark_edge  = vec3(0.05, 0.05, 0.06);
+
+            vec3 line_col;
+            if (dist_px <= 0.8) {
+                line_col = mix(core_hl, amber_gold, dist_px / 0.8);
+            } else {
+                float edge_t = clamp((dist_px - 0.8) / 1.4, 0.0, 1.0);
+                line_col = mix(amber_gold, dark_edge, edge_t);
+            }
+            fragColor = vec4(line_col, 1.0);
             return;
         }
+
+        // Left region: Strictly display untouched original image (Before / 原片)
         if (v_texcoord.x < u_split_x) {
-            fragColor = vec4(prophoto_to_srgb(orig_rgb), 1.0);
+            fragColor = vec4(before_color, 1.0);
             return;
         }
+        // Right region: Continue forward into developed pipeline (After / 已修改)
     } else if (u_view_mode == 2 && is_left) {
-        // Mode 2 Left viewport: Full complete original (Before)
-        fragColor = vec4(prophoto_to_srgb(orig_rgb), 1.0);
+        // Mode 2 Left viewport: Full complete original (Before / 原片)
+        fragColor = vec4(before_color, 1.0);
         return;
     } else if (u_view_mode == 3) {
-        // Mode 3: Temporary Full Original Before Compare (Long Press on Compare button)
-        fragColor = vec4(prophoto_to_srgb(orig_rgb), 1.0);
+        // Mode 3: Temporary Full Original Before Compare (Long Press)
+        fragColor = vec4(before_color, 1.0);
+        return;
+    }
+
+    // -------------------------------------------------------------
+    // After Pipeline (Applied to single view mode or split right region)
+    // -------------------------------------------------------------
+    // 0. Bypass Mode:
+    // 2: Direct sRGB passthrough (0ms placeholder / embedded preview from filmstrip or JPEG)
+    if (u_is_bypass == 2) {
+        fragColor = vec4(clamp(orig_rgb, 0.0, 1.0), 1.0);
+        return;
+    }
+
+    // 1: Pure Bypass Mode: When no film is selected (film_stock == "none")
+    if (u_is_bypass == 1) {
+        fragColor = vec4(before_color, 1.0);
         return;
     }
     
-    // 1. Exposure compensation
-    vec3 linear_rgb = orig_rgb * exp2(u_exposure);
-    
-    // 2. White balance / Temperature tint calibrated against camera as-shot baseline
-    float b_temp = (u_base_temp > 1000.0) ? u_base_temp : 5500.0;
-    float b_tint = (u_base_tint > 0.1) ? u_base_tint : 1.0;
-    float temp_factor = (u_temp - b_temp) / 3000.0;
-    linear_rgb.r *= (1.0 + temp_factor * 0.22);
-    linear_rgb.b *= (1.0 - temp_factor * 0.22);
-    linear_rgb.g *= (u_tint / b_tint);
+    // 1 & 2. Exposure, White Balance, and Highlights & Shadows Tone Shaping
+    vec3 linear_rgb = compute_scene_radiance(orig_rgb);
     
     // 3. Optical Diffusion Filter (Physical Convolution Bloom with Vogel Spiral & Trilinear LOD)
     int eff_diff_type = u_diffusion_type;
@@ -309,7 +384,7 @@ void main() {
             
             // Sample with hardware trilinear mipmap pre-filtering
             float tap_lod = clamp(lod_base + r_norm * 1.8, 0.0, 4.5);
-            vec3 tap_rgb = textureLod(u_image, tap_uv, tap_lod).rgb * exp2(u_exposure);
+            vec3 tap_rgb = compute_scene_radiance(textureLod(u_image, tap_uv, tap_lod).rgb);
             
             float tap_luma = dot(tap_rgb, vec3(0.2126, 0.7152, 0.0722));
             float hl = soft_knee_hl(tap_luma, thr, knee);
@@ -339,12 +414,76 @@ void main() {
         }
     }
 
-    // 4. Physical 3D LUT sampling (Film emulsion + Paper D-max)
+    // 3.5. Official Spektrafilm Physical Halation & In-Emulsion Scatter
+    if (u_halation > 0.001 || u_scatter_amount > 0.001) {
+        vec2 tex_sz_hal = max(vec2(100.0), vec2(textureSize(u_image, 0)));
+        float aspect_hal = tex_sz_hal.x / tex_sz_hal.y;
+        float max_dim = max(tex_sz_hal.x, tex_sz_hal.y);
+
+        // Physical sigma scaled by 35mm film baseline (35000 um)
+        float base_hal_rad = max(0.0005, (u_hal_sigma_um / 35000.0) * max(0.2, u_hal_spatial_scale));
+        vec2 hal_spread = vec2(base_hal_rad * 2.5, base_hal_rad * 2.5 * aspect_hal);
+
+        // 1. In-Emulsion Forward Scatter: Energy-preserving micro-diffusion
+        if (u_scatter_amount > 0.001) {
+            vec2 scat_spread = hal_spread * 0.15;
+            vec3 scat_accum = vec3(0.0);
+            float scat_w = 0.0;
+            for (int i = 0; i < 8; i++) {
+                vec2 offset = VOGEL_TAPS[i];
+                vec2 tap_uv = clamp(sample_uv + offset * scat_spread, 0.0, 1.0);
+                vec3 tap_rgb = compute_scene_radiance(textureLod(u_image, tap_uv, 0.5).rgb);
+                float w = exp(-length(offset) * 2.0);
+                scat_accum += tap_rgb * w;
+                scat_w += w;
+            }
+            scat_accum /= max(0.0001, scat_w);
+            float eff_s = clamp(u_scatter_amount * 0.06, 0.0, 0.5);
+            linear_rgb = mix(linear_rgb, scat_accum, eff_s);
+        }
+
+        // 2. Base Back-Reflection Halation: Multi-bounce additive sum with DC energy normalization
+        if (u_halation > 0.001) {
+            vec3 a_tot = u_hal_strength_rgb * u_halation;
+            vec3 hal_accum = vec3(0.0);
+            float hal_total_w = 0.0;
+
+            for (int b = 1; b <= 3; b++) {
+                float bounce_w = pow(0.5, float(b - 1));
+                float bounce_rad_mult = sqrt(float(b));
+                float lod_b = clamp(log2(base_hal_rad * bounce_rad_mult * max_dim * 0.4), 0.0, 4.5);
+
+                for (int i = 0; i < 16; i++) {
+                    vec2 offset = VOGEL_TAPS[i] * bounce_rad_mult;
+                    float r_norm = length(offset);
+                    vec2 tap_uv = clamp(sample_uv + offset * hal_spread, 0.0, 1.0);
+                    vec3 tap_rgb = compute_scene_radiance(textureLod(u_image, tap_uv, lod_b).rgb);
+                    
+                    if (u_halation_boost > 0.001) {
+                        float tap_luma = dot(tap_rgb, vec3(0.2126, 0.7152, 0.0722));
+                        float boost_f = 1.0 + max(0.0, tap_luma - 0.7) * (u_halation_boost * 0.6);
+                        tap_rgb *= boost_f;
+                    }
+
+                    float w = exp(-r_norm * 1.5) * bounce_w;
+                    hal_accum += tap_rgb * w;
+                    hal_total_w += w;
+                }
+            }
+            vec3 hal_blur = hal_accum / max(0.0001, hal_total_w);
+
+            // Official Spektrafilm physical halation DC normalization:
+            linear_rgb = (linear_rgb + a_tot * hal_blur) / (vec3(1.0) + a_tot);
+        }
+    }
+
+    // 4. Physical 3D LUT sampling with Log Shaper (Film emulsion + Paper D-max)
     vec3 film_rgb;
     if (u_has_lut == 1) {
-        vec3 rolled_in = filmic_shoulder(max(vec3(0.0), linear_rgb), 0.75);
-        vec3 clamped_in = clamp(rolled_in, 0.0, 1.0);
-        film_rgb = texture(u_lut, clamped_in).rgb;
+        vec3 shaper_in = linear_to_shaper(linear_rgb);
+        float lut_dim = float(textureSize(u_lut, 0).x);
+        vec3 lut_coord = shaper_in * ((lut_dim - 1.0) / lut_dim) + (0.5 / lut_dim);
+        film_rgb = texture(u_lut, lut_coord).rgb;
     } else {
         film_rgb = prophoto_to_srgb(linear_rgb);
     }
@@ -370,21 +509,7 @@ void main() {
         film_rgb = mix(film_rgb, film_rgb * 0.88 + vec3(0.03), u_developer_exhaustion * 0.6);
     }
 
-    // 8. Multi-bounce Halation & Highlight Boost
-    if (u_halation > 0.01) {
-        float luma_orig = dot(orig_rgb, vec3(0.299, 0.587, 0.114));
-        float highlight = max(0.0, luma_orig - 0.70 + u_halation_boost * 0.10) / 0.30;
-        float hal_accum = 0.0;
-        float cur_decay = 1.0;
-        for (int b = 0; b < 4; b++) {
-            if (b < u_halation_bounces) {
-                hal_accum += pow(highlight, 1.6 + float(b) * 0.4) * cur_decay;
-                cur_decay *= u_halation_decay;
-            }
-        }
-        vec3 halation_tint = vec3(1.0, 0.14, 0.04) * (hal_accum * u_halation * 0.35);
-        film_rgb += halation_tint;
-    }
+    // 8. Multi-bounce Halation & Highlight Boost (Processed in scene-linear irradiance space before LUT)
     
     // 9. Silver Halide Organic Film Grain & Dye Cloud Blur (Film-space anchored)
     if (u_grain > 0.01) {
@@ -450,23 +575,29 @@ class DarkroomGLCanvas(QOpenGLWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
+        self.engine = getattr(parent, "engine", None)
 
         # Texture state
         self._image_tex_id = None
         self._lut_tex_id = None
-        self._image_width = 1
-        self._image_height = 1
-        self._master_width = 1
-        self._master_height = 1
+        self._image_width = 0
+        self._image_height = 0
+        self._master_width = 0
+        self._master_height = 0
         self._has_image = False
         self._has_lut = False
+        self._is_placeholder = False
+        self._has_library_photos = False
         self._pending_image = None
         self._pending_lut = None
         self._gl_initialized = False
 
         # Parameters
         self.params = {
+            "film_stock": "none",
             "exposure_ev": 0.0,
+            "highlights": 0.0,
+            "shadows": 0.0,
             "color_temp": 5500.0,
             "tint": 1.0,
             "film_format_mm": 35.0,
@@ -484,10 +615,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
             "pre_flash": 0.0,
             "morph_gamma": 1.0,
             "developer_exhaustion": 0.0,
-            "halation": 0.5,
-            "halation_bounces": 2,
-            "halation_decay": 0.5,
+            "halation": 1.0,
+            "halation_amount": 1.0,
+            "halation_spatial_scale": 1.0,
+            "scatter_amount": 1.0,
+            "boost_ev": 0.0,
             "halation_boost": 0.0,
+            "_halation_preset": None,
             "grain": 0.4,
             "grain_size": 1.0,
             "grain_cloud_blur": 1.0,
@@ -645,9 +779,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if self._pending_image is not None:
             self._do_upload_image(self._pending_image)
             self._pending_image = None
+            self.fit_to_view()
+            self._update_badges()
+            self.update()
         if self._pending_lut is not None:
             self._do_upload_lut(self._pending_lut)
             self._pending_lut = None
+            self.update()
 
     def resizeGL(self, w, h):
         pass
@@ -689,7 +827,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 funcs.glUniform3f(loc, float(x), float(y), float(z))
 
         screen_aspect = float(max(1, self.width())) / float(max(1, self.height()))
-        img_aspect = float(self._image_width) / float(max(1, self._image_height))
+        m_w = self._master_width if self._master_width > 0 else self._image_width
+        m_h = self._master_height if self._master_height > 0 else self._image_height
+        img_aspect = float(m_w) / float(max(1, m_h))
 
         u_1f("u_screen_aspect", screen_aspect)
         u_1f("u_image_aspect", img_aspect)
@@ -698,21 +838,48 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         u_1i("u_has_image", 1 if self._has_image else 0)
         u_1i("u_has_lut", 1 if self._has_lut else 0)
+        if getattr(self, "_is_placeholder", False):
+            is_bypass = 2
+        else:
+            is_bypass = 1 if str(self.params.get("film_stock", "none")).lower() in ("none", "") else 0
+        u_1i("u_is_bypass", is_bypass)
 
         u_1f("u_exposure", self.params.get("exposure_ev", 0.0))
         u_1f("u_temp", self.params.get("color_temp", 5500.0))
         u_1f("u_tint", self.params.get("tint", 1.0))
         u_1f("u_base_temp", self.params.get("base_temp", 5500.0))
         u_1f("u_base_tint", self.params.get("base_tint", 1.0))
+        u_1f("u_highlights", float(self.params.get("highlights", 0.0)))
+        u_1f("u_shadows", float(self.params.get("shadows", 0.0)))
         u_3f("u_cmy", self.params.get("enlarger_cyan", 0.0), self.params.get("enlarger_magenta", 0.0), self.params.get("enlarger_yellow", 0.0))
         u_1f("u_print_exposure", self.params.get("print_exposure", 1.0))
         u_1f("u_preflash", self.params.get("pre_flash", 0.0))
 
-        # Halation physics
-        u_1f("u_halation", self.params.get("halation", 0.5))
-        u_1i("u_halation_bounces", int(self.params.get("halation_bounces", 2)))
-        u_1f("u_halation_decay", self.params.get("halation_decay", 0.5))
-        u_1f("u_halation_boost", self.params.get("halation_boost", 0.0))
+        # Halation physics (Official Spektrafilm Model)
+        hal_preset = self.params.get("_halation_preset")
+        if not hal_preset:
+            eng = getattr(self, "engine", None)
+            if not eng and hasattr(self.parent(), "engine"):
+                eng = self.parent().engine
+            if eng:
+                stock = self.params.get("film_stock", "kodak_portra_400")
+                hal_preset = eng.get_film_halation_preset(stock)
+        if not hal_preset:
+            hal_preset = {"sigma_h": 65.0, "strength": [0.08, 0.02, 0.0]}
+        strength = hal_preset.get("strength", [0.08, 0.02, 0.0])
+        sigma_um = float(hal_preset.get("sigma_h", 65.0))
+
+        hal_amt = float(self.params.get("halation_amount", self.params.get("halation", 1.0)))
+        hal_scale = float(self.params.get("halation_spatial_scale", 1.0))
+        scatter_amt = float(self.params.get("scatter_amount", 1.0))
+        boost_ev = float(self.params.get("boost_ev", self.params.get("halation_boost", 0.0)))
+
+        u_1f("u_halation", hal_amt)
+        u_1f("u_hal_spatial_scale", hal_scale)
+        u_1f("u_scatter_amount", scatter_amt)
+        u_1f("u_halation_boost", boost_ev)
+        u_3f("u_hal_strength_rgb", float(strength[0]), float(strength[1]), float(strength[2]))
+        u_1f("u_hal_sigma_um", sigma_um)
 
         # Grain physics & format
         u_1f("u_grain", self.params.get("grain", 0.4))
@@ -748,6 +915,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         u_1f("u_split_x", self.params.get("split_x", 0.5))
         u_1i("u_view_mode", self.params.get("view_mode", 0))
+        u_2f("u_viewport_size", float(max(1, self.width())), float(max(1, self.height())))
 
         # Bind 2D Image Texture (Unit 0)
         if self._image_tex_id:
@@ -773,10 +941,21 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self.params.get("view_mode") == 1:
+            self._clamp_split_to_image()
         self._update_badges()
 
     def _update_badges(self):
-        if not self._has_image and self.width() > 0:
+        has_lib_photos = getattr(self, "_has_library_photos", False)
+        if not has_lib_photos:
+            p = self.parent() if hasattr(self, "parent") else None
+            while p:
+                if hasattr(p, "photos") and len(getattr(p, "photos", [])) > 0:
+                    has_lib_photos = True
+                    break
+                p = p.parent() if hasattr(p, "parent") else None
+
+        if not self._has_image and not has_lib_photos and self.width() > 0:
             if hasattr(self, 'empty_overlay'):
                 ow, oh = 380, 210
                 ox = max(10, (self.width() - ow) // 2)
@@ -790,10 +969,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         if self.params.get("view_mode") == 1 and self._has_image and self.width() > 0:
             split_x = float(self.params.get("split_x", 0.5)) * float(self.width())
+            left, right, _, _ = self.get_image_bounds_norm()
+            img_vis_left_px = max(0.0, left) * float(self.width())
+            img_vis_right_px = min(1.0, right) * float(self.width())
+
             b1_w, b1_h = 56, 26
             b2_w, b2_h = 68, 26
-            b1_x = int(max(16.0, min(self.width() - 140.0, split_x - b1_w - 12.0)))
-            b2_x = int(max(80.0, min(self.width() - b2_w - 16.0, split_x + 12.0)))
+            b1_x = int(max(img_vis_left_px + 12.0, min(self.width() - 140.0, split_x - b1_w - 12.0)))
+            b2_x = int(max(80.0, min(img_vis_right_px - b2_w - 12.0, split_x + 12.0)))
             self.badge_before.setText("原片")
             self.badge_before.setGeometry(b1_x, 16, b1_w, b1_h)
             self.badge_after.setGeometry(b2_x, 16, b2_w, b2_h)
@@ -827,8 +1010,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.badge_before.hide()
             self.badge_after.hide()
 
-    def set_image(self, float_img_rgb, master_width=None, master_height=None, reset_zoom=True):
+    def set_image(self, float_img_rgb, master_width=None, master_height=None, reset_zoom=True, photo_id=None, is_placeholder=False):
         """Upload source image array (float32 [H, W, 3]) to 2D texture, or clear if None."""
+        self._is_placeholder = is_placeholder
         if float_img_rgb is None:
             self._image_width = 0
             self._image_height = 0
@@ -836,6 +1020,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self._master_height = 0
             self._pending_image = None
             self._has_image = False
+            self._is_placeholder = False
+            self._loaded_photo_id = None
             if getattr(self, "_gl_initialized", False) and self.isValid():
                 self.makeCurrent()
                 try:
@@ -848,16 +1034,31 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.update()
             return
 
+        self._loaded_photo_id = photo_id
         try:
             h, w = float_img_rgb.shape[:2]
             self._image_width = w
             self._image_height = h
             self._master_width = int(master_width) if master_width else w
             self._master_height = int(master_height) if master_height else h
+            # Enforce orientation consistency between uploaded texture array and master dimensions
+            if (h > w and self._master_width > self._master_height) or (w > h and self._master_height > self._master_width):
+                self._master_width, self._master_height = self._master_height, self._master_width
         except Exception:
             pass
         if not getattr(self, "_gl_initialized", False) or not self.isValid():
             self._pending_image = float_img_rgb
+            self._has_image = True
+            if hasattr(self, 'empty_overlay'):
+                self.empty_overlay.hide()
+            if reset_zoom:
+                self.fit_to_view(animate=False)
+                if self.params.get("view_mode") == 1:
+                    self.reset_split_to_center()
+            else:
+                if self.params.get("view_mode") == 1:
+                    self._clamp_split_to_image()
+            self._update_badges()
             return
         self.makeCurrent()
         try:
@@ -866,8 +1067,34 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.doneCurrent()
         if reset_zoom:
             self.fit_to_view()
+            if self.params.get("view_mode") == 1:
+                self.reset_split_to_center()
+        else:
+            if self.params.get("view_mode") == 1:
+                self._clamp_split_to_image()
         self._update_badges()
         self.update()
+
+    def set_placeholder_image(self, rgb_array, master_width=None, master_height=None, photo_id=None):
+        """Upload low-res or embedded sRGB placeholder image (uint8 or float32 [H, W, 3])
+        with direct sRGB bypass (u_is_bypass = 2) for instant 0ms visual continuity.
+        """
+        if rgb_array is None:
+            return
+        if rgb_array.dtype == np.uint8:
+            float_data = (rgb_array.astype(np.float32) / 255.0)
+        else:
+            float_data = np.asarray(rgb_array, dtype=np.float32)
+            if float_data.max() > 1.05:
+                float_data = float_data / 255.0
+        self.set_image(float_data, master_width=master_width, master_height=master_height, reset_zoom=True, photo_id=photo_id, is_placeholder=True)
+
+    def set_has_library_photos(self, has_photos: bool):
+        """Notifies canvas whether the session photo library has photos.
+        Prevents empty overlay banner from appearing during photo switches.
+        """
+        self._has_library_photos = bool(has_photos)
+        self._update_badges()
 
     def _do_upload_image(self, float_img_rgb):
         h, w = float_img_rgb.shape[:2]
@@ -930,14 +1157,122 @@ class DarkroomGLCanvas(QOpenGLWidget):
         GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
         self._has_lut = True
 
+    @property
+    def _image_w(self):
+        mw = getattr(self, "_master_width", 0)
+        return mw if mw > 1 else max(1, getattr(self, "_image_width", 1))
+
+    @property
+    def _image_h(self):
+        mh = getattr(self, "_master_height", 0)
+        return mh if mh > 1 else max(1, getattr(self, "_image_height", 1))
+
     def update_params(self, **kwargs):
         """Update shader uniforms instantly and redraw."""
         self.params.update(kwargs)
         self.update()
 
+    def get_image_bounds_norm(self):
+        """Calculate image normalized bounding box in viewport coordinates [0.0, 1.0].
+        Returns: (left, right, top, bottom) where:
+          - left, right: horizontal screen coordinates (0.0=left, 1.0=right)
+          - top, bottom: vertical Qt screen coordinates (0.0=top, 1.0=bottom)
+        """
+        if not self._has_image or self.width() <= 0 or self.height() <= 0:
+            return 0.0, 1.0, 0.0, 1.0
+
+        screen_aspect = float(self.width()) / float(max(1, self.height()))
+        m_w = self._master_width if getattr(self, "_master_width", 0) > 0 else self._image_width
+        m_h = self._master_height if getattr(self, "_master_height", 0) > 0 else self._image_height
+        img_aspect = float(m_w) / float(max(1, m_h)) if m_h > 0 else 1.0
+
+        eff_screen_aspect = screen_aspect * (0.5 if self.params.get("view_mode") == 2 else 1.0)
+        if eff_screen_aspect > img_aspect:
+            quad_scale_x = img_aspect / eff_screen_aspect
+            quad_scale_y = 1.0
+        else:
+            quad_scale_x = 1.0
+            quad_scale_y = eff_screen_aspect / img_aspect
+
+        half_w = 0.5 * quad_scale_x * self.zoom
+        center_x = 0.5 + 0.5 * self.pan_x
+        img_left = center_x - half_w
+        img_right = center_x + half_w
+
+        half_h = 0.5 * quad_scale_y * self.zoom
+        center_y = 0.5 - 0.5 * self.pan_y  # Qt top-down Y coordinate
+        img_top = center_y - half_h
+        img_bottom = center_y + half_h
+
+        return img_left, img_right, img_top, img_bottom
+
+    def get_image_visible_bounds_norm(self):
+        """Calculate visible intersection of image with viewport boundaries [0.0, 1.0].
+        Returns: (vis_left, vis_right, vis_top, vis_bottom)
+        """
+        left, right, top, bottom = self.get_image_bounds_norm()
+        vis_left = max(0.0, min(1.0, left))
+        vis_right = max(0.0, min(1.0, right))
+        vis_top = max(0.0, min(1.0, top))
+        vis_bottom = max(0.0, min(1.0, bottom))
+        return vis_left, vis_right, vis_top, vis_bottom
+
+    def reset_split_to_center(self):
+        """Reset split compare divider line to the geometric center of visible image area."""
+        vis_left, vis_right, _, _ = self.get_image_visible_bounds_norm()
+        if vis_right > vis_left:
+            self.params["split_x"] = (vis_left + vis_right) * 0.5
+        else:
+            self.params["split_x"] = 0.5
+        self._update_badges()
+        self.update()
+
+    def _clamp_split_to_image(self):
+        """Clamp split_x strictly to the visible image bounds to avoid cutting empty letterbox bars."""
+        if not self._has_image or self.width() <= 0:
+            return
+        left, right, _, _ = self.get_image_bounds_norm()
+        margin = max(0.01, 8.0 / float(max(1, self.width())))
+        clamp_min = max(0.0, left) + margin
+        clamp_max = min(1.0, right) - margin
+        if clamp_min < clamp_max:
+            cur_split = float(self.params.get("split_x", 0.5))
+            self.params["split_x"] = max(clamp_min, min(clamp_max, cur_split))
+
+    def _is_hovering_split_line(self, pos, tolerance=0.02) -> bool:
+        """Check whether mouse position is over the split line within the visible image bounds."""
+        if self.params.get("view_mode") != 1 or not self._has_image or self.width() <= 0 or self.height() <= 0:
+            return False
+        norm_x = pos.x() / float(max(1, self.width()))
+        norm_y = pos.y() / float(max(1, self.height()))
+        split_x = float(self.params.get("split_x", 0.5))
+
+        if abs(norm_x - split_x) > tolerance:
+            return False
+
+        # Vertical & horizontal bounds check: ensure mouse is inside image area (with small buffer)
+        left, right, top, bottom = self.get_image_bounds_norm()
+        pad_y = max(0.02, 12.0 / float(max(1, self.height())))
+        pad_x = max(0.02, 12.0 / float(max(1, self.width())))
+        vis_top = max(0.0, top) - pad_y
+        vis_bottom = min(1.0, bottom) + pad_y
+        vis_left = max(0.0, left) - pad_x
+        vis_right = min(1.0, right) + pad_x
+
+        return (vis_left <= norm_x <= vis_right) and (vis_top <= norm_y <= vis_bottom)
+
     def set_view_mode(self, mode):
         # 0: single, 1: split
+        old_mode = self.params.get("view_mode", 0)
         self.params["view_mode"] = mode
+        if mode == 1:
+            if old_mode != 1:
+                if old_mode == 3:
+                    self._clamp_split_to_image()
+                else:
+                    self.reset_split_to_center()
+            else:
+                self._clamp_split_to_image()
         self._update_badges()
         self.update()
 
@@ -963,6 +1298,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.zoom = self._start_zoom + (self._target_zoom - self._start_zoom) * t
         self.pan_x = self._start_pan_x + (self._target_pan_x - self._start_pan_x) * t
         self.pan_y = self._start_pan_y + (self._target_pan_y - self._start_pan_y) * t
+        if self.params.get("view_mode") == 1:
+            self._clamp_split_to_image()
+            self._update_badges()
         self.zoomChanged.emit(self.get_actual_zoom_ratio())
         self.update()
 
@@ -985,10 +1323,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.zoom = 1.0
             self.pan_x = 0.0
             self.pan_y = 0.0
+            if self.params.get("view_mode") == 1:
+                self.reset_split_to_center()
             self.zoomChanged.emit(self.get_actual_zoom_ratio())
             self.update()
 
-    def set_zoom_100(self, animate=True):
+    def set_zoom_100(self, animate=True, mouse_pos=None):
         # 1:1 camera sensor native pixel to screen display pixel (100% scale)
         ref_w = float(getattr(self, "_master_width", 0) or self._image_width)
         ref_h = float(getattr(self, "_master_height", 0) or self._image_height)
@@ -1002,12 +1342,31 @@ class DarkroomGLCanvas(QOpenGLWidget):
             target_zoom = float(ref_w) / float(max(1.0, base_w))
         else:
             target_zoom = 1.0
+
+        if target_zoom < 1.25:
+            target_zoom = max(2.0, target_zoom)
+
+        if mouse_pos is not None:
+            mx = mouse_pos.x() if hasattr(mouse_pos, 'x') else float(mouse_pos[0])
+            my = mouse_pos.y() if hasattr(mouse_pos, 'y') else float(mouse_pos[1])
+            mouse_norm_x = (mx / float(max(1, self.width())) - 0.5) * 2.0
+            mouse_norm_y = ((self.height() - my) / float(max(1, self.height())) - 0.5) * 2.0
+            old_zoom = max(0.001, self.zoom)
+            target_pan_x = mouse_norm_x - (mouse_norm_x - self.pan_x) * (target_zoom / old_zoom)
+            target_pan_y = mouse_norm_y - (mouse_norm_y - self.pan_y) * (target_zoom / old_zoom)
+        else:
+            target_pan_x = 0.0
+            target_pan_y = 0.0
+
         if animate:
-            self.animate_to(target_zoom, 0.0, 0.0)
+            self.animate_to(target_zoom, target_pan_x, target_pan_y)
         else:
             self.zoom = target_zoom
-            self.pan_x = 0.0
-            self.pan_y = 0.0
+            self.pan_x = target_pan_x
+            self.pan_y = target_pan_y
+            if self.params.get("view_mode") == 1:
+                self._clamp_split_to_image()
+                self._update_badges()
             self.zoomChanged.emit(self.get_actual_zoom_ratio())
             self.update()
 
@@ -1024,6 +1383,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.animate_to(new_zoom, self.pan_x, self.pan_y)
         else:
             self.zoom = new_zoom
+            if self.params.get("view_mode") == 1:
+                self._clamp_split_to_image()
+                self._update_badges()
             self.zoomChanged.emit(self.get_actual_zoom_ratio())
             self.update()
 
@@ -1033,6 +1395,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.animate_to(new_zoom, self.pan_x, self.pan_y)
         else:
             self.zoom = new_zoom
+            if self.params.get("view_mode") == 1:
+                self._clamp_split_to_image()
+                self._update_badges()
             self.zoomChanged.emit(self.get_actual_zoom_ratio())
             self.update()
 
@@ -1084,12 +1449,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         menu.addSeparator()
 
-        act_quick = menu.addAction("快速导出 (上次参数)")
+        act_quick = menu.addAction("快速冲印 (上次参数)")
         act_quick.setIcon(get_icon("quick_export.png"))
         act_quick.setShortcut(QKeySequence("Ctrl+Shift+E"))
         act_quick.triggered.connect(self.requestQuickExport.emit)
 
-        act_export = menu.addAction("导出此图像 (Export)...")
+        act_export = menu.addAction("冲印照片 (Print)...")
         act_export.setIcon(get_icon("export.png"))
         act_export.setShortcut(QKeySequence("Ctrl+E"))
         act_export.triggered.connect(self.requestExport.emit)
@@ -1121,15 +1486,18 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.pan_x = mouse_norm_x - (mouse_norm_x - self.pan_x) * (new_zoom / old_zoom)
         self.pan_y = mouse_norm_y - (mouse_norm_y - self.pan_y) * (new_zoom / old_zoom)
 
+        if self.params.get("view_mode") == 1:
+            self._clamp_split_to_image()
+            self._update_badges()
+
         self.zoomChanged.emit(self.get_actual_zoom_ratio())
         self.update()
         event.accept()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            # Check if clicking on split divider
-            norm_x = event.position().x() / float(max(1, self.width()))
-            if self.params["view_mode"] == 1 and abs(norm_x - self.params["split_x"]) < 0.02:
+            # Check if clicking on split divider within visible image bounds
+            if self._is_hovering_split_line(event.position()):
                 self._is_split_dragging = True
                 self.setCursor(Qt.CursorShape.SplitHCursor)
             else:
@@ -1144,7 +1512,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
         norm_x = event.position().x() / float(max(1, self.width()))
 
         if self._is_split_dragging:
-            self.params["split_x"] = max(0.01, min(0.99, norm_x))
+            left, right, _, _ = self.get_image_bounds_norm()
+            margin = max(0.01, 8.0 / float(max(1, self.width())))
+            clamp_min = max(0.0, left) + margin
+            clamp_max = min(1.0, right) - margin
+            if clamp_min < clamp_max:
+                self.params["split_x"] = max(clamp_min, min(clamp_max, norm_x))
+            else:
+                self.params["split_x"] = max(0.01, min(0.99, norm_x))
             self._update_badges()
             self.update()
             event.accept()
@@ -1158,11 +1533,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
             self.pan_x += dx
             self.pan_y += dy
+            if self.params.get("view_mode") == 1:
+                self._clamp_split_to_image()
+                self._update_badges()
             self.update()
             event.accept()
         else:
-            # Hover cursor check
-            if self.params["view_mode"] == 1 and abs(norm_x - self.params["split_x"]) < 0.02:
+            # Hover cursor check: split cursor only within visible image area
+            if self._is_hovering_split_line(event.position()):
                 self.setCursor(Qt.CursorShape.SplitHCursor)
             else:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -1172,25 +1550,36 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._is_panning = False
             self._is_split_dragging = False
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            if self._is_hovering_split_line(event.position()):
+                self.setCursor(Qt.CursorShape.SplitHCursor)
+            else:
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
             event.accept()
         else:
             super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            # Double-click on split line instantly resets divider to image center
+            if self.params.get("view_mode") == 1 and self._is_hovering_split_line(event.position(), tolerance=0.035):
+                self.reset_split_to_center()
+                event.accept()
+                return
+
             if abs(self.zoom - 1.0) < 0.15:
-                self.set_zoom_100()
+                self.set_zoom_100(animate=True, mouse_pos=event.position())
             else:
-                self.fit_to_view()
+                self.fit_to_view(animate=True)
             event.accept()
         else:
             super().mouseDoubleClickEvent(event)
 
-    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None):
+    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None):
         """Render image at target resolution on GPU using an offscreen FBO.
         Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
         """
+        if is_16bit is not None:
+            bit_depth = 16 if is_16bit else 8
         if not getattr(self, "_gl_initialized", False) or not self.isValid():
             try:
                 self.grabFramebuffer()
@@ -1302,20 +1691,48 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
             u_1i("u_has_image", 1)
             u_1i("u_has_lut", 1 if (active_lut_tex_id and (self._has_lut or lut_override is not None)) else 0)
+            if getattr(self, "_is_placeholder", False):
+                is_bypass = 2
+            else:
+                is_bypass = 1 if str(eff_params.get("film_stock", "none")).lower() in ("none", "") else 0
+            u_1i("u_is_bypass", is_bypass)
 
             u_1f("u_exposure", eff_params.get("exposure_ev", 0.0))
             u_1f("u_temp", eff_params.get("color_temp", 5500.0))
             u_1f("u_tint", eff_params.get("tint", 1.0))
             u_1f("u_base_temp", eff_params.get("base_temp", 5500.0))
             u_1f("u_base_tint", eff_params.get("base_tint", 1.0))
+            u_1f("u_highlights", float(eff_params.get("highlights", 0.0)))
+            u_1f("u_shadows", float(eff_params.get("shadows", 0.0)))
             u_3f("u_cmy", eff_params.get("enlarger_cyan", 0.0), eff_params.get("enlarger_magenta", 0.0), eff_params.get("enlarger_yellow", 0.0))
             u_1f("u_print_exposure", eff_params.get("print_exposure", 1.0))
             u_1f("u_preflash", eff_params.get("pre_flash", 0.0))
 
-            u_1f("u_halation", eff_params.get("halation", 0.5))
-            u_1i("u_halation_bounces", int(eff_params.get("halation_bounces", 2)))
-            u_1f("u_halation_decay", eff_params.get("halation_decay", 0.5))
-            u_1f("u_halation_boost", eff_params.get("halation_boost", 0.0))
+            # Halation physics (Official Spektrafilm Model)
+            hal_preset = eff_params.get("_halation_preset")
+            if not hal_preset:
+                eng = getattr(self, "engine", None)
+                if not eng and hasattr(self.parent(), "engine"):
+                    eng = self.parent().engine
+                if eng:
+                    stock = eff_params.get("film_stock", "kodak_portra_400")
+                    hal_preset = eng.get_film_halation_preset(stock)
+            if not hal_preset:
+                hal_preset = {"sigma_h": 65.0, "strength": [0.08, 0.02, 0.0]}
+            strength = hal_preset.get("strength", [0.08, 0.02, 0.0])
+            sigma_um = float(hal_preset.get("sigma_h", 65.0))
+
+            hal_amt = float(eff_params.get("halation_amount", eff_params.get("halation", 1.0)))
+            hal_scale = float(eff_params.get("halation_spatial_scale", 1.0))
+            scatter_amt = float(eff_params.get("scatter_amount", 1.0))
+            boost_ev = float(eff_params.get("boost_ev", eff_params.get("halation_boost", 0.0)))
+
+            u_1f("u_halation", hal_amt)
+            u_1f("u_hal_spatial_scale", hal_scale)
+            u_1f("u_scatter_amount", scatter_amt)
+            u_1f("u_halation_boost", boost_ev)
+            u_3f("u_hal_strength_rgb", float(strength[0]), float(strength[1]), float(strength[2]))
+            u_1f("u_hal_sigma_um", sigma_um)
 
             u_1f("u_grain", eff_params.get("grain", 0.4))
             fmt_mm = float(eff_params.get("film_format_mm", 35.0))
@@ -1336,8 +1753,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_morph_gamma", eff_params.get("morph_gamma", 1.0))
             u_1f("u_developer_exhaustion", eff_params.get("developer_exhaustion", 0.0))
 
-            u_1f("u_split_x", 0.5)
-            u_1i("u_view_mode", 0)  # Always render final developed image
+            view_mode = eff_params.get("view_mode", 0) if (params_override and "view_mode" in params_override) else 0
+            split_x = float(eff_params.get("split_x", 0.5))
+            u_1f("u_split_x", split_x)
+            u_1i("u_view_mode", view_mode)
+            u_2f("u_viewport_size", float(target_w), float(target_h))
 
             funcs.glActiveTexture(0x84C0)  # GL_TEXTURE0
             GL.glBindTexture(GL.GL_TEXTURE_2D, active_tex_id)

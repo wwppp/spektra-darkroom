@@ -20,6 +20,34 @@ import numpy as np
 logger = logging.getLogger("SpektraDarkroom.SessionCache")
 
 
+def is_dummy_or_corrupted_thumbnail(arr) -> bool:
+    """
+    Determines if a thumbnail array is a dummy placeholder or corrupted frame.
+    Returns True if the array is None, not an ndarray, empty, uninitialized dark frame,
+    or solid uniform placeholder color (e.g., 0 or 45).
+    """
+    if arr is None or not isinstance(arr, np.ndarray) or arr.size == 0:
+        return True
+    if len(arr.shape) < 2 or min(arr.shape[:2]) < 8:
+        return True
+    if arr.max() <= 1:
+        return True
+    if arr.mean() < 0.5 and arr.max() < 3:
+        return True
+    # Catch any solid uniform placeholder color (e.g. 0, 45, 100, 255)
+    if arr.min() == arr.max():
+        return True
+    # Catch near-zero variance flat noise (std < 0.5)
+    if float(arr.std()) < 0.5:
+        return True
+    return False
+
+
+def is_valid_thumbnail(arr) -> bool:
+    """Convenience inverse of is_dummy_or_corrupted_thumbnail."""
+    return not is_dummy_or_corrupted_thumbnail(arr)
+
+
 def get_cache_dir() -> str:
     """Returns path to the session cache folder, creating it if needed."""
     try:
@@ -68,17 +96,70 @@ def get_cache_key(file_path: str) -> str:
         max_edge = int(config_manager.get_preferences().get("preview_max_edge", 2048))
     except Exception:
         max_edge = 2048
-    token = f"prophoto_v3|{norm_path}|{mtime}|{size}|res_{max_edge}".encode("utf-8")
+    sdc_path = f"{norm_path}.sdc"
+    sdc_mtime = 0.0
+    if os.path.isfile(sdc_path):
+        try:
+            sdc_mtime = os.path.getmtime(sdc_path)
+        except OSError:
+            sdc_mtime = 0.0
+    token = f"prophoto_v3|{norm_path}|{mtime}|{size}|sdc_{sdc_mtime}|res_{max_edge}".encode("utf-8")
     return hashlib.sha256(token).hexdigest()[:24]
+
+
+_path_cache_index = None
+
+def _get_entry_path_with_fallback(file_path: str) -> tuple[str | None, str | None]:
+    """Returns (entry_path, key) for a file, supporting seamless fallback to legacy/alternate keys."""
+    if not file_path or not os.path.isfile(file_path):
+        return None, None
+    key = get_cache_key(file_path)
+    cache_dir = get_cache_dir()
+    primary_entry = os.path.join(cache_dir, f"{key}_entry.npz")
+    if os.path.isfile(primary_entry):
+        return primary_entry, key
+
+    # Check fallback index for existing cached entry matching path
+    norm_path = os.path.abspath(file_path)
+    global _path_cache_index
+    if _path_cache_index is None:
+        _path_cache_index = {}
+        try:
+            for f in os.listdir(cache_dir):
+                if f.endswith("_entry.npz"):
+                    f_path = os.path.join(cache_dir, f)
+                    try:
+                        with np.load(f_path, allow_pickle=False) as npz:
+                            meta = json.loads(str(npz["meta"]))
+                            p = meta.get("path")
+                            if p:
+                                _path_cache_index[os.path.abspath(p)] = f[:-10]
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    old_key = _path_cache_index.get(norm_path)
+    if old_key:
+        old_entry = os.path.join(cache_dir, f"{old_key}_entry.npz")
+        if os.path.isfile(old_entry):
+            try:
+                shutil.copy2(old_entry, primary_entry)
+                old_prev = os.path.join(cache_dir, f"{old_key}_preview.npy")
+                primary_prev = os.path.join(cache_dir, f"{key}_preview.npy")
+                if os.path.isfile(old_prev) and not os.path.isfile(primary_prev):
+                    shutil.copy2(old_prev, primary_prev)
+            except Exception:
+                pass
+            return primary_entry, key
+
+    return None, None
 
 
 def has_valid_cache(file_path: str) -> bool:
     """Checks whether a valid, non-stale cache entry exists for the given file."""
-    if not file_path or not os.path.isfile(file_path):
-        return False
-    key = get_cache_key(file_path)
-    entry_path = os.path.join(get_cache_dir(), f"{key}_entry.npz")
-    return os.path.isfile(entry_path)
+    entry_path, _ = _get_entry_path_with_fallback(file_path)
+    return entry_path is not None and os.path.isfile(entry_path)
 
 
 def save_photo_cache(file_path: str, photo_data: dict, preview_array: np.ndarray = None, save_preview: bool = True) -> bool:
@@ -92,12 +173,26 @@ def save_photo_cache(file_path: str, photo_data: dict, preview_array: np.ndarray
         entry_path = os.path.join(cache_dir, f"{key}_entry.npz")
         preview_path = os.path.join(cache_dir, f"{key}_preview.npy")
 
+        # Ensure width and height orientation matches thumbnail
+        pw = int(photo_data.get("width", 0))
+        ph = int(photo_data.get("height", 0))
+        if (pw <= 0 or ph <= 0) and file_path and os.path.isfile(file_path):
+            dw, dh = get_image_dimensions(file_path)
+            if dw > 0 and dh > 0:
+                pw, ph = dw, dh
+
+        ref_thumb = photo_data.get("thumbnail_rgb") if photo_data.get("thumbnail_rgb") is not None else photo_data.get("raw_thumbnail_rgb")
+        if ref_thumb is not None and hasattr(ref_thumb, "shape") and len(ref_thumb.shape) >= 2:
+            th_h, th_w = ref_thumb.shape[:2]
+            if (th_h > th_w and pw > ph) or (th_w > th_h and ph > pw):
+                pw, ph = ph, pw
+
         # 1. Prepare metadata
         meta = {
             "path": os.path.abspath(file_path),
             "filename": os.path.basename(file_path),
-            "width": int(photo_data.get("width", 0)),
-            "height": int(photo_data.get("height", 0)),
+            "width": pw,
+            "height": ph,
             "exif": photo_data.get("exif", {}),
             "auto_ev": float(photo_data.get("auto_ev", 0.0)),
             "base_ev": float(photo_data.get("base_ev", 0.0)),
@@ -105,23 +200,63 @@ def save_photo_cache(file_path: str, photo_data: dict, preview_array: np.ndarray
         }
         meta_json = json.dumps(meta, default=str, ensure_ascii=False)
 
-        # 2. Thumbnail
+        # 2. Thumbnail handling: Raw base vs Graded
         thumb = photo_data.get("thumbnail_rgb")
-        if thumb is None:
-            thumb = np.zeros((72, 72, 3), dtype=np.uint8)
-        elif not isinstance(thumb, np.ndarray):
-            thumb = np.array(thumb, dtype=np.uint8)
-        elif thumb.dtype != np.uint8:
-            if np.issubdtype(thumb.dtype, np.floating):
-                thumb = (np.clip(thumb, 0.0, 1.0) * 255.0).astype(np.uint8)
+        raw_thumb = photo_data.get("raw_thumbnail_rgb")
+        if raw_thumb is None or (isinstance(raw_thumb, np.ndarray) and raw_thumb.size == 0):
+            raw_thumb = photo_data.get("raw_thumbnail")
+        if raw_thumb is None or (isinstance(raw_thumb, np.ndarray) and raw_thumb.size == 0):
+            if not photo_data.get("is_edited"):
+                raw_thumb = np.copy(thumb) if thumb is not None else None
             else:
-                thumb = thumb.astype(np.uint8)
+                # Attempt healing from preview array
+                prev = preview_array if preview_array is not None else photo_data.get("float_img")
+                if prev is None:
+                    prev = get_photo_preview(file_path)
+                if prev is not None and isinstance(prev, np.ndarray) and prev.size > 0:
+                    try:
+                        import cv2
+                        from app_core import prophoto_to_srgb_filmic
+                        th_h = 72
+                        th_w = max(48, int(prev.shape[1] * (th_h / float(prev.shape[0]))))
+                        th_img = cv2.resize(prev, (th_w, th_h), interpolation=cv2.INTER_AREA)
+                        raw_thumb = (prophoto_to_srgb_filmic(th_img) * 255.0).astype(np.uint8)
+                    except Exception:
+                        pass
+        graded_thumb = photo_data.get("graded_thumbnail_rgb")
+
+        # Guard: Never write dummy arrays or uninitialized black frames to disk cache
+        if is_dummy_or_corrupted_thumbnail(thumb):
+            healed = extract_fast_thumbnail(file_path)
+            if healed is not None and not is_dummy_or_corrupted_thumbnail(healed):
+                thumb = healed
+        if is_dummy_or_corrupted_thumbnail(raw_thumb):
+            if not is_dummy_or_corrupted_thumbnail(thumb):
+                raw_thumb = thumb
+            else:
+                healed = extract_fast_thumbnail(file_path)
+                if healed is not None and not is_dummy_or_corrupted_thumbnail(healed):
+                    raw_thumb = healed
+                    thumb = healed
+
+        def _to_u8(arr):
+            if arr is None:
+                return None
+            if not isinstance(arr, np.ndarray):
+                arr = np.array(arr)
+            if np.issubdtype(arr.dtype, np.floating):
+                return (np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)
+            return arr.astype(np.uint8)
+
+        thumb_u8 = _to_u8(thumb) if thumb is not None else np.zeros((72, 72, 3), dtype=np.uint8)
+        raw_u8 = _to_u8(raw_thumb) if raw_thumb is not None else thumb_u8
+        graded_u8 = _to_u8(graded_thumb) if (graded_thumb is not None and graded_thumb.size > 0) else np.zeros((0,), dtype=np.uint8)
 
         # Atomic write entry
         import threading
         nonce = f"{os.getpid()}_{threading.get_ident()}_{time.time_ns()}"
         tmp_entry = os.path.join(cache_dir, f"{key}_entry_tmp_{nonce}.npz")
-        np.savez(tmp_entry, thumb=thumb, meta=meta_json)
+        np.savez(tmp_entry, thumb=thumb_u8, raw_thumb=raw_u8, graded_thumb=graded_u8, meta=meta_json)
         if os.path.exists(entry_path):
             try:
                 os.remove(entry_path)
@@ -162,62 +297,190 @@ def save_photo_cache(file_path: str, photo_data: dict, preview_array: np.ndarray
         return False
 
 
-def save_photo_preview(file_path: str, preview_array: np.ndarray) -> bool:
-    """Saves only the viewport preview array in float16 format."""
-    if not file_path or not os.path.isfile(file_path) or preview_array is None:
-        return False
-    try:
-        import threading
-        nonce = f"{os.getpid()}_{threading.get_ident()}_{time.time_ns()}"
-        cache_dir = get_cache_dir()
-        key = get_cache_key(file_path)
-        preview_path = os.path.join(cache_dir, f"{key}_preview.npy")
-        tmp_prev = os.path.join(cache_dir, f"{key}_preview_tmp_{nonce}.npy")
-        np.save(tmp_prev, preview_array.astype(np.float16))
-        if os.path.exists(preview_path):
-            try:
-                os.remove(preview_path)
-            except Exception:
-                pass
+def get_image_dimensions(file_path: str) -> tuple[int, int]:
+    """Fast, lightweight dimension extraction for RAW and standard image files in sub-2ms."""
+    if not file_path or not os.path.isfile(file_path):
+        return 0, 0
+    ext = os.path.splitext(file_path)[1].lower()
+    raw_exts = {
+        ".arw", ".srf", ".sr2", ".arq",
+        ".cr2", ".cr3", ".crw",
+        ".nef", ".nrw",
+        ".raf",
+        ".dng",
+        ".rw2",
+        ".orf", ".ori",
+        ".pef", ".ptx",
+        ".3fr", ".fff",
+        ".x3f",
+    }
+    if ext in raw_exts:
         try:
-            os.replace(tmp_prev, preview_path)
+            import rawpy
+            with rawpy.imread(file_path) as raw:
+                rw, rh = raw.sizes.width, raw.sizes.height
+                flip = getattr(raw.sizes, "flip", 0)
+                if flip in (4, 5, 6, 7):
+                    rw, rh = rh, rw
+                if rw > 0 and rh > 0:
+                    return int(rw), int(rh)
         except Exception:
-            if os.path.exists(tmp_prev):
-                try:
-                    os.remove(tmp_prev)
-                except Exception:
-                    pass
-        return True
+            pass
+    try:
+        from PIL import Image
+        with Image.open(file_path) as img:
+            return int(img.width), int(img.height)
+    except Exception:
+        pass
+    return 0, 0
+
+
+def extract_fast_thumbnail(file_path: str, target_h: int = 72) -> np.ndarray | None:
+    """Extracts high-quality camera embedded JPEG thumbnail or loads image thumbnail in sub-15ms.
+    Guarantees correct orientation and avoids expensive LibRaw demosaicing.
+    """
+    if not file_path or not os.path.isfile(file_path):
+        return None
+    ext = os.path.splitext(file_path)[1].lower()
+    raw_exts = {
+        ".arw", ".srf", ".sr2", ".arq",
+        ".cr2", ".cr3", ".crw",
+        ".nef", ".nrw",
+        ".raf",
+        ".dng",
+        ".rw2",
+        ".orf", ".ori",
+        ".pef", ".ptx",
+        ".3fr", ".fff",
+        ".x3f",
+    }
+    try:
+        import cv2
+        if ext in raw_exts:
+            import rawpy
+            with rawpy.imread(file_path) as raw:
+                rw, rh = raw.sizes.width, raw.sizes.height
+                flip = getattr(raw.sizes, "flip", 0)
+                if flip in (4, 5, 6, 7):
+                    w, h = rh, rw
+                else:
+                    w, h = rw, rh
+                thumb = raw.extract_thumb()
+                if thumb.format == rawpy.ThumbFormat.JPEG:
+                    file_bytes = np.frombuffer(thumb.data, dtype=np.uint8)
+                    img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                    if img_bgr is not None:
+                        th_h_raw, th_w_raw = img_bgr.shape[:2]
+                        if (h > w and th_w_raw > th_h_raw):
+                            img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
+                        elif (w > h and th_h_raw > th_w_raw):
+                            img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
+                        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                        th_h = target_h
+                        th_w = max(48, int(rgb.shape[1] * (th_h / float(rgb.shape[0]))))
+                        return cv2.resize(rgb, (th_w, th_h), interpolation=cv2.INTER_AREA)
+        else:
+            with open(file_path, "rb") as fp:
+                file_bytes = np.frombuffer(fp.read(), dtype=np.uint8)
+                img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            if img_bgr is not None:
+                rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                th_h = target_h
+                th_w = max(48, int(rgb.shape[1] * (th_h / float(rgb.shape[0]))))
+                return cv2.resize(rgb, (th_w, th_h), interpolation=cv2.INTER_AREA)
     except Exception as e:
-        logger.warning(f"Failed to save preview cache for {file_path}: {e}")
-        return False
+        logger.debug(f"extract_fast_thumbnail failed for {file_path}: {e}")
+    return None
 
 
 def get_photo_cache(file_path: str, load_preview: bool = False) -> dict | None:
     """Loads cached photo metadata, thumbnail, and optionally the viewport preview array."""
-    if not file_path or not os.path.isfile(file_path):
-        return None
-
-    key = get_cache_key(file_path)
-    entry_path = os.path.join(get_cache_dir(), f"{key}_entry.npz")
-    if not os.path.isfile(entry_path):
+    entry_path, key = _get_entry_path_with_fallback(file_path)
+    if not entry_path or not os.path.isfile(entry_path):
         return None
 
     try:
         with np.load(entry_path, allow_pickle=False) as npz:
             meta = json.loads(str(npz["meta"]))
             thumb = np.copy(npz["thumb"])
+            raw_thumb = np.copy(npz["raw_thumb"]) if "raw_thumb" in npz else np.copy(thumb)
+            graded_thumb = np.copy(npz["graded_thumb"]) if ("graded_thumb" in npz and npz["graded_thumb"].size > 0) else None
+
+        # Auto-heal inverted dimensions from old cache entries
+        w_cached = int(meta.get("width", 0))
+        h_cached = int(meta.get("height", 0))
+        if (w_cached <= 0 or h_cached <= 0) and file_path and os.path.isfile(file_path):
+            dw, dh = get_image_dimensions(file_path)
+            if dw > 0 and dh > 0:
+                w_cached, h_cached = dw, dh
+                meta["width"] = w_cached
+                meta["height"] = h_cached
+
+        ref_th = raw_thumb if (raw_thumb is not None and raw_thumb.size > 0) else thumb
+        if ref_th is not None and hasattr(ref_th, "shape") and len(ref_th.shape) >= 2:
+            th_h, th_w = ref_th.shape[:2]
+            if (th_h > th_w and w_cached > h_cached) or (th_w > th_h and h_cached > w_cached):
+                w_cached, h_cached = h_cached, w_cached
+                meta["width"] = w_cached
+                meta["height"] = h_cached
 
         float_img = None
         if load_preview:
             float_img = get_photo_preview(file_path)
+
+        # Healing 1: Auto-heal dummy solid placeholder arrays or corrupted frames
+        if is_dummy_or_corrupted_thumbnail(raw_thumb) or is_dummy_or_corrupted_thumbnail(thumb):
+            healed = extract_fast_thumbnail(file_path)
+            if healed is not None and not is_dummy_or_corrupted_thumbnail(healed):
+                raw_thumb = healed
+                thumb = healed
+                if is_dummy_or_corrupted_thumbnail(graded_thumb):
+                    graded_thumb = None
+                # Persist healed thumbnail back to disk cache
+                try:
+                    save_photo_cache(file_path, {
+                        "width": meta.get("width", 0),
+                        "height": meta.get("height", 0),
+                        "thumbnail_rgb": thumb,
+                        "raw_thumbnail_rgb": raw_thumb,
+                        "graded_thumbnail_rgb": graded_thumb,
+                        "exif": meta.get("exif", {}),
+                        "auto_ev": meta.get("auto_ev", 0.0),
+                        "base_ev": meta.get("base_ev", 0.0),
+                        "is_raw": meta.get("is_raw", False)
+                    }, save_preview=False)
+                except Exception:
+                    pass
+
+        # Healing 2: If raw_thumb is missing, empty or dummy, recover from float preview
+        if is_dummy_or_corrupted_thumbnail(raw_thumb):
+            preview_src = float_img if float_img is not None else get_photo_preview(file_path)
+            if preview_src is not None and preview_src.size > 0:
+                try:
+                    import cv2
+                    from app_core import prophoto_to_srgb_filmic
+                    th_h = 72
+                    th_w = max(48, int(preview_src.shape[1] * (th_h / float(preview_src.shape[0]))))
+                    th_img = cv2.resize(preview_src, (th_w, th_h), interpolation=cv2.INTER_AREA)
+                    raw_thumb = (prophoto_to_srgb_filmic(th_img) * 255.0).astype(np.uint8)
+                    if is_dummy_or_corrupted_thumbnail(thumb):
+                        thumb = raw_thumb
+                except Exception:
+                    pass
+
+        effective_thumb = graded_thumb if (graded_thumb is not None and graded_thumb.size > 0 and not is_dummy_or_corrupted_thumbnail(graded_thumb)) else raw_thumb
+        if is_dummy_or_corrupted_thumbnail(effective_thumb) and not is_dummy_or_corrupted_thumbnail(thumb):
+            effective_thumb = thumb
 
         return {
             "path": meta.get("path", file_path),
             "filename": meta.get("filename", os.path.basename(file_path)),
             "width": meta.get("width", 0),
             "height": meta.get("height", 0),
-            "thumbnail_rgb": thumb,
+            "thumbnail_rgb": effective_thumb,
+            "raw_thumbnail_rgb": raw_thumb,
+            "raw_thumbnail": raw_thumb,
+            "graded_thumbnail_rgb": graded_thumb,
             "float_img": float_img,
             "exif": meta.get("exif", {}),
             "auto_ev": float(meta.get("auto_ev", 0.0)),
@@ -231,10 +494,10 @@ def get_photo_cache(file_path: str, load_preview: bool = False) -> dict | None:
 
 def get_photo_preview(file_path: str) -> np.ndarray | None:
     """Loads only the viewport float preview array (float32) from cache."""
-    if not file_path or not os.path.isfile(file_path):
+    entry_path, key = _get_entry_path_with_fallback(file_path)
+    if not key:
         return None
 
-    key = get_cache_key(file_path)
     preview_path = os.path.join(get_cache_dir(), f"{key}_preview.npy")
     if not os.path.isfile(preview_path):
         return None
@@ -245,6 +508,47 @@ def get_photo_preview(file_path: str) -> np.ndarray | None:
     except Exception as e:
         logger.warning(f"Failed to load preview cache for {file_path}: {e}")
         return None
+
+
+def save_photo_preview(file_path: str, preview_array: np.ndarray) -> bool:
+    """Saves only the viewport float preview array (float16 on disk) into cache."""
+    if not file_path or preview_array is None or not isinstance(preview_array, np.ndarray) or preview_array.size == 0:
+        return False
+    entry_path, key = _get_entry_path_with_fallback(file_path)
+    if not key:
+        return False
+    cache_dir = get_cache_dir()
+    preview_path = os.path.join(cache_dir, f"{key}_preview.npy")
+    import threading
+    nonce = f"{os.getpid()}_{threading.get_ident()}_{time.time_ns()}"
+    tmp_prev = os.path.join(cache_dir, f"{key}_preview_tmp_{nonce}.npy")
+    try:
+        np.save(tmp_prev, preview_array.astype(np.float16))
+        if os.path.exists(preview_path):
+            try:
+                os.remove(preview_path)
+            except Exception:
+                pass
+        os.replace(tmp_prev, preview_path)
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to save preview cache for {file_path}: {e}")
+        if os.path.exists(tmp_prev):
+            try:
+                os.remove(tmp_prev)
+            except Exception:
+                pass
+        return False
+
+
+def invalidate_photo_cache(file_path: str):
+    """Invalidates and purges memory fallback index for a given image file upon SDC removal."""
+    if not file_path:
+        return
+    norm_path = os.path.abspath(file_path)
+    global _path_cache_index
+    if _path_cache_index is not None and norm_path in _path_cache_index:
+        _path_cache_index.pop(norm_path, None)
 
 
 def get_cache_size_bytes() -> int:
@@ -436,15 +740,26 @@ def save_session_file(file_path: str, session_data: dict) -> bool:
         raw_photos = session_data.get("photos", [])
         for item in raw_photos:
             if isinstance(item, str):
-                clean_photos.append(os.path.abspath(item))
+                clean_photos.append({
+                    "path": os.path.abspath(item),
+                    "filename": os.path.basename(item)
+                })
             elif isinstance(item, dict) and "path" in item:
-                clean_photos.append(os.path.abspath(item["path"]))
+                entry = {
+                    "path": os.path.abspath(item["path"]),
+                    "filename": item.get("filename") or os.path.basename(item["path"])
+                }
+                if "rel_path" in item and item["rel_path"]:
+                    entry["rel_path"] = item["rel_path"]
+                clean_photos.append(entry)
 
         clean_data = {
             "format": "SpektraDarkroomSession",
-            "version": "2.0",
+            "version": session_data.get("version", "2.1"),
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "active_photo_path": session_data.get("active_photo_path"),
+            "active_photo_rel_path": session_data.get("active_photo_rel_path"),
+            "active_photo_filename": session_data.get("active_photo_filename"),
             "active_photo_id": session_data.get("active_photo_id"),
             "view_mode": session_data.get("view_mode", 0),
             "split_x": session_data.get("split_x", 0.5),
@@ -462,7 +777,7 @@ def save_session_file(file_path: str, session_data: dict) -> bool:
 def load_session_file(file_path: str) -> dict | None:
     """Loads session data from a .sdss file.
     Seamless backward compatibility:
-    - Supports v2.0 clean path array format;
+    - Supports v2.0/v2.1 clean path and relative path array format;
     - If legacy v1.0 file with embedded params is detected, auto-migrates missing .sdc sidecars.
     """
     if not file_path or not os.path.isfile(file_path):
@@ -480,7 +795,10 @@ def load_session_file(file_path: str) -> dict | None:
 
         for item in raw_photos:
             if isinstance(item, str):
-                norm_photos.append({"path": os.path.abspath(item)})
+                norm_photos.append({
+                    "path": os.path.abspath(item),
+                    "filename": os.path.basename(item)
+                })
             elif isinstance(item, dict) and "path" in item:
                 photo_path = os.path.abspath(item["path"])
                 # Legacy migration: If old session has params and .sdc does not exist, save sidecar
@@ -492,7 +810,13 @@ def load_session_file(file_path: str) -> dict | None:
                         sdc_manager.save_sdc(photo_path, film, paper, params or {})
                     except Exception:
                         pass
-                norm_photos.append({"path": photo_path})
+                entry = {
+                    "path": photo_path,
+                    "filename": item.get("filename") or os.path.basename(photo_path)
+                }
+                if "rel_path" in item and item["rel_path"]:
+                    entry["rel_path"] = item["rel_path"]
+                norm_photos.append(entry)
 
         data["photos"] = norm_photos
         return data

@@ -35,6 +35,10 @@ class ParameterGroupCard(QWidget):
                 border: 1px solid #262834;
                 border-radius: 6px;
             }
+            QFrame#paramGroupCard:disabled {
+                background: #131418;
+                border: 1px solid #1c1d24;
+            }
         """)
 
         card_layout = QVBoxLayout(self.card)
@@ -48,10 +52,15 @@ class ParameterGroupCard(QWidget):
 
         self.title_label = QLabel(self.title_text)
         self.title_label.setStyleSheet("""
-            color: #f59e0b;
-            font-size: 11px;
-            font-weight: bold;
-            letter-spacing: 0.5px;
+            QLabel {
+                color: #f59e0b;
+                font-size: 11px;
+                font-weight: bold;
+                letter-spacing: 0.5px;
+            }
+            QLabel:disabled {
+                color: #52525b;
+            }
         """)
         header_layout.addWidget(self.title_label, 1)
 
@@ -68,12 +77,16 @@ class ParameterGroupCard(QWidget):
                 border-radius: 3px;
             }
             QPushButton:hover {
-                color: #f59e0b;
-                background: rgba(245, 158, 11, 0.12);
+                color: #fbbf24;
+                background: rgba(251, 191, 36, 0.12);
             }
             QPushButton:pressed {
                 color: #d97706;
                 background: rgba(245, 158, 11, 0.22);
+            }
+            QPushButton:disabled {
+                color: #383a42;
+                background: transparent;
             }
         """)
         self.reset_btn.clicked.connect(self.resetClicked.emit)

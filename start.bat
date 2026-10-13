@@ -7,9 +7,9 @@ echo   SpektraDarkroom (GPU Edition) Adobe Camera Raw UI
 echo   Hardware-Accelerated 60+ FPS Real-time Pipeline
 echo ====================================================
 echo.
-"%~dp0.venv\Scripts\python.exe" main.py
+"%~dp0SpektraDarkroom.exe" %*
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo Application exited with error. Press any key to exit...
+    echo Application exited with error code %ERRORLEVEL%. Press any key to exit...
     pause >nul
 )

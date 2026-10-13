@@ -28,10 +28,141 @@ else:
 
 import ctypes
 from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QPalette, QColor, QPainter, QPen, QBrush, QPixmap
+from PySide6.QtCore import Qt, QRect, QRectF
+from PySide6.QtGui import QFont, QFontMetrics, QPalette, QColor, QPainter, QPen, QBrush, QPixmap, QImage
 
 from version import VERSION_STRING, get_app_title
+
+
+class DarkroomSplashScreen(QSplashScreen):
+    """自定义启动画面：支持高 DPI 视网膜渲染与底部状态文案几何居中"""
+
+    def __init__(self, pixmap: QPixmap):
+        super().__init__(pixmap, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        self._status_text = ""
+
+    def set_status(self, text: str):
+        self._status_text = text
+        self.repaint()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawPixmap(self.rect(), self.pixmap())
+        self.drawContents(painter)
+
+    def drawContents(self, painter: QPainter):
+        if self._status_text:
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            font = QFont()
+            font.setFamilies([
+                "Microsoft YaHei UI",
+                "Microsoft YaHei",
+                "Segoe UI",
+                "PingFang SC",
+                "Hiragino Sans GB",
+                "Noto Sans CJK SC",
+                "sans-serif"
+            ])
+            font.setPixelSize(11)
+            painter.setFont(font)
+            painter.setPen(QColor("#a0aec0"))
+            # 物理 1280x720, pix.setDevicePixelRatio(2.0), 逻辑尺寸 640x360
+            # 物理底栏高度 68px (逻辑 34px), 物理左边距 48px (逻辑 24px)
+            # +1 针对汉字光学基线绝对垂直对齐
+            text_rect = QRect(24, int(self.height() - 34) + 1, int(self.width() - 200), 34)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._status_text)
+            painter.restore()
+
+
+def select_splash_pixmap(resource_dir: str, app: QApplication, version_string: str = VERSION_STRING) -> QPixmap | None:
+    """
+    根据当前主显示器物理分辨率与 DPI 缩放比例自适应挑选最佳启动画面底图，
+    按目标物理栅格进行高质量 Lanczos 重采样，
+    在内存中以目标物理分辨率动态测量并合成版本号胶囊药丸徽章（解耦静态底图文件），
+    并设置精确的 devicePixelRatio 保持 640x360 视网膜清晰视口，消除运行时点采样损失。
+    """
+    screen = app.primaryScreen() if app else None
+    dpr = float(screen.devicePixelRatio()) if screen else 1.0
+
+    # 目标物理像素尺寸（逻辑 640x360 * dpr）
+    target_w = max(640, int(round(640 * dpr)))
+    target_h = max(360, int(round(360 * dpr)))
+
+    # 多分辨率候选梯队：选择能够覆盖目标物理宽度的底图
+    candidates = [
+        (1280, "splash.png"),
+        (1920, "splash@1.5x.png"),
+        (2560, "splash@2x.png"),
+    ]
+
+    chosen_path = None
+    for cand_w, fname in candidates:
+        cand_path = os.path.join(resource_dir, fname)
+        if os.path.exists(cand_path):
+            chosen_path = cand_path
+            if cand_w >= target_w:
+                break
+
+    if not chosen_path or not os.path.exists(chosen_path):
+        chosen_path = os.path.join(resource_dir, "splash.png")
+
+    if not os.path.exists(chosen_path):
+        return None
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.open(chosen_path).convert("RGBA")
+
+        # 1. 高质量 Lanczos 预缩放到当前屏幕的实际物理像素栅格
+        if (img.width, img.height) != (target_w, target_h):
+            img = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+        # 2. 动态测量与绘制版本号全圆角药丸胶囊 (在目标物理像素栅格上以 1:1 像素精度绘制)
+        if version_string:
+            ver_text = f"v{version_string}"
+            scale = target_w / 1280.0
+            font_size = max(10, int(round(16 * scale)))
+            font_path = "C:/Windows/Fonts/segoeuib.ttf"
+            if not os.path.exists(font_path):
+                font_path = "C:/Windows/Fonts/msyh.ttc"
+            f_ver = ImageFont.truetype(font_path, font_size)
+            b = f_ver.getbbox(ver_text)
+            vw, vh = b[2] - b[0], b[3] - b[1]
+            badge_h = max(16, int(round(30 * scale)))
+            pad_x = max(10, int(round(22 * scale)))
+            badge_w = vw + pad_x
+            badge_r = badge_h // 2
+            badge_x = int(round((867 + 18) * scale))
+            title_center_y = int(round(291 * scale))
+            badge_y = int(round(title_center_y - badge_h / 2.0))
+
+            draw = ImageDraw.Draw(img)
+            draw.rounded_rectangle(
+                [badge_x, badge_y, badge_x + badge_w, badge_y + badge_h],
+                radius=badge_r,
+                fill=(22, 24, 30, 255),
+                outline=(245, 158, 11, 255),
+                width=max(1, int(round(1 * scale)))
+            )
+            badge_tx = badge_x + (badge_w - vw) // 2 - b[0]
+            badge_ty = badge_y + (badge_h - vh) // 2 - b[1]
+            draw.text((badge_tx, badge_ty), ver_text, fill=(245, 158, 11, 255), font=f_ver)
+
+        raw_bytes = img.tobytes("raw", "RGBA")
+        qimg = QImage(raw_bytes, img.width, img.height, img.width * 4, QImage.Format.Format_RGBA8888)
+        pix = QPixmap.fromImage(qimg)
+    except Exception:
+        pix = QPixmap(chosen_path)
+
+    # 依据底图物理像素宽度自适应计算设备像素比，始终输出 640x360 黄金比例逻辑视口
+    target_logical_w = 640.0
+    scale_ratio = pix.width() / target_logical_w
+    pix.setDevicePixelRatio(scale_ratio)
+    return pix
 
 
 def main():
@@ -113,39 +244,16 @@ def main():
 
     splash = None
     if not launched_from_exe:
-        splash_path = os.path.join(get_resource_dir(), "splash.png")
-        if os.path.exists(splash_path):
-            pix = QPixmap(splash_path)
-            try:
-                painter = QPainter(pix)
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                ver_text = f"v{VERSION_STRING}"
-                font_ver = QFont("Segoe UI", 16, QFont.Weight.Bold)
-                painter.setFont(font_ver)
-                fm = painter.fontMetrics()
-                tw = fm.horizontalAdvance(ver_text)
-                th = fm.height()
-                bw = tw + 24
-                bh = th + 8
-                bx = 898
-                by = 233
-                painter.setBrush(QBrush(QColor(20, 22, 28, 170)))
-                painter.setPen(QPen(QColor(245, 158, 11, 210), 2.0))
-                painter.drawRoundedRect(bx, by, bw, bh, 7, 7)
-                painter.setPen(QPen(QColor(245, 158, 11)))
-                painter.drawText(bx, by, bw, bh, Qt.AlignmentFlag.AlignCenter, ver_text)
-                painter.end()
-            except Exception:
-                pass
-            pix.setDevicePixelRatio(2.0)
-            splash = QSplashScreen(pix, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        pix = select_splash_pixmap(get_resource_dir(), app, VERSION_STRING)
+        if pix and not pix.isNull():
+            splash = DarkroomSplashScreen(pix)
             splash.show()
             app.processEvents()
 
     def notify_status(msg):
         print(f"[SPLASH] {msg}", flush=True)
         if splash and not launched_from_exe:
-            splash.showMessage(f"  {msg}", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft, QColor("#cbd5e1"))
+            splash.set_status(msg)
             app.processEvents()
 
     notify_status("正在解析 Qt 核心组件与图形环境...")

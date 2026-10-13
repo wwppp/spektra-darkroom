@@ -1,12 +1,17 @@
 using System;
-using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Text;
+using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Threading;
 using System.Windows.Forms;
+
+[assembly: AssemblyTitle("SpektraDarkroom")]
+[assembly: AssemblyProduct("SpektraDarkroom")]
+[assembly: AssemblyDescription("SpektraDarkroom 物理胶片暗房工作站")]
+[assembly: AssemblyCompany("Spektra Darkroom Studio")]
+[assembly: AssemblyCopyright("Copyright © 2026 SpektraDarkroom")]
+[assembly: AssemblyVersion("0.1.74.75")]
+[assembly: AssemblyFileVersion("0.1.74.75")]
 
 namespace SpektraDarkroom
 {
@@ -15,15 +20,24 @@ namespace SpektraDarkroom
         [DllImport("user32.dll")]
         private static extern bool SetProcessDPIAware();
 
+        [DllImport("shell32.dll", SetLastError = true)]
+        private static extern void SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr LoadLibrary(string lpFileName);
+
+        [DllImport("python313.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int Py_Main(int argc, IntPtr[] argv);
+
         [STAThread]
-        static void Main(string[] args)
+        static int Main(string[] args)
         {
-            // Fast IPC check: if an instance is already running, pass args directly and exit immediately
+            // 1. Fast single-instance IPC check
             try
             {
                 using (var pipe = new System.IO.Pipes.NamedPipeClientStream(".", "SpektraDarkroom_IPC_SingleInstance", System.IO.Pipes.PipeDirection.Out))
                 {
-                    pipe.Connect(1000);
+                    pipe.Connect(300);
                     using (var writer = new StreamWriter(pipe, new System.Text.UTF8Encoding(false)))
                     {
                         if (args != null && args.Length > 0)
@@ -36,311 +50,166 @@ namespace SpektraDarkroom
                         }
                         writer.Flush();
                     }
-                    return;
+                    return 0;
                 }
             }
             catch { }
 
-            try
-            {
-                SetProcessDPIAware();
-            }
-            catch { }
-
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
+            // 2. Windows DPI awareness & AppUserModelID
+            try { SetProcessDPIAware(); } catch { }
+            try { SetCurrentProcessExplicitAppUserModelID("SpektraDarkroom.Vulkan.App.1.0"); } catch { }
 
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string pythonExe = Path.Combine(baseDir, "runtime", "python.exe");
-            if (!File.Exists(pythonExe))
+            if (baseDir.TrimEnd('\\', '/').EndsWith("Scripts", StringComparison.OrdinalIgnoreCase))
             {
-                pythonExe = Path.Combine(baseDir, "runtime", "pythonw.exe");
-            }
-            if (!File.Exists(pythonExe))
-            {
-                pythonExe = Path.Combine(baseDir, "python", "python.exe");
-            }
-            if (!File.Exists(pythonExe))
-            {
-                pythonExe = Path.Combine(baseDir, ".venv", "Scripts", "python.exe");
-            }
-            if (!File.Exists(pythonExe))
-            {
-                pythonExe = Path.Combine(baseDir, ".venv", "Scripts", "pythonw.exe");
-            }
-            if (!File.Exists(pythonExe))
-            {
-                MessageBox.Show("找不到 Python 运行环境 (runtime/python.exe 或 .venv/Scripts/python.exe)。请确保软件目录完整。", 
-                                "SpektraDarkroom", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
+                baseDir = Path.GetFullPath(Path.Combine(baseDir, "..", ".."));
             }
 
+            string venvDir = Path.Combine(baseDir, ".venv");
+            string venvSite = Path.Combine(venvDir, "Lib", "site-packages");
+            string spektraSrc = Path.Combine(baseDir, "spektrafilm-repo", "src");
+
+            // 3. Locate python313.dll dynamically
+            string dllPath = null;
+            string pythonHome = null;
+
+            // 3a. Check runtime directory
+            string rtDir = Path.Combine(baseDir, "runtime");
+            if (File.Exists(Path.Combine(rtDir, "python313.dll")))
+            {
+                dllPath = Path.Combine(rtDir, "python313.dll");
+                pythonHome = rtDir;
+            }
+
+            // 3b. Check .venv/pyvenv.cfg
+            if (string.IsNullOrEmpty(dllPath))
+            {
+                string venvCfg = Path.Combine(venvDir, "pyvenv.cfg");
+                if (File.Exists(venvCfg))
+                {
+                    string[] lines = File.ReadAllLines(venvCfg);
+                    foreach (string line in lines)
+                    {
+                        if (line.Trim().StartsWith("home ="))
+                        {
+                            string home = line.Substring(line.IndexOf('=') + 1).Trim();
+                            string cand = Path.Combine(home, "python313.dll");
+                            if (File.Exists(cand))
+                            {
+                                dllPath = cand;
+                                pythonHome = home;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3c. Check WindowsApps Python 3.13 packages
+            if (string.IsNullOrEmpty(dllPath))
+            {
+                string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                string winApps = Path.Combine(progFiles, "WindowsApps");
+                if (Directory.Exists(winApps))
+                {
+                    try
+                    {
+                        foreach (string pkg in Directory.GetDirectories(winApps, "*Python.3.13*"))
+                        {
+                            string cand = Path.Combine(pkg, "python313.dll");
+                            if (File.Exists(cand))
+                            {
+                                dllPath = cand;
+                                pythonHome = pkg;
+                                break;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            if (string.IsNullOrEmpty(dllPath) || !File.Exists(dllPath))
+            {
+                MessageBox.Show(
+                    "找不到 Python 核心运行组件 (python313.dll)。\n请确保已安装 Python 3.13 或已配置完整的 .venv 运行环境。",
+                    "SpektraDarkroom",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
+                return 1;
+            }
+
+            string basePrefix = pythonHome ?? Path.GetDirectoryName(dllPath);
+            Environment.SetEnvironmentVariable("PYTHONHOME", basePrefix);
+
+            // 4. Construct comprehensive PYTHONPATH for embedded environment
+            List<string> paths = new List<string>();
+            paths.Add(Path.Combine(basePrefix, "DLLs"));
+            paths.Add(Path.Combine(basePrefix, "Lib"));
+            paths.Add(basePrefix);
+            if (Directory.Exists(venvSite)) paths.Add(venvSite);
+            paths.Add(baseDir);
+            if (Directory.Exists(spektraSrc)) paths.Add(spektraSrc);
+
+            string pythonPath = string.Join(";", paths.ToArray());
+            Environment.SetEnvironmentVariable("PYTHONPATH", pythonPath);
+            Environment.SetEnvironmentVariable("PYTHONUNBUFFERED", "1");
+
+            // 5. Load python313.dll
+            IntPtr hDll = LoadLibrary(dllPath);
+            if (hDll == IntPtr.Zero)
+            {
+                MessageBox.Show(
+                    "加载 python313.dll 失败，Win32 错误代码: " + Marshal.GetLastWin32Error(),
+                    "SpektraDarkroom",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
+                return 1;
+            }
+
+            // 6. Execute main.py via Py_Main in native host process
             string mainPy = Path.Combine(baseDir, "main.py");
             if (!File.Exists(mainPy))
             {
-                MessageBox.Show("找不到主程序脚本 main.py。", "SpektraDarkroom", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
+                MessageBox.Show(
+                    "找不到主程序脚本 main.py。",
+                    "SpektraDarkroom",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
+                return 1;
             }
 
-            string appVersion = GetAppVersion(baseDir);
-            string splashPath = Path.Combine(baseDir, "resources", "splash.png");
-            SplashForm splash = new SplashForm(splashPath, appVersion);
-            splash.Show();
-            Application.DoEvents();
-
-            ProcessStartInfo psi = new ProcessStartInfo();
-            psi.FileName = pythonExe;
-            string extraArgs = "";
-            if (args != null && args.Length > 0)
+            List<string> pyArgsList = new List<string>();
+            pyArgsList.Add("SpektraDarkroom.exe");
+            pyArgsList.Add(mainPy);
+            if (args != null)
             {
-                foreach (string arg in args)
+                foreach (string a in args)
                 {
-                    if (!string.IsNullOrEmpty(arg))
-                    {
-                        extraArgs += " \"" + arg.Trim().Replace("\"", "\\\"") + "\"";
-                    }
+                    if (!string.IsNullOrEmpty(a)) pyArgsList.Add(a);
                 }
             }
-            psi.Arguments = "\"" + mainPy + "\" --launched-from-exe" + extraArgs;
-            psi.WorkingDirectory = baseDir;
-            psi.UseShellExecute = false;
-            psi.RedirectStandardOutput = true;
-            psi.RedirectStandardError = true;
-            psi.CreateNoWindow = true;
 
-            Process proc;
+            IntPtr[] pArgs = new IntPtr[pyArgsList.Count];
+            for (int i = 0; i < pyArgsList.Count; i++)
+            {
+                pArgs[i] = Marshal.StringToHGlobalUni(pyArgsList[i]);
+            }
+
             try
             {
-                proc = Process.Start(psi);
+                return Py_Main(pArgs.Length, pArgs);
             }
-            catch (Exception ex)
+            finally
             {
-                splash.Close();
-                MessageBox.Show("启动 Python 进程失败: " + ex.Message, "SpektraDarkroom", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-
-            bool isReady = false;
-            Thread outThread = new Thread(() =>
-            {
-                try
+                for (int i = 0; i < pArgs.Length; i++)
                 {
-                    string line;
-                    while ((line = proc.StandardOutput.ReadLine()) != null)
-                    {
-                        line = line.Trim();
-                        if (line.StartsWith("[SPLASH]"))
-                        {
-                            string msg = line.Substring(8).Trim();
-                            if (!splash.IsDisposed && splash.IsHandleCreated)
-                            {
-                                splash.BeginInvoke((Action)(() => splash.UpdateStatus(msg)));
-                            }
-                        }
-                        else if (line.StartsWith("[READY]"))
-                        {
-                            isReady = true;
-                            if (!splash.IsDisposed && splash.IsHandleCreated)
-                            {
-                                splash.BeginInvoke((Action)(() => splash.CloseSplash()));
-                            }
-                            break;
-                        }
-                    }
-                }
-                catch { }
-            });
-            outThread.IsBackground = true;
-            outThread.Start();
-
-            Thread monitorThread = new Thread(() =>
-            {
-                proc.WaitForExit();
-                if (!isReady && proc.ExitCode != 0)
-                {
-                    string err = proc.StandardError.ReadToEnd();
-                    if (!splash.IsDisposed && splash.IsHandleCreated)
-                    {
-                        splash.BeginInvoke((Action)(() =>
-                        {
-                            splash.Close();
-                            MessageBox.Show("程序启动异常退出 (代码 " + proc.ExitCode + "):\n" + err, 
-                                            "SpektraDarkroom 启动错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }));
-                    }
-                }
-                else
-                {
-                    if (!splash.IsDisposed && splash.IsHandleCreated)
-                    {
-                        splash.BeginInvoke((Action)(() => splash.CloseSplash()));
-                    }
-                }
-            });
-            monitorThread.IsBackground = true;
-            monitorThread.Start();
-
-            Application.Run(splash);
-        }
-
-        static string GetAppVersion(string baseDir)
-        {
-            try
-            {
-                string verFile = Path.Combine(baseDir, "version.py");
-                if (File.Exists(verFile))
-                {
-                    string content = File.ReadAllText(verFile, System.Text.Encoding.UTF8);
-                    var mMaj = System.Text.RegularExpressions.Regex.Match(content, @"VERSION_MAJOR\s*=\s*(\d+)");
-                    var mMin = System.Text.RegularExpressions.Regex.Match(content, @"VERSION_MINOR\s*=\s*(\d+)");
-                    var mPat = System.Text.RegularExpressions.Regex.Match(content, @"VERSION_PATCH\s*=\s*(\d+)");
-                    if (mMaj.Success && mMin.Success && mPat.Success)
-                    {
-                        return mMaj.Groups[1].Value + "." + mMin.Groups[1].Value + "." + mPat.Groups[1].Value;
-                    }
+                    Marshal.FreeHGlobal(pArgs[i]);
                 }
             }
-            catch { }
-            return "0.1.16";
-        }
-    }
-
-    class SplashForm : Form
-    {
-        private Image splashImage;
-        private string appVersion;
-        private string currentStatus = "正在初始化环境与启动暗房内核...";
-        private System.Windows.Forms.Timer fadeTimer;
-        private float currentOpacity = 1.0f;
-
-        public SplashForm(string imagePath, string version = "")
-        {
-            this.appVersion = version;
-            this.FormBorderStyle = FormBorderStyle.None;
-            this.StartPosition = FormStartPosition.CenterScreen;
-            this.ShowInTaskbar = false;
-            this.TopMost = true;
-            this.DoubleBuffered = true;
-            this.BackColor = Color.FromArgb(14, 15, 20);
-
-            this.ClientSize = new Size(640, 360);
-
-            if (File.Exists(imagePath))
-            {
-                try
-                {
-                    splashImage = Image.FromFile(imagePath);
-                }
-                catch { }
-            }
-        }
-
-        public void UpdateStatus(string status)
-        {
-            this.currentStatus = status;
-            this.Invalidate(new Rectangle(0, this.ClientSize.Height - 50, this.ClientSize.Width, 50));
-        }
-
-        public void CloseSplash()
-        {
-            fadeTimer = new System.Windows.Forms.Timer();
-            fadeTimer.Interval = 20;
-            fadeTimer.Tick += (s, e) =>
-            {
-                currentOpacity -= 0.15f;
-                if (currentOpacity <= 0.05f)
-                {
-                    fadeTimer.Stop();
-                    this.Close();
-                }
-                else
-                {
-                    this.Opacity = currentOpacity;
-                }
-            };
-            fadeTimer.Start();
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            Graphics g = e.Graphics;
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-
-            if (splashImage != null)
-            {
-                g.DrawImage(splashImage, new Rectangle(0, 0, this.ClientSize.Width, this.ClientSize.Height));
-            }
-
-            if (!string.IsNullOrEmpty(appVersion))
-            {
-                string verText = appVersion.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? appVersion : "v" + appVersion;
-                using (Font verFont = new Font("Segoe UI", 8.0f, FontStyle.Bold))
-                {
-                    SizeF textSize = g.MeasureString(verText, verFont);
-                    float padH = 6f;
-                    float padV = 2f;
-                    float badgeW = textSize.Width + padH * 2;
-                    float badgeH = textSize.Height + padV * 2;
-                    float badgeX = 450f;
-                    float badgeY = 117f;
-
-                    RectangleF badgeRect = new RectangleF(badgeX, badgeY, badgeW, badgeH);
-                    using (GraphicsPath path = CreateRoundedRectanglePath(badgeRect, 3.5f))
-                    {
-                        using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(170, 20, 22, 28)))
-                        {
-                            g.FillPath(bgBrush, path);
-                        }
-                        using (Pen borderPen = new Pen(Color.FromArgb(210, 245, 158, 11), 1.0f))
-                        {
-                            g.DrawPath(borderPen, path);
-                        }
-                    }
-                    using (SolidBrush textBrush = new SolidBrush(Color.FromArgb(245, 158, 11)))
-                    {
-                        using (StringFormat sf = new StringFormat() { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                        {
-                            g.DrawString(verText, verFont, textBrush, new RectangleF(badgeX, badgeY + 0.5f, badgeW, badgeH), sf);
-                        }
-                    }
-                }
-            }
-
-            int barY = this.ClientSize.Height - 44;
-            using (SolidBrush barBrush = new SolidBrush(Color.FromArgb(230, 11, 12, 16)))
-            {
-                g.FillRectangle(barBrush, 0, barY, this.ClientSize.Width, 44);
-            }
-            using (Pen borderPen = new Pen(Color.FromArgb(40, 44, 56)))
-            {
-                g.DrawLine(borderPen, 0, barY, this.ClientSize.Width, barY);
-            }
-
-            using (SolidBrush dotBrush = new SolidBrush(Color.FromArgb(245, 158, 11)))
-            {
-                g.FillEllipse(dotBrush, 28, barY + 18, 7, 7);
-            }
-
-            using (Font font = new Font("Microsoft YaHei", 9f, FontStyle.Regular))
-            using (SolidBrush textBrush = new SolidBrush(Color.FromArgb(203, 213, 225)))
-            {
-                g.DrawString(currentStatus, font, textBrush, new PointF(46, barY + 13));
-            }
-        }
-
-        private static GraphicsPath CreateRoundedRectanglePath(RectangleF rect, float radius)
-        {
-            GraphicsPath path = new GraphicsPath();
-            float d = radius * 2.0f;
-            path.AddArc(rect.X, rect.Y, d, d, 180, 90);
-            path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
-            path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
-            path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
-            path.CloseFigure();
-            return path;
         }
     }
 }

@@ -39,12 +39,18 @@ class ScrubLabel(QLabel):
             QLabel:hover {
                 color: #f59e0b;
             }
+            QLabel:disabled {
+                color: #4b5563;
+            }
         """)
 
     def minimumSizeHint(self):
         return QSize(30, 16)
 
     def mousePressEvent(self, event):
+        if not self.isEnabled():
+            event.ignore()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
             self._last_global_x = float(event.globalPosition().x())
@@ -202,6 +208,9 @@ class RoundScrubSlider(QSlider):
         self.update()
 
     def mousePressEvent(self, event):
+        if not self.isEnabled():
+            event.ignore()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._pressed = True
             self._update_from_mouse_x(event.position().x())
@@ -210,6 +219,9 @@ class RoundScrubSlider(QSlider):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if not self.isEnabled():
+            event.ignore()
+            return
         if self._pressed:
             self._update_from_mouse_x(event.position().x())
             event.accept()
@@ -221,10 +233,14 @@ class RoundScrubSlider(QSlider):
             self._pressed = False
             self._smooth_x = None
             self.update()
+            self.sliderReleased.emit()
             event.accept()
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
+        if not self.isEnabled():
+            event.ignore()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self.doubleClicked.emit()
             event.accept()
@@ -256,6 +272,23 @@ class RoundScrubSlider(QSlider):
                 frac = (self.value() - self.minimum()) / float(self.maximum() - self.minimum())
                 frac = max(0.0, min(1.0, frac))
             knob_cx = x_start + frac * span
+
+        # Disabled rendering: flat muted dark gray slot + dimmed slate knob
+        if not self.isEnabled():
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(25, 27, 33))
+            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
+            if self.has_center_detent:
+                mid_x = x_start + span * 0.5
+                painter.setPen(QColor(255, 255, 255, 25))
+                painter.drawLine(QPointF(mid_x, cy - 2.0), QPointF(mid_x, cy + 2.0))
+                painter.setPen(Qt.PenStyle.NoPen)
+            knob_color = QColor(55, 59, 70)
+            border_pen = QPen(QColor(32, 34, 40), 1.0)
+            painter.setPen(border_pen)
+            painter.setBrush(knob_color)
+            painter.drawEllipse(QPointF(knob_cx, cy), r, r)
+            return
 
         # 1. Background Groove (Strict 3.0px height as requested)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -320,7 +353,8 @@ class AdobeScrubSlider(QWidget):
         self.step = float(step)
         self.unit = unit
         self.decimals = decimals
-        self.tooltip_text = tooltip
+        self.tooltip_text = tooltip.strip() if tooltip else ""
+        self.default_tooltip = self.tooltip_text
         self.track_gradient = track_gradient
         self.has_center_detent = has_center_detent
         self._is_updating = False
@@ -341,9 +375,9 @@ class AdobeScrubSlider(QWidget):
         header_layout.setSpacing(4)
 
         self.label = ScrubLabel(label_text)
-        clean_tip = re.sub(r'[\(（][^()（）]*[\)）]', '', self.tooltip_text).strip() if self.tooltip_text else ""
-        clean_tip = re.sub(r'\s{2,}', ' ', clean_tip)
-        self.label.setToolTip(clean_tip)
+        if self.tooltip_text:
+            self.label.setToolTip(self.tooltip_text)
+            self.setToolTip(self.tooltip_text)
         self.label.scrubDelta.connect(self._on_scrub)
         self.label.scrubFinished.connect(self._on_scrub_finished)
         self.label.doubleClicked.connect(self.reset)
@@ -368,6 +402,11 @@ class AdobeScrubSlider(QWidget):
             QLineEdit:focus {
                 border: 1px solid #f59e0b;
                 background: #1c1c1c;
+            }
+            QLineEdit:disabled {
+                background: #111216;
+                color: #4b5563;
+                border: 1px solid #20222a;
             }
         """)
         self.value_edit.returnPressed.connect(self._on_text_edited)
@@ -409,6 +448,9 @@ class AdobeScrubSlider(QWidget):
             QPushButton:pressed {
                 background: #1e202a;
             }
+            QPushButton:disabled {
+                opacity: 0.25;
+            }
         """)
         self.reset_btn.clicked.connect(self.reset)
         header_layout.addWidget(self.reset_btn)
@@ -422,12 +464,20 @@ class AdobeScrubSlider(QWidget):
         self.slider.setMinimumWidth(30)
         self.slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.slider.setRange(0, self.steps_total)
-        self.slider.setToolTip(clean_tip)
+        if self.tooltip_text:
+            self.slider.setToolTip(self.tooltip_text)
         self.slider.setStyleSheet("QSlider { background: transparent; border: none; }")
         self.slider.valueChanged.connect(self._on_slider_changed)
         self.slider.sliderReleased.connect(self._on_slider_released)
         self.slider.doubleClicked.connect(self.reset)
         main_layout.addWidget(self.slider)
+
+    def setToolTip(self, text):
+        super().setToolTip(text)
+        if hasattr(self, 'label') and self.label:
+            self.label.setToolTip(text)
+        if hasattr(self, 'slider') and self.slider:
+            self.slider.setToolTip(text)
 
     def set_track_gradient(self, gradient, center_detent=False):
         self.track_gradient = gradient
@@ -558,8 +608,18 @@ class AdobeScrubSlider(QWidget):
             self.steps_total = int(round((self.max_val - self.min_val) / self.step))
             self.slider.setRange(0, self.steps_total)
 
-    def get_default_value(self):
-        return self.default_val
+    def setEnabled(self, enabled: bool):
+        super().setEnabled(enabled)
+        if hasattr(self, 'label') and self.label:
+            self.label.setEnabled(enabled)
+        if hasattr(self, 'slider') and self.slider:
+            self.slider.setEnabled(enabled)
+            self.slider.update()
+        if hasattr(self, 'value_edit') and self.value_edit:
+            self.value_edit.setEnabled(enabled)
+        if hasattr(self, 'reset_btn') and self.reset_btn:
+            self.reset_btn.setEnabled(enabled)
+        self.update()
 
     def wheelEvent(self, event):
         event.ignore()
@@ -572,9 +632,13 @@ class ComboBoxRow(QWidget):
     def __init__(self, label_text, items, default_val=None, tooltip="", parent=None):
         super().__init__(parent)
         self.default_val = default_val
+        self.default_tooltip = tooltip.strip() if tooltip else ""
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 3, 0, 3)
         layout.setSpacing(6)
+
+        arrow_icon = get_icon_path("arrow_down.png").replace("\\", "/")
+        arrow_disabled = get_icon_path("arrow_down_disabled.png").replace("\\", "/")
 
         self.label = QLabel(label_text)
         self.label.setStyleSheet("""
@@ -584,45 +648,68 @@ class ComboBoxRow(QWidget):
                 font-weight: 500;
                 font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
             }
+            QLabel:disabled {
+                color: #4b5563;
+            }
         """)
-        if tooltip:
-            cleaned_tip = re.sub(r'[\(（][^()（）]*[\)）]', '', tooltip).strip()
-            cleaned_tip = re.sub(r'\s{2,}', ' ', cleaned_tip)
-            self.setToolTip(cleaned_tip)
-            self.label.setToolTip(cleaned_tip)
+        if self.default_tooltip:
+            self.setToolTip(self.default_tooltip)
+            self.label.setToolTip(self.default_tooltip)
         layout.addWidget(self.label)
         layout.addStretch()
 
         self.combo = QComboBox()
+        if self.default_tooltip:
+            self.combo.setToolTip(self.default_tooltip)
         self.combo.wheelEvent = lambda ev: ev.ignore()
         self.combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.combo.setStyleSheet("""
-            QComboBox {
+        self.combo.setStyleSheet(f"""
+            QComboBox {{
                 background: #14151a;
                 color: #e2e8f0;
                 border: 1px solid #2d303e;
                 border-radius: 4px;
-                padding: 3px 20px 3px 8px;
+                padding: 3px 22px 3px 8px;
                 font-size: 10.5px;
                 min-width: 115px;
                 max-width: 180px;
-            }
-            QComboBox:hover {
+            }}
+            QComboBox:hover {{
                 border-color: #f59e0b;
-            }
-            QComboBox::drop-down {
+            }}
+            QComboBox:disabled {{
+                background: #111216;
+                color: #4b5563;
+                border-color: #1e2029;
+            }}
+            QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 18px;
+                width: 20px;
                 border-left: 1px solid #242632;
-            }
-            QComboBox QAbstractItemView {
+            }}
+            QComboBox::drop-down:disabled {{
+                border-left-color: #1a1b22;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{arrow_icon}");
+                width: 9px;
+                height: 6px;
+                margin-right: 2px;
+            }}
+            QComboBox::down-arrow:disabled {{
+                image: url("{arrow_disabled}");
+                width: 9px;
+                height: 6px;
+                margin-right: 2px;
+            }}
+            QComboBox QAbstractItemView {{
                 background: #181920;
                 color: #e2e8f0;
                 selection-background-color: #f59e0b;
                 selection-color: #111;
                 border: 1px solid #333644;
-            }
+            }}
         """)
         for text, val in items:
             self.combo.addItem(text, val)
@@ -630,6 +717,20 @@ class ComboBoxRow(QWidget):
             self.set_value(default_val)
         self.combo.currentIndexChanged.connect(self._on_index_changed)
         layout.addWidget(self.combo)
+
+    def setToolTip(self, text):
+        super().setToolTip(text)
+        if hasattr(self, 'label') and self.label:
+            self.label.setToolTip(text)
+        if hasattr(self, 'combo') and self.combo:
+            self.combo.setToolTip(text)
+
+    def setEnabled(self, enabled: bool):
+        super().setEnabled(enabled)
+        if hasattr(self, 'label') and self.label:
+            self.label.setEnabled(enabled)
+        if hasattr(self, 'combo') and self.combo:
+            self.combo.setEnabled(enabled)
 
     def _on_index_changed(self, idx):
         self.valueChanged.emit(self.combo.currentData())

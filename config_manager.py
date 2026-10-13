@@ -544,5 +544,51 @@ def unregister_sdss_file_association() -> bool:
         return False
 
 
+def get_last_dialog_dir(category: str = "photo_import") -> str:
+    """Retrieve remembered directory for file dialogs by category, falling back to Pictures/User directory."""
+    cfg = load_config()
+    dirs = cfg.get("last_dialog_dirs", {})
+    last_dir = dirs.get(category, "")
+    if last_dir and os.path.isdir(last_dir):
+        return last_dir
+    # Check general last photo or session path
+    if category == "session":
+        last_sess = cfg.get("last_session_path", "")
+        if last_sess and os.path.exists(last_sess):
+            d = os.path.dirname(os.path.abspath(last_sess))
+            if os.path.isdir(d):
+                return d
+    elif category == "photo_import":
+        recents = cfg.get("recent_files", [])
+        if recents:
+            for r in recents:
+                if os.path.exists(r):
+                    d = os.path.dirname(os.path.abspath(r))
+                    if os.path.isdir(d):
+                        return d
+    # Standard fallbacks
+    pictures = os.path.join(os.path.expanduser("~"), "Pictures")
+    if os.path.isdir(pictures):
+        return pictures
+    return os.path.expanduser("~")
+
+
+def set_last_dialog_dir(category: str, dir_or_file_path: str):
+    """Persist remembered directory for file dialogs."""
+    if not dir_or_file_path:
+        return
+    target_dir = dir_or_file_path
+    if os.path.isfile(target_dir):
+        target_dir = os.path.dirname(target_dir)
+    if not os.path.isdir(target_dir):
+        return
+    cfg = load_config()
+    if "last_dialog_dirs" not in cfg:
+        cfg["last_dialog_dirs"] = {}
+    cfg["last_dialog_dirs"][category] = os.path.abspath(target_dir)
+    save_config(cfg)
+
+
+
 
 

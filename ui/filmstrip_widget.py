@@ -1,11 +1,14 @@
 import os
-from PySide6.QtCore import Qt, Signal, QRectF, QPoint
+import numpy as np
+from PySide6.QtCore import Qt, Signal, QRectF, QPoint, QEvent
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QFontMetrics, QKeySequence, QIcon
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QScrollArea, QFrame,
     QMenu, QDialog, QTextEdit, QSizePolicy
 )
 import sdc_manager
+import session_cache_manager
+from session_cache_manager import is_dummy_or_corrupted_thumbnail, is_valid_thumbnail
 from path_utils import get_icon_path, get_resource_dir
 from ui.window_utils import apply_dark_titlebar, get_darkroom_menu_style, get_icon
 from ui.smooth_scroll import SmoothScrollArea
@@ -133,19 +136,59 @@ class FilmstripItemWidget(QFrame):
 
         self.setFixedSize(76, 82)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(f"{self.filename}\n路径: {self.file_path}\n尺寸: {photo_data.get('width', 0)} × {photo_data.get('height', 0)}")
+        self.update_tooltip()
 
         self._base_pixmap = None
         self._pixmap = None
         thumb_rgb = photo_data.get("thumbnail_rgb")
-        if thumb_rgb is not None:
-            h, w, c = thumb_rgb.shape
-            qimg = QImage(thumb_rgb.data, w, h, w * c, QImage.Format.Format_RGB888)
+
+        if is_dummy_or_corrupted_thumbnail(thumb_rgb):
+            raw_rgb = photo_data.get("raw_thumbnail_rgb")
+            if is_valid_thumbnail(raw_rgb):
+                thumb_rgb = raw_rgb
+            else:
+                raw_rgb = photo_data.get("raw_thumbnail")
+                if is_valid_thumbnail(raw_rgb):
+                    thumb_rgb = raw_rgb
+                elif photo_data.get("path") and os.path.isfile(photo_data["path"]):
+                    try:
+                        extracted = session_cache_manager.extract_fast_thumbnail(photo_data["path"])
+                        if is_valid_thumbnail(extracted):
+                            thumb_rgb = extracted
+                            photo_data["thumbnail_rgb"] = extracted
+                            photo_data["raw_thumbnail_rgb"] = extracted
+                    except Exception:
+                        pass
+
+        if thumb_rgb is not None and isinstance(thumb_rgb, np.ndarray) and thumb_rgb.size > 0:
+            thumb_c = np.ascontiguousarray(thumb_rgb, dtype=np.uint8)
+            h, w, c = thumb_c.shape
+            qimg = QImage(thumb_c.data, w, h, w * c, QImage.Format.Format_RGB888).copy()
             self._base_pixmap = QPixmap.fromImage(qimg)
-            self._pixmap = self._base_pixmap.scaled(66, 52, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            my = 82 * 0.14
+            tw = max(10, int(76 - 8))
+            th = max(10, int(82 - my * 2.0))
+            self._pixmap = self._base_pixmap.scaled(tw, th, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
     def set_item_size(self, target_w, target_h):
         self.setFixedSize(target_w, target_h)
+        if (self._base_pixmap is None or self._base_pixmap.isNull()) and self.photo_data:
+            thumb_rgb = self.photo_data.get("thumbnail_rgb") if self.photo_data.get("thumbnail_rgb") is not None else self.photo_data.get("raw_thumbnail_rgb")
+            if not is_valid_thumbnail(thumb_rgb) and self.photo_data.get("path") and os.path.isfile(self.photo_data["path"]):
+                try:
+                    extracted = session_cache_manager.extract_fast_thumbnail(self.photo_data["path"])
+                    if is_valid_thumbnail(extracted):
+                        thumb_rgb = extracted
+                        self.photo_data["thumbnail_rgb"] = extracted
+                        self.photo_data["raw_thumbnail_rgb"] = extracted
+                except Exception:
+                    pass
+            if thumb_rgb is not None and isinstance(thumb_rgb, np.ndarray) and thumb_rgb.size > 0:
+                thumb_c = np.ascontiguousarray(thumb_rgb, dtype=np.uint8)
+                h, w, c = thumb_c.shape
+                qimg = QImage(thumb_c.data, w, h, w * c, QImage.Format.Format_RGB888).copy()
+                self._base_pixmap = QPixmap.fromImage(qimg)
+
         if self._base_pixmap and not self._base_pixmap.isNull():
             my = target_h * 0.14
             tw = max(10, int(target_w - 8))
@@ -155,6 +198,18 @@ class FilmstripItemWidget(QFrame):
             )
         self.update()
 
+    def set_thumbnail(self, pixmap):
+        """Update thumbnail pixmap dynamically in real-time."""
+        if pixmap and not pixmap.isNull():
+            self._base_pixmap = pixmap
+            my = self.height() * 0.14
+            tw = max(10, int(self.width() - 8))
+            th = max(10, int(self.height() - my * 2.0))
+            self._pixmap = self._base_pixmap.scaled(
+                tw, th, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+            self.update()
+
     def set_active(self, is_active):
         self.is_active = is_active
         self.update()
@@ -162,6 +217,39 @@ class FilmstripItemWidget(QFrame):
     def set_selected(self, is_selected):
         self.is_selected = is_selected
         self.update()
+
+    def update_photo_data(self, photo_data):
+        """Update photo metadata and ensure tooltip is synchronized."""
+        if not photo_data:
+            return
+        self.photo_data = photo_data
+        if photo_data.get("filename"):
+            self.filename = photo_data["filename"]
+        if photo_data.get("path"):
+            from path_utils import normalize_path
+            self.file_path = normalize_path(photo_data["path"])
+        self.update_tooltip()
+
+    def update_tooltip(self):
+        """Dynamically build tooltip ensuring resolution is accurate and never 0 x 0."""
+        w = int(self.photo_data.get("width", 0))
+        h = int(self.photo_data.get("height", 0))
+        if (w <= 0 or h <= 0) and self.file_path and os.path.isfile(self.file_path):
+            try:
+                import session_cache_manager
+                dw, dh = session_cache_manager.get_image_dimensions(self.file_path)
+                if dw > 0 and dh > 0:
+                    w, h = dw, dh
+                    self.photo_data["width"] = w
+                    self.photo_data["height"] = h
+            except Exception:
+                pass
+        self.setToolTip(f"{self.filename}\n路径: {self.file_path}\n尺寸: {w} × {h}")
+
+    def event(self, e):
+        if e.type() == QEvent.Type.ToolTip:
+            self.update_tooltip()
+        return super().event(e)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -288,7 +376,13 @@ class FilmstripWidget(QWidget):
     quickExportRequested = Signal(list)
     addRequested = Signal()
     clearSdcRequested = Signal(list)
+    copyParamsRequested = Signal(str)
+    pasteParamsRequested = Signal()
     selectionChanged = Signal(list)
+    sortRequested = Signal(str)
+    stepPhotoRequested = Signal(int)
+    navigateFirstRequested = Signal()
+    navigateLastRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -299,8 +393,13 @@ class FilmstripWidget(QWidget):
         self._photos_list = []
         self._active_id = None
         self._selected_ids = set()
+        self._can_paste_params = False
 
         self._init_ui()
+
+    def set_can_paste(self, can_paste: bool):
+        """Update whether clipboard contains a valid darkroom recipe."""
+        self._can_paste_params = bool(can_paste)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
@@ -308,11 +407,35 @@ class FilmstripWidget(QWidget):
                 self.photosRemoved.emit(list(self._selected_ids))
                 event.accept()
                 return
+        elif event.key() == Qt.Key.Key_Left:
+            self.stepPhotoRequested.emit(-1)
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_Right:
+            self.stepPhotoRequested.emit(1)
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_Home:
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self._select_range_to_boundary(to_start=True)
+            else:
+                self.navigate_first()
+                self.navigateFirstRequested.emit()
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_End:
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self._select_range_to_boundary(to_start=False)
+            else:
+                self.navigate_last()
+                self.navigateLastRequested.emit()
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(10, 4, 10, 4)
+        main_layout.setContentsMargins(10, 6, 10, 6)
         main_layout.setSpacing(8)
         self.setStyleSheet("background: #0d0e11; border-top: 1px solid #20222a;")
 
@@ -327,22 +450,39 @@ class FilmstripWidget(QWidget):
                 border: none;
             }
             QScrollBar:horizontal {
-                height: 5px;
-                background: #0d0e11;
-                border-radius: 2px;
+                background: rgba(18, 19, 24, 0.75);
+                height: 6px;
+                margin: 0px 4px 1px 4px;
+                border-radius: 3px;
+                border: none;
             }
             QScrollBar::handle:horizontal {
-                background: #2b2e38;
-                border-radius: 2px;
+                background: #474d61;
+                min-width: 24px;
+                border-radius: 3px;
+                border: none;
             }
             QScrollBar::handle:horizontal:hover {
                 background: #f59e0b;
+            }
+            QScrollBar::handle:horizontal:pressed {
+                background: #d97706;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                height: 0px;
+                width: 0px;
+                background: none;
+                border: none;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
+                border: none;
             }
         """)
 
         self.scroll_content = QWidget()
         self.scroll_layout = QHBoxLayout(self.scroll_content)
-        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_layout.setContentsMargins(0, 7, 0, 7)
         self.scroll_layout.setSpacing(6)
         self.scroll_layout.addStretch()
 
@@ -419,11 +559,19 @@ class FilmstripWidget(QWidget):
         if photo_id in self._item_widgets:
             self._item_widgets[photo_id].set_dirty(is_dirty)
 
+    def _compute_item_dimensions(self):
+        """Computes (item_w, item_h) leaving comfortable vertical padding
+        above (so selection border doesn't touch the top dividing line)
+        and below (so horizontal scrollbar doesn't obscure sprocket holes).
+        """
+        avail_h = self.height()
+        item_h = max(48, min(240, avail_h - 26))
+        item_w = int(round(item_h * 0.92))
+        return item_w, item_h
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        avail_h = self.height()
-        item_h = max(52, min(240, avail_h - 14))
-        item_w = int(round(item_h * 0.92))
+        item_w, item_h = self._compute_item_dimensions()
         for item in self._item_widgets.values():
             item.set_item_size(item_w, item_h)
 
@@ -468,8 +616,7 @@ class FilmstripWidget(QWidget):
             self._empty_lbl = None
 
         # Re-add with current dynamic size
-        item_h = max(52, min(240, self.height() - 14))
-        item_w = int(round(item_h * 0.92))
+        item_w, item_h = self._compute_item_dimensions()
         for idx, p in enumerate(photos):
             pid = p["id"]
             is_active = (pid == active_id)
@@ -494,8 +641,7 @@ class FilmstripWidget(QWidget):
             self._photos_list.append(photo)
         self.count_label.setText(f"{len(self._photos_list)} 张")
 
-        item_h = max(52, min(240, self.height() - 14))
-        item_w = int(round(item_h * 0.92))
+        item_w, item_h = self._compute_item_dimensions()
         pid = photo["id"]
 
         if is_active:
@@ -568,6 +714,80 @@ class FilmstripWidget(QWidget):
             self.photoSelected.emit(photo_id)
         self.selectionChanged.emit(list(self._selected_ids))
 
+    def update_photo_thumbnail(self, photo_id, pixmap):
+        """Update thumbnail for specific photo item."""
+        if photo_id in self._item_widgets:
+            self._item_widgets[photo_id].set_thumbnail(pixmap)
+
+    def update_photo_data(self, photo_id, photo_data):
+        """Update photo metadata and tooltip for specific photo item."""
+        if photo_id in self._item_widgets:
+            self._item_widgets[photo_id].update_photo_data(photo_data)
+
+    def scroll_to_active(self):
+        """Smoothly ensure active photo item is centered in view."""
+        if self._active_id in self._item_widgets:
+            w = self._item_widgets[self._active_id]
+            self.scroll_area.ensureWidgetVisible(w, 50, 0)
+
+    def scroll_to_start(self):
+        """Scroll filmstrip to the very beginning."""
+        if hasattr(self, "scroll_area") and self.scroll_area:
+            hbar = self.scroll_area.horizontalScrollBar()
+            if hbar:
+                hbar.setValue(hbar.minimum())
+
+    def scroll_to_end(self):
+        """Scroll filmstrip to the very end."""
+        if hasattr(self, "scroll_area") and self.scroll_area:
+            hbar = self.scroll_area.horizontalScrollBar()
+            if hbar:
+                hbar.setValue(hbar.maximum())
+
+    def navigate_first(self):
+        """Navigate to the first photo in filmstrip, activate and select it (Home key)."""
+        if not self._photos_list:
+            return
+        first_id = self._photos_list[0].get("id")
+        if first_id:
+            self._selected_ids = {first_id}
+            self.set_active_photo(first_id)
+            self.photoSelected.emit(first_id)
+            self.scroll_to_start()
+            self.scroll_to_active()
+
+    def navigate_last(self):
+        """Navigate to the last photo in filmstrip, activate and select it (End key)."""
+        if not self._photos_list:
+            return
+        last_id = self._photos_list[-1].get("id")
+        if last_id:
+            self._selected_ids = {last_id}
+            self.set_active_photo(last_id)
+            self.photoSelected.emit(last_id)
+            self.scroll_to_end()
+            self.scroll_to_active()
+
+    def _select_range_to_boundary(self, to_start=True):
+        """Handle Shift+Home or Shift+End range selection to the start or end."""
+        if not self._photos_list:
+            return
+        pids = [p["id"] for p in self._photos_list if p and "id" in p]
+        if not pids:
+            return
+        curr_idx = pids.index(self._active_id) if self._active_id in pids else (0 if to_start else len(pids) - 1)
+        target_idx = 0 if to_start else len(pids) - 1
+        start, end = min(curr_idx, target_idx), max(curr_idx, target_idx)
+        self._selected_ids = set(pids[start:end + 1])
+        target_id = pids[target_idx]
+        self.set_active_photo(target_id)
+        self.photoSelected.emit(target_id)
+        if to_start:
+            self.scroll_to_start()
+        else:
+            self.scroll_to_end()
+        self.scroll_to_active()
+
     def _show_context_menu(self, target_id, global_pos):
         # Decouple right-click: ensure target_id is selected for action scope, but DO NOT switch active canvas photo
         if target_id not in self._selected_ids:
@@ -579,20 +799,47 @@ class FilmstripWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
-        quick_label = "快速导出 (上次参数)" if sel_count == 1 else f"快速导出选中底片 ({sel_count} 张)"
+        quick_label = "快速冲印 (上次参数)" if sel_count == 1 else f"快速冲印选中底片 ({sel_count} 张)"
         act_quick = menu.addAction(quick_label)
         act_quick.setIcon(get_icon("quick_export.png"))
         act_quick.triggered.connect(lambda: self.quickExportRequested.emit(list(self._selected_ids)))
 
-        export_label = f"导出此底片..." if sel_count == 1 else f"导出选中底片 ({sel_count} 张)..."
+        export_label = f"冲印当前底片..." if sel_count == 1 else f"批量冲印选中底片 ({sel_count} 张)..."
         act_export = menu.addAction(export_label)
         act_export.setIcon(get_icon("dlg_export.png"))
         act_export.triggered.connect(lambda: self.batchExportRequested.emit(list(self._selected_ids)))
+
+        target_photo = next((p for p in self._photos_list if p.get("id") == target_id), None)
+        target_path = target_photo.get("path", "") if target_photo else ""
+        if target_path:
+            act_reveal = menu.addAction("在文件资源管理器中显示")
+            act_reveal.triggered.connect(lambda checked=False, p=target_path: self._reveal_in_explorer(p))
 
         remove_label = "从底片库移除" if sel_count == 1 else f"从底片库移除 ({sel_count} 项)"
         act_remove = menu.addAction(remove_label)
         act_remove.setIcon(get_icon("dlg_discard.png"))
         act_remove.triggered.connect(lambda: self.photosRemoved.emit(list(self._selected_ids)))
+
+        menu.addSeparator()
+
+        # Copy / Paste darkroom recipe actions
+        target_edited = False
+        if target_photo:
+            p_path = target_photo.get("path", "")
+            if target_photo.get("is_dirty") or target_photo.get("is_edited") or (p_path and sdc_manager.has_sdc(p_path)):
+                target_edited = True
+            elif target_photo.get("film_profile", "none") != "none" or target_photo.get("paper_profile", "none") != "none":
+                target_edited = True
+
+        act_copy = menu.addAction("复制暗房配方 (Ctrl+C)")
+        act_copy.setEnabled(target_edited)
+        act_copy.triggered.connect(lambda checked=False, pid=target_id: self.copyParamsRequested.emit(pid))
+
+        paste_label = "粘贴暗房配方 (Ctrl+V)" if sel_count <= 1 else f"粘贴暗房配方至选中底片 ({sel_count} 张) (Ctrl+V)"
+        act_paste = menu.addAction(paste_label)
+        can_paste = bool(getattr(self, "_can_paste_params", False))
+        act_paste.setEnabled(can_paste)
+        act_paste.triggered.connect(self.pasteParamsRequested.emit)
 
         menu.addSeparator()
 
@@ -613,6 +860,24 @@ class FilmstripWidget(QWidget):
 
         menu.addSeparator()
 
+        # Submenu: 整理底片
+        sort_menu = menu.addMenu("整理底片")
+        sort_menu.setStyleSheet(get_darkroom_menu_style())
+        act_s1 = sort_menu.addAction("按拍摄时间升序 (旧 → 新)")
+        act_s1.triggered.connect(lambda: self.sortRequested.emit("time_asc"))
+        act_s2 = sort_menu.addAction("按拍摄时间降序 (新 → 旧)")
+        act_s2.triggered.connect(lambda: self.sortRequested.emit("time_desc"))
+        sort_menu.addSeparator()
+        act_s3 = sort_menu.addAction("按文件名升序 (A → Z)")
+        act_s3.triggered.connect(lambda: self.sortRequested.emit("name_asc"))
+        act_s4 = sort_menu.addAction("按文件名降序 (Z → A)")
+        act_s4.triggered.connect(lambda: self.sortRequested.emit("name_desc"))
+        sort_menu.addSeparator()
+        act_s5 = sort_menu.addAction("按导入添加顺序")
+        act_s5.triggered.connect(lambda: self.sortRequested.emit("import"))
+
+        menu.addSeparator()
+
         act_select_all = menu.addAction("全选所有底片 (Ctrl+A)")
         act_select_all.triggered.connect(self.select_all)
 
@@ -620,6 +885,18 @@ class FilmstripWidget(QWidget):
         act_invert.triggered.connect(self.invert_selection)
 
         menu.exec(global_pos)
+
+    def _reveal_in_explorer(self, file_path):
+        if not file_path:
+            return
+        import subprocess
+        norm_p = os.path.abspath(file_path)
+        if os.path.exists(norm_p):
+            subprocess.Popen(f'explorer /select,"{norm_p}"')
+        else:
+            dir_p = os.path.dirname(norm_p)
+            if os.path.exists(dir_p):
+                os.startfile(dir_p)
 
     def _on_blank_context_menu(self, pos):
         sender = self.sender()
@@ -630,6 +907,24 @@ class FilmstripWidget(QWidget):
         act_add = menu.addAction("导入底片...")
         act_add.setIcon(get_icon("dlg_import.png"))
         act_add.triggered.connect(self.addRequested.emit)
+
+        menu.addSeparator()
+
+        # Submenu: 整理底片
+        sort_menu = menu.addMenu("整理底片")
+        sort_menu.setStyleSheet(get_darkroom_menu_style())
+        act_s1 = sort_menu.addAction("按拍摄时间升序 (旧 → 新)")
+        act_s1.triggered.connect(lambda: self.sortRequested.emit("time_asc"))
+        act_s2 = sort_menu.addAction("按拍摄时间降序 (新 → 旧)")
+        act_s2.triggered.connect(lambda: self.sortRequested.emit("time_desc"))
+        sort_menu.addSeparator()
+        act_s3 = sort_menu.addAction("按文件名升序 (A → Z)")
+        act_s3.triggered.connect(lambda: self.sortRequested.emit("name_asc"))
+        act_s4 = sort_menu.addAction("按文件名降序 (Z → A)")
+        act_s4.triggered.connect(lambda: self.sortRequested.emit("name_desc"))
+        sort_menu.addSeparator()
+        act_s5 = sort_menu.addAction("按导入添加顺序")
+        act_s5.triggered.connect(lambda: self.sortRequested.emit("import"))
 
         menu.addSeparator()
 

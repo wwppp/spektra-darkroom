@@ -90,13 +90,25 @@ class SmoothScrollArea(QScrollArea):
         self._anim.setDuration(220)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        # Repaint viewport to update edge indicators on scroll
+        # Overlay widget on top of viewport child widgets
+        self._overlay = _ScrollEdgeOverlay(self)
+
+        # Repaint overlay on scroll
         sb.valueChanged.connect(self._on_scroll_value_changed)
 
-    def _on_scroll_value_changed(self, val):
+    def _sync_overlay(self):
         vp = self.viewport()
-        if vp:
-            vp.update()
+        if vp and hasattr(self, '_overlay'):
+            self._overlay.setGeometry(vp.rect())
+            self._overlay.raise_()
+            self._overlay.update()
+
+    def _on_scroll_value_changed(self, val):
+        self._sync_overlay()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_overlay()
 
     def wheelEvent(self, event):
         """Intercept mouse wheel to drive smooth interpolation animation."""
@@ -128,45 +140,53 @@ class SmoothScrollArea(QScrollArea):
         self._anim.start()
         event.accept()
 
+
+class _ScrollEdgeOverlay(QWidget):
+    """Transparent overlay widget floating above all viewport children to draw subtle edge fade shadows."""
+    def __init__(self, parent_scroll_area: SmoothScrollArea):
+        super().__init__(parent_scroll_area.viewport())
+        self.scroll_area = parent_scroll_area
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
     def paintEvent(self, event):
-        super().paintEvent(event)
-        # Overlay subtle edge fade indicator in viewport
-        vp = self.viewport()
+        vp = self.scroll_area.viewport()
         if not vp:
             return
 
         w = vp.width()
         h = vp.height()
-        painter = QPainter(vp)
+        painter = QPainter(self)
 
-        if not self.is_horizontal:
-            sb = self.verticalScrollBar()
+        if not self.scroll_area.is_horizontal:
+            sb = self.scroll_area.verticalScrollBar()
             if sb.maximum() > 0:
                 # Top edge indicator: if scrolled down from 0
                 if sb.value() > 0:
-                    grad_top = QLinearGradient(0, 0, 0, 14)
-                    grad_top.setColorAt(0.0, QColor(0, 0, 0, 130))
-                    grad_top.setColorAt(1.0, QColor(0, 0, 0, 0))
-                    painter.fillRect(QRectF(0, 0, w, 14), grad_top)
+                    grad_top = QLinearGradient(0, 0, 0, 16)
+                    grad_top.setColorAt(0.0, QColor(18, 19, 24, 210))
+                    grad_top.setColorAt(1.0, QColor(18, 19, 24, 0))
+                    painter.fillRect(QRectF(0, 0, w, 16), grad_top)
 
                 # Bottom edge indicator: if not yet at maximum
                 if sb.value() < sb.maximum():
-                    grad_bottom = QLinearGradient(0, h - 14, 0, h)
-                    grad_bottom.setColorAt(0.0, QColor(0, 0, 0, 0))
-                    grad_bottom.setColorAt(1.0, QColor(0, 0, 0, 130))
-                    painter.fillRect(QRectF(0, h - 14, w, 14), grad_bottom)
+                    grad_bottom = QLinearGradient(0, h - 16, 0, h)
+                    grad_bottom.setColorAt(0.0, QColor(18, 19, 24, 0))
+                    grad_bottom.setColorAt(1.0, QColor(18, 19, 24, 210))
+                    painter.fillRect(QRectF(0, h - 16, w, 16), grad_bottom)
         else:
-            sb = self.horizontalScrollBar()
+            sb = self.scroll_area.horizontalScrollBar()
             if sb.maximum() > 0:
                 if sb.value() > 0:
-                    grad_left = QLinearGradient(0, 0, 14, 0)
-                    grad_left.setColorAt(0.0, QColor(0, 0, 0, 130))
-                    grad_left.setColorAt(1.0, QColor(0, 0, 0, 0))
-                    painter.fillRect(QRectF(0, 0, 14, h), grad_left)
+                    grad_left = QLinearGradient(0, 0, 16, 0)
+                    grad_left.setColorAt(0.0, QColor(18, 19, 24, 210))
+                    grad_left.setColorAt(1.0, QColor(18, 19, 24, 0))
+                    painter.fillRect(QRectF(0, 0, 16, h), grad_left)
 
                 if sb.value() < sb.maximum():
-                    grad_right = QLinearGradient(w - 14, 0, w, 0)
-                    grad_right.setColorAt(0.0, QColor(0, 0, 0, 0))
-                    grad_right.setColorAt(1.0, QColor(0, 0, 0, 130))
-                    painter.fillRect(QRectF(w - 14, 0, 14, h), grad_right)
+                    grad_right = QLinearGradient(w - 16, 0, w, 0)
+                    grad_right.setColorAt(0.0, QColor(18, 19, 24, 0))
+                    grad_right.setColorAt(1.0, QColor(18, 19, 24, 210))
+                    painter.fillRect(QRectF(w - 16, 0, 16, h), grad_right)
         painter.end()

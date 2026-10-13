@@ -43,10 +43,34 @@ PROPHOTO_TO_SRGB = np.array([
 ], dtype=np.float32)
 
 
+# Log Shaper constants: maps scene-linear HDR [0.0, 8.0] into [0.0, 1.0] with dense shadow resolution
+SHAPER_C = 60.0
+SHAPER_MAX = 8.0
+SHAPER_S = float(np.log(1.0 + SHAPER_C * SHAPER_MAX))  # ~6.175867147775916
+SHAPER_INV_S = float(1.0 / SHAPER_S)                    # ~0.16192058097945077
+
+
+def shaper_forward(lin):
+    """Map scene-linear HDR [0.0, 8.0+] into [0.0, 1.0] with logarithmic shadow allocation."""
+    c = np.maximum(0.0, lin)
+    return (np.log(1.0 + SHAPER_C * c) * SHAPER_INV_S).astype(np.float32)
+
+
+def shaper_inverse(t):
+    """Map shaper lattice coordinates [0.0, 1.0] into scene-linear HDR [0.0, 8.0]."""
+    return ((np.exp(t * SHAPER_S) - 1.0) / SHAPER_C).astype(np.float32)
+
+
 def srgb_to_linear(srgb):
     """Decode standard sRGB non-linear CCTF into linear values."""
     srgb_c = np.clip(srgb, 0.0, 1.0)
     return np.where(srgb_c <= 0.04045, srgb_c / 12.92, np.power(np.maximum(0.0, (srgb_c + 0.055) / 1.055), 2.4)).astype(np.float32)
+
+
+def srgb_to_prophoto(srgb):
+    """Convert standard non-linear Display sRGB [0.0, 1.0] to Linear ProPhoto RGB."""
+    lin_srgb = srgb_to_linear(srgb)
+    return np.maximum(0.0, lin_srgb @ SRGB_TO_PROPHOTO.T).astype(np.float32)
 
 
 def prophoto_to_srgb(lin_pro):
@@ -60,11 +84,118 @@ def prophoto_to_srgb(lin_pro):
     return np.clip(srgb_disp, 0.0, 1.0).astype(np.float32)
 
 
+def prophoto_to_srgb_filmic(lin_pro):
+    """Convert Linear ProPhoto RGB [0.0, 8.0] to Display sRGB with smooth highlight roll-off (Bypass mode)."""
+    lin_srgb = np.maximum(0.0, lin_pro @ PROPHOTO_TO_SRGB.T)
+    knee = 0.5
+    scale = 3.5
+    comp = np.where(lin_srgb <= knee, lin_srgb, knee + (1.0 - knee) * (lin_srgb - knee) / ((lin_srgb - knee) + (scale - 1.0)))
+    comp = np.clip(comp, 0.0, 1.0)
+    srgb_disp = np.where(
+        comp <= 0.0031308,
+        12.92 * comp,
+        1.055 * np.power(np.maximum(comp, 1e-6), 1.0 / 2.4) - 0.055
+    )
+    return np.clip(srgb_disp, 0.0, 1.0).astype(np.float32)
+
+
 def filmic_shoulder_np(c, threshold=0.75):
     """Filmic soft highlight roll-off (smooth C1 shoulder compression above threshold)."""
     over = np.maximum(0.0, c - threshold)
     span = 1.0 - threshold
     return (np.minimum(c, threshold) + span * (over / (span + over))).astype(np.float32)
+
+
+def apply_highlights_shadows_np(linear_img, highlights, shadows):
+    """Pre-LUT Scene-Linear Highlights & Shadows Tone Shaping (Zone System EV Hermite Spline).
+    Strictly aligned with GLSL Shader & export pipeline.
+    """
+    hl_val = float(highlights)
+    sh_val = float(shadows)
+    if linear_img is None or (abs(hl_val) <= 0.001 and abs(sh_val) <= 0.001):
+        return linear_img
+
+    out = linear_img.copy()
+    y_lum = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
+    mask = (y_lum > 1e-5)
+    z = np.zeros_like(y_lum)
+    z[mask] = np.log2(y_lum[mask] / 0.18)
+
+    w_sh = np.clip(-z * 0.25, 0.0, 1.0)
+    w_sh = w_sh * w_sh * (3.0 - 2.0 * w_sh)
+
+    w_hl = np.clip(z * 0.25, 0.0, 1.0)
+    w_hl = w_hl * w_hl * (3.0 - 2.0 * w_hl)
+
+    delta_z = (sh_val * 0.02) * w_sh + (hl_val * 0.02) * w_hl
+    y_target = 0.18 * (2.0 ** (z + delta_z))
+
+    scale = np.ones_like(y_lum)
+    scale[mask] = y_target[mask] / y_lum[mask]
+    out *= scale[..., None]
+    return out
+
+
+def apply_diffusion_np(linear_img, diff_family="none", diff_strength=0.0, diff_warmth=0.0):
+    """Optical Diffusion Filter (Black Pro-Mist, Glimmerglass, Pro-Mist, CineBloom).
+    Applied in scene-linear radiance space before 3D LUT.
+    Strictly aligned with GLSL fragment shader Vogel spiral bloom & export pipeline.
+    """
+    diff_fam = str(diff_family).lower()
+    strength = float(diff_strength)
+    if linear_img is None or diff_fam in ("none", "") or strength <= 0.001:
+        return linear_img
+
+    out = linear_img.copy()
+    eff_type = 1
+    if "glimmer" in diff_fam:
+        eff_type = 2
+    elif "cine" in diff_fam:
+        eff_type = 4
+    elif "pro_mist" in diff_fam or "promist" in diff_fam:
+        eff_type = 3 if "black" not in diff_fam else 1
+
+    base_rad = 0.012 * max(0.20, strength)
+    if eff_type == 1:
+        thr, knee, rad_mult, intensity, halo_w = 0.36, 0.16, 1.0, 1.05, 0.65
+    elif eff_type == 2:
+        thr, knee, rad_mult, intensity, halo_w = 0.42, 0.14, 0.75, 0.85, 0.0
+    elif eff_type == 3:
+        thr, knee, rad_mult, intensity, halo_w = 0.24, 0.20, 1.45, 1.25, 0.40
+    elif eff_type == 4:
+        thr, knee, rad_mult, intensity, halo_w = 0.20, 0.22, 1.85, 1.40, 0.85
+    else:
+        thr, knee, rad_mult, intensity, halo_w = 0.36, 0.16, 1.0, 1.05, 0.65
+
+    H, W = out.shape[:2]
+    luma = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
+    lo = max(0.001, thr - knee)
+    hi = thr + knee
+    t = np.clip((luma - lo) / max(0.0001, hi - lo), 0.0, 1.0)
+    smooth_t = t * t * (3.0 - 2.0 * t)
+    hl = smooth_t * np.maximum(0.0, luma - lo)
+    hl_factor = (hl / np.maximum(0.0001, luma))[..., None]
+    hl_img = out * hl_factor
+
+    sigma_px = max(1.0, base_rad * rad_mult * max(H, W) * 0.18)
+    ksize = int(sigma_px * 3.0) * 2 + 1
+    ksize = min(ksize, 301)
+    bloom = cv2.GaussianBlur(hl_img, (ksize, ksize), sigma_px)
+
+    eff_warmth = float(np.clip(halo_w + float(diff_warmth), -1.5, 1.5))
+    diff_tint = np.array([
+        1.0 + eff_warmth * 0.35,
+        1.0 + eff_warmth * 0.08,
+        1.0 - eff_warmth * 0.35
+    ], dtype=np.float32)
+
+    out += bloom * (strength * intensity) * diff_tint
+    if eff_type == 3:
+        out = out * 0.80 + (out + 0.015 * strength) * 0.20
+    elif eff_type == 4:
+        out = out * 0.75 + (out + 0.022 * strength) * 0.25
+
+    return out
 
 
 def convert_image_colorspace(img_rgb_float, target_colorspace="sRGB"):
@@ -115,6 +246,50 @@ def get_icc_profile_bytes(target_colorspace="sRGB"):
     return None
 
 
+def _force_exif_orientation_upright(exif_bytes):
+    """Guarantees that embedded EXIF byte stream has Orientation tag (0x0112) set to 1 (Normal/Upright).
+    Since SpektraDarkroom pixel buffers are already fully demosaiced and oriented upright,
+    preserving non-1 EXIF orientation flags causes external photo viewers to rotate the image
+    a second time (e.g. rotating portrait negatives horizontally).
+    """
+    if not exif_bytes or len(exif_bytes) < 14:
+        return exif_bytes
+    try:
+        import struct
+        b = bytearray(exif_bytes)
+        start = 6 if b.startswith(b'Exif\x00\x00') else 0
+        if b[start:start+2] == b'II':
+            endian = '<'
+        elif b[start:start+2] == b'MM':
+            endian = '>'
+        else:
+            return exif_bytes
+
+        magic = struct.unpack_from(endian + 'H', b, start + 2)[0]
+        if magic != 42:
+            return exif_bytes
+
+        ifd0_offset = struct.unpack_from(endian + 'I', b, start + 4)[0]
+        pos = start + ifd0_offset
+        if pos + 2 > len(b):
+            return exif_bytes
+
+        num_tags = struct.unpack_from(endian + 'H', b, pos)[0]
+        pos += 2
+        for _ in range(num_tags):
+            if pos + 12 > len(b):
+                break
+            tag = struct.unpack_from(endian + 'H', b, pos)[0]
+            if tag == 0x0112:
+                struct.pack_into(endian + 'H', b, pos + 8, 1)
+                struct.pack_into(endian + 'H', b, pos + 10, 0)
+                break
+            pos += 12
+        return bytes(b)
+    except Exception:
+        return exif_bytes
+
+
 def extract_exif_bundle(source_path):
     """Extract complete camera metadata from original photo or RAW negative (ARW, CR2, NEF, DNG, RAF, JPG, TIF, PNG).
     Returns (pil_exif, exif_bytes, tiff_tags) for embedding into exported JPEG, TIFF, and PNG images.
@@ -122,152 +297,206 @@ def extract_exif_bundle(source_path):
     if not source_path or not os.path.exists(source_path):
         return None, None, []
 
-    from PIL import Image
+    from PIL import Image, ExifTags
+    import io, struct
     ext = os.path.splitext(source_path)[1].lower()
-    pil_exif = Image.Exif()
-    sub_exif = pil_exif.get_ifd(0x8769)
-    sub_gps = pil_exif.get_ifd(0x8825)
 
-    SUBTAG_MAP = {
-        'ExposureTime': 0x829a, 'FNumber': 0x829d, 'ExposureProgram': 0x8822,
-        'ISOSpeedRatings': 0x8827, 'SensitivityType': 0x8830, 'RecommendedExposureIndex': 0x8832,
-        'ExifVersion': 0x9000, 'DateTimeOriginal': 0x9003, 'DateTimeDigitized': 0x9004,
-        'OffsetTime': 0x9010, 'OffsetTimeOriginal': 0x9011, 'OffsetTimeDigitized': 0x9012,
-        'BrightnessValue': 0x9203, 'ExposureBiasValue': 0x9204, 'MaxApertureValue': 0x9205,
-        'MeteringMode': 0x9207, 'LightSource': 0x9208, 'Flash': 0x9209,
-        'FocalLength': 0x920a, 'MakerNote': 0x927c, 'UserComment': 0x9286,
-        'SubsecTime': 0x9290, 'SubsecTimeOriginal': 0x9291, 'SubsecTimeDigitized': 0x9292,
-        'FlashpixVersion': 0xa000, 'ColorSpace': 0xa001, 'PixelXDimension': 0xa002, 'PixelYDimension': 0xa003,
-        'CustomRendered': 0xa401, 'ExposureMode': 0xa402, 'WhiteBalance': 0xa403,
-        'DigitalZoomRatio': 0xa404, 'FocalLengthIn35mmFilm': 0xa405, 'SceneCaptureType': 0xa406,
-        'Contrast': 0xa408, 'Saturation': 0xa409, 'Sharpness': 0xa40a,
-        'BodySerialNumber': 0xa431, 'LensSpecification': 0xa432, 'LensMake': 0xa433, 'LensModel': 0xa434,
-    }
+    tag_name_to_id = {v: k for k, v in ExifTags.TAGS.items()}
+    gps_name_to_id = {v: k for k, v in ExifTags.GPSTAGS.items()}
 
-    # 1. Try reading with PIL directly (works for JPG, TIFF, PNG, DNG)
-    try:
-        with Image.open(source_path) as im:
-            loaded_exif = im.getexif()
-            if loaded_exif:
-                for k, v in loaded_exif.items():
-                    try:
-                        pil_exif[k] = v
-                    except Exception:
-                        pass
-                if 0x8769 in loaded_exif:
-                    for sk, sv in loaded_exif.get_ifd(0x8769).items():
-                        try:
-                            sub_exif[sk] = sv
-                        except Exception:
-                            pass
-                if 0x8825 in loaded_exif:
-                    for gk, gv in loaded_exif.get_ifd(0x8825).items():
-                        try:
-                            sub_gps[gk] = gv
-                        except Exception:
-                            pass
-    except Exception:
-        pass
+    exif_bytes = None
+    loaded_exif = None
 
-    # 2. Fuji RAF embedded JPEG preview header
-    if ext == '.raf':
+    # 1. Native TIFF/RAW deep tag extraction (ARW, CR2, CR3, NEF, DNG, TIF, TIFF, PEF, ORF, RW2)
+    # Extracts complete IFD0, ExifIFD (0x8769), and GPSTag (0x8825) directly from camera negative
+    if ext in ('.arw', '.cr2', '.cr3', '.nef', '.dng', '.tif', '.tiff', '.orf', '.pef', '.rw2'):
         try:
-            with open(source_path, 'rb') as rf:
-                hdr = rf.read(128)
-                if hdr.startswith(b'FUJIFILMCCD-RAW'):
-                    import struct
-                    off_jpg = struct.unpack('>I', hdr[84:88])[0]
-                    len_jpg = struct.unpack('>I', hdr[88:92])[0]
-                    rf.seek(off_jpg)
-                    jpg_bytes = rf.read(len_jpg)
-                    with Image.open(io.BytesIO(jpg_bytes)) as j_img:
-                        loaded_exif = j_img.getexif()
-                        if loaded_exif:
-                            for k, v in loaded_exif.items():
+            import tifffile
+            with tifffile.TiffFile(source_path) as tf:
+                p = tf.pages[0]
+                loaded_exif = Image.Exif()
+                sub_exif = loaded_exif.get_ifd(0x8769)
+                gps_exif = loaded_exif.get_ifd(0x8825)
+
+                for tag in p.tags:
+                    c = tag.code
+                    name = tag.name
+                    v = tag.value
+                    if hasattr(v, 'value'):
+                        v = v.value
+
+                    if name == 'ExifTag' and isinstance(v, dict):
+                        for sk, sv in v.items():
+                            cid = sk if isinstance(sk, int) else tag_name_to_id.get(sk)
+                            if cid and cid not in (0x8769, 0x8825):
+                                if hasattr(sv, 'value'):
+                                    sv = sv.value
                                 try:
-                                    pil_exif[k] = v
+                                    sub_exif[cid] = sv
                                 except Exception:
                                     pass
-                            if 0x8769 in loaded_exif:
-                                for sk, sv in loaded_exif.get_ifd(0x8769).items():
-                                    try:
-                                        sub_exif[sk] = sv
-                                    except Exception:
-                                        pass
-                            if 0x8825 in loaded_exif:
-                                for gk, gv in loaded_exif.get_ifd(0x8825).items():
-                                    try:
-                                        sub_gps[gk] = gv
-                                    except Exception:
-                                        pass
+                    elif (name in ('GPSTag', 'GPSInfo') or c in (0x8825, 34853)) and isinstance(v, dict):
+                        from fractions import Fraction
+                        for gk, gv in v.items():
+                            gid = gk if isinstance(gk, int) else gps_name_to_id.get(gk)
+                            if gid is not None:
+                                if hasattr(gv, 'value'):
+                                    gv = gv.value
+                                try:
+                                    # Normalize tifffile rational tuples to Fraction for valid EXIF DMS serialization
+                                    if gid in (2, 4) and isinstance(gv, (tuple, list)) and len(gv) == 6:
+                                        gv = (
+                                            Fraction(int(gv[0]), int(gv[1])) if gv[1] != 0 else Fraction(0, 1),
+                                            Fraction(int(gv[2]), int(gv[3])) if gv[3] != 0 else Fraction(0, 1),
+                                            Fraction(int(gv[4]), int(gv[5])) if gv[5] != 0 else Fraction(0, 1)
+                                        )
+                                    elif gid == 6 and isinstance(gv, (tuple, list)) and len(gv) == 2:
+                                        gv = Fraction(int(gv[0]), int(gv[1])) if gv[1] != 0 else Fraction(0, 1)
+                                    elif gid == 5 and isinstance(gv, (int, np.integer)):
+                                        gv = int(gv)
+                                    gps_exif[gid] = gv
+                                except Exception:
+                                    pass
+                    else:
+                        # Top-level IFD0 tags
+                        if (c < 0x8000 or c == 0x8298) and c not in (0x8769, 0x8825, 254, 256, 257, 258, 259, 273, 277, 278, 279, 282, 283, 330, 513, 514, 34675, 50341, 50740):
+                            try:
+                                loaded_exif[c] = v
+                            except Exception:
+                                pass
+
+                # Ensure DateTime is present in IFD0 if available in sub_exif
+                if 0x0132 not in loaded_exif and 0x9003 in sub_exif:
+                    loaded_exif[0x0132] = sub_exif[0x9003]
+
+                loaded_exif[0x0112] = 1  # Force upright
+                try:
+                    exif_bytes = loaded_exif.tobytes()
+                except Exception as e:
+                    logger.debug(f"tifffile tobytes: {e}")
+        except Exception as e:
+            logger.debug(f"tifffile native raw exif extraction: {e}")
+
+    # 2. Fuji RAF embedded JPEG preview header
+    if loaded_exif is None or len(loaded_exif) == 0:
+        if ext == '.raf':
+            try:
+                with open(source_path, 'rb') as rf:
+                    hdr = rf.read(128)
+                    if hdr.startswith(b'FUJIFILMCCD-RAW'):
+                        off_jpg = struct.unpack('>I', hdr[84:88])[0]
+                        len_jpg = struct.unpack('>I', hdr[88:92])[0]
+                        rf.seek(off_jpg)
+                        jpg_bytes = rf.read(len_jpg)
+                        with Image.open(io.BytesIO(jpg_bytes)) as j_img:
+                            loaded_exif = j_img.getexif()
+                            if loaded_exif:
+                                loaded_exif[0x0112] = 1
+                                exif_bytes = loaded_exif.tobytes()
+            except Exception as e:
+                logger.debug(f"RAF direct preview exif extraction: {e}")
+
+    # 3. Direct PIL open (JPG, TIFF, PNG, DNG)
+    if loaded_exif is None or len(loaded_exif) == 0:
+        try:
+            with Image.open(source_path) as im:
+                loaded_exif = im.getexif()
+                if loaded_exif:
+                    loaded_exif[0x0112] = 1
+                    try:
+                        exif_bytes = loaded_exif.tobytes()
+                    except Exception:
+                        exif_bytes = im.info.get('exif')
+        except Exception as e:
+            logger.debug(f"PIL direct exif: {e}")
+
+    # 4. Camera RAW fallback via rawpy thumbnail preview (only if preceding failed)
+    if (loaded_exif is None or len(loaded_exif) == 0) and ext in ('.arw', '.cr2', '.cr3', '.nef', '.dng', '.rw2', '.orf', '.pef', '.raf'):
+        try:
+            import rawpy
+            with rawpy.imread(source_path) as raw:
+                thumb = raw.extract_thumb()
+                if thumb.format == rawpy.ThumbFormat.JPEG:
+                    with Image.open(io.BytesIO(thumb.data)) as j_img:
+                        loaded_exif = j_img.getexif()
+                        if loaded_exif:
+                            loaded_exif[0x0112] = 1
+                            exif_bytes = loaded_exif.tobytes()
+        except Exception as e:
+            logger.debug(f"rawpy extract_thumb exif: {e}")
+
+    # Ensure orientation is upright (tag 0x0112 = 1) across all formats and serialized bytes
+    if loaded_exif is not None:
+        try:
+            loaded_exif[0x0112] = 1
         except Exception:
             pass
 
-    # 3. Tifffile for RAW negative formats (ARW, CR2, NEF, DNG, TIFF)
-    try:
-        import tifffile
-        with tifffile.TiffFile(source_path) as tf:
-            for page in tf.pages:
-                for tag in page.tags:
-                    code = tag.code
-                    val = tag.value
-                    if code in (0x014a, 0x0201, 0x0202, 0x00fe, 0x0103, 0x011a, 0x011b, 0x0128, 0x0100, 0x0101):
-                        continue
-                    if tag.name == 'ExifTag' and isinstance(val, dict):
-                        for sk, sv in val.items():
-                            sub_code = sk if isinstance(sk, int) else SUBTAG_MAP.get(sk)
-                            if sub_code:
-                                try:
-                                    sub_exif[sub_code] = sv
-                                except Exception:
-                                    pass
-                    elif isinstance(code, int) and code < 0xffff:
-                        try:
-                            if code not in pil_exif:
-                                pil_exif[code] = val
-                        except Exception:
-                            pass
-    except Exception:
-        pass
+    if exif_bytes is not None:
+        exif_bytes = _force_exif_orientation_upright(exif_bytes)
+    elif loaded_exif:
+        try:
+            exif_bytes = loaded_exif.tobytes()
+        except Exception:
+            pass
 
-    # Force orientation to 1 (normal upright) because raw decoding already renders pixels upright
-    pil_exif[0x0112] = 1
-
-    exif_bytes = None
-    try:
-        exif_bytes = pil_exif.tobytes()
-    except Exception:
-        pass
-
+    # Build safe TIFF extratags with signed/unsigned type safety
     tiff_tags = []
-    # Tags that tifffile manages internally or should not be written to extratags
     skip_tiff_codes = {
-        0x8769, 0x8825, 270, 305, 256, 257, 258, 259, 262, 273, 277, 278, 279, 284
+        0x8769, 0x8825, 270, 305, 256, 257, 258, 259, 262, 273, 277, 278, 279, 284, 296, 282, 283, 34675, 50341
     }
     seen_codes = set()
 
     def _add_tiff_tag(c, v):
         if c in skip_tiff_codes or c in seen_codes:
             return
-        if c == 0x0112:
+        if c == 0x0112 or c == 274:
             v = 1
         seen_codes.add(c)
-        if isinstance(v, (int, np.integer)) and not isinstance(v, bool):
-            tiff_tags.append((c, "I", 1, int(v), True))
-        elif hasattr(v, "numerator") and hasattr(v, "denominator"):
-            tiff_tags.append((c, "2I", 1, (int(v.numerator), int(v.denominator)), True))
-        elif isinstance(v, str):
-            tiff_tags.append((c, "s", 0, v, True))
-        elif isinstance(v, tuple) and len(v) == 2 and isinstance(v[0], int) and isinstance(v[1], int):
-            tiff_tags.append((c, "2I", 1, (int(v[0]), int(v[1])), True))
+        try:
+            if isinstance(v, (int, np.integer)) and not isinstance(v, bool):
+                val_int = int(v)
+                if val_int < 0:
+                    tiff_tags.append((c, "i", 1, val_int, True))
+                elif val_int <= 65535:
+                    tiff_tags.append((c, "H", 1, val_int, True))
+                else:
+                    tiff_tags.append((c, "I", 1, val_int, True))
+            elif hasattr(v, "numerator") and hasattr(v, "denominator"):
+                num, den = int(v.numerator), int(v.denominator)
+                if num < 0 or den < 0:
+                    tiff_tags.append((c, "2i", 1, (num, den), True))
+                else:
+                    tiff_tags.append((c, "2I", 1, (num, den), True))
+            elif isinstance(v, str):
+                tiff_tags.append((c, "s", 0, v, True))
+            elif isinstance(v, (bytes, bytearray)):
+                tiff_tags.append((c, "B", len(v), bytes(v), True))
+            elif isinstance(v, tuple) and len(v) == 2 and all(isinstance(x, (int, np.integer)) for x in v):
+                if any(x < 0 for x in v):
+                    tiff_tags.append((c, "2i", 1, (int(v[0]), int(v[1])), True))
+                else:
+                    tiff_tags.append((c, "2I", 1, (int(v[0]), int(v[1])), True))
+        except Exception:
+            pass
 
-    for code, val in pil_exif.items():
-        _add_tiff_tag(code, val)
+    if loaded_exif:
+        for code, val in loaded_exif.items():
+            _add_tiff_tag(code, val)
+        try:
+            sub = loaded_exif.get_ifd(0x8769)
+            if len(sub) > 0:
+                for target_code in (
+                    36867, 36868, 33434, 33437, 34855, 34850, 37380, 37383, 37384,
+                    37385, 37386, 41989, 42033, 42034, 42035, 42036, 42037,
+                    36880, 36881, 36882
+                ):
+                    if target_code in sub:
+                        _add_tiff_tag(target_code, sub[target_code])
+        except Exception:
+            pass
 
-    for code, val in sub_exif.items():
-        _add_tiff_tag(code, val)
-
-    return pil_exif, exif_bytes, tiff_tags
+    return loaded_exif, exif_bytes, tiff_tags
 
 
 def save_encoded_image(rendered_data, output_path, params_dict):
@@ -360,29 +589,31 @@ def save_encoded_image(rendered_data, output_path, params_dict):
         png_level = int(params_dict.get("png_level", 6))
         if bit_depth == 16:
             out_u16 = (np.clip(rendered_float, 0.0, 1.0) * 65535.0).astype(np.uint16)
-            cv2.imwrite(output_path, cv2.cvtColor(out_u16, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_PNG_COMPRESSION, png_level])
-            # Inject EXIF and ICC into 16-bit PNG
-            try:
-                with open(output_path, 'rb') as pf:
-                    pdata = pf.read()
-                if pdata.startswith(b'\x89PNG\r\n\x1a\n'):
-                    import struct, zlib
-                    idx = 8
-                    ihdr_len = struct.unpack('>I', pdata[idx:idx+4])[0]
-                    insert_pos = idx + 8 + ihdr_len + 4
-                    injected_chunks = []
-                    if icc_bytes:
-                        comp_icc = zlib.compress(icc_bytes)
-                        cdata = b'ICC Profile\x00\x00' + comp_icc
-                        injected_chunks.append(struct.pack('>I', len(cdata)) + b'iCCP' + cdata + struct.pack('>I', zlib.crc32(b'iCCP' + cdata) & 0xffffffff))
-                    if exif_bytes:
-                        clean_exif = exif_bytes[6:] if exif_bytes.startswith(b'Exif\x00\x00') else exif_bytes
-                        injected_chunks.append(struct.pack('>I', len(clean_exif)) + b'eXIf' + clean_exif + struct.pack('>I', zlib.crc32(b'eXIf' + clean_exif) & 0xffffffff))
-                    if injected_chunks:
-                        with open(output_path, 'wb') as pf:
-                            pf.write(pdata[:insert_pos] + b''.join(injected_chunks) + pdata[insert_pos:])
-            except Exception as ex_png:
-                print(f"[SpektraEngine] Warning: PNG 16-bit metadata injection failed: {ex_png}")
+            bgr_u16 = cv2.cvtColor(out_u16, cv2.COLOR_RGB2BGR)
+            ok, enc_buf = cv2.imencode('.png', bgr_u16, [cv2.IMWRITE_PNG_COMPRESSION, png_level])
+            if ok:
+                pdata = enc_buf.tobytes()
+                # Inject EXIF and ICC into 16-bit PNG in memory
+                try:
+                    if pdata.startswith(b'\x89PNG\r\n\x1a\n'):
+                        import struct, zlib
+                        idx = 8
+                        ihdr_len = struct.unpack('>I', pdata[idx:idx+4])[0]
+                        insert_pos = idx + 8 + ihdr_len + 4
+                        injected_chunks = []
+                        if icc_bytes:
+                            comp_icc = zlib.compress(icc_bytes)
+                            cdata = b'ICC Profile\x00\x00' + comp_icc
+                            injected_chunks.append(struct.pack('>I', len(cdata)) + b'iCCP' + cdata + struct.pack('>I', zlib.crc32(b'iCCP' + cdata) & 0xffffffff))
+                        if exif_bytes:
+                            clean_exif = exif_bytes[6:] if exif_bytes.startswith(b'Exif\x00\x00') else exif_bytes
+                            injected_chunks.append(struct.pack('>I', len(clean_exif)) + b'eXIf' + clean_exif + struct.pack('>I', zlib.crc32(b'eXIf' + clean_exif) & 0xffffffff))
+                        if injected_chunks:
+                            pdata = pdata[:insert_pos] + b''.join(injected_chunks) + pdata[insert_pos:]
+                except Exception as ex_png:
+                    print(f"[SpektraEngine] Warning: PNG 16-bit metadata injection failed: {ex_png}")
+                with open(output_path, 'wb') as pf:
+                    pf.write(pdata)
         else:
             out_u8 = (np.clip(rendered_float, 0.0, 1.0) * 255.0).astype(np.uint8)
             im = Image.fromarray(out_u8, mode='RGB')
@@ -420,7 +651,14 @@ def save_encoded_image(rendered_data, output_path, params_dict):
             save_kw['icc_profile'] = icc_bytes
         if exif_bytes:
             save_kw['exif'] = exif_bytes
-        im.save(output_path, 'JPEG', **save_kw)
+        try:
+            im.save(output_path, 'JPEG', **save_kw)
+        except OSError:
+            if save_kw.get('progressive'):
+                save_kw['progressive'] = False
+                im.save(output_path, 'JPEG', **save_kw)
+            else:
+                raise
 
     return True
 
@@ -464,8 +702,24 @@ class SpektraEngine:
             self._profile_cache[stock_id] = load_processed_profile(stock_id)
         return self._profile_cache[stock_id]
 
+    BUILTIN_FILM_IDS = {
+        "none", "kodak_portra_400", "kodak_portra_160", "kodak_portra_800",
+        "kodak_portra_800_push1", "kodak_portra_800_push2", "kodak_gold_200",
+        "kodak_ektar_100", "kodak_ultramax_400", "fujifilm_pro_400h", "fujifilm_c200",
+        "fujifilm_xtra_400", "kodak_vision3_500t", "kodak_vision3_250d",
+        "kodak_vision3_50d", "kodak_vision3_200t", "kodak_verita_200d",
+        "fujifilm_velvia_100", "fujifilm_provia_100f", "kodak_ektachrome_100",
+        "kodak_kodachrome_64"
+    }
+
+    BUILTIN_PAPER_IDS = {
+        "none", "kodak_2383", "kodak_2393", "kodak_portra_endura", "kodak_ultra_endura",
+        "kodak_supra_endura", "kodak_endura_premier", "kodak_ektacolor_edge",
+        "fujifilm_crystal_archive_typeii"
+    }
+
     def get_film_stocks(self):
-        return [
+        stocks = [
             {
                 "category": "数码原生 (Bypass)",
                 "stocks": [
@@ -613,9 +867,36 @@ class SpektraEngine:
                 ]
             }
         ]
+        # Dynamically discover user-imported custom film profiles
+        custom_films = []
+        if os.path.exists(self.profiles_dir):
+            import json
+            for f in sorted(os.listdir(self.profiles_dir)):
+                if f.endswith(".json"):
+                    sid = f[:-5]
+                    if sid not in self.BUILTIN_FILM_IDS and sid not in self.BUILTIN_PAPER_IDS:
+                        try:
+                            with open(os.path.join(self.profiles_dir, f), "r", encoding="utf-8") as fp:
+                                meta = json.load(fp)
+                            if meta.get("type") != "paper" and "paper" not in sid.lower():
+                                custom_films.append({
+                                    "id": sid,
+                                    "name": meta.get("name", sid),
+                                    "badge": "自定义",
+                                    "desc": meta.get("desc") or (meta.get("info", {}).get("desc", "")) or "用户自定义胶卷配置",
+                                    "is_custom": True
+                                })
+                        except Exception:
+                            pass
+        if custom_films:
+            stocks.append({
+                "category": "用户自定义胶卷 (Custom)",
+                "stocks": custom_films
+            })
+        return stocks
 
     def get_paper_stocks(self):
-        return [
+        papers = [
             {
                 "id": "none",
                 "name": "数码扫描",
@@ -671,6 +952,27 @@ class SpektraEngine:
                 "desc": "富士纯白高光表现，色彩鲜艳明快，层次丰富持久。"
             }
         ]
+        # Dynamically discover user-imported custom paper profiles
+        if os.path.exists(self.profiles_dir):
+            import json
+            for f in sorted(os.listdir(self.profiles_dir)):
+                if f.endswith(".json"):
+                    sid = f[:-5]
+                    if sid not in self.BUILTIN_FILM_IDS and sid not in self.BUILTIN_PAPER_IDS:
+                        try:
+                            with open(os.path.join(self.profiles_dir, f), "r", encoding="utf-8") as fp:
+                                meta = json.load(fp)
+                            if meta.get("type") == "paper" or "paper" in sid.lower():
+                                papers.append({
+                                    "id": sid,
+                                    "name": meta.get("name", sid),
+                                    "badge": "自定义相纸",
+                                    "desc": meta.get("desc") or (meta.get("info", {}).get("desc", "")) or "用户自定义相纸配置",
+                                    "is_custom": True
+                                })
+                        except Exception:
+                            pass
+        return papers
 
     def get_neutral_filter(self, paper_stock, film_stock):
         if paper_stock in self.neutral_filters:
@@ -679,6 +981,37 @@ class SpektraEngine:
                 if illuminant_key in paper_dict and film_stock in paper_dict[illuminant_key]:
                     return list(paper_dict[illuminant_key][film_stock])
         return [0.0, 50.0, 50.0]
+
+    def is_positive_film(self, film_stock: str) -> bool:
+        """Returns True if the film stock is a positive/reversal (slide) film."""
+        if not film_stock or film_stock == "none":
+            return False
+        prof = self._load_profile(film_stock)
+        if not prof:
+            return False
+        return bool(
+            (hasattr(prof, 'is_positive') and prof.is_positive) or
+            (hasattr(prof, 'info') and getattr(prof.info, 'type', None) == 'positive')
+        )
+
+    def get_film_halation_preset(self, film_stock):
+        """Query official spektrafilm halation preset from film profile's (use, antihalation) tags."""
+        if not film_stock or film_stock == "none":
+            return {"sigma_h": 65.0, "strength": (0.015, 0.005, 0.0), "antihalation": "none", "use": "still"}
+        try:
+            prof = self._load_profile(film_stock)
+            use = getattr(prof.info, "use", "still") if prof and hasattr(prof, "info") else "still"
+            antihalation = getattr(prof.info, "antihalation", "strong") if prof and hasattr(prof, "info") else "strong"
+            from spektrafilm.runtime.params_builder import _HALATION_PRESETS
+            preset = _HALATION_PRESETS.get((use, antihalation), {'sigma_h': (65.0, 65.0, 65.0), 'strength': (0.015, 0.005, 0.0)})
+            return {
+                "sigma_h": float(preset['sigma_h'][0]),
+                "strength": tuple(float(x) for x in preset['strength']),
+                "antihalation": antihalation,
+                "use": use
+            }
+        except Exception:
+            return {"sigma_h": 65.0, "strength": (0.015, 0.005, 0.0), "antihalation": "strong", "use": "still"}
 
     def get_3d_lut(self, film_stock="kodak_portra_400", paper_stock="kodak_2383", lut_size=33, params_dict=None, print_mode=None):
         """Build and cache a 3D LUT (N x N x N x 3 float32) for the film + paper combination."""
@@ -708,18 +1041,21 @@ class SpektraEngine:
         if cache_key in self._lut_cache:
             return self._lut_cache[cache_key]
 
-        # 1. Bypass mode: 胶卷为 "none" 时，生成从 Linear ProPhoto RGB -> Display sRGB 的单位转换表 (保持无滤镜自然色彩)
+        # 1. Shaper lattice coordinates t in [0.0, 1.0] -> Scene-linear HDR ProPhoto [0.0, 8.0]
+        lin_t = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
+        lin_x = shaper_inverse(lin_t)
+        b, g, r = np.meshgrid(lin_x, lin_x, lin_x, indexing='ij')
+        lattice = np.stack([r, g, b], axis=-1).astype(np.float32)
+
+        # 2. Bypass mode: 胶卷为 "none" 时，生成从 Linear ProPhoto RGB [0.0, 8.0] -> Display sRGB 的平滑高光胶片色调转换表
         if film_stock == "none":
-            lin = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
-            b, g, r = np.meshgrid(lin, lin, lin, indexing='ij')
-            lattice = np.stack([r, g, b], axis=-1).astype(np.float32)
-            identity_lut = prophoto_to_srgb(lattice)
+            identity_lut = prophoto_to_srgb_filmic(lattice)
             self._lut_cache[cache_key] = identity_lut
             return identity_lut
 
         cache_dir = os.path.join(self.resources_dir, ".lut_cache")
         if is_default_params:
-            cache_file = os.path.join(cache_dir, f"v2__{film_stock}__{eff_paper}__{lut_size}.npy")
+            cache_file = os.path.join(cache_dir, f"v3_shaper__{film_stock}__{eff_paper}__{lut_size}.npy")
             if os.path.exists(cache_file):
                 try:
                     lut_3d = np.load(cache_file)
@@ -728,12 +1064,9 @@ class SpektraEngine:
                 except Exception:
                     pass
 
-        print(f"[SpektraEngine] 正在为 GPU 生成物理 3D LUT: {film_stock} + {eff_paper} (模式: {print_mode}, 光源: {illuminant}, DIR: {dir_intl}, 尺寸: {lut_size})...")
+        print(f"[SpektraEngine] 正在为 GPU 生成物理对数 3D LUT: {film_stock} + {eff_paper} (模式: {print_mode}, 光源: {illuminant}, DIR: {dir_intl}, 尺寸: {lut_size})...")
         t0 = time.time()
         
-        lin = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
-        b, g, r = np.meshgrid(lin, lin, lin, indexing='ij')
-        lattice = np.stack([r, g, b], axis=-1)  # RGB channel values
         flat_input = lattice.reshape(-1, 1, 3)
 
         params = init_params()
@@ -815,8 +1148,21 @@ class SpektraEngine:
         print(f"[SpektraEngine] 3D LUT 生成完毕，耗时: {round((time.time() - t0)*1000, 1)}ms")
         return lut_3d
 
-    @staticmethod
-    def _extract_exif(file_path):
+    RAW_EXTS = {
+        ".arw", ".srf", ".sr2", ".arq",
+        ".cr2", ".cr3", ".crw",
+        ".nef", ".nrw",
+        ".raf",
+        ".dng",
+        ".rw2",
+        ".orf", ".ori",
+        ".pef", ".ptx",
+        ".3fr", ".fff",
+        ".x3f",
+    }
+
+    @classmethod
+    def _extract_exif(cls, file_path):
         meta = {
             "capture_time": "-",
             "resolution": "-",
@@ -833,7 +1179,13 @@ class SpektraEngine:
             "exposure_program": "-",
             "metering_mode": "-",
             "flash": "-",
-            "focal_length": "-"
+            "focal_length": "-",
+            "focal_length_35mm": "-",
+            "white_balance": "-",
+            "artist": "-",
+            "copyright": "-",
+            "gps_coords": "-",
+            "gps_datum": "-"
         }
         
         # File Size
@@ -845,6 +1197,18 @@ class SpektraEngine:
 
         ext = os.path.splitext(file_path)[1].lower()
 
+        # Fast direct sensor resolution extraction for RAW camera files (<1ms)
+        if ext in cls.RAW_EXTS and rawpy is not None:
+            try:
+                with rawpy.imread(file_path) as raw_probe:
+                    rw, rh = raw_probe.sizes.width, raw_probe.sizes.height
+                    if getattr(raw_probe.sizes, "flip", 0) in (4, 5, 6, 7):
+                        rw, rh = rh, rw
+                    if rw > 0 and rh > 0:
+                        meta["resolution"] = f"{rw} × {rh}"
+            except Exception:
+                pass
+
         # Helper mapping tables
         prog_map = {
             0: "未定义", 1: "手动 (M)", 2: "程序自动 (P)", 3: "光圈优先 (A)",
@@ -852,8 +1216,24 @@ class SpektraEngine:
         }
         meter_map = {
             0: "未知", 1: "平均测光", 2: "中央重点平均", 3: "点测光",
-            4: "多点测光", 5: "多重 / 图案测光", 6: "局部测光"
+            4: "多点测光", 5: "图案 / 多重测光", 6: "局部测光"
         }
+
+        def _format_gps_dms(coord, ref):
+            if not coord or len(coord) < 3:
+                return ""
+            def _val(x):
+                if isinstance(x, (tuple, list)) and len(x) == 2 and x[1] != 0:
+                    return float(x[0]) / float(x[1])
+                return float(x)
+            try:
+                deg = _val(coord[0])
+                mn = _val(coord[1])
+                sec = _val(coord[2])
+                ref_s = str(ref).strip() if ref else ""
+                return f"{int(deg)}°{int(mn)}'{sec:.1f}\" {ref_s}".strip()
+            except Exception:
+                return ""
 
         # 1. Fujifilm RAF extraction via embedded JPEG preview header (offset 84:88)
         if ext == ".raf":
@@ -872,46 +1252,77 @@ class SpektraEngine:
                             if ex:
                                 if meta["camera_make"] == "-": meta["camera_make"] = str(ex.get(0x010f, "-")).strip()
                                 if meta["camera_model"] == "-": meta["camera_model"] = str(ex.get(0x0110, "-")).strip()
+                                if meta["artist"] == "-": meta["artist"] = str(ex.get(0x013b, "-")).strip()
+                                if meta["copyright"] == "-": meta["copyright"] = str(ex.get(0x8298, "-")).strip()
                                 if meta["capture_time"] == "-": meta["capture_time"] = str(ex.get(0x0132, "-")).strip()
-                                if 0x8769 in ex:
+                                try:
                                     sub = ex.get_ifd(0x8769)
-                                    if meta["lens_model"] == "-":
-                                        raw_lens = sub.get(0xa434, "-")
-                                        meta["lens_model"] = str(raw_lens).strip().strip("\x00").strip()
-                                    if meta["lens_make"] == "-":
-                                        raw_lmake = sub.get(0xa433, "-")
-                                        meta["lens_make"] = str(raw_lmake).strip().strip("\x00").strip()
-                                    if meta["serial_number"] == "-":
-                                        raw_sn = sub.get(0xa431, "-")
-                                        meta["serial_number"] = str(raw_sn).strip().strip("\x00").strip()
-                                    if meta["iso"] == "-":
-                                        iso_v = sub.get(0x8827)
-                                        if iso_v is not None: meta["iso"] = f"ISO-{iso_v}"
-                                    if meta["aperture"] == "-":
-                                        fn = sub.get(0x829d)
-                                        if fn is not None: meta["aperture"] = f"f/{float(fn):.1f}"
-                                    if meta["shutter_speed"] == "-":
-                                        et = sub.get(0x829a)
-                                        if et is not None:
-                                            fv = float(et)
-                                            meta["shutter_speed"] = f"1/{int(round(1.0/fv))} 秒" if (fv < 1.0 and fv > 0) else f"{fv:.1f} 秒"
-                                    if meta["focal_length"] == "-":
-                                        fl = sub.get(0x920a)
-                                        if fl is not None: meta["focal_length"] = f"{int(round(float(fl)))} 毫米"
-                                    if meta["exposure_bias"] == "-":
-                                        eb = sub.get(0x9204)
-                                        if eb is not None:
-                                            bias = float(eb)
-                                            meta["exposure_bias"] = f"{bias:+.1f} 档光圈" if bias != 0 else "0 档光圈"
-                                    if meta["exposure_program"] == "-":
-                                        ep = sub.get(0x8822)
-                                        if ep is not None: meta["exposure_program"] = prog_map.get(int(ep), str(ep))
-                                    if meta["metering_mode"] == "-":
-                                        mm = sub.get(0x9207)
-                                        if mm is not None: meta["metering_mode"] = meter_map.get(int(mm), str(mm))
-                                    if meta["flash"] == "-":
-                                        fl_val = sub.get(0x9209)
-                                        if fl_val is not None: meta["flash"] = "开启闪光" if (int(fl_val) & 1) else "无闪光"
+                                    if len(sub) > 0:
+                                        dt_orig = sub.get(0x9003) or sub.get(0x9004)
+                                        if dt_orig:
+                                            meta["capture_time"] = str(dt_orig).strip()
+                                        if meta["lens_model"] == "-":
+                                            raw_lens = sub.get(0xa434, "-")
+                                            meta["lens_model"] = str(raw_lens).strip().strip("\x00").strip()
+                                        if meta["lens_make"] == "-":
+                                            raw_lmake = sub.get(0xa433, "-")
+                                            meta["lens_make"] = str(raw_lmake).strip().strip("\x00").strip()
+                                        if meta["serial_number"] == "-":
+                                            raw_sn = sub.get(0xa431, "-")
+                                            meta["serial_number"] = str(raw_sn).strip().strip("\x00").strip()
+                                        if meta["focal_length_35mm"] == "-":
+                                            fl_35 = sub.get(0xa405)
+                                            if fl_35: meta["focal_length_35mm"] = f"{fl_35} 毫米"
+                                        if meta["iso"] == "-":
+                                            iso_v = sub.get(0x8827)
+                                            if iso_v is not None: meta["iso"] = f"ISO-{iso_v}"
+                                        if meta["aperture"] == "-":
+                                            fn = sub.get(0x829d)
+                                            if fn is not None: meta["aperture"] = f"f/{float(fn):.1f}"
+                                        if meta["shutter_speed"] == "-":
+                                            et = sub.get(0x829a)
+                                            if et is not None:
+                                                fv = float(et)
+                                                meta["shutter_speed"] = f"1/{int(round(1.0/fv))} 秒" if (fv < 1.0 and fv > 0) else f"{fv:.1f} 秒"
+                                        if meta["focal_length"] == "-":
+                                            fl = sub.get(0x920a)
+                                            if fl is not None: meta["focal_length"] = f"{int(round(float(fl)))} 毫米"
+                                        if meta["exposure_bias"] == "-":
+                                            eb = sub.get(0x9204)
+                                            if eb is not None:
+                                                bias = float(eb)
+                                                meta["exposure_bias"] = f"{bias:+.1f} 档光圈" if bias != 0 else "0 档光圈"
+                                        if meta["exposure_program"] == "-":
+                                            ep = sub.get(0x8822)
+                                            if ep is not None: meta["exposure_program"] = prog_map.get(int(ep), str(ep))
+                                        if meta["metering_mode"] == "-":
+                                            mm = sub.get(0x9207)
+                                            if mm is not None: meta["metering_mode"] = meter_map.get(int(mm), str(mm))
+                                        if meta["flash"] == "-":
+                                            fl_val = sub.get(0x9209)
+                                            if fl_val is not None:
+                                                fst = int(fl_val)
+                                                meta["flash"] = "开启闪光" if (fst & 1) else ("无闪光，强制" if (fst & 16) else "无闪光")
+                                except Exception:
+                                    pass
+                                try:
+                                    gps = ex.get_ifd(0x8825)
+                                    if len(gps) > 0:
+                                        datum = gps.get(0x0012)
+                                        if datum and meta["gps_datum"] == "-": meta["gps_datum"] = str(datum).strip()
+                                        lat = gps.get(0x0002)
+                                        lat_ref = gps.get(0x0001)
+                                        lon = gps.get(0x0004)
+                                        lon_ref = gps.get(0x0003)
+                                        alt = gps.get(0x0006)
+                                        if lat and lon:
+                                            c_str = f"{_format_gps_dms(lat, lat_ref)}, {_format_gps_dms(lon, lon_ref)}"
+                                            if alt:
+                                                alt_val = alt[0]/float(alt[1]) if isinstance(alt, tuple) and alt[1] != 0 else float(alt)
+                                                c_str += f" (海拔 {int(round(alt_val))}m)"
+                                            meta["gps_coords"] = c_str
+                                except Exception:
+                                    pass
             except Exception:
                 pass
 
@@ -933,17 +1344,26 @@ class SpektraEngine:
                             meta["camera_model"] = str(val).strip()
                         elif t_name == 'DateTime' and meta["capture_time"] == "-":
                             meta["capture_time"] = str(val).strip()
+                        elif t_name == 'Artist' and meta["artist"] == "-":
+                            meta["artist"] = str(val).strip()
+                        elif t_name == 'Copyright' and meta["copyright"] == "-":
+                            meta["copyright"] = str(val).strip()
                         elif t_name == 'BodySerialNumber' and meta["serial_number"] == "-":
                             meta["serial_number"] = str(val).strip()
                         elif t_name == 'ExifTag' and isinstance(val, dict):
                             sub = val
+                            dt_orig = sub.get('DateTimeOriginal') or sub.get(0x9003) or sub.get('DateTimeDigitized') or sub.get(0x9004)
+                            if dt_orig:
+                                meta["capture_time"] = str(dt_orig).strip()
                             for k, v in sub.items():
                                 if k in ('LensModel', 0xa434) and meta["lens_model"] == "-":
-                                    meta["lens_model"] = str(v).strip()
+                                    meta["lens_model"] = str(v).strip().strip("\x00")
                                 elif k in ('LensMake', 0xa433) and meta["lens_make"] == "-":
-                                    meta["lens_make"] = str(v).strip()
+                                    meta["lens_make"] = str(v).strip().strip("\x00")
                                 elif k in ('BodySerialNumber', 0xa431) and meta["serial_number"] == "-":
-                                    meta["serial_number"] = str(v).strip()
+                                    meta["serial_number"] = str(v).strip().strip("\x00")
+                                elif k in ('FocalLengthIn35mmFilm', 0xa405) and meta["focal_length_35mm"] == "-":
+                                    meta["focal_length_35mm"] = f"{v} 毫米"
                                 elif k in ('FNumber', 0x829d) and meta["aperture"] == "-":
                                     num = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else v
                                     meta["aperture"] = f"f/{num:.1f}" if isinstance(num, (int, float)) else str(num)
@@ -965,7 +1385,24 @@ class SpektraEngine:
                                 elif k in ('MeteringMode', 0x9207) and meta["metering_mode"] == "-":
                                     meta["metering_mode"] = meter_map.get(int(v), str(v))
                                 elif k in ('Flash', 0x9209) and meta["flash"] == "-":
-                                    meta["flash"] = "开启闪光" if (int(v) & 1) else "无闪光"
+                                    fst = int(v)
+                                    meta["flash"] = "开启闪光" if (fst & 1) else ("无闪光，强制" if (fst & 16) else "无闪光")
+                        elif t_name == 'GPSTag' and isinstance(val, dict):
+                            gps = val
+                            datum = gps.get('GPSMapDatum') or gps.get(0x0012)
+                            if datum and meta["gps_datum"] == "-":
+                                meta["gps_datum"] = str(datum).strip()
+                            lat = gps.get('GPSLatitude') or gps.get(0x0002)
+                            lat_ref = gps.get('GPSLatitudeRef') or gps.get(0x0001)
+                            lon = gps.get('GPSLongitude') or gps.get(0x0004)
+                            lon_ref = gps.get('GPSLongitudeRef') or gps.get(0x0003)
+                            alt = gps.get('GPSAltitude') or gps.get(0x0006)
+                            if lat and lon:
+                                c_str = f"{_format_gps_dms(lat, lat_ref)}, {_format_gps_dms(lon, lon_ref)}"
+                                if alt:
+                                    alt_val = alt[0]/float(alt[1]) if isinstance(alt, tuple) and alt[1] != 0 else float(alt)
+                                    c_str += f" (海拔 {int(round(alt_val))}m)"
+                                meta["gps_coords"] = c_str
         except Exception:
             pass
 
@@ -982,28 +1419,56 @@ class SpektraEngine:
                         if tag_name == "Make" and meta["camera_make"] == "-": meta["camera_make"] = str(v).strip()
                         elif tag_name == "Model" and meta["camera_model"] == "-": meta["camera_model"] = str(v).strip()
                         elif tag_name == "DateTime" and meta["capture_time"] == "-": meta["capture_time"] = str(v).strip()
-                    if 0x8769 in exif:
+                        elif tag_name == "Artist" and meta["artist"] == "-": meta["artist"] = str(v).strip()
+                        elif tag_name == "Copyright" and meta["copyright"] == "-": meta["copyright"] = str(v).strip()
+                    try:
                         sub_exif = exif.get_ifd(0x8769)
-                        for k, v in sub_exif.items():
-                            t = ExifTags.TAGS.get(k, str(k))
-                            if t == "LensModel" and meta["lens_model"] == "-": meta["lens_model"] = str(v).strip()
-                            elif t == "LensMake" and meta["lens_make"] == "-": meta["lens_make"] = str(v).strip()
-                            elif t == "BodySerialNumber" and meta["serial_number"] == "-": meta["serial_number"] = str(v).strip()
-                            elif t == "FNumber" and meta["aperture"] == "-": meta["aperture"] = f"f/{float(v):.1f}"
-                            elif t == "ExposureTime" and meta["shutter_speed"] == "-":
-                                fv = float(v)
-                                meta["shutter_speed"] = f"1/{int(round(1.0/fv))} 秒" if fv < 1.0 and fv > 0 else f"{fv:.1f} 秒"
-                            elif t in ("ISOSpeedRatings", "PhotographicSensitivity") and meta["iso"] == "-": meta["iso"] = f"ISO-{v}"
-                            elif t == "FocalLength" and meta["focal_length"] == "-": meta["focal_length"] = f"{int(round(float(v)))} 毫米"
-                            elif t == "ExposureBiasValue" and meta["exposure_bias"] == "-":
-                                b = float(v)
-                                meta["exposure_bias"] = f"{b:+.1f} 档光圈" if b != 0 else "0 档光圈"
-                            elif t == "ExposureProgram" and meta["exposure_program"] == "-":
-                                meta["exposure_program"] = prog_map.get(int(v), str(v))
-                            elif t == "MeteringMode" and meta["metering_mode"] == "-":
-                                meta["metering_mode"] = meter_map.get(int(v), str(v))
-                            elif t == "Flash" and meta["flash"] == "-":
-                                meta["flash"] = "开启闪光" if (int(v) & 1) else "无闪光"
+                        if len(sub_exif) > 0:
+                            dt_orig = sub_exif.get(0x9003) or sub_exif.get(0x9004)
+                            if dt_orig:
+                                meta["capture_time"] = str(dt_orig).strip()
+                            for k, v in sub_exif.items():
+                                t = ExifTags.TAGS.get(k, str(k))
+                                if t == "LensModel" and meta["lens_model"] == "-": meta["lens_model"] = str(v).strip()
+                                elif t == "LensMake" and meta["lens_make"] == "-": meta["lens_make"] = str(v).strip()
+                                elif t == "BodySerialNumber" and meta["serial_number"] == "-": meta["serial_number"] = str(v).strip()
+                                elif t == "FocalLengthIn35mmFilm" and meta["focal_length_35mm"] == "-": meta["focal_length_35mm"] = f"{v} 毫米"
+                                elif t == "FNumber" and meta["aperture"] == "-": meta["aperture"] = f"f/{float(v):.1f}"
+                                elif t == "ExposureTime" and meta["shutter_speed"] == "-":
+                                    fv = float(v)
+                                    meta["shutter_speed"] = f"1/{int(round(1.0/fv))} 秒" if fv < 1.0 and fv > 0 else f"{fv:.1f} 秒"
+                                elif t in ("ISOSpeedRatings", "PhotographicSensitivity") and meta["iso"] == "-": meta["iso"] = f"ISO-{v}"
+                                elif t == "FocalLength" and meta["focal_length"] == "-": meta["focal_length"] = f"{int(round(float(v)))} 毫米"
+                                elif t == "ExposureBiasValue" and meta["exposure_bias"] == "-":
+                                    b = float(v)
+                                    meta["exposure_bias"] = f"{b:+.1f} 档光圈" if b != 0 else "0 档光圈"
+                                elif t == "ExposureProgram" and meta["exposure_program"] == "-":
+                                    meta["exposure_program"] = prog_map.get(int(v), str(v))
+                                elif t == "MeteringMode" and meta["metering_mode"] == "-":
+                                    meta["metering_mode"] = meter_map.get(int(v), str(v))
+                                elif t == "Flash" and meta["flash"] == "-":
+                                    fst = int(v)
+                                    meta["flash"] = "开启闪光" if (fst & 1) else ("无闪光，强制" if (fst & 16) else "无闪光")
+                    except Exception:
+                        pass
+                    try:
+                        gps = exif.get_ifd(0x8825)
+                        if len(gps) > 0:
+                            datum = gps.get(0x0012)
+                            if datum and meta["gps_datum"] == "-": meta["gps_datum"] = str(datum).strip()
+                            lat = gps.get(0x0002)
+                            lat_ref = gps.get(0x0001)
+                            lon = gps.get(0x0004)
+                            lon_ref = gps.get(0x0003)
+                            alt = gps.get(0x0006)
+                            if lat and lon:
+                                c_str = f"{_format_gps_dms(lat, lat_ref)}, {_format_gps_dms(lon, lon_ref)}"
+                                if alt:
+                                    alt_val = alt[0]/float(alt[1]) if isinstance(alt, tuple) and alt[1] != 0 else float(alt)
+                                    c_str += f" (海拔 {int(round(alt_val))}m)"
+                                meta["gps_coords"] = c_str
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -1013,7 +1478,10 @@ class SpektraEngine:
                 with open(file_path, "rb") as fp:
                     with rawpy.imread(fp) as raw:
                         if meta["resolution"] == "-":
-                            meta["resolution"] = f"{raw.sizes.width} × {raw.sizes.height}"
+                            rw, rh = raw.sizes.width, raw.sizes.height
+                            if getattr(raw.sizes, "flip", 0) in (4, 5, 6, 7):
+                                rw, rh = rh, rw
+                            meta["resolution"] = f"{rw} × {rh}"
 
                         wb = getattr(raw, "camera_whitebalance", None)
                         mat = getattr(raw, "rgb_xyz_matrix", None)
@@ -1090,7 +1558,7 @@ class SpektraEngine:
             return 0.0
 
     @classmethod
-    def decode_photo_data(cls, file_path, preview_max_edge=2048, is_first=True, load_preview=None):
+    def decode_photo_data(cls, file_path, preview_max_edge=2048, is_first=True, load_preview=None, fast_thumbnail=False):
         """Thread-safe, stateless worker function to decode RAW or SDR image,
         compute base_ev, extract EXIF, and generate thumbnail and preview arrays.
         Safe for concurrent execution across high-CPU worker pools.
@@ -1125,44 +1593,128 @@ class SpektraEngine:
                 if rawpy is None:
                     return {"success": False, "error": "系统未检测到 rawpy 模块，无法解析相机 RAW"}
 
-                # preview_max_edge: 0 means Full Native Sensor Resolution (no downscale)
-                if preview_max_edge == 0:
-                    max_edge = 0
-                    use_half_size = False
-                else:
-                    max_edge = preview_max_edge if (preview_max_edge is not None and preview_max_edge > 0) else 2048
-                    use_half_size = (max_edge <= 2560)
+                if fast_thumbnail and (not is_first) and (load_preview is not True):
+                    # Fast path: Extract camera-embedded JPEG preview in sub-15ms
+                    # Avoids expensive LibRaw full-resolution demosaicing during batch import
+                    try:
+                        with open(file_path, "rb") as fp:
+                            with rawpy.imread(fp) as raw:
+                                rw, rh = raw.sizes.width, raw.sizes.height
+                                flip = getattr(raw.sizes, "flip", 0)
+                                if flip in (4, 5, 6, 7):
+                                    w, h = rh, rw
+                                else:
+                                    w, h = rw, rh
+                                original_meta["width"] = w
+                                original_meta["height"] = h
+                                original_meta["resolution"] = f"{w} × {h}"
+
+                                thumb = raw.extract_thumb()
+                                if thumb.format == rawpy.ThumbFormat.JPEG:
+                                    file_bytes = np.frombuffer(thumb.data, dtype=np.uint8)
+                                    img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                                    if img_bgr is not None:
+                                        th_h_raw, th_w_raw = img_bgr.shape[:2]
+                                        if (h > w and th_w_raw > th_h_raw):
+                                            img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
+                                        elif (w > h and th_h_raw > th_w_raw):
+                                            img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
+
+                                        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                                        th_h = 72
+                                        th_w = max(48, int(rgb.shape[1] * (th_h / float(rgb.shape[0]))))
+                                        th_u8 = cv2.resize(rgb, (th_w, th_h), interpolation=cv2.INTER_AREA)
+
+                                        import session_cache_manager
+                                        cache_entry = {
+                                            "path": file_path,
+                                            "filename": original_meta["filename"],
+                                            "width": w,
+                                            "height": h,
+                                            "thumbnail_rgb": th_u8,
+                                            "raw_thumbnail_rgb": th_u8,
+                                            "graded_thumbnail_rgb": None,
+                                            "exif": original_meta,
+                                            "auto_ev": 0.0,
+                                            "base_ev": 0.0,
+                                            "is_raw": True
+                                        }
+                                        session_cache_manager.save_photo_cache(file_path, cache_entry, save_preview=False)
+
+                                        return {
+                                            "success": True,
+                                            "path": file_path,
+                                            "filename": original_meta["filename"],
+                                            "width": w,
+                                            "height": h,
+                                            "preview_w": th_w,
+                                            "preview_h": th_h,
+                                            "thumbnail_rgb": th_u8,
+                                            "raw_thumbnail_rgb": th_u8,
+                                            "graded_thumbnail_rgb": None,
+                                            "float_img": None,
+                                            "raw_preview": None,
+                                            "exif": dict(original_meta),
+                                            "is_raw": True,
+                                            "auto_ev": 0.0,
+                                            "base_ev": 0.0
+                                        }
+                    except Exception as e_fast:
+                        logger.debug(f"Fast thumbnail extraction fell back to demosaic: {e_fast}")
+
+                # Use fast half_size demosaic for background batch loading to prevent OOM across worker pools
+                use_half = (not is_first) and (load_preview is not True) and (preview_max_edge > 0 and preview_max_edge <= 2048)
+                demosaic_algo = rawpy.DemosaicAlgorithm.LINEAR if use_half else rawpy.DemosaicAlgorithm.AHD
 
                 with open(file_path, "rb") as fp:
                     with rawpy.imread(fp) as raw:
+                        rw, rh = raw.sizes.width, raw.sizes.height
+                        flip = getattr(raw.sizes, "flip", 0)
+                        if flip in (4, 5, 6, 7):
+                            w, h = rh, rw
+                        else:
+                            w, h = rw, rh
+                        original_meta["width"] = w
+                        original_meta["height"] = h
+                        original_meta["resolution"] = f"{w} × {h}"
                         try:
-                            # 16-bit linear ACES extraction
+                            # 16-bit linear ProPhoto extraction using LibRaw native ProPhoto colorspace
                             rgb16 = raw.postprocess(
-                                use_camera_wb=True,
-                                half_size=use_half_size,
-                                no_auto_bright=True,
-                                output_color=rawpy.ColorSpace.ACES,
+                                demosaic_algorithm=demosaic_algo,
+                                half_size=use_half,
+                                four_color_rgb=False,
+                                output_color=rawpy.ColorSpace.ProPhoto,
+                                output_bps=16,
                                 gamma=(1, 1),
-                                output_bps=16
+                                no_auto_bright=True,
+                                no_auto_scale=False,
+                                use_camera_wb=True,
+                                highlight_mode=rawpy.HighlightMode.Clip
                             )
                         except Exception:
                             rgb16 = raw.postprocess(
-                                use_auto_wb=True,
-                                half_size=use_half_size,
-                                no_auto_bright=True,
-                                output_color=rawpy.ColorSpace.ACES,
+                                demosaic_algorithm=demosaic_algo,
+                                half_size=use_half,
+                                four_color_rgb=False,
+                                output_color=rawpy.ColorSpace.ProPhoto,
+                                output_bps=16,
                                 gamma=(1, 1),
-                                output_bps=16
+                                no_auto_bright=True,
+                                no_auto_scale=False,
+                                use_auto_wb=True,
+                                highlight_mode=rawpy.HighlightMode.Clip
                             )
-                post_h, post_w = rgb16.shape[:2]
-                if use_half_size:
-                    w, h = post_w * 2, post_h * 2
-                else:
-                    w, h = post_w, post_h
-                # Convert linear ACES2065-1 to linear ProPhoto RGB
-                rgb_aces = rgb16.astype(np.float32) / 65535.0
-                rgb_linear_pro = np.maximum(0.0, rgb_aces @ ACES_TO_PROPHOTO.T)
-                del rgb16, rgb_aces
+                # Linear ProPhoto float32 representation
+                rgb_linear_pro = (rgb16.astype(np.float32) / 65535.0)
+                del rgb16
+                # Ensure original_meta orientation matches demosaiced array
+                # (without shrinking full resolution to half-size when use_half is enabled)
+                h_act, w_act = rgb_linear_pro.shape[:2]
+                if (h_act > w_act and w > h) or (w_act > h_act and h > w):
+                    w, h = h, w
+                    original_meta["width"] = w
+                    original_meta["height"] = h
+                    original_meta["resolution"] = f"{w} × {h}"
             else:
                 img_bgr = None
                 try:
@@ -1217,7 +1769,7 @@ class SpektraEngine:
             original_meta["height"] = h
             original_meta["resolution"] = f"{w} × {h}"
 
-            # Downscale slightly for GPU preview texture according to user preference (1080P/2K/4K/Full)
+            # Downscale smoothly after full-fidelity demosaic for GPU preview texture (1080P/2K/4K/Full)
             cur_h, cur_w = rgb_linear_pro.shape[:2]
             max_edge = 0 if preview_max_edge == 0 else (preview_max_edge if (preview_max_edge is not None and preview_max_edge > 0) else 2048)
             if max_edge > 0 and max(cur_h, cur_w) > max_edge:
@@ -1231,22 +1783,22 @@ class SpektraEngine:
 
             is_raw_file = (ext in raw_exts)
             if is_raw_file:
-                # Calculate auto-exposure on Linear ProPhoto RGB image
+                # Calculate auto-exposure baseline for metadata recommendation
                 auto_ev = cls.calculate_auto_exposure_ev(preview_small)
                 base_ev = auto_ev
-                # Calibrate underlying preview image to 18% middle-gray baseline
-                raw_preview = (preview_small * float(np.exp2(base_ev))).astype(np.float32)
+                # Retain pristine scene-linear ProPhoto radiance values without pre-multiplying base_ev
+                raw_preview = preview_small.astype(np.float32)
             else:
                 auto_ev = 0.0
                 base_ev = 0.0
                 raw_preview = preview_small.astype(np.float32)
             del preview_small
 
-            # Small filmstrip negative thumbnail (height 72px)
+            # Small filmstrip negative thumbnail (height 72px) with smooth highlight roll-off
             th_h = 72
             th_w = max(48, int(raw_preview.shape[1] * (th_h / float(raw_preview.shape[0]))))
             th_img = cv2.resize(raw_preview, (th_w, th_h), interpolation=cv2.INTER_AREA)
-            th_u8 = (prophoto_to_srgb(th_img) * 255.0).astype(np.uint8)
+            th_u8 = (prophoto_to_srgb_filmic(th_img) * 255.0).astype(np.uint8)
 
             # Save through to session cache for sub-100ms subsequent loads
             import session_cache_manager
@@ -1256,6 +1808,8 @@ class SpektraEngine:
                 "width": w,
                 "height": h,
                 "thumbnail_rgb": th_u8,
+                "raw_thumbnail_rgb": th_u8,
+                "graded_thumbnail_rgb": None,
                 "exif": original_meta,
                 "auto_ev": auto_ev,
                 "base_ev": base_ev,
@@ -1273,6 +1827,8 @@ class SpektraEngine:
                 "preview_w": raw_preview.shape[1],
                 "preview_h": raw_preview.shape[0],
                 "thumbnail_rgb": th_u8,
+                "raw_thumbnail_rgb": th_u8,
+                "graded_thumbnail_rgb": None,
                 "float_img": raw_preview if should_keep else None,
                 "raw_preview": raw_preview if should_keep else None,
                 "exif": dict(original_meta),
@@ -1430,36 +1986,31 @@ class SpektraEngine:
                 with rawpy.imread(fp) as raw:
                     try:
                         rgb16 = raw.postprocess(
-                            use_camera_wb=True,
+                            demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
                             half_size=False,
-                            no_auto_bright=True,
-                            output_color=rawpy.ColorSpace.ACES,
+                            four_color_rgb=False,
+                            output_color=rawpy.ColorSpace.ProPhoto,
+                            output_bps=16,
                             gamma=(1, 1),
-                            output_bps=16
+                            no_auto_bright=True,
+                            no_auto_scale=False,
+                            use_camera_wb=True,
+                            highlight_mode=rawpy.HighlightMode.Clip
                         )
                     except Exception:
                         rgb16 = raw.postprocess(
-                            use_auto_wb=True,
+                            demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
                             half_size=False,
-                            no_auto_bright=True,
-                            output_color=rawpy.ColorSpace.ACES,
+                            four_color_rgb=False,
+                            output_color=rawpy.ColorSpace.ProPhoto,
+                            output_bps=16,
                             gamma=(1, 1),
-                            output_bps=16
+                            no_auto_bright=True,
+                            no_auto_scale=False,
+                            use_auto_wb=True,
+                            highlight_mode=rawpy.HighlightMode.Clip
                         )
-                    rgb_aces = rgb16.astype(np.float32) / 65535.0
-                    rgb_pro = np.maximum(0.0, rgb_aces @ ACES_TO_PROPHOTO.T)
-                    
-                    eff_base_ev = float(base_ev)
-                    if abs(eff_base_ev) < 0.0001:
-                        matched_p = next((p for p in self.session_photos if p.get("path") == file_path), None)
-                        if matched_p and abs(float(matched_p.get("base_ev", 0.0))) > 0.0001:
-                            eff_base_ev = float(matched_p["base_ev"])
-                        else:
-                            eff_base_ev = self.calculate_auto_exposure_ev(rgb_pro[::4, ::4])
-                            print(f"[SpektraEngine] RAW导出自动测光补偿: {eff_base_ev:+.2f} EV")
-                    
-                    if abs(eff_base_ev) > 0.0001:
-                        rgb_pro *= float(np.exp2(eff_base_ev))
+                    rgb_pro = (rgb16.astype(np.float32) / 65535.0)
                     return rgb_pro
         else:
             img_bgr = None
@@ -1556,10 +2107,10 @@ class SpektraEngine:
             y_val = float(params_dict.get("enlarger_yellow", 0.0))
             print_exp = float(params_dict.get("print_exposure", 1.0))
             preflash = float(params_dict.get("pre_flash", 0.0))
-            halation = float(params_dict.get("halation", 0.5))
-            hal_bounces = int(params_dict.get("halation_bounces", 2))
-            hal_decay = float(params_dict.get("halation_decay", 0.5))
-            hal_boost = float(params_dict.get("halation_boost", 0.0))
+            halation = float(params_dict.get("halation_amount", params_dict.get("halation", 1.0)))
+            hal_spatial_scale = float(params_dict.get("halation_spatial_scale", 1.0))
+            scatter_amount = float(params_dict.get("scatter_amount", 1.0))
+            hal_boost = float(params_dict.get("boost_ev", params_dict.get("halation_boost", 0.0)))
             grain = float(params_dict.get("grain", 0.4))
             grain_size = float(params_dict.get("grain_size", 1.0))
             fmt_mm = float(params_dict.get("film_format_mm", 35.0))
@@ -1571,6 +2122,31 @@ class SpektraEngine:
             H, W = raw_target.shape[:2]
             lut_size = lut_3d.shape[0]
             rendered_float = np.empty((H, W, 3), dtype=np.float32)
+
+            if film_stock == "none":
+                # Pure digital RAW bypass export: output untouched original raw converted directly to sRGB
+                if progress_cb:
+                    progress_cb(60, "正在导出数码原片直出 (Bypass)...")
+                rendered_float = np.clip(prophoto_to_srgb(raw_target), 0.0, 1.0)
+                if progress_cb:
+                    progress_cb(92, "正在编码并写入图像文件...")
+
+                if os.path.isdir(output_path) or output_path.endswith(('/', '\\\\')):
+                    src = source_path or params_dict.get("source_path") or self.current_file_path or "developed"
+                    base_name = os.path.splitext(os.path.basename(src))[0]
+                    fmt_str = str(format_type).lower()
+                    ext = ".tif" if "tif" in fmt_str else (".png" if "png" in fmt_str else ".jpg")
+                    output_path = os.path.join(output_path, f"{base_name}_developed{ext}")
+
+                enc_params = dict(params_dict)
+                enc_params["format"] = format_type
+                enc_params["quality"] = quality
+                enc_params["source_path"] = target_src
+                save_encoded_image(rendered_float, output_path, enc_params)
+
+                if progress_cb:
+                    progress_cb(100, f"成片冲印完成: {os.path.basename(output_path)}")
+                return {"success": True, "output_path": output_path}
 
             base_temp = float(params_dict.get("base_temp", 5500.0))
             base_tint = float(params_dict.get("base_tint", 1.0))
@@ -1588,6 +2164,11 @@ class SpektraEngine:
             linear_full[..., 2] *= (1.0 - temp_factor * 0.22)
             linear_full[..., 1] *= tint_factor
 
+            # 1.5. Pre-LUT Scene-Linear Highlights & Shadows Tone Shaping (Zone System EV Hermite Spline)
+            hl_val = float(params_dict.get("highlights", 0.0))
+            sh_val = float(params_dict.get("shadows", 0.0))
+            linear_full = apply_highlights_shadows_np(linear_full, hl_val, sh_val)
+
             if cancel_cb and cancel_cb():
                 return {"success": False, "cancelled": True, "error": "用户已取消导出"}
 
@@ -1598,55 +2179,59 @@ class SpektraEngine:
                 if progress_cb:
                     progress_cb(18, f"正在进行光学柔光印相模拟 ({diff_family})...")
                 try:
-                    eff_type = 1
-                    if "glimmer" in diff_family:
-                        eff_type = 2
-                    elif "cine" in diff_family:
-                        eff_type = 4
-                    elif "pro_mist" in diff_family or "promist" in diff_family:
-                        eff_type = 3 if "black" not in diff_family else 1
-
-                    base_rad = 0.012 * max(0.20, diff_strength)
-                    if eff_type == 1:
-                        thr, knee, rad_mult, intensity, halo_w = 0.36, 0.16, 1.0, 1.05, 0.65
-                    elif eff_type == 2:
-                        thr, knee, rad_mult, intensity, halo_w = 0.42, 0.14, 0.75, 0.85, 0.0
-                    elif eff_type == 3:
-                        thr, knee, rad_mult, intensity, halo_w = 0.24, 0.20, 1.45, 1.25, 0.40
-                    elif eff_type == 4:
-                        thr, knee, rad_mult, intensity, halo_w = 0.20, 0.22, 1.85, 1.40, 0.85
-                    else:
-                        thr, knee, rad_mult, intensity, halo_w = 0.36, 0.16, 1.0, 1.05, 0.65
-
-                    # Hermite soft-knee highlight extraction
-                    luma = 0.2126 * linear_full[..., 0] + 0.7152 * linear_full[..., 1] + 0.0722 * linear_full[..., 2]
-                    lo = max(0.001, thr - knee)
-                    hi = thr + knee
-                    t = np.clip((luma - lo) / max(0.0001, hi - lo), 0.0, 1.0)
-                    smooth_t = t * t * (3.0 - 2.0 * t)
-                    hl = smooth_t * np.maximum(0.0, luma - lo)
-                    hl_factor = (hl / np.maximum(0.0001, luma))[..., None]
-                    hl_img = linear_full * hl_factor
-
-                    sigma_px = max(1.0, base_rad * rad_mult * max(H, W) * 0.18)
-                    ksize = int(sigma_px * 3.0) * 2 + 1
-                    ksize = min(ksize, 301)
-                    bloom = cv2.GaussianBlur(hl_img, (ksize, ksize), sigma_px)
-
-                    eff_warmth = float(np.clip(halo_w + diff_warmth, -1.5, 1.5))
-                    diff_tint = np.array([
-                        1.0 + eff_warmth * 0.35,
-                        1.0 + eff_warmth * 0.08,
-                        1.0 - eff_warmth * 0.35
-                    ], dtype=np.float32)
-
-                    linear_full += bloom * (diff_strength * intensity) * diff_tint
-                    if eff_type == 3:
-                        linear_full = linear_full * 0.80 + (linear_full + 0.015 * diff_strength) * 0.20
-                    elif eff_type == 4:
-                        linear_full = linear_full * 0.75 + (linear_full + 0.022 * diff_strength) * 0.25
+                    linear_full = apply_diffusion_np(linear_full, diff_family, diff_strength, diff_warmth)
                 except Exception as e:
                     print(f"[SpektraExport] 柔光模拟异常: {e}")
+
+            # 2.5. Official Spektrafilm Physical Halation & In-Emulsion Scatter in Scene-linear space
+            if halation > 0.001 or scatter_amount > 0.001:
+                try:
+                    if progress_cb:
+                        progress_cb(25, "正在模拟真实物理胶片光晕与防光晕层漫射 (Official Spektrafilm Dual-Pass)...")
+
+                    hal_preset = self.get_film_halation_preset(film_stock)
+                    hal_strength_rgb = np.array(hal_preset["strength"], dtype=np.float32)
+                    hal_sigma_um = float(hal_preset["sigma_h"])
+                    eff_strength = hal_strength_rgb * halation
+
+                    # 1. In-emulsion scatter pass: physical micro-diffusion (energy-preserving)
+                    if scatter_amount > 0.001:
+                        sigma_c_px = max(0.5, (2.0 * max(0.2, hal_spatial_scale)) / pixel_size_um)
+                        sigma_t_px = max(1.0, (9.5 * max(0.2, hal_spatial_scale)) / pixel_size_um)
+                        kc = int(sigma_c_px * 3.0) * 2 + 1
+                        kt = int(sigma_t_px * 3.0) * 2 + 1
+                        core = cv2.GaussianBlur(linear_full, (min(kc, 101), min(kc, 101)), sigma_c_px)
+                        tail = cv2.GaussianBlur(linear_full, (min(kt, 151), min(kt, 151)), sigma_t_px)
+                        w_tail = np.array([0.78, 0.65, 0.67], dtype=np.float32)
+                        scattered = core * (1.0 - w_tail) + tail * w_tail
+                        eff_s = min(0.5, scatter_amount * 0.06)
+                        linear_full = (1.0 - eff_s) * linear_full + eff_s * scattered
+
+                    # 2. Base back-reflection halation pass: Spektrafilm multi-bounce sum with DC normalization
+                    if halation > 0.001 and np.any(eff_strength > 0):
+                        sigma_h_px = (hal_sigma_um * max(0.2, hal_spatial_scale)) / pixel_size_um
+                        decay = np.array([0.5 ** (k - 1) for k in range(1, 4)], dtype=np.float32)
+                        decay /= decay.sum()
+
+                        # Highlight boost if enabled (0.0 by default)
+                        hal_input = linear_full
+                        if hal_boost > 0.001:
+                            luma_in = 0.2126 * linear_full[..., 0] + 0.7152 * linear_full[..., 1] + 0.0722 * linear_full[..., 2]
+                            boost_scale = 1.0 + np.maximum(0.0, luma_in - 0.7) * (hal_boost * 0.6)
+                            hal_input = linear_full * boost_scale[..., None]
+
+                        hal_blur = np.zeros_like(linear_full)
+                        for k, wk in zip(range(1, 4), decay):
+                            sigma_k = sigma_h_px * np.sqrt(k)
+                            ksize = int(sigma_k * 3.0) * 2 + 1
+                            ksize = min(ksize, 301)
+                            blur_k = cv2.GaussianBlur(hal_input, (ksize, ksize), sigma_k)
+                            hal_blur += blur_k * wk
+
+                        # Official Spektrafilm physical halation DC normalization:
+                        linear_full = (linear_full + eff_strength * hal_blur) / (1.0 + eff_strength)
+                except Exception as e_hal:
+                    print(f"[SpektraExport] 光晕模拟异常: {e_hal}")
 
             if cancel_cb and cancel_cb():
                 return {"success": False, "cancelled": True, "error": "用户已取消导出"}
@@ -1792,8 +2377,7 @@ class SpektraEngine:
                     y0, y1 = y_range
                     chunk_linear = linear_full[y0:y1]
 
-                    shoulder_linear = filmic_shoulder_np(np.maximum(0.0, chunk_linear), 0.75)
-                    coords = np.clip(shoulder_linear * (lut_size - 1), 0.0, lut_size - 1.0001)
+                    coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
                     idx0 = coords.astype(np.int32)
                     idx1 = np.minimum(idx0 + 1, lut_size - 1)
                     d = coords - idx0
@@ -1841,18 +2425,7 @@ class SpektraEngine:
                     if dev_exh > 0.005:
                         chunk_film = chunk_film * (1.0 - dev_exh * 0.6) + (chunk_film * 0.88 + 0.03) * (dev_exh * 0.6)
 
-                    # Halation (LUT 之后防光晕红晕叠加)
-                    if halation > 0.01:
-                        chunk_orig = raw_target[y0:y1]
-                        luma_orig = 0.299 * chunk_orig[..., 0] + 0.587 * chunk_orig[..., 1] + 0.114 * chunk_orig[..., 2]
-                        highlight = np.maximum(0.0, luma_orig - 0.70 + hal_boost * 0.10) / 0.30
-                        hal_accum = np.zeros_like(highlight)
-                        cur_decay = 1.0
-                        for b in range(min(4, hal_bounces)):
-                            hal_accum += np.power(highlight, 1.6 + float(b) * 0.4) * cur_decay
-                            cur_decay *= hal_decay
-                        halation_tint = np.array([1.0, 0.14, 0.04], dtype=np.float32) * (halation * 0.35)
-                        chunk_film += hal_accum[..., None] * halation_tint
+
 
                     # Film grain
                     if grain > 0.01:
@@ -1912,13 +2485,12 @@ class SpektraEngine:
 
     render_full_res = export_image
 
-    def apply_lut_to_linear(self, linear_f32, lut_3d):
-        """Vectorized trilinear 3D LUT application to linear input (H, W, 3) float32 in [0, 1]."""
+    def apply_lut_to_linear(self, linear_f32, lut_3d, as_float=False):
+        """Vectorized trilinear 3D LUT application with log shaper to linear input (H, W, 3) float32."""
         if lut_3d is None or linear_f32 is None:
             return linear_f32
         lut_size = lut_3d.shape[0]
-        coords = np.clip(linear_f32, 0.0, 1.0) * (lut_size - 1)
-        coords = np.clip(coords, 0.0, lut_size - 1.0001)
+        coords = np.clip(shaper_forward(linear_f32) * (lut_size - 1), 0.0, lut_size - 1.0001)
 
         idx0 = coords.astype(np.int32)
         idx1 = np.minimum(idx0 + 1, lut_size - 1)
@@ -1949,6 +2521,8 @@ class SpektraEngine:
         c1 = c01 * (1 - dg) + c11 * dg
 
         out = c0 * (1 - db) + c1 * db
+        if as_float:
+            return np.clip(out, 0.0, 1.0)
         return (np.clip(out, 0.0, 1.0) * 255.0).astype(np.uint8)
 
     def apply_lut_to_rgb(self, rgb_u8, lut_3d):
@@ -2037,24 +2611,48 @@ class SpektraEngine:
             "lut_path": output_cube_path
         }
 
-    def import_film_lut(self, src_path):
-        import shutil
+    def import_film_lut(self, src_path, custom_name="", custom_desc=""):
+        return self.import_custom_stock("film", src_path, custom_name, custom_desc)
+
+    def import_paper_lut(self, src_path, custom_name="", custom_desc=""):
+        return self.import_custom_stock("paper", src_path, custom_name, custom_desc)
+
+    def import_custom_stock(self, stock_type, src_path, custom_name="", custom_desc=""):
+        import json
         dest_dir = self.profiles_dir
         os.makedirs(dest_dir, exist_ok=True)
         fname = os.path.basename(src_path)
         dest_path = os.path.join(dest_dir, fname)
-        shutil.copy2(src_path, dest_path)
+        try:
+            with open(src_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if custom_name:
+                data["name"] = custom_name
+            if custom_desc:
+                if "info" in data and isinstance(data["info"], dict):
+                    data["info"]["desc"] = custom_desc
+                data["desc"] = custom_desc
+            with open(dest_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            import shutil
+            shutil.copy2(src_path, dest_path)
+
         self._lut_cache.clear()
         self._profile_cache.clear()
         return dest_path
 
-    def import_paper_lut(self, src_path):
-        import shutil
+    def delete_custom_stock(self, stock_type, stock_id):
+        """Physically deletes user-imported profile from disk and clears caches."""
         dest_dir = self.profiles_dir
-        os.makedirs(dest_dir, exist_ok=True)
-        fname = os.path.basename(src_path)
-        dest_path = os.path.join(dest_dir, fname)
-        shutil.copy2(src_path, dest_path)
+        for f in os.listdir(dest_dir):
+            if f.endswith(".json") and (f.startswith(stock_id) or stock_id in f):
+                fp = os.path.join(dest_dir, f)
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
         self._lut_cache.clear()
         self._profile_cache.clear()
-        return dest_path
+        return True
+

@@ -87,6 +87,15 @@ def get_icon(name: str, target_size=None, scale: float = 1.0) -> QIcon:
     p.end()
 
     icon = QIcon(canvas)
+    dimmed_canvas = QPixmap(canvas.size())
+    dimmed_canvas.fill(Qt.GlobalColor.transparent)
+    dp = QPainter(dimmed_canvas)
+    dp.setOpacity(0.32)
+    dp.drawPixmap(0, 0, canvas)
+    dp.end()
+    icon.addPixmap(dimmed_canvas, QIcon.Mode.Disabled, QIcon.State.Off)
+    icon.addPixmap(dimmed_canvas, QIcon.Mode.Disabled, QIcon.State.On)
+
     _ICON_CACHE[cache_key] = icon
     return icon
 
@@ -204,7 +213,12 @@ def get_darkroom_menu_style():
             font-weight: bold;
         }
         QMenu::item:disabled {
-            color: #555869;
+            color: #4b5563;
+            background: transparent;
+        }
+        QMenu::item:disabled:selected {
+            color: #4b5563;
+            background: transparent;
         }
         QMenu::separator {
             height: 1px;
