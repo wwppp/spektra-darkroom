@@ -1,11 +1,10 @@
-"""Adobe Camera Raw / Lightroom Style Professional Export Dialog
-Supports:
-- Formats: TIFF, JPEG, PNG
-- Bit Depths: 8-bit, 16-bit, 32-bit Float
-- Color Spaces: sRGB, Display P3, Adobe RGB (1998), ProPhoto RGB
-- DPI / Print Resolution: 72, 300, 600 DPI
-- Advanced JPEG options: Quality 1-10, Chroma Subsampling (4:4:4, 4:2:2, 4:2:0), Progressive JPEG
-- Fixed layout geometry: Absolutely prevents header jumping when toggling formats.
+"""Adobe Camera Raw / Lightroom Style Professional Export Dialog System
+Provides:
+- BaseExportDialog: Shared render settings (Engine, Format, Color Space, Bit Depth, DPI, Codec parameters)
+- SingleExportDialog: Tailored for single photo export with explicit file destination and save file picker
+- BatchExportDialog: Tailored for batch multi-photo export with output directory, count badge, and naming rules
+- ExportImageDialog: Compatibility factory mapping to SingleExportDialog or BatchExportDialog
+- Zero layout shift, strictly decoupled file vs folder paths, concise professional typography.
 """
 
 import os
@@ -17,24 +16,16 @@ from PySide6.QtWidgets import (
     QStackedWidget, QCheckBox, QProgressBar
 )
 
-from path_utils import get_icon_path, get_resource_dir
+from path_utils import get_icon_path, get_resource_dir, normalize_path
 from ui.window_utils import apply_dark_titlebar
+import config_manager
 
 
-class ExportImageDialog(QDialog):
-    def __init__(self, default_path, is_batch=False, batch_count=0, parent=None):
-        if isinstance(is_batch, QWidget):
-            parent = is_batch
-            is_batch = False
-            batch_count = 0
+class BaseExportDialog(QDialog):
+    """Base dialog encapsulating shared darkroom rendering and color management settings."""
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.is_batch = bool(is_batch)
-        self.batch_count = batch_count
-        if self.is_batch:
-            self.setWindowTitle("冲印参数设置")
-        else:
-            self.setWindowTitle("冲印照片")
-        self.setFixedSize(660, 455)
         self.setModal(True)
 
         icon_path = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
@@ -43,116 +34,11 @@ class ExportImageDialog(QDialog):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        self._current_path = default_path
-        self._init_ui()
-        self._apply_style()
-        self._apply_last_settings()
-
-    def accept(self):
-        try:
-            import config_manager
-            config_manager.save_last_export_settings(self.get_export_config())
-        except Exception:
-            pass
-        super().accept()
-
-    def _apply_last_settings(self):
-        try:
-            import config_manager
-            last = config_manager.get_last_export_settings()
-            if not last:
-                return
-            eng = last.get("engine", "wysiwyg")
-            idx_eng = self.combo_engine.findData(eng)
-            if idx_eng >= 0:
-                self.combo_engine.setCurrentIndex(idx_eng)
-
-            fmt = last.get("format", "jpeg")
-            idx = self.combo_format.findData(fmt)
-            if idx >= 0:
-                self.combo_format.setCurrentIndex(idx)
-                self._on_format_changed(idx)
-
-            cs = last.get("colorspace", "sRGB")
-            idx_cs = self.combo_colorspace.findData(cs)
-            if idx_cs >= 0:
-                self.combo_colorspace.setCurrentIndex(idx_cs)
-
-            bd = last.get("bit_depth", 8)
-            idx_bd = self.combo_depth.findData(bd)
-            if idx_bd >= 0:
-                self.combo_depth.setCurrentIndex(idx_bd)
-
-            q = last.get("quality", 9)
-            if hasattr(self, "slider_quality"):
-                self.slider_quality.setValue(min(10, max(1, int(q))))
-
-            sc = last.get("scale_pct", 100)
-            if hasattr(self, "combo_scale"):
-                idx_sc = self.combo_scale.findData(sc)
-                if idx_sc >= 0:
-                    self.combo_scale.setCurrentIndex(idx_sc)
-
-            # Item 6: Chroma Subsampling persistence
-            sub = last.get("subsampling", "4:4:4")
-            if hasattr(self, "combo_subsampling"):
-                idx_sub = self.combo_subsampling.findData(sub)
-                if idx_sub >= 0:
-                    self.combo_subsampling.setCurrentIndex(idx_sub)
-
-            # Progressive JPEG persistence
-            if hasattr(self, "chk_progressive"):
-                self.chk_progressive.setChecked(bool(last.get("progressive", True)))
-
-            # TIFF Compression persistence
-            comp = last.get("tiff_compression", "lzw")
-            if hasattr(self, "combo_tiff_comp"):
-                idx_comp = self.combo_tiff_comp.findData(comp)
-                if idx_comp >= 0:
-                    self.combo_tiff_comp.setCurrentIndex(idx_comp)
-
-            # PNG Compression level persistence
-            png_lvl = last.get("png_level", 6)
-            if hasattr(self, "combo_png_level"):
-                idx_png = self.combo_png_level.findData(png_lvl)
-                if idx_png >= 0:
-                    self.combo_png_level.setCurrentIndex(idx_png)
-
-            # DPI Print Resolution persistence
-            dpi_val = last.get("dpi", 300)
-            if hasattr(self, "combo_dpi"):
-                idx_dpi = self.combo_dpi.findData(dpi_val)
-                if idx_dpi >= 0:
-                    self.combo_dpi.setCurrentIndex(idx_dpi)
-        except Exception as e:
-            pass
-
     def showEvent(self, event):
         super().showEvent(event)
         apply_dark_titlebar(self)
 
-    def _init_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(24, 20, 24, 20)
-        main_layout.setSpacing(14)
-
-        # 1. Header (Fixed Height to prevent title jitter)
-        header_container = QWidget()
-        header_container.setFixedHeight(32)
-        h_layout = QHBoxLayout(header_container)
-        h_layout.setContentsMargins(0, 0, 0, 0)
-        h_layout.setSpacing(8)
-
-        if self.is_batch:
-            lbl_title = QLabel(f"冲印设置 (共 {self.batch_count} 张底片)")
-        else:
-            lbl_title = QLabel("冲印照片")
-        lbl_title.setStyleSheet("font-size: 14.5px; font-weight: bold; color: #f59e0b;")
-        h_layout.addWidget(lbl_title, 0, Qt.AlignmentFlag.AlignVCenter)
-        h_layout.addStretch()
-        main_layout.addWidget(header_container)
-
-        # 2. Settings Card
+    def _init_settings_card(self) -> tuple[QFrame, QVBoxLayout]:
         card = QFrame()
         card.setObjectName("settingsCard")
         card.setStyleSheet("""
@@ -170,7 +56,7 @@ class ExportImageDialog(QDialog):
             }
         """)
         card_layout = QVBoxLayout(card)
-        card_layout.setSpacing(12)
+        card_layout.setSpacing(11)
 
         # Row 0: Rendering Engine Selection
         r0 = QHBoxLayout()
@@ -190,7 +76,6 @@ class ExportImageDialog(QDialog):
         r1 = QHBoxLayout()
         r1.setSpacing(12)
 
-        # Format
         lbl_fmt = QLabel("文件格式:")
         lbl_fmt.setFixedWidth(65)
         r1.addWidget(lbl_fmt)
@@ -200,7 +85,6 @@ class ExportImageDialog(QDialog):
         self.combo_format.addItem("PNG (*.png)", "png")
         r1.addWidget(self.combo_format, 1)
 
-        # Color Space
         lbl_cs = QLabel("色彩空间:")
         lbl_cs.setFixedWidth(65)
         r1.addWidget(lbl_cs)
@@ -213,7 +97,7 @@ class ExportImageDialog(QDialog):
 
         card_layout.addLayout(r1)
 
-        # Row 2: Resolution (DPI)
+        # Row 2: Resolution (DPI) & Bit Depth
         r2 = QHBoxLayout()
         r2.setSpacing(12)
         lbl_dpi = QLabel("输出分辨率:")
@@ -235,17 +119,16 @@ class ExportImageDialog(QDialog):
 
         card_layout.addLayout(r2)
 
-        # Row 3: Format-Specific Settings Stack (Zero layout shift)
+        # Row 3: Format-Specific Settings Stack
         self.stack_settings = QStackedWidget()
-        self.stack_settings.setFixedHeight(85)
+        self.stack_settings.setFixedHeight(82)
 
         # --- Stack Page 0: JPEG Options ---
         page_jpeg = QWidget()
         l_jpeg = QVBoxLayout(page_jpeg)
-        l_jpeg.setContentsMargins(0, 4, 0, 0)
-        l_jpeg.setSpacing(10)
+        l_jpeg.setContentsMargins(0, 2, 0, 0)
+        l_jpeg.setSpacing(8)
 
-        # Row 0.1: Size + Subsampling + Progressive in a clean balanced horizontal flow
         row_jpeg_opts = QHBoxLayout()
         row_jpeg_opts.setSpacing(10)
 
@@ -287,7 +170,6 @@ class ExportImageDialog(QDialog):
 
         l_jpeg.addLayout(row_jpeg_opts)
 
-        # Row 0.2: Quality Slider
         row_q = QHBoxLayout()
         row_q.setSpacing(10)
         lbl_q = QLabel("画质档位:")
@@ -303,11 +185,11 @@ class ExportImageDialog(QDialog):
         row_q.addWidget(self.slider_quality, 1)
 
         self.lbl_quality_val = QLabel("9 档 (90%)")
-        self.lbl_quality_val.setFixedWidth(85)
-        self.lbl_quality_val.setStyleSheet("color: #f59e0b; font-size: 12px; font-weight: bold;")
+        self.lbl_quality_val.setFixedWidth(75)
+        self.lbl_quality_val.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 11px;")
         row_q.addWidget(self.lbl_quality_val)
-        l_jpeg.addLayout(row_q)
 
+        l_jpeg.addLayout(row_q)
         self.stack_settings.addWidget(page_jpeg)
 
         # --- Stack Page 1: TIFF Options ---
@@ -321,19 +203,19 @@ class ExportImageDialog(QDialog):
         lbl_t_comp = QLabel("压缩算法:")
         lbl_t_comp.setFixedWidth(65)
         row_t_comp.addWidget(lbl_t_comp)
+
         self.combo_tiff_comp = QComboBox()
-        self.combo_tiff_comp.addItem("无压缩 (None)", "none")
-        self.combo_tiff_comp.addItem("LZW 压缩", "lzw")
-        self.combo_tiff_comp.addItem("ZIP 压缩", "deflate")
+        self.combo_tiff_comp.addItem("LZW 压缩 (无损推荐)", "lzw")
+        self.combo_tiff_comp.addItem("Zip / Deflate 压缩 (小体积)", "deflate")
+        self.combo_tiff_comp.addItem("无压缩 (Raw TIFF)", "none")
         self.combo_tiff_comp.setFixedWidth(200)
         row_t_comp.addWidget(self.combo_tiff_comp)
         row_t_comp.addStretch()
         l_tiff.addLayout(row_t_comp)
 
-        lbl_t_hint = QLabel("支持高动态位深，适合专业冲印与调色归档。")
+        lbl_t_hint = QLabel("TIFF 支持最高 32 位浮点线性渲染，适合送印大型相纸展演或二次排版。")
         lbl_t_hint.setStyleSheet("color: #888; font-size: 11px;")
         l_tiff.addWidget(lbl_t_hint)
-
         self.stack_settings.addWidget(page_tiff)
 
         # --- Stack Page 2: PNG Options ---
@@ -347,6 +229,7 @@ class ExportImageDialog(QDialog):
         lbl_p_comp = QLabel("压缩级别:")
         lbl_p_comp.setFixedWidth(65)
         row_p_comp.addWidget(lbl_p_comp)
+
         self.combo_png_level = QComboBox()
         self.combo_png_level.addItem("标准压缩 (Level 6)", 6)
         self.combo_png_level.addItem("极限压缩 (Level 9)", 9)
@@ -356,112 +239,18 @@ class ExportImageDialog(QDialog):
         row_p_comp.addStretch()
         l_png.addLayout(row_p_comp)
 
-        lbl_p_hint = QLabel("PNG 支持 8位 与 16位 无损透明通道与极佳网络兼容性。")
+        lbl_p_hint = QLabel("PNG 支持 8位 与 16位 无损通道与广泛的网络兼容性。")
         lbl_p_hint.setStyleSheet("color: #888; font-size: 11px;")
         l_png.addWidget(lbl_p_hint)
-
         self.stack_settings.addWidget(page_png)
 
         card_layout.addWidget(self.stack_settings)
-
-        # Row 4: Save Path
-        row_path = QVBoxLayout()
-        row_path.setSpacing(6)
-        lbl_path = QLabel("目标输出文件夹:" if self.is_batch else "保存路径:")
-        lbl_path.setStyleSheet("color: #bbb; font-size: 12px;")
-        row_path.addWidget(lbl_path)
-
-        path_box = QHBoxLayout()
-        path_box.setSpacing(8)
-        self.edit_path = QLineEdit(self._current_path)
-        path_box.addWidget(self.edit_path, 1)
-
-        btn_browse = QPushButton("浏览...")
-        btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_browse.clicked.connect(self._browse_save_path)
-        path_box.addWidget(btn_browse)
-
-        row_path.addLayout(path_box)
-        card_layout.addLayout(row_path)
-
-        main_layout.addWidget(card)
-
-        # Connect format change signal
         self.combo_format.currentIndexChanged.connect(self._on_format_changed)
 
-        # Initial format setup
-        ext = os.path.splitext(self._current_path)[1].lower()
-        if ext in (".jpg", ".jpeg"):
-            self.combo_format.setCurrentIndex(0)
-        elif ext in (".tif", ".tiff"):
-            self.combo_format.setCurrentIndex(1)
-        else:
-            self.combo_format.setCurrentIndex(2)
-        self._on_format_changed(self.combo_format.currentIndex())
-
-        # Buttons row
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-
-        btn_cancel = QPushButton("取消")
-        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_cancel.setStyleSheet("""
-            QPushButton {
-                background: #25262c;
-                color: #bbb;
-                border: 1px solid #3c3e4a;
-                border-radius: 4px;
-                padding: 6px 20px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background: #32343e;
-                color: #fff;
-            }
-            QPushButton:pressed {
-                background: #191a1e;
-                color: #888;
-                border-color: #2b2d38;
-            }
-        """)
-        btn_cancel.clicked.connect(self.reject)
-        btn_row.addWidget(btn_cancel)
-
-        btn_export = QPushButton("冲印")
-        save_icon_path = get_icon_path("export_dark.png")
-        if not os.path.exists(save_icon_path):
-            save_icon_path = get_icon_path("save.png")
-        if os.path.exists(save_icon_path):
-            btn_export.setIcon(QIcon(save_icon_path))
-            btn_export.setIconSize(QSize(14, 14))
-        btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_export.setStyleSheet("""
-            QPushButton {
-                background: #f59e0b;
-                color: #111;
-                font-weight: bold;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 26px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background: #d97706;
-            }
-            QPushButton:pressed {
-                background: #b45309;
-                color: #000;
-            }
-        """)
-        btn_export.clicked.connect(self.accept)
-        btn_row.addWidget(btn_export)
-
-        main_layout.addLayout(btn_row)
+        return card, card_layout
 
     def _on_format_changed(self, index):
         fmt = self.combo_format.currentData()
-        
-        # Switch stacked widget without resizing dialog
         self.combo_depth.clear()
         if fmt == "jpeg":
             self.stack_settings.setCurrentIndex(0)
@@ -472,65 +261,88 @@ class ExportImageDialog(QDialog):
             self.combo_depth.addItem("16 位 (16-bit)", 16)
             self.combo_depth.addItem("32 位浮点 (32-bit Float)", 32)
             self.combo_depth.setCurrentIndex(1)
-        else: # png
+        else:  # png
             self.stack_settings.setCurrentIndex(2)
             self.combo_depth.addItem("8 位 (8-bit)", 8)
             self.combo_depth.addItem("16 位 (16-bit)", 16)
-
-        # Update path extension if single export
-        if not self.is_batch:
-            cur_path = self.edit_path.text()
-            base, _ = os.path.splitext(cur_path)
-            if fmt == "tiff":
-                new_ext = ".tif"
-            elif fmt == "jpeg":
-                new_ext = ".jpg"
-            else:
-                new_ext = ".png"
-            self.edit_path.setText(base + new_ext)
 
     def _on_quality_changed(self, val):
         pct = int(val * 10)
         self.lbl_quality_val.setText(f"{val} 档 ({pct}%)")
 
-    def _browse_save_path(self):
-        if self.is_batch:
-            dir_chosen = QFileDialog.getExistingDirectory(self, "选择批量冲印输出文件夹", self.edit_path.text())
-            if dir_chosen:
-                self.edit_path.setText(dir_chosen)
-            return
+    def _apply_last_settings(self):
+        try:
+            last = config_manager.get_last_export_settings()
+            if not last:
+                return
+            eng = last.get("engine", "wysiwyg")
+            idx_eng = self.combo_engine.findData(eng)
+            if idx_eng >= 0:
+                self.combo_engine.setCurrentIndex(idx_eng)
 
-        fmt = self.combo_format.currentData()
-        if fmt == "tiff":
-            filt = "专业 TIFF (*.tif *.tiff)"
-        elif fmt == "jpeg":
-            filt = "高质量 JPEG (*.jpg *.jpeg)"
-        else:
-            filt = "便携 PNG (*.png)"
+            fmt = last.get("format", "jpeg")
+            idx = self.combo_format.findData(fmt)
+            if idx >= 0:
+                self.combo_format.setCurrentIndex(idx)
+                self._on_format_changed(idx)
 
-        path, _ = QFileDialog.getSaveFileName(self, "选择保存路径", self.edit_path.text(), filt)
-        if path:
-            if os.path.isdir(path) or path.endswith(("/", "\\")):
-                cur_name = os.path.basename(self._current_path) or "developed.jpg"
-                path = os.path.join(path, cur_name)
-            self.edit_path.setText(path)
+            cs = last.get("colorspace", "sRGB")
+            idx_cs = self.combo_colorspace.findData(cs)
+            if idx_cs >= 0:
+                self.combo_colorspace.setCurrentIndex(idx_cs)
 
-    def get_export_config(self):
+            bd = last.get("bit_depth", 8)
+            idx_bd = self.combo_depth.findData(bd)
+            if idx_bd >= 0:
+                self.combo_depth.setCurrentIndex(idx_bd)
+
+            q = last.get("quality", 9)
+            if hasattr(self, "slider_quality"):
+                self.slider_quality.setValue(min(10, max(1, int(q))))
+
+            sc = last.get("scale_pct", 100)
+            if hasattr(self, "combo_scale"):
+                idx_sc = self.combo_scale.findData(sc)
+                if idx_sc >= 0:
+                    self.combo_scale.setCurrentIndex(idx_sc)
+
+            sub = last.get("subsampling", "4:4:4")
+            if hasattr(self, "combo_subsampling"):
+                idx_sub = self.combo_subsampling.findData(sub)
+                if idx_sub >= 0:
+                    self.combo_subsampling.setCurrentIndex(idx_sub)
+
+            if hasattr(self, "chk_progressive"):
+                self.chk_progressive.setChecked(bool(last.get("progressive", True)))
+
+            comp = last.get("tiff_compression", "lzw")
+            if hasattr(self, "combo_tiff_comp"):
+                idx_comp = self.combo_tiff_comp.findData(comp)
+                if idx_comp >= 0:
+                    self.combo_tiff_comp.setCurrentIndex(idx_comp)
+
+            png_lvl = last.get("png_level", 6)
+            if hasattr(self, "combo_png_level"):
+                idx_png = self.combo_png_level.findData(png_lvl)
+                if idx_png >= 0:
+                    self.combo_png_level.setCurrentIndex(idx_png)
+
+            dpi_val = last.get("dpi", 300)
+            if hasattr(self, "combo_dpi"):
+                idx_dpi = self.combo_dpi.findData(dpi_val)
+                if idx_dpi >= 0:
+                    self.combo_dpi.setCurrentIndex(idx_dpi)
+        except Exception:
+            pass
+
+    def get_common_export_config(self) -> dict:
         try:
             dpi_val = int(str(self.combo_dpi.currentText()).split()[0])
         except Exception:
             dpi_val = 300
 
-        from path_utils import normalize_path
-        raw_path = normalize_path(self.edit_path.text().strip())
-        if not self.is_batch and raw_path:
-            if os.path.isdir(raw_path) or raw_path.endswith(("/", "\\")):
-                cur_name = os.path.basename(self._current_path) or "developed.jpg"
-                raw_path = os.path.join(raw_path, cur_name)
-        raw_path = normalize_path(raw_path)
-
         return {
-            "engine": self.combo_engine.currentData() if hasattr(self, 'combo_engine') else "wysiwyg",
+            "engine": self.combo_engine.currentData() if hasattr(self, "combo_engine") else "wysiwyg",
             "format": self.combo_format.currentData(),
             "colorspace": self.combo_colorspace.currentData(),
             "bit_depth": self.combo_depth.currentData(),
@@ -540,8 +352,7 @@ class ExportImageDialog(QDialog):
             "progressive": self.chk_progressive.isChecked(),
             "tiff_compression": self.combo_tiff_comp.currentData(),
             "png_level": self.combo_png_level.currentData(),
-            "scale_pct": int(self.combo_scale.currentData()) if hasattr(self, 'combo_scale') and self.combo_format.currentData() == "jpeg" else 100,
-            "path": raw_path
+            "scale_pct": int(self.combo_scale.currentData()) if hasattr(self, "combo_scale") and self.combo_format.currentData() == "jpeg" else 100,
         }
 
     def _apply_style(self):
@@ -659,6 +470,348 @@ class ExportImageDialog(QDialog):
         """)
 
 
+class SingleExportDialog(BaseExportDialog):
+    """Export dialog for single photo development with precise file destination."""
+
+    def __init__(self, default_file_path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("冲印照片")
+        self.setFixedSize(660, 455)
+
+        self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
+        self._init_ui()
+        self._apply_style()
+        self._apply_last_settings()
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(24, 20, 24, 20)
+        main_layout.setSpacing(14)
+
+        # 1. Header (Concise typography without emoji)
+        header_container = QWidget()
+        header_container.setFixedHeight(30)
+        h_layout = QHBoxLayout(header_container)
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        h_layout.setSpacing(10)
+
+        lbl_title = QLabel("冲印照片")
+        lbl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #f59e0b;")
+        h_layout.addWidget(lbl_title)
+
+        if self._default_file_path:
+            src_fname = os.path.basename(self._default_file_path)
+            lbl_sub = QLabel(f"底片: {src_fname}")
+            lbl_sub.setStyleSheet("font-size: 12px; color: #8b92a5;")
+            h_layout.addWidget(lbl_sub)
+
+        h_layout.addStretch()
+        main_layout.addWidget(header_container)
+
+        # 2. Shared Settings Card
+        card, card_layout = self._init_settings_card()
+
+        # Row 4: Exact Save Path for Single Photo
+        row_path = QVBoxLayout()
+        row_path.setSpacing(6)
+        lbl_path = QLabel("保存路径:")
+        lbl_path.setStyleSheet("color: #bbb; font-size: 12px;")
+        row_path.addWidget(lbl_path)
+
+        path_box = QHBoxLayout()
+        path_box.setSpacing(8)
+        self.edit_path = QLineEdit(self._default_file_path)
+        path_box.addWidget(self.edit_path, 1)
+
+        btn_browse = QPushButton("浏览...")
+        btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_browse.clicked.connect(self._browse_save_path)
+        path_box.addWidget(btn_browse)
+
+        row_path.addLayout(path_box)
+        card_layout.addLayout(row_path)
+        main_layout.addWidget(card)
+
+        # Initial format extension setup
+        ext = os.path.splitext(self._default_file_path)[1].lower()
+        if ext in (".jpg", ".jpeg"):
+            self.combo_format.setCurrentIndex(0)
+        elif ext in (".tif", ".tiff"):
+            self.combo_format.setCurrentIndex(1)
+        else:
+            self.combo_format.setCurrentIndex(2)
+        self._on_format_changed(self.combo_format.currentIndex())
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_export = QPushButton("开始冲印")
+        btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_export.setStyleSheet("""
+            QPushButton {
+                background: #f59e0b;
+                color: #111;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 26px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #d97706;
+            }
+            QPushButton:pressed {
+                background: #b45309;
+                color: #000;
+            }
+        """)
+        btn_export.clicked.connect(self.accept)
+        btn_row.addWidget(btn_export)
+
+        main_layout.addLayout(btn_row)
+
+    def _on_format_changed(self, index):
+        super()._on_format_changed(index)
+        fmt = self.combo_format.currentData()
+        cur_path = self.edit_path.text()
+        if cur_path:
+            base, _ = os.path.splitext(cur_path)
+            new_ext = ".tif" if fmt == "tiff" else (".png" if fmt == "png" else ".jpg")
+            self.edit_path.setText(base + new_ext)
+
+    def _browse_save_path(self):
+        fmt = self.combo_format.currentData()
+        if fmt == "tiff":
+            filt = "专业 TIFF (*.tif *.tiff)"
+        elif fmt == "jpeg":
+            filt = "高质量 JPEG (*.jpg *.jpeg)"
+        else:
+            filt = "便携 PNG (*.png)"
+
+        start_path = self.edit_path.text().strip()
+        path, _ = QFileDialog.getSaveFileName(self, "选择保存路径", start_path, filt)
+        if path:
+            self.edit_path.setText(normalize_path(path))
+
+    def get_export_config(self) -> dict:
+        cfg = self.get_common_export_config()
+        raw_path = normalize_path(self.edit_path.text().strip())
+        if raw_path and (os.path.isdir(raw_path) or raw_path.endswith(("/", "\\"))):
+            cur_name = os.path.basename(self._default_file_path) or "developed.jpg"
+            raw_path = os.path.join(raw_path, cur_name)
+        cfg["path"] = normalize_path(raw_path)
+        cfg["is_batch"] = False
+        return cfg
+
+    def accept(self):
+        try:
+            cfg = self.get_export_config()
+            config_manager.save_last_export_settings(cfg)
+            if cfg.get("path"):
+                config_manager.set_last_export_dir(os.path.dirname(cfg["path"]))
+        except Exception:
+            pass
+        super().accept()
+
+
+class BatchExportDialog(BaseExportDialog):
+    """Export dialog for multi-photo batch queue delivery with strictly directory destination."""
+
+    def __init__(self, default_dir: str, batch_count: int = 0, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("批量冲印")
+        self.setFixedSize(660, 495)
+        self.batch_count = batch_count
+
+        # Ensure directory only, never a file
+        clean_dir = normalize_path(default_dir) if default_dir else ""
+        if clean_dir and not os.path.isdir(clean_dir):
+            clean_dir = os.path.dirname(clean_dir)
+        if not clean_dir or not os.path.exists(clean_dir):
+            clean_dir = config_manager.get_last_export_dir() or os.path.expanduser("~")
+        self._default_dir = clean_dir
+
+        self._init_ui()
+        self._apply_style()
+        self._apply_last_settings()
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(24, 20, 24, 20)
+        main_layout.setSpacing(14)
+
+        # 1. Header (Concise typography, badge without emoji)
+        header_container = QWidget()
+        header_container.setFixedHeight(30)
+        h_layout = QHBoxLayout(header_container)
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        h_layout.setSpacing(10)
+
+        lbl_title = QLabel("批量冲印")
+        lbl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #f59e0b;")
+        h_layout.addWidget(lbl_title)
+
+        lbl_badge = QLabel(f"批量：选中了 {self.batch_count} 张")
+        lbl_badge.setStyleSheet("""
+            QLabel {
+                background: #25262c;
+                border: 1px solid #3c3e4a;
+                border-radius: 4px;
+                color: #e2e8f0;
+                padding: 2px 8px;
+                font-size: 11.5px;
+            }
+        """)
+        h_layout.addWidget(lbl_badge)
+        h_layout.addStretch()
+        main_layout.addWidget(header_container)
+
+        # 2. Shared Settings Card
+        card, card_layout = self._init_settings_card()
+
+        # Row 4: File Naming Rules (Concise prefix and suffix)
+        row_naming = QHBoxLayout()
+        row_naming.setSpacing(10)
+
+        lbl_name_tag = QLabel("文件命名:")
+        lbl_name_tag.setFixedWidth(65)
+        row_naming.addWidget(lbl_name_tag)
+
+        lbl_pre = QLabel("前缀:")
+        lbl_pre.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        row_naming.addWidget(lbl_pre)
+        self.edit_prefix = QLineEdit()
+        self.edit_prefix.setPlaceholderText("无")
+        self.edit_prefix.setFixedWidth(110)
+        row_naming.addWidget(self.edit_prefix)
+
+        row_naming.addSpacing(10)
+
+        lbl_suf = QLabel("后缀:")
+        lbl_suf.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        row_naming.addWidget(lbl_suf)
+        self.edit_suffix = QLineEdit()
+        self.edit_suffix.setPlaceholderText("无")
+        self.edit_suffix.setFixedWidth(110)
+        row_naming.addWidget(self.edit_suffix)
+
+        row_naming.addSpacing(10)
+        lbl_hint = QLabel("留空则保持原文件名输出")
+        lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        row_naming.addWidget(lbl_hint)
+        row_naming.addStretch()
+
+        card_layout.addLayout(row_naming)
+
+        # Row 5: Strictly Destination Directory
+        row_path = QVBoxLayout()
+        row_path.setSpacing(6)
+        lbl_path = QLabel("目标输出文件夹:")
+        lbl_path.setStyleSheet("color: #bbb; font-size: 12px;")
+        row_path.addWidget(lbl_path)
+
+        path_box = QHBoxLayout()
+        path_box.setSpacing(8)
+        self.edit_path = QLineEdit(self._default_dir)
+        path_box.addWidget(self.edit_path, 1)
+
+        btn_browse = QPushButton("浏览...")
+        btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_browse.clicked.connect(self._browse_save_dir)
+        path_box.addWidget(btn_browse)
+
+        row_path.addLayout(path_box)
+        card_layout.addLayout(row_path)
+        main_layout.addWidget(card)
+
+        # Initial format setup
+        self._on_format_changed(self.combo_format.currentIndex())
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_export = QPushButton(f"加入冲印队列 ({self.batch_count})")
+        btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_export.setStyleSheet("""
+            QPushButton {
+                background: #f59e0b;
+                color: #111;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 24px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #d97706;
+            }
+            QPushButton:pressed {
+                background: #b45309;
+                color: #000;
+            }
+        """)
+        btn_export.clicked.connect(self.accept)
+        btn_row.addWidget(btn_export)
+
+        main_layout.addLayout(btn_row)
+
+    def _browse_save_dir(self):
+        start_dir = self.edit_path.text().strip()
+        if not os.path.isdir(start_dir):
+            start_dir = config_manager.get_last_export_dir() or os.path.expanduser("~")
+        dir_chosen = QFileDialog.getExistingDirectory(self, "选择目标输出文件夹", start_dir)
+        if dir_chosen:
+            self.edit_path.setText(normalize_path(dir_chosen))
+
+    def get_export_config(self) -> dict:
+        cfg = self.get_common_export_config()
+        out_dir = normalize_path(self.edit_path.text().strip())
+        if out_dir and not os.path.isdir(out_dir):
+            # Strip accidental file suffix if user typed filename
+            out_dir = os.path.dirname(out_dir) if os.path.splitext(out_dir)[1] else out_dir
+        cfg["path"] = normalize_path(out_dir)
+        cfg["prefix"] = self.edit_prefix.text().strip()
+        cfg["suffix"] = self.edit_suffix.text().strip()
+        cfg["is_batch"] = True
+        cfg["batch_count"] = self.batch_count
+        return cfg
+
+    def accept(self):
+        try:
+            cfg = self.get_export_config()
+            config_manager.save_last_export_settings(cfg)
+            if cfg.get("path"):
+                config_manager.set_last_export_dir(cfg["path"])
+        except Exception:
+            pass
+        super().accept()
+
+
+class ExportImageDialog:
+    """Compatibility factory dispatching to SingleExportDialog or BatchExportDialog."""
+
+    def __new__(cls, default_path: str, is_batch: bool = False, batch_count: int = 0, parent=None):
+        if is_batch:
+            clean_dir = default_path
+            if clean_dir and not os.path.isdir(clean_dir):
+                clean_dir = os.path.dirname(clean_dir)
+            return BatchExportDialog(clean_dir, batch_count=batch_count, parent=parent)
+        else:
+            return SingleExportDialog(default_path, parent=parent)
+
+
 class ExportProgressDialog(QDialog):
     """Modern darkroom responsive export progress dialog with progress bar and cancel button."""
     cancelRequested = Signal()
@@ -758,8 +911,7 @@ class ExportProgressDialog(QDialog):
     def set_progress(self, pct, detail=""):
         self.progress_bar.setValue(pct)
         if detail:
-            # Concise formatting: remove verbose sentences
-            clean_detail = detail.replace("正在载入底片并准备物理色彩管线...", "准备底片与物理色彩管线...")
+            clean_detail = detail.replace("正在载入底片并准备物理色彩管线...", "准备底片与色彩管线...")
             clean_detail = clean_detail.replace("正在准备全分辨率冲印管线...", "准备管线...")
             clean_detail = clean_detail.replace("正在进行高精度冲印渲染与显影", "高精度冲印中")
             self.lbl_detail.setText(clean_detail)
@@ -799,8 +951,10 @@ class SingleExportWorker(QThread):
             )
             if self._is_cancelled or (res and res.get("cancelled")):
                 if os.path.exists(self.out_path):
-                    try: os.remove(self.out_path)
-                    except Exception: pass
+                    try:
+                        os.remove(self.out_path)
+                    except Exception:
+                        pass
                 self.finished.emit({"success": False, "cancelled": True, "error": "用户已取消冲印"})
             else:
                 self.finished.emit(res)

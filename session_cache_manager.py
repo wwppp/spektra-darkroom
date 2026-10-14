@@ -19,6 +19,8 @@ import numpy as np
 
 logger = logging.getLogger("SpektraDarkroom.SessionCache")
 
+from format_constants import RAW_EXTENSIONS
+
 
 def is_dummy_or_corrupted_thumbnail(arr) -> bool:
     """
@@ -302,19 +304,7 @@ def get_image_dimensions(file_path: str) -> tuple[int, int]:
     if not file_path or not os.path.isfile(file_path):
         return 0, 0
     ext = os.path.splitext(file_path)[1].lower()
-    raw_exts = {
-        ".arw", ".srf", ".sr2", ".arq",
-        ".cr2", ".cr3", ".crw",
-        ".nef", ".nrw",
-        ".raf",
-        ".dng",
-        ".rw2",
-        ".orf", ".ori",
-        ".pef", ".ptx",
-        ".3fr", ".fff",
-        ".x3f",
-    }
-    if ext in raw_exts:
+    if ext in RAW_EXTENSIONS:
         try:
             import rawpy
             with rawpy.imread(file_path) as raw:
@@ -342,21 +332,9 @@ def extract_fast_thumbnail(file_path: str, target_h: int = 72) -> np.ndarray | N
     if not file_path or not os.path.isfile(file_path):
         return None
     ext = os.path.splitext(file_path)[1].lower()
-    raw_exts = {
-        ".arw", ".srf", ".sr2", ".arq",
-        ".cr2", ".cr3", ".crw",
-        ".nef", ".nrw",
-        ".raf",
-        ".dng",
-        ".rw2",
-        ".orf", ".ori",
-        ".pef", ".ptx",
-        ".3fr", ".fff",
-        ".x3f",
-    }
     try:
         import cv2
-        if ext in raw_exts:
+        if ext in RAW_EXTENSIONS:
             import rawpy
             with rawpy.imread(file_path) as raw:
                 rw, rh = raw.sizes.width, raw.sizes.height

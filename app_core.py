@@ -19,6 +19,12 @@ try:
 except ImportError:
     rawpy = None
 
+from format_constants import (
+    RAW_EXTENSIONS,
+    STANDARD_IMAGE_EXTENSIONS,
+    ALL_SUPPORTED_IMAGE_EXTENSIONS
+)
+
 
 # Color matrices for accurate gamut transitions
 # ACES2065-1 (AP0) to ProPhoto RGB
@@ -307,9 +313,9 @@ def extract_exif_bundle(source_path):
     exif_bytes = None
     loaded_exif = None
 
-    # 1. Native TIFF/RAW deep tag extraction (ARW, CR2, CR3, NEF, DNG, TIF, TIFF, PEF, ORF, RW2)
+    # 1. Native TIFF/RAW deep tag extraction
     # Extracts complete IFD0, ExifIFD (0x8769), and GPSTag (0x8825) directly from camera negative
-    if ext in ('.arw', '.cr2', '.cr3', '.nef', '.dng', '.tif', '.tiff', '.orf', '.pef', '.rw2'):
+    if ext in RAW_EXTENSIONS or ext in ('.tif', '.tiff'):
         try:
             import tifffile
             with tifffile.TiffFile(source_path) as tf:
@@ -411,7 +417,7 @@ def extract_exif_bundle(source_path):
             logger.debug(f"PIL direct exif: {e}")
 
     # 4. Camera RAW fallback via rawpy thumbnail preview (only if preceding failed)
-    if (loaded_exif is None or len(loaded_exif) == 0) and ext in ('.arw', '.cr2', '.cr3', '.nef', '.dng', '.rw2', '.orf', '.pef', '.raf'):
+    if (loaded_exif is None or len(loaded_exif) == 0) and (ext in RAW_EXTENSIONS):
         try:
             import rawpy
             with rawpy.imread(source_path) as raw:
@@ -1148,18 +1154,7 @@ class SpektraEngine:
         print(f"[SpektraEngine] 3D LUT 生成完毕，耗时: {round((time.time() - t0)*1000, 1)}ms")
         return lut_3d
 
-    RAW_EXTS = {
-        ".arw", ".srf", ".sr2", ".arq",
-        ".cr2", ".cr3", ".crw",
-        ".nef", ".nrw",
-        ".raf",
-        ".dng",
-        ".rw2",
-        ".orf", ".ori",
-        ".pef", ".ptx",
-        ".3fr", ".fff",
-        ".x3f",
-    }
+    RAW_EXTS = RAW_EXTENSIONS
 
     @classmethod
     def _extract_exif(cls, file_path):
@@ -1473,7 +1468,7 @@ class SpektraEngine:
             pass
 
         # 4. Rawpy extraction for white balance, color temp, camera make, model, resolution
-        if rawpy is not None and ext in {".arw", ".srf", ".sr2", ".arq", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".raf", ".dng", ".rw2", ".orf", ".ori", ".pef", ".ptx", ".3fr", ".fff", ".x3f"}:
+        if rawpy is not None and ext in cls.RAW_EXTS:
             try:
                 with open(file_path, "rb") as fp:
                     with rawpy.imread(fp) as raw:
@@ -1576,18 +1571,7 @@ class SpektraEngine:
             # Extract rich EXIF shooting attributes
             original_meta.update(cls._extract_exif(file_path))
 
-            raw_exts = {
-                ".arw", ".srf", ".sr2", ".arq",
-                ".cr2", ".cr3", ".crw",
-                ".nef", ".nrw",
-                ".raf",
-                ".dng",
-                ".rw2",
-                ".orf", ".ori",
-                ".pef", ".ptx",
-                ".3fr", ".fff",
-                ".x3f",
-            }
+            raw_exts = cls.RAW_EXTS
 
             if ext in raw_exts:
                 if rawpy is None:
@@ -1980,7 +1964,7 @@ class SpektraEngine:
     def _load_full_resolution(self, file_path, base_ev=0.0):
         """Full 16-bit float32 loader for master export on demand in Linear ProPhoto RGB."""
         ext = os.path.splitext(file_path)[1].lower()
-        raw_exts = {".arw", ".srf", ".sr2", ".arq", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".raf", ".dng", ".rw2", ".orf", ".ori", ".pef", ".ptx", ".3fr", ".fff", ".x3f"}
+        raw_exts = self.RAW_EXTS
         if ext in raw_exts:
             with open(file_path, "rb") as fp:
                 with rawpy.imread(fp) as raw:

@@ -436,6 +436,46 @@ def save_last_export_settings(settings: dict):
     save_config(cfg)
 
 
+def get_last_export_dir() -> str:
+    """Returns the last used export directory. Always returns a directory path or empty string."""
+    cfg = load_config()
+    pref = cfg.get("preferences", {})
+    last_settings = pref.get("last_export_settings", {})
+    candidates = [
+        pref.get("last_export_dir"),
+        last_settings.get("output_dir"),
+        last_settings.get("path"),
+        pref.get("default_export_dir")
+    ]
+    for c in candidates:
+        if c and isinstance(c, str):
+            c_clean = c.strip()
+            if os.path.isdir(c_clean):
+                return c_clean
+            parent = os.path.dirname(c_clean)
+            if parent and os.path.isdir(parent):
+                return parent
+    return ""
+
+
+def set_last_export_dir(dir_or_file_path: str):
+    """Persists last used export directory."""
+    if not dir_or_file_path or not isinstance(dir_or_file_path, str):
+        return
+    clean = dir_or_file_path.strip()
+    target_dir = clean if os.path.isdir(clean) else os.path.dirname(clean)
+    if not target_dir or not os.path.exists(target_dir):
+        return
+    cfg = load_config()
+    if "preferences" not in cfg:
+        cfg["preferences"] = {}
+    cfg["preferences"]["last_export_dir"] = target_dir
+    if "last_export_settings" not in cfg["preferences"]:
+        cfg["preferences"]["last_export_settings"] = {}
+    cfg["preferences"]["last_export_settings"]["output_dir"] = target_dir
+    save_config(cfg)
+
+
 def register_sdss_file_association() -> bool:
     """Item 3: Associate .sdss session files with SpektraDarkroom in HKCU registry.
     Requires no administrator elevation because it modifies HKCU\\Software\\Classes.

@@ -41,6 +41,11 @@ from PySide6.QtWidgets import (
 )
 
 from path_utils import get_icon_path, get_resource_dir
+from format_constants import (
+    RAW_EXTENSIONS,
+    ALL_SUPPORTED_IMAGE_EXTENSIONS,
+    FILE_DIALOG_IMAGE_FILTER
+)
 from version import get_app_title, get_full_version_info
 import sdc_manager
 import config_manager
@@ -80,11 +85,12 @@ from ui.canvas_viewport import CanvasViewport, DarkroomGLCanvas
 from ui.accordion import AccordionSection
 from ui.adobe_scrub_slider import AdobeScrubSlider, ComboBoxRow
 from ui.export_dialog import (
-    ExportImageDialog, ExportProgressDialog, SingleExportWorker, BatchExportWorker
+    SingleExportDialog, BatchExportDialog, ExportImageDialog, ExportProgressDialog, SingleExportWorker, BatchExportWorker
 )
 from ui.filmstrip_widget import FilmstripWidget, DuplicateFilesDialog
 from ui.spinner_widget import SpinnerWidget
 from ui.histogram_widget import HistogramWidget
+from ui.fading_stacked_widget import FadingStackedWidget
 
 
 class WindowCaptionButton(QPushButton):
@@ -239,20 +245,8 @@ class SinglePhotoLoadWorker(QThread):
             # 1. Fast camera-embedded JPEG preview extraction (~10-15ms)
             # Provides progressive multi-stage clarity: micro-thumb (0ms) -> 1080p preview (15ms) -> master (300ms)
             try:
-                raw_exts = {
-                    ".arw", ".srf", ".sr2", ".arq",
-                    ".cr2", ".cr3", ".crw",
-                    ".nef", ".nrw",
-                    ".raf",
-                    ".dng",
-                    ".rw2",
-                    ".orf", ".ori",
-                    ".pef", ".ptx",
-                    ".3fr", ".fff",
-                    ".x3f",
-                }
                 ext = os.path.splitext(self.path)[1].lower()
-                if ext in raw_exts:
+                if ext in RAW_EXTENSIONS:
                     import rawpy
                     with rawpy.imread(self.path) as raw:
                         thumb = raw.extract_thumb()
@@ -493,6 +487,212 @@ class SlotDecodeWorker(QThread):
 
         if not self._stopped:
             self.finished.emit()
+
+
+class SessionRestoreWorker(QThread):
+    """Background worker for ultra-fast asynchronous session restoration.
+    - Decouples disk I/O (.npz cache unzipping, .sdc JSON reading, CPU LUT grading) from Qt GUI thread.
+    - Emits first active photo immediately (<30ms) for instantaneous canvas rendering.
+    - Concurrent multi-worker extraction for remaining photos with in-order assembly.
+    - Zero GUI freezing during session transitions.
+    """
+    activePhotoReady = Signal(int, dict)       # target_idx, target_photo_entry
+    progress = Signal(int, int)                # current, total
+    restoreFinished = Signal(list, list, str)  # all_photos, uncached_slots, target_path
+    failed = Signal(str)
+
+    def __init__(self, existing_files, active_file=None, thumb_controller=None, engine=None, is_params_modified_fn=None, parent=None):
+        super().__init__(parent)
+        self.existing_files = list(existing_files or [])
+        self.active_file = active_file
+        self.thumb_controller = thumb_controller
+        self.engine = engine
+        self.is_params_modified_fn = is_params_modified_fn
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
+
+    def _process_single_photo(self, idx: int, p: str, is_target: bool) -> tuple:
+        """Processes a single photo entry: sdc, cache, thumbnails, dimensions."""
+        import sdc_manager
+        pid = f"photo_{idx}_{os.path.basename(p)}"
+        sdc = sdc_manager.load_sdc(p)
+        film_profile = sdc.get("film_profile", "none") if sdc else "none"
+        paper_profile = sdc.get("paper_profile", "none") if sdc else "none"
+        print_mode = sdc.get("print_mode", sdc.get("params", {}).get("print_mode", "optical")) if sdc else "scan"
+        params = dict(sdc.get("params", {})) if sdc else None
+        is_dirty = False
+
+        params_modified = False
+        if callable(self.is_params_modified_fn):
+            params_modified = bool(self.is_params_modified_fn(params))
+        elif params:
+            params_modified = any(abs(float(params.get(k, 0.0))) > 0.001 for k in ("exposure_ev", "highlights", "shadows"))
+
+        is_edited = bool(sdc is not None and (
+            film_profile not in ("none", "", None) or
+            paper_profile not in ("none", "", None) or
+            params_modified
+        ))
+
+        cache_item = session_cache_manager.get_photo_cache(p, load_preview=is_target)
+
+        raw_th = None
+        graded_th = None
+        if cache_item:
+            for k in ("raw_thumbnail_rgb", "raw_thumbnail", "thumbnail_rgb"):
+                cand = cache_item.get(k)
+                if session_cache_manager.is_valid_thumbnail(cand):
+                    raw_th = cand
+                    break
+
+        if not session_cache_manager.is_valid_thumbnail(raw_th) and os.path.isfile(p):
+            try:
+                extracted = session_cache_manager.extract_fast_thumbnail(p)
+                if session_cache_manager.is_valid_thumbnail(extracted):
+                    raw_th = extracted
+            except Exception:
+                pass
+
+        th_rgb = None
+        if sdc:
+            sdc_th = sdc.get("thumbnail_rgb")
+            if session_cache_manager.is_valid_thumbnail(sdc_th):
+                th_rgb = sdc_th
+                graded_th = sdc_th
+            elif raw_th is not None:
+                if self.thumb_controller and (film_profile != "none" or paper_profile != "none" or (params and abs(params.get("exposure_ev", 0.0)) > 0.001)):
+                    try:
+                        graded_th = self.thumb_controller.grade_thumbnail_fast(raw_th, film_profile, paper_profile, params)
+                    except Exception:
+                        graded_th = raw_th
+                    th_rgb = graded_th
+                else:
+                    th_rgb = raw_th
+        else:
+            th_rgb = raw_th
+            graded_th = None
+
+        is_uncached = False
+        if cache_item is not None:
+            photo_entry = {
+                "id": pid,
+                "filename": os.path.basename(p),
+                "path": p,
+                "width": cache_item.get("width", 0),
+                "height": cache_item.get("height", 0),
+                "thumbnail_rgb": th_rgb,
+                "raw_thumbnail_rgb": np.copy(raw_th) if raw_th is not None else None,
+                "raw_thumbnail": np.copy(raw_th) if raw_th is not None else None,
+                "graded_thumbnail_rgb": graded_th,
+                "float_img": cache_item.get("float_img") if is_target else None,
+                "exif": cache_item.get("exif", {}),
+                "auto_ev": cache_item.get("auto_ev", 0.0),
+                "base_ev": cache_item.get("base_ev", 0.0),
+                "is_raw": cache_item.get("is_raw", False),
+                "film_profile": film_profile,
+                "paper_profile": paper_profile,
+                "print_mode": print_mode,
+                "params": params,
+                "is_dirty": is_dirty,
+                "is_edited": is_edited,
+            }
+        else:
+            dw, dh = session_cache_manager.get_image_dimensions(p)
+            photo_entry = {
+                "id": pid,
+                "filename": os.path.basename(p),
+                "path": p,
+                "width": dw,
+                "height": dh,
+                "thumbnail_rgb": th_rgb,
+                "raw_thumbnail_rgb": np.copy(raw_th) if raw_th is not None else None,
+                "raw_thumbnail": np.copy(raw_th) if raw_th is not None else None,
+                "graded_thumbnail_rgb": graded_th,
+                "float_img": None,
+                "exif": {"filename": os.path.basename(p), "path": p, "width": dw, "height": dh},
+                "auto_ev": 0.0,
+                "base_ev": 0.0,
+                "is_raw": False,
+                "film_profile": film_profile,
+                "paper_profile": paper_profile,
+                "print_mode": print_mode,
+                "params": params,
+                "is_dirty": is_dirty,
+                "is_edited": is_edited,
+            }
+            is_uncached = True
+
+        return photo_entry, is_uncached
+
+    def run(self):
+        try:
+            if not self.existing_files:
+                self.restoreFinished.emit([], [], None)
+                return
+
+            total_files = len(self.existing_files)
+            all_photos = [None] * total_files
+            uncached_slots = []
+
+            target_path = self.active_file if (self.active_file and self.active_file in self.existing_files) else self.existing_files[0]
+            try:
+                target_idx = self.existing_files.index(target_path)
+            except ValueError:
+                target_idx = 0
+                target_path = self.existing_files[0]
+
+            # 1. First photo priority (<30ms)
+            target_entry, is_target_uncached = self._process_single_photo(target_idx, target_path, is_target=True)
+            all_photos[target_idx] = target_entry
+            if is_target_uncached:
+                uncached_slots.append((target_idx, target_path))
+
+            if not self._stopped:
+                self.activePhotoReady.emit(target_idx, target_entry)
+                self.progress.emit(1, total_files)
+
+            if total_files == 1:
+                if not self._stopped:
+                    self.restoreFinished.emit(all_photos, uncached_slots, target_path)
+                return
+
+            # 2. Concurrent processing for remaining photos
+            import concurrent.futures
+            remaining_indices = [i for i in range(total_files) if i != target_idx]
+            max_workers = min(8, max(2, (os.cpu_count() or 4)))
+            completed_count = 1
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {
+                    executor.submit(self._process_single_photo, idx, self.existing_files[idx], False): idx
+                    for idx in remaining_indices
+                }
+                for future in concurrent.futures.as_completed(future_map):
+                    if self._stopped:
+                        break
+                    idx = future_map[future]
+                    try:
+                        entry, is_uncached = future.result()
+                        all_photos[idx] = entry
+                        if is_uncached:
+                            uncached_slots.append((idx, self.existing_files[idx]))
+                    except Exception as e:
+                        logger.warning(f"Error restoring photo at idx {idx}: {e}")
+                    completed_count += 1
+                    if completed_count % 5 == 0 or completed_count == total_files:
+                        self.progress.emit(completed_count, total_files)
+
+            if not self._stopped:
+                uncached_slots.sort(key=lambda x: x[0])
+                self.restoreFinished.emit(all_photos, uncached_slots, target_path)
+        except Exception as e:
+            logger.error(f"SessionRestoreWorker failed: {e}", exc_info=True)
+            self.failed.emit(str(e))
+
+    def run_sync(self):
+        self.run()
 
 
 class FilmGridCard(QFrame):
@@ -1306,162 +1506,125 @@ class DarkroomMainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"Error restoring application state: {e}")
 
-    def _restore_saved_session(self, existing_files, active_file=None):
-        """Ultra-fast session restoration: loads cached filmstrip thumbnails and EXIF in <100ms.
+    def _restore_saved_session(self, existing_files, active_file=None, session_name="", path_updated=False):
+        """Asynchronously restores session photos using SessionRestoreWorker and FadingStackedWidget.
         Pre-allocates slots for all files to guarantee order and count stability (100 remains 100).
-        Any uncached files are decoded directly into their slot indices in the background.
+        Transitions smoothly to editor workspace while restoring active photo and thumbnails in background.
         """
         if not existing_files:
             return
 
         total_files = len(existing_files)
         self.photos = [None] * total_files
-        uncached_slots = []
+        self._is_importing = True
+        if hasattr(self, "btn_cancel_import"):
+            self.btn_cancel_import.setVisible(True)
 
         target_path = active_file if (active_file and active_file in existing_files) else existing_files[0]
         self._target_initial_active_path = target_path
 
-        import sdc_manager
-
-        for idx, p in enumerate(existing_files):
-            pid = f"photo_{idx}_{os.path.basename(p)}"
-            sdc = sdc_manager.load_sdc(p)
-            film_profile = sdc.get("film_profile", "none") if sdc else "none"
-            paper_profile = sdc.get("paper_profile", "none") if sdc else "none"
-            print_mode = sdc.get("print_mode", sdc.get("params", {}).get("print_mode", "optical")) if sdc else "scan"
-            params = dict(sdc.get("params", {})) if sdc else None
-            is_dirty = False
-            is_edited = bool(sdc is not None and (film_profile not in ("none", "", None) or paper_profile not in ("none", "", None) or self._is_params_modified(params)))
-
-            is_target = (p == target_path)
-            cache_item = session_cache_manager.get_photo_cache(p, load_preview=is_target)
-
-            # Strictly fetch immutable raw thumbnail from session cache
-            raw_th = None
-            graded_th = None
-            if cache_item:
-                for k in ("raw_thumbnail_rgb", "raw_thumbnail", "thumbnail_rgb"):
-                    cand = cache_item.get(k)
-                    if session_cache_manager.is_valid_thumbnail(cand):
-                        raw_th = cand
-                        break
-
-            if not session_cache_manager.is_valid_thumbnail(raw_th) and os.path.isfile(p):
-                try:
-                    extracted = session_cache_manager.extract_fast_thumbnail(p)
-                    if session_cache_manager.is_valid_thumbnail(extracted):
-                        raw_th = extracted
-                except Exception:
-                    pass
-
-            th_rgb = None
-            if sdc:
-                sdc_th = sdc.get("thumbnail_rgb")
-                if session_cache_manager.is_valid_thumbnail(sdc_th):
-                    th_rgb = sdc_th
-                    graded_th = sdc_th
-                elif raw_th is not None:
-                    if (film_profile != "none" or paper_profile != "none" or abs(params.get("exposure_ev", 0.0)) > 0.001):
-                        graded_th = self.thumb_controller.grade_thumbnail_fast(raw_th, film_profile, paper_profile, params)
-                        th_rgb = graded_th
-                    else:
-                        th_rgb = raw_th
-            else:
-                th_rgb = raw_th
-                graded_th = None
-
-            if cache_item is not None:
-                photo_entry = {
-                    "id": pid,
-                    "filename": os.path.basename(p),
-                    "path": p,
-                    "width": cache_item.get("width", 0),
-                    "height": cache_item.get("height", 0),
-                    "thumbnail_rgb": th_rgb,
-                    "raw_thumbnail_rgb": np.copy(raw_th) if raw_th is not None else None,
-                    "raw_thumbnail": np.copy(raw_th) if raw_th is not None else None,
-                    "graded_thumbnail_rgb": graded_th,
-                    "float_img": cache_item.get("float_img") if is_target else None,
-                    "exif": cache_item.get("exif", {}),
-                    "auto_ev": cache_item.get("auto_ev", 0.0),
-                    "base_ev": cache_item.get("base_ev", 0.0),
-                    "is_raw": cache_item.get("is_raw", False),
-                    "film_profile": film_profile,
-                    "paper_profile": paper_profile,
-                    "print_mode": print_mode,
-                    "params": params,
-                    "is_dirty": is_dirty,
-                    "is_edited": is_edited,
-                }
-            else:
-                dw, dh = session_cache_manager.get_image_dimensions(p)
-                photo_entry = {
-                    "id": pid,
-                    "filename": os.path.basename(p),
-                    "path": p,
-                    "width": dw,
-                    "height": dh,
-                    "thumbnail_rgb": th_rgb,
-                    "raw_thumbnail_rgb": np.copy(raw_th) if raw_th is not None else None,
-                    "raw_thumbnail": np.copy(raw_th) if raw_th is not None else None,
-                    "graded_thumbnail_rgb": graded_th,
-                    "float_img": None,
-                    "exif": {"filename": os.path.basename(p), "path": p, "width": dw, "height": dh},
-                    "auto_ev": 0.0,
-                    "base_ev": 0.0,
-                    "is_raw": False,
-                    "film_profile": film_profile,
-                    "paper_profile": paper_profile,
-                    "print_mode": print_mode,
-                    "params": params,
-                    "is_dirty": is_dirty,
-                    "is_edited": is_edited,
-                }
-                uncached_slots.append((idx, p))
-
-            self.photos[idx] = photo_entry
-
-        # 1. Switch to darkroom workspace instantly
-        self.stack.setCurrentIndex(1)
+        # 1. Switch to darkroom workspace smoothly
+        self.stack.setCurrentIndexAnimated(1, duration_ms=250)
         self.btn_title_export.setVisible(True)
-        self.canvas.set_has_library_photos(bool(self.photos))
-
-        # 2. Populate filmstrip with all entries in exact order
-        target_entry = next((p for p in self.photos if p and p.get("path") == target_path), self.photos[0])
-        target_id = target_entry["id"] if target_entry else None
-        self.filmstrip.set_photos(self.photos, target_id)
-
-        # 3. Mark dirty/edited badges
-        for entry in self.photos:
-            if entry and (entry.get("is_dirty") or entry.get("is_edited")):
-                self.filmstrip.set_photo_dirty(entry["id"], True)
-
-        # 4. Activate target photo immediately
-        self.active_photo_id = None
-        if uncached_slots:
-            self._is_importing = True
-            if hasattr(self, "btn_cancel_import"):
-                self.btn_cancel_import.setVisible(True)
-            self.set_app_status(f"正在恢复底片库 (0/{len(uncached_slots)} 张)...", spinning=True, timeout_ms=0)
+        if session_name:
+            self.set_app_status(f"正在载入会话: {session_name}...", spinning=True, timeout_ms=0)
         else:
+            self.set_app_status("正在载入会话...", spinning=True, timeout_ms=0)
+
+        # 2. Launch background worker
+        worker = SessionRestoreWorker(
+            existing_files,
+            active_file=target_path,
+            thumb_controller=self.thumb_controller,
+            engine=self.engine,
+            is_params_modified_fn=self._is_params_modified,
+            parent=self
+        )
+        self._session_restore_worker = worker
+
+        def _on_active_photo_ready(target_idx, target_entry):
+            if getattr(self, "_session_restore_worker", None) != worker:
+                return
+            self.photos[target_idx] = target_entry
+            target_id = target_entry.get("id")
+            if target_id and target_entry.get("float_img") is not None:
+                try:
+                    self.on_switch_photo(target_id)
+                except Exception as e:
+                    logger.debug(f"Immediate active photo activation: {e}")
+
+        def _on_progress(current, total):
+            if getattr(self, "_session_restore_worker", None) != worker:
+                return
+            if getattr(self, "_is_importing", False):
+                self.set_app_status(f"正在载入会话 ({current}/{total} 张)...", spinning=True, timeout_ms=0)
+
+        def _on_restore_finished(all_photos, uncached_slots, final_target_path):
+            if getattr(self, "_session_restore_worker", None) != worker:
+                return
+            self._session_restore_worker = None
+            self.photos = all_photos
+            self.canvas.set_has_library_photos(bool(self.photos))
+
+            target_entry = next((p for p in self.photos if p and p.get("path") == final_target_path), self.photos[0] if self.photos else None)
+            target_id = target_entry["id"] if target_entry else None
+
+            # Populate filmstrip with full session photos
+            self.filmstrip.set_photos(self.photos, target_id)
+
+            # Mark dirty/edited badges
+            for entry in self.photos:
+                if entry and (entry.get("is_dirty") or entry.get("is_edited")):
+                    self.filmstrip.set_photo_dirty(entry["id"], True)
+
+            # Activate target photo if not yet active or canvas empty
+            if target_id and (self.active_photo_id != target_id or not getattr(self.canvas, '_has_image', False)):
+                try:
+                    self.on_switch_photo(target_id)
+                except Exception as e:
+                    logger.error(f"Error activating photo on session restore: {e}")
+
+            # Uncached slots handling
+            if uncached_slots:
+                self._is_importing = True
+                if hasattr(self, "btn_cancel_import"):
+                    self.btn_cancel_import.setVisible(True)
+                self.set_app_status(f"正在恢复底片库 (0/{len(uncached_slots)} 张)...", spinning=True, timeout_ms=0)
+                self._slot_decode_worker = SlotDecodeWorker(uncached_slots, self.engine, parent=self)
+                self._slot_decode_worker.slotDecoded.connect(self._on_slot_photo_decoded)
+                self._slot_decode_worker.progress.connect(self._on_slot_decode_progress)
+                self._slot_decode_worker.finished.connect(self._on_all_slots_decoded)
+                self._slot_decode_worker.start()
+            else:
+                self._is_importing = False
+                if hasattr(self, "btn_cancel_import"):
+                    self.btn_cancel_import.setVisible(False)
+                if session_name:
+                    if path_updated:
+                        self.set_app_status(f"会话已恢复 (底片路径已更新): {session_name} ({total_files} 张)", spinning=False, timeout_ms=3000)
+                    else:
+                        self.set_app_status(f"会话已恢复: {session_name} ({total_files} 张)", spinning=False, timeout_ms=2500)
+                else:
+                    self.set_app_status(f"底片库已就绪 ({total_files} 张)", spinning=False, timeout_ms=2500)
+
+        def _on_failed(err_msg):
+            if getattr(self, "_session_restore_worker", None) != worker:
+                return
+            self._session_restore_worker = None
             self._is_importing = False
             if hasattr(self, "btn_cancel_import"):
                 self.btn_cancel_import.setVisible(False)
-            self.set_app_status(f"底片库已就绪 ({total_files} 张)", spinning=False, timeout_ms=3000)
+            self.set_app_status(f"载入会话失败: {err_msg}", spinning=False, timeout_ms=3500)
 
-        # 5. Decode any uncached slots in background without changing list length or order
-        if uncached_slots:
-            self._slot_decode_worker = SlotDecodeWorker(uncached_slots, self.engine, parent=self)
-            self._slot_decode_worker.slotDecoded.connect(self._on_slot_photo_decoded)
-            self._slot_decode_worker.progress.connect(self._on_slot_decode_progress)
-            self._slot_decode_worker.finished.connect(self._on_all_slots_decoded)
-            self._slot_decode_worker.start()
+        worker.activePhotoReady.connect(_on_active_photo_ready)
+        worker.progress.connect(_on_progress)
+        worker.restoreFinished.connect(_on_restore_finished)
+        worker.failed.connect(_on_failed)
 
-        if target_id:
-            try:
-                self.on_switch_photo(target_id)
-            except Exception as e:
-                logger.error(f"Error activating initial photo on session restore: {e}")
+        if os.environ.get("FAST_TEST"):
+            worker.run_sync()
+        else:
+            worker.start()
 
     def _apply_win11_corners(self, is_max=False):
         if sys.platform != "win32":
@@ -1688,10 +1851,7 @@ class DarkroomMainWindow(QMainWindow):
             return
 
         from path_utils import normalize_path
-        valid_exts = {
-            ".arw", ".cr2", ".cr3", ".nef", ".raf", ".dng",
-            ".tif", ".tiff", ".png"
-        }
+        valid_exts = ALL_SUPPORTED_IMAGE_EXTENSIONS
         sdss_files = []
         img_files = []
 
@@ -1958,7 +2118,7 @@ class DarkroomMainWindow(QMainWindow):
         root_layout.addWidget(self.title_bar)
 
         # 2. Main Stack (Welcome View & Editor View)
-        self.stack = QStackedWidget()
+        self.stack = FadingStackedWidget()
         root_layout.addWidget(self.stack, 1)
 
         self._init_welcome_view()
@@ -3859,7 +4019,7 @@ class DarkroomMainWindow(QMainWindow):
             card.set_thumbnail(None)
 
         # 6. Switch back to startup welcome screen
-        self.stack.setCurrentIndex(0)
+        self.stack.setCurrentIndexAnimated(0, duration_ms=250)
         self._update_window_title()
         self.set_app_status("已关闭当前会话", timeout_ms=3000)
 
@@ -3998,15 +4158,7 @@ class DarkroomMainWindow(QMainWindow):
         if not active_path or not os.path.exists(active_path):
             active_path = resolved_files[0] if resolved_files else None
 
-        if resolved_files:
-            self._restore_saved_session(resolved_files, active_file=active_path)
-        else:
-            self.stack.setCurrentIndex(1)
-            self.canvas.set_has_library_photos(False)
-            self.canvas.set_image(None)
-            self.filmstrip.set_photos([], None)
-            self.btn_title_export.setVisible(False)
-            self.thumb_controller.reset_all_cards_to_color_pills(self.film_cards, self.paper_cards)
+        fn = "未命名会话" if is_temp else os.path.basename(file_path)
 
         if not is_temp:
             config_manager.add_recent_session(file_path)
@@ -4017,12 +4169,16 @@ class DarkroomMainWindow(QMainWindow):
         self._session_is_dirty = path_updated
         self._update_window_title()
 
-        fn = "未命名会话" if is_temp else os.path.basename(file_path)
-        if not getattr(self, "_is_importing", False):
-            if path_updated:
-                self.set_app_status(f"会话已恢复 (底片路径已更新): {fn}", timeout_ms=3000)
-            else:
-                self.set_app_status(f"会话已恢复: {fn}", timeout_ms=2500)
+        if resolved_files:
+            self._restore_saved_session(resolved_files, active_file=active_path, session_name=fn, path_updated=path_updated)
+        else:
+            self.stack.setCurrentIndexAnimated(1, duration_ms=250)
+            self.canvas.set_has_library_photos(False)
+            self.canvas.set_image(None)
+            self.filmstrip.set_photos([], None)
+            self.btn_title_export.setVisible(False)
+            self.thumb_controller.reset_all_cards_to_color_pills(self.film_cards, self.paper_cards)
+            self.set_app_status(f"会话已恢复 (空工程): {fn}", timeout_ms=2500)
 
     def action_quick_export(self, target_ids=None):
         """Item 4: Quick export selected or active photo(s) using remembered last export settings."""
@@ -4047,7 +4203,7 @@ class DarkroomMainWindow(QMainWindow):
 
         fmt = last_cfg.get("format", "jpeg")
         ext = ".tif" if "tif" in str(fmt).lower() else (".png" if "png" in str(fmt).lower() else ".jpg")
-        out_dir = last_cfg.get("path", "")
+        out_dir = config_manager.get_last_export_dir()
         if not out_dir or not os.path.isdir(out_dir):
             if self._current_photo_path:
                 out_dir = os.path.dirname(self._current_photo_path)
@@ -5232,7 +5388,7 @@ class DarkroomMainWindow(QMainWindow):
         self._update_photo_info_display()
 
     def action_open_files(self):
-        filt = "图像文件 (*.arw *.cr2 *.cr3 *.nef *.raf *.dng *.tif *.tiff *.png);;所有文件 (*.*)"
+        filt = FILE_DIALOG_IMAGE_FILTER
         last_d = config_manager.get_last_dialog_dir("photo")
         files, _ = QFileDialog.getOpenFileNames(self, "导入照片 / RAW 负片", last_d, filt)
         if files:
@@ -5244,7 +5400,7 @@ class DarkroomMainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "选择导入照片文件夹", last_d)
         if folder:
             config_manager.set_last_dialog_dir("photo", folder)
-            valid_exts = {".arw", ".cr2", ".cr3", ".nef", ".raf", ".dng", ".tif", ".tiff", ".png"}
+            valid_exts = ALL_SUPPORTED_IMAGE_EXTENSIONS
             files = []
             for root, _, fnames in os.walk(folder):
                 for f in fnames:
@@ -5292,7 +5448,7 @@ class DarkroomMainWindow(QMainWindow):
             self._update_window_title()
 
         # 1. Immediately switch to edit workspace
-        self.stack.setCurrentIndex(1)
+        self.stack.setCurrentIndexAnimated(1, duration_ms=250)
         self.btn_title_export.setVisible(True)
 
         # 2. Add to recent files
@@ -5481,6 +5637,18 @@ class DarkroomMainWindow(QMainWindow):
             self._slot_decode_worker.stop()
             self._slot_decode_worker.wait(150)
             self._slot_decode_worker = None
+
+        if getattr(self, "_session_restore_worker", None) and self._session_restore_worker.isRunning():
+            try:
+                self._session_restore_worker.activePhotoReady.disconnect()
+                self._session_restore_worker.progress.disconnect()
+                self._session_restore_worker.restoreFinished.disconnect()
+                self._session_restore_worker.failed.disconnect()
+            except Exception:
+                pass
+            self._session_restore_worker.stop()
+            self._session_restore_worker.wait(150)
+            self._session_restore_worker = None
 
         self._is_importing = False
         if hasattr(self, "btn_cancel_import"):
@@ -6627,24 +6795,28 @@ class DarkroomMainWindow(QMainWindow):
         self.restore_default_status()
 
     def action_export_image(self):
+        # 1. Check filmstrip multi-selection
+        selected_ids = self.filmstrip.get_selected_ids() if hasattr(self, "filmstrip") else []
+        if len(selected_ids) > 1:
+            self._batch_export_photos(selected_ids)
+            return
+
+        # 2. Single export
         if not self._current_photo_path:
             return
 
-        last_cfg = config_manager.get_last_export_settings()
-        last_dir = ""
-        if last_cfg and "path" in last_cfg:
-            p = last_cfg["path"]
-            if os.path.isdir(p):
-                last_dir = p
-            elif p:
-                last_dir = os.path.dirname(p)
+        last_dir = config_manager.get_last_export_dir()
         if not last_dir or not os.path.exists(last_dir):
             last_dir = os.path.dirname(self._current_photo_path) if self._current_photo_path else os.path.expanduser("~")
 
-        base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0]
-        default_out = os.path.join(last_dir, f"{base_name}.jpg")
+        last_cfg = config_manager.get_last_export_settings()
+        fmt = str(last_cfg.get("format", "jpeg")).lower() if last_cfg else "jpeg"
+        ext = ".tif" if "tif" in fmt else (".png" if "png" in fmt else ".jpg")
 
-        dlg = ExportImageDialog(default_out, is_batch=False, parent=self)
+        base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0]
+        default_out = os.path.join(last_dir, f"{base_name}{ext}")
+
+        dlg = SingleExportDialog(default_out, parent=self)
         if dlg.exec():
             cfg = dlg.get_export_config()
             self._do_export_single(cfg)
@@ -6693,7 +6865,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # Remember output directory for subsequent exports
         try:
-            config_manager.save_last_export_settings({"path": os.path.dirname(out_path)})
+            config_manager.set_last_export_dir(os.path.dirname(out_path))
         except Exception:
             pass
 
@@ -6733,24 +6905,36 @@ class DarkroomMainWindow(QMainWindow):
             self._show_warning_dialog("导出失败", f"导出 3D LUT 失败: {e}")
 
     def _batch_export_photos(self, photo_ids):
-        """Item 16: Batch export multiple photos with background export queue."""
+        """Batch export multiple photos with background export queue."""
         if not photo_ids:
             return
 
-        last_cfg = config_manager.get_last_export_settings()
-        last_dir = ""
-        if last_cfg and "path" in last_cfg:
-            p = last_cfg["path"]
-            if os.path.isdir(p):
-                last_dir = p
-            elif p:
-                last_dir = os.path.dirname(p)
+        # If only 1 photo was passed, route to single photo export
+        if len(photo_ids) == 1:
+            pid = photo_ids[0]
+            photo = next((p for p in self.photos if p["id"] == pid), None)
+            if photo and photo.get("path"):
+                self._current_photo_path = photo["path"]
+                last_dir = config_manager.get_last_export_dir()
+                if not last_dir or not os.path.exists(last_dir):
+                    last_dir = os.path.dirname(self._current_photo_path) if self._current_photo_path else os.path.expanduser("~")
+                last_cfg = config_manager.get_last_export_settings()
+                fmt = str(last_cfg.get("format", "jpeg")).lower() if last_cfg else "jpeg"
+                ext = ".tif" if "tif" in fmt else (".png" if "png" in fmt else ".jpg")
+                base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0]
+                default_out = os.path.join(last_dir, f"{base_name}{ext}")
+                dlg = SingleExportDialog(default_out, parent=self)
+                if dlg.exec():
+                    cfg = dlg.get_export_config()
+                    self._do_export_single(cfg)
+            return
+
+        last_dir = config_manager.get_last_export_dir()
         if not last_dir or not os.path.exists(last_dir):
             first_photo = next((p for p in self.photos if p["id"] in photo_ids), None)
             last_dir = os.path.dirname(first_photo["path"]) if first_photo else os.path.expanduser("~")
-        default_dir = last_dir
 
-        dialog = ExportImageDialog(default_dir, is_batch=True, batch_count=len(photo_ids), parent=self)
+        dialog = BatchExportDialog(last_dir, batch_count=len(photo_ids), parent=self)
         if not dialog.exec():
             return
 
@@ -6761,7 +6945,7 @@ class DarkroomMainWindow(QMainWindow):
 
         try:
             os.makedirs(out_dir, exist_ok=True)
-            config_manager.save_last_export_settings({"path": out_dir})
+            config_manager.set_last_export_dir(out_dir)
         except Exception:
             mb = QMessageBox(self)
             mb.setWindowIcon(self.windowIcon())
@@ -6778,6 +6962,9 @@ class DarkroomMainWindow(QMainWindow):
             ext = ".png"
         else:
             ext = ".jpg"
+
+        prefix = cfg.get("prefix", "").strip()
+        suffix = cfg.get("suffix", "").strip()
 
         import uuid
         enqueued_count = 0
@@ -6842,7 +7029,8 @@ class DarkroomMainWindow(QMainWindow):
                 "scale_pct": cfg.get("scale_pct", 100)
             }
 
-            out_fn = f"{os.path.splitext(os.path.basename(file_p))[0]}{ext}"
+            stem = os.path.splitext(os.path.basename(file_p))[0]
+            out_fn = f"{prefix}{stem}{suffix}{ext}"
             out_target = os.path.join(out_dir, out_fn)
 
             pix = None
@@ -6857,7 +7045,7 @@ class DarkroomMainWindow(QMainWindow):
             self.export_queue.enqueue(task)
             enqueued_count += 1
 
-        self._set_export_status(f"已将 {enqueued_count} 张底片加入冲印队列...", state="busy")
+        self._set_export_status(f"已将 {enqueued_count} 张底片加入冲印队列", state="busy")
 
     def _create_dark_message_box(self, title, text, icon=QMessageBox.Icon.Information):
         mb = QMessageBox(self)
@@ -7171,6 +7359,9 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, '_single_photo_loader') and self._single_photo_loader and self._single_photo_loader.isRunning():
                 self._single_photo_loader.stop()
                 self._single_photo_loader.wait(100)
+            if hasattr(self, '_session_restore_worker') and self._session_restore_worker and self._session_restore_worker.isRunning():
+                self._session_restore_worker.stop()
+                self._session_restore_worker.wait(100)
         except Exception:
             pass
 

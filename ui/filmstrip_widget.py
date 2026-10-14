@@ -948,3 +948,7 @@ class FilmstripWidget(QWidget):
         self._selected_ids = all_ids - self._selected_ids
         self._update_items_selection()
         self.selectionChanged.emit(list(self._selected_ids))
+
+    def get_selected_ids(self) -> list[str]:
+        """Returns a list of currently selected photo IDs in the filmstrip."""
+        return list(self._selected_ids)
