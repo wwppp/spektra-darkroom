@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 from path_utils import get_icon_path
+from ui.theme_manager import theme_manager
 
 
 class ScrubLabel(QLabel):
@@ -28,20 +29,31 @@ class ScrubLabel(QLabel):
         self._last_global_x = 0.0
         self.setMinimumWidth(10)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.setStyleSheet("""
-            QLabel {
-                color: #c8c8c8;
+        self.apply_theme()
+        theme_manager.themeChanged.connect(self.apply_theme)
+
+    def apply_theme(self, theme_name=None):
+        is_dark = theme_manager.is_dark()
+        text_color = "#c8c8c8" if is_dark else "#334155"
+        disabled_color = "#4b5563" if is_dark else "#94a3b8"
+        self.setStyleSheet(f"""
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {text_color};
                 font-size: 11.5px;
                 font-weight: 500;
                 padding: 1px 0px;
                 font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
-            }
-            QLabel:hover {
+            }}
+            QLabel:hover {{
                 color: #f59e0b;
-            }
-            QLabel:disabled {
-                color: #4b5563;
-            }
+                background: transparent;
+            }}
+            QLabel:disabled {{
+                color: {disabled_color};
+                background: transparent;
+            }}
         """)
 
     def minimumSizeHint(self):
@@ -161,6 +173,7 @@ class RoundScrubSlider(QSlider):
         self.has_center_detent = False
         self.setFixedHeight(18)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        theme_manager.themeChanged.connect(lambda _: self.update())
 
     def enterEvent(self, event):
         self._hover = True
@@ -254,6 +267,7 @@ class RoundScrubSlider(QSlider):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        is_dark = theme_manager.is_dark()
         w = self.width()
         h = self.height()
         cy = h / 2.0
@@ -273,18 +287,18 @@ class RoundScrubSlider(QSlider):
                 frac = max(0.0, min(1.0, frac))
             knob_cx = x_start + frac * span
 
-        # Disabled rendering: flat muted dark gray slot + dimmed slate knob
+        # Disabled rendering: flat muted slot + dimmed knob
         if not self.isEnabled():
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(25, 27, 33))
+            painter.setBrush(QColor(25, 27, 33) if is_dark else QColor(226, 232, 240))
             painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
             if self.has_center_detent:
                 mid_x = x_start + span * 0.5
-                painter.setPen(QColor(255, 255, 255, 25))
+                painter.setPen(QColor(255, 255, 255, 25) if is_dark else QColor(0, 0, 0, 30))
                 painter.drawLine(QPointF(mid_x, cy - 2.0), QPointF(mid_x, cy + 2.0))
                 painter.setPen(Qt.PenStyle.NoPen)
-            knob_color = QColor(55, 59, 70)
-            border_pen = QPen(QColor(32, 34, 40), 1.0)
+            knob_color = QColor(55, 59, 70) if is_dark else QColor(190, 195, 205)
+            border_pen = QPen(QColor(32, 34, 40) if is_dark else QColor(203, 213, 225), 1.0)
             painter.setPen(border_pen)
             painter.setBrush(knob_color)
             painter.drawEllipse(QPointF(knob_cx, cy), r, r)
@@ -299,22 +313,25 @@ class RoundScrubSlider(QSlider):
                 grad.setColorAt(stop, color)
             painter.setBrush(grad)
             painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
-            # Subtle 0.5px border to ensure contrast on dark backgrounds
-            painter.setPen(QColor(0, 0, 0, 100))
+            # Subtle 0.5px border to ensure contrast
+            painter.setPen(QColor(0, 0, 0, 100) if is_dark else QColor(0, 0, 0, 40))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
             painter.setPen(Qt.PenStyle.NoPen)
         else:
-            painter.setBrush(QColor(42, 44, 52))
+            groove_bg = QColor(42, 44, 52) if is_dark else QColor(218, 222, 230)
+            active_bg = QColor(90, 95, 110) if is_dark else QColor(140, 146, 160)
+            painter.setBrush(groove_bg)
             painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
             # Active subpage track for normal uncolored slider
-            painter.setBrush(QColor(90, 95, 110))
+            painter.setBrush(active_bg)
             painter.drawRoundedRect(QRectF(x_start, cy - 1.5, max(0.0, knob_cx - x_start), 3.0), 1.5, 1.5)
 
         # 2. Optional Center Detent tick mark (1px clean mark for center-balanced sliders)
         if self.has_center_detent:
             mid_x = x_start + span * 0.5
-            painter.setPen(QColor(255, 255, 255, 150))
+            detent_color = QColor(255, 255, 255, 150) if is_dark else QColor(71, 85, 105, 180)
+            painter.setPen(detent_color)
             painter.drawLine(QPointF(mid_x, cy - 2.5), QPointF(mid_x, cy + 2.5))
             painter.setPen(Qt.PenStyle.NoPen)
 
@@ -326,8 +343,8 @@ class RoundScrubSlider(QSlider):
             knob_color = QColor(245, 158, 11)  # bright amber
             border_pen = QPen(QColor(255, 255, 255), 1.5)
         else:
-            knob_color = QColor(228, 230, 238) # clean light silver
-            border_pen = QPen(QColor(30, 32, 38), 1.2)
+            knob_color = QColor(228, 230, 238) if is_dark else QColor(255, 255, 255)
+            border_pen = QPen(QColor(30, 32, 38) if is_dark else QColor(148, 163, 184), 1.2)
 
         painter.setPen(border_pen)
         painter.setBrush(knob_color)
@@ -389,26 +406,6 @@ class AdobeScrubSlider(QWidget):
         self.value_edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.value_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.value_edit.setToolTip("点击输入精确数值，Enter 确认")
-        self.value_edit.setStyleSheet("""
-            QLineEdit {
-                background: #141414;
-                color: #e0e0e0;
-                border: 1px solid #363636;
-                border-radius: 3px;
-                padding: 1px 3px;
-                font-size: 11px;
-                font-family: "Segoe UI", "Microsoft YaHei UI", Consolas, monospace;
-            }
-            QLineEdit:focus {
-                border: 1px solid #f59e0b;
-                background: #1c1c1c;
-            }
-            QLineEdit:disabled {
-                background: #111216;
-                color: #4b5563;
-                border: 1px solid #20222a;
-            }
-        """)
         self.value_edit.returnPressed.connect(self._on_text_edited)
         self.value_edit.editingFinished.connect(self._on_text_edited)
         header_layout.addWidget(self.value_edit)
@@ -435,23 +432,6 @@ class AdobeScrubSlider(QWidget):
                 self.reset_btn.setIconSize(QSize(11, 11))
             else:
                 self.reset_btn.setText("R")
-        self.reset_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                padding: 1px;
-                border-radius: 2px;
-            }
-            QPushButton:hover {
-                background: #282a36;
-            }
-            QPushButton:pressed {
-                background: #1e202a;
-            }
-            QPushButton:disabled {
-                opacity: 0.25;
-            }
-        """)
         self.reset_btn.clicked.connect(self.reset)
         header_layout.addWidget(self.reset_btn)
 
@@ -471,6 +451,64 @@ class AdobeScrubSlider(QWidget):
         self.slider.sliderReleased.connect(self._on_slider_released)
         self.slider.doubleClicked.connect(self.reset)
         main_layout.addWidget(self.slider)
+
+        self.apply_theme()
+        theme_manager.themeChanged.connect(self.apply_theme)
+
+    def apply_theme(self, theme_name=None):
+        is_dark = theme_manager.is_dark()
+        input_bg = "#141414" if is_dark else "#ffffff"
+        input_fg = "#e0e0e0" if is_dark else "#1e293b"
+        input_border = "#363636" if is_dark else "#cbd5e1"
+        input_dis_bg = "#111216" if is_dark else "#f1f5f9"
+        input_dis_fg = "#4b5563" if is_dark else "#94a3b8"
+        input_dis_border = "#20222a" if is_dark else "#e2e8f0"
+        btn_hover = "#282a36" if is_dark else "#e2e8f0"
+        btn_pressed = "#1e202a" if is_dark else "#cbd5e1"
+
+        if hasattr(self, 'value_edit') and self.value_edit:
+            self.value_edit.setStyleSheet(f"""
+                QLineEdit {{
+                    background: {input_bg};
+                    color: {input_fg};
+                    border: 1px solid {input_border};
+                    border-radius: 3px;
+                    padding: 1px 3px;
+                    font-size: 11px;
+                    font-family: "Segoe UI", "Microsoft YaHei UI", Consolas, monospace;
+                }}
+                QLineEdit:focus {{
+                    border: 1px solid #f59e0b;
+                    background: {input_bg};
+                }}
+                QLineEdit:disabled {{
+                    background: {input_dis_bg};
+                    color: {input_dis_fg};
+                    border: 1px solid {input_dis_border};
+                }}
+            """)
+        if hasattr(self, 'reset_btn') and self.reset_btn:
+            self.reset_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent;
+                    border: none;
+                    padding: 1px;
+                    border-radius: 2px;
+                }}
+                QPushButton:hover {{
+                    background: {btn_hover};
+                }}
+                QPushButton:pressed {{
+                    background: {btn_pressed};
+                }}
+                QPushButton:disabled {{
+                    opacity: 0.25;
+                }}
+            """)
+        if hasattr(self, 'label') and self.label:
+            self.label.apply_theme()
+        if hasattr(self, 'slider') and self.slider:
+            self.slider.update()
 
     def setToolTip(self, text):
         super().setToolTip(text)
@@ -637,21 +675,7 @@ class ComboBoxRow(QWidget):
         layout.setContentsMargins(0, 3, 0, 3)
         layout.setSpacing(6)
 
-        arrow_icon = get_icon_path("arrow_down.png").replace("\\", "/")
-        arrow_disabled = get_icon_path("arrow_down_disabled.png").replace("\\", "/")
-
         self.label = QLabel(label_text)
-        self.label.setStyleSheet("""
-            QLabel {
-                color: #c8c8c8;
-                font-size: 11.5px;
-                font-weight: 500;
-                font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
-            }
-            QLabel:disabled {
-                color: #4b5563;
-            }
-        """)
         if self.default_tooltip:
             self.setToolTip(self.default_tooltip)
             self.label.setToolTip(self.default_tooltip)
@@ -663,11 +687,57 @@ class ComboBoxRow(QWidget):
             self.combo.setToolTip(self.default_tooltip)
         self.combo.wheelEvent = lambda ev: ev.ignore()
         self.combo.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        for text, val in items:
+            self.combo.addItem(text, val)
+        if default_val is not None:
+            self.set_value(default_val)
+        self.combo.currentIndexChanged.connect(self._on_index_changed)
+        layout.addWidget(self.combo)
+
+        self.apply_theme()
+        theme_manager.themeChanged.connect(self.apply_theme)
+
+    def apply_theme(self, theme_name=None):
+        is_dark = theme_manager.is_dark()
+        label_fg = "#c8c8c8" if is_dark else "#334155"
+        label_dis_fg = "#4b5563" if is_dark else "#94a3b8"
+        self.label.setStyleSheet(f"""
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {label_fg};
+                font-size: 11.5px;
+                font-weight: 500;
+                font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+            }}
+            QLabel:disabled {{
+                color: {label_dis_fg};
+                background: transparent;
+            }}
+        """)
+
+        arrow_icon = get_icon_path("arrow_down.png").replace("\\", "/")
+        arrow_disabled = get_icon_path("arrow_down_disabled.png").replace("\\", "/")
+
+        combo_bg = "#14151a" if is_dark else "#ffffff"
+        combo_fg = "#e2e8f0" if is_dark else "#1e293b"
+        combo_border = "#2d303e" if is_dark else "#cbd5e1"
+        combo_dis_bg = "#111216" if is_dark else "#f1f5f9"
+        combo_dis_fg = "#4b5563" if is_dark else "#94a3b8"
+        combo_dis_border = "#1e2029" if is_dark else "#e2e8f0"
+        dropdown_border = "#242632" if is_dark else "#e2e8f0"
+        dropdown_dis_border = "#1a1b22" if is_dark else "#e2e8f0"
+        popup_bg = "#181920" if is_dark else "#ffffff"
+        popup_fg = "#e2e8f0" if is_dark else "#1e293b"
+        popup_border = "#333644" if is_dark else "#cbd5e1"
+        sel_fg = "#111111" if is_dark else "#ffffff"
+
         self.combo.setStyleSheet(f"""
             QComboBox {{
-                background: #14151a;
-                color: #e2e8f0;
-                border: 1px solid #2d303e;
+                background: {combo_bg};
+                color: {combo_fg};
+                border: 1px solid {combo_border};
                 border-radius: 4px;
                 padding: 3px 22px 3px 8px;
                 font-size: 10.5px;
@@ -678,18 +748,18 @@ class ComboBoxRow(QWidget):
                 border-color: #f59e0b;
             }}
             QComboBox:disabled {{
-                background: #111216;
-                color: #4b5563;
-                border-color: #1e2029;
+                background: {combo_dis_bg};
+                color: {combo_dis_fg};
+                border-color: {combo_dis_border};
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
                 width: 20px;
-                border-left: 1px solid #242632;
+                border-left: 1px solid {dropdown_border};
             }}
             QComboBox::drop-down:disabled {{
-                border-left-color: #1a1b22;
+                border-left-color: {dropdown_dis_border};
             }}
             QComboBox::down-arrow {{
                 image: url("{arrow_icon}");
@@ -704,19 +774,13 @@ class ComboBoxRow(QWidget):
                 margin-right: 2px;
             }}
             QComboBox QAbstractItemView {{
-                background: #181920;
-                color: #e2e8f0;
+                background: {popup_bg};
+                color: {popup_fg};
                 selection-background-color: #f59e0b;
-                selection-color: #111;
-                border: 1px solid #333644;
+                selection-color: {sel_fg};
+                border: 1px solid {popup_border};
             }}
         """)
-        for text, val in items:
-            self.combo.addItem(text, val)
-        if default_val is not None:
-            self.set_value(default_val)
-        self.combo.currentIndexChanged.connect(self._on_index_changed)
-        layout.addWidget(self.combo)
 
     def setToolTip(self, text):
         super().setToolTip(text)

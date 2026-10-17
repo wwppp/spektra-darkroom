@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QLinearGradient, QPainterPath, QFont
 from PySide6.QtCore import Qt, QRectF
 import numpy as np
+from ui.theme_manager import theme_manager
 
 
 class HistogramWidget(QWidget):
@@ -22,6 +23,7 @@ class HistogramWidget(QWidget):
         self.setFixedHeight(88)
         self.setMinimumWidth(220)
         self.setStyleSheet("background: transparent;")
+        theme_manager.themeChanged.connect(lambda _: self.update())
 
         # 256-bin normalized curves (float 0.0 ~ 1.0)
         self._r_hist = np.zeros(256, dtype=np.float32)
@@ -32,6 +34,28 @@ class HistogramWidget(QWidget):
         self._has_data = False
         self._shadow_clip = False
         self._highlight_clip = False
+        self._last_rgb_array = None
+
+        # Scale mode: "log" (Fotufilm/DaVinci standard) or "linear"
+        self._scale_mode = "log"
+
+    def set_scale_mode(self, mode: str):
+        """Set scale mode to 'log' or 'linear'."""
+        if mode in ("log", "linear") and self._scale_mode != mode:
+            self._scale_mode = mode
+            if self._last_rgb_array is not None:
+                self.update_from_rgb(self._last_rgb_array)
+            else:
+                self.update()
+
+    def toggle_scale_mode(self):
+        """Toggle between Log and Linear scale modes."""
+        self.set_scale_mode("linear" if self._scale_mode == "log" else "log")
+
+    def mousePressEvent(self, event):
+        """Click on the histogram to toggle between Log and Linear views."""
+        super().mousePressEvent(event)
+        self.toggle_scale_mode()
 
     def clear(self):
         self._r_hist.fill(0)
@@ -41,6 +65,7 @@ class HistogramWidget(QWidget):
         self._has_data = False
         self._shadow_clip = False
         self._highlight_clip = False
+        self._last_rgb_array = None
         self.update()
 
     def update_from_rgb(self, rgb_array):
@@ -48,6 +73,8 @@ class HistogramWidget(QWidget):
         if rgb_array is None or rgb_array.size == 0:
             self.clear()
             return
+
+        self._last_rgb_array = rgb_array
 
         try:
             if rgb_array.dtype != np.uint8:
@@ -76,18 +103,33 @@ class HistogramWidget(QWidget):
             # 99.2th percentile peak clipping so solid backdrop does not crush contrast
             all_mid = np.concatenate([r_counts[1:255], g_counts[1:255], b_counts[1:255]])
             if len(all_mid) > 0:
-                peak = np.percentile(all_mid, 99.2)
+                peak = float(np.percentile(all_mid, 99.2))
                 if peak <= 0:
-                    peak = np.max(all_mid) if np.max(all_mid) > 0 else 1.0
+                    peak = float(np.max(all_mid)) if np.max(all_mid) > 0 else 1.0
             else:
                 peak = 1.0
 
-            # 3-tap moving average box filter for smooth photographic curves
-            kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
-            self._r_hist = np.clip(np.convolve(r_counts / peak, kernel, mode='same'), 0.0, 1.0)
-            self._g_hist = np.clip(np.convolve(g_counts / peak, kernel, mode='same'), 0.0, 1.0)
-            self._b_hist = np.clip(np.convolve(b_counts / peak, kernel, mode='same'), 0.0, 1.0)
-            self._l_hist = np.clip(np.convolve(l_counts / peak, kernel, mode='same'), 0.0, 1.0)
+            # Scale normalization: Logarithmic (Fotufilm/Resolve) vs Linear
+            if self._scale_mode == "log":
+                log_peak = float(np.log1p(peak))
+                if log_peak <= 0:
+                    log_peak = 1.0
+                r_norm = np.log1p(r_counts) / log_peak
+                g_norm = np.log1p(g_counts) / log_peak
+                b_norm = np.log1p(b_counts) / log_peak
+                l_norm = np.log1p(l_counts) / log_peak
+            else:
+                r_norm = r_counts / peak
+                g_norm = g_counts / peak
+                b_norm = b_counts / peak
+                l_norm = l_counts / peak
+
+            # Fotufilm standard 5-tap Gaussian smoothing kernel [1, 4, 6, 4, 1] / 16.0
+            kernel = np.array([0.0625, 0.25, 0.375, 0.25, 0.0625], dtype=np.float32)
+            self._r_hist = np.clip(np.convolve(r_norm, kernel, mode='same'), 0.0, 1.0)
+            self._g_hist = np.clip(np.convolve(g_norm, kernel, mode='same'), 0.0, 1.0)
+            self._b_hist = np.clip(np.convolve(b_norm, kernel, mode='same'), 0.0, 1.0)
+            self._l_hist = np.clip(np.convolve(l_norm, kernel, mode='same'), 0.0, 1.0)
 
             self._has_data = True
             self.update()
@@ -105,13 +147,18 @@ class HistogramWidget(QWidget):
         plot_w = w - pad_x * 2.0
         plot_h = h - pad_y * 2.0
 
+        is_dark = theme_manager.is_dark()
+
         # Background card
-        painter.setPen(QPen(QColor("#262832"), 1.0))
-        painter.setBrush(QBrush(QColor("#131417")))
+        card_border = QColor("#262832") if is_dark else QColor("#d8dce6")
+        card_bg = QColor("#131417") if is_dark else QColor("#ffffff")
+        painter.setPen(QPen(card_border, 1.0))
+        painter.setBrush(QBrush(card_bg))
         painter.drawRoundedRect(QRectF(pad_x, pad_y, plot_w, plot_h), 4.0, 4.0)
 
         # Reference grid lines (25%, 50%, 75% Exposure Zones)
-        painter.setPen(QPen(QColor(255, 255, 255, 18), 1.0, Qt.PenStyle.DashLine))
+        grid_pen = QColor(255, 255, 255, 18) if is_dark else QColor(0, 0, 0, 30)
+        painter.setPen(QPen(grid_pen, 1.0, Qt.PenStyle.DashLine))
         for frac in (0.25, 0.50, 0.75):
             gx = pad_x + plot_w * frac
             painter.drawLine(gx, pad_y + 2, gx, pad_y + plot_h - 2)
@@ -143,11 +190,13 @@ class HistogramWidget(QWidget):
             return path
 
         # Channels rendering with semi-transparent additive look
+        luma_fill = QColor(255, 255, 255, 30) if is_dark else QColor(30, 41, 59, 25)
+        luma_stroke = QColor(226, 232, 240, 220) if is_dark else QColor(51, 65, 85, 200)
         channels = [
             (self._r_hist, QColor(239, 68, 68, 55), QColor(239, 68, 68, 190)),   # Red
             (self._g_hist, QColor(16, 185, 129, 55), QColor(16, 185, 129, 190)), # Green
             (self._b_hist, QColor(59, 130, 246, 55), QColor(59, 130, 246, 190)), # Blue
-            (self._l_hist, QColor(255, 255, 255, 30), QColor(226, 232, 240, 220))# Luma
+            (self._l_hist, luma_fill, luma_stroke)                                 # Luma
         ]
 
         # 1. Fill areas
@@ -174,3 +223,11 @@ class HistogramWidget(QWidget):
             painter.setBrush(QBrush(QColor("#ef4444")))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(QRectF(pad_x + plot_w - 10.0, pad_y + 5.0, 5.0, 5.0))
+
+        # 4. Mode badge (LOG / LIN)
+        badge_text = "LOG" if self._scale_mode == "log" else "LIN"
+        badge_color = QColor(255, 255, 255, 100) if is_dark else QColor(30, 41, 59, 120)
+        painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        painter.setPen(QPen(badge_color))
+        painter.drawText(QRectF(pad_x + plot_w - 32.0, pad_y + 4.0, 26.0, 14.0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, badge_text)
+

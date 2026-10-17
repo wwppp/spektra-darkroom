@@ -241,6 +241,19 @@ def main():
     font.setPointSize(9)
     font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)
+    app.setStyleSheet("""
+        QToolTip {
+            background-color: rgba(22, 24, 30, 0.88);
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            padding: 7px 11px;
+            font-size: 11px;
+            font-weight: 400;
+            line-height: 1.4;
+            font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+        }
+    """)
 
     splash = None
     if not launched_from_exe:

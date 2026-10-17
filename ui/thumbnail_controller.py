@@ -109,7 +109,7 @@ class StockThumbnailWorker(QThread):
             small_linear = small_float.copy()
 
         # 1. Apply exposure EV & Scene-Linear Highlights / Shadows (Strictly aligned with GLSL u_exposure)
-        total_ev = self.ev
+        total_ev = self.ev + self.base_ev
         if abs(total_ev) > 0.001:
             small_linear = small_linear * (2.0 ** total_ev)
 
@@ -391,7 +391,7 @@ class ThumbnailController(QObject):
             else:
                 small_linear = raw_thumb.astype(np.float32)
 
-            ev = float(params.get("exposure_ev", 0.0))
+            ev = float(params.get("exposure_ev", 0.0)) + float(params.get("base_ev", 0.0))
             if abs(ev) > 0.001:
                 small_linear = small_linear * (2.0 ** ev)
 
@@ -520,6 +520,7 @@ class ThumbnailController(QObject):
         ev = float(params.get("exposure_ev", 0.0))
         hl = float(params.get("highlights", 0.0))
         sh = float(params.get("shadows", 0.0))
+        eff_base_ev = float(base_ev) if abs(base_ev) > 0.0001 else float(params.get("base_ev", 0.0))
 
         self._card_worker = StockThumbnailWorker(
             self.engine, linear_thumb,
@@ -528,7 +529,7 @@ class ThumbnailController(QObject):
             current_film, current_paper,
             do_films=bool(film_cards),
             do_papers=bool(paper_cards),
-            ev=ev, highlights=hl, shadows=sh, base_ev=base_ev,
+            ev=ev, highlights=hl, shadows=sh, base_ev=eff_base_ev,
             params_dict=params,
             parent=self
         )

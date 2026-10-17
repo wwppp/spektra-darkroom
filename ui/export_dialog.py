@@ -11,13 +11,14 @@ import os
 from PySide6.QtCore import Qt, QSize, QThread, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox,
     QSlider, QLineEdit, QPushButton, QFileDialog, QFrame, QWidget,
     QStackedWidget, QCheckBox, QProgressBar
 )
 
 from path_utils import get_icon_path, get_resource_dir, normalize_path
 from ui.window_utils import apply_dark_titlebar
+from ui.theme_manager import theme_manager
 import config_manager
 
 
@@ -27,114 +28,95 @@ class BaseExportDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setModal(True)
-
-        icon_path = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
-        if not os.path.exists(icon_path):
-            icon_path = os.path.join(get_resource_dir(), "app_icon.png")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        from ui.window_utils import get_icon
+        self.setWindowIcon(get_icon("dlg_export.png", is_dark=theme_manager.is_dark()))
 
     def showEvent(self, event):
         super().showEvent(event)
-        apply_dark_titlebar(self)
+        is_dark = theme_manager.is_dark()
+        apply_dark_titlebar(self, is_dark=is_dark)
+        from ui.window_utils import get_icon
+        self.setWindowIcon(get_icon("dlg_export.png", is_dark=is_dark))
 
     def _init_settings_card(self) -> tuple[QFrame, QVBoxLayout]:
         card = QFrame()
         card.setObjectName("settingsCard")
-        card.setStyleSheet("""
-            QFrame#settingsCard {
-                background: #1a1a1e;
-                border: 1px solid #2b2d38;
-                border-radius: 8px;
-                padding: 14px;
-            }
-            QLabel {
-                border: none;
-                background: transparent;
-                color: #c4c4cc;
-                font-size: 12px;
-            }
-        """)
         card_layout = QVBoxLayout(card)
-        card_layout.setSpacing(11)
+        card_layout.setContentsMargins(14, 14, 14, 14)
+        card_layout.setSpacing(10)
 
-        # Row 0: Rendering Engine Selection
-        r0 = QHBoxLayout()
-        r0.setSpacing(12)
-        lbl_eng = QLabel("冲印引擎:")
-        lbl_eng.setFixedWidth(65)
-        r0.addWidget(lbl_eng)
-        self.combo_engine = QComboBox()
-        self.combo_engine.addItem("spektradarkroom（较快）", "wysiwyg")
-        self.combo_engine.addItem("spektrafilm（极慢）", "official")
-        self.combo_engine.setItemData(0, "多核并行硬件加速冲印，与视口画面 100% 视觉对齐", Qt.ItemDataRole.ToolTipRole)
-        self.combo_engine.setItemData(1, "官方 spektrafilm 原生端到端物理光谱模拟管线", Qt.ItemDataRole.ToolTipRole)
-        r0.addWidget(self.combo_engine, 1)
-        card_layout.addLayout(r0)
+        # Top 2 Rows: Format, Color Space, Resolution, Bit Depth in a unified QGridLayout
+        grid_top = QGridLayout()
+        grid_top.setContentsMargins(0, 0, 0, 0)
+        grid_top.setHorizontalSpacing(12)
+        grid_top.setVerticalSpacing(10)
+        grid_top.setColumnStretch(0, 0)
+        grid_top.setColumnStretch(1, 1)
+        grid_top.setColumnStretch(2, 0)
+        grid_top.setColumnStretch(3, 1)
 
-        # Row 1: Format & Color Space
-        r1 = QHBoxLayout()
-        r1.setSpacing(12)
-
+        # Row 0: Format & Color Space
         lbl_fmt = QLabel("文件格式:")
-        lbl_fmt.setFixedWidth(65)
-        r1.addWidget(lbl_fmt)
+        lbl_fmt.setFixedWidth(72)
+        grid_top.addWidget(lbl_fmt, 0, 0)
+
         self.combo_format = QComboBox()
         self.combo_format.addItem("JPEG (*.jpg)", "jpeg")
         self.combo_format.addItem("TIFF (*.tif)", "tiff")
         self.combo_format.addItem("PNG (*.png)", "png")
-        r1.addWidget(self.combo_format, 1)
+        grid_top.addWidget(self.combo_format, 0, 1)
 
         lbl_cs = QLabel("色彩空间:")
         lbl_cs.setFixedWidth(65)
-        r1.addWidget(lbl_cs)
+        grid_top.addWidget(lbl_cs, 0, 2)
+
         self.combo_colorspace = QComboBox()
         self.combo_colorspace.addItem("sRGB", "sRGB")
         self.combo_colorspace.addItem("Display P3", "Display P3")
         self.combo_colorspace.addItem("Adobe RGB (1998)", "Adobe RGB (1998)")
         self.combo_colorspace.addItem("ProPhoto RGB", "ProPhoto RGB")
-        r1.addWidget(self.combo_colorspace, 1)
+        grid_top.addWidget(self.combo_colorspace, 0, 3)
 
-        card_layout.addLayout(r1)
-
-        # Row 2: Resolution (DPI) & Bit Depth
-        r2 = QHBoxLayout()
-        r2.setSpacing(12)
+        # Row 1: Resolution (DPI) & Bit Depth
         lbl_dpi = QLabel("输出分辨率:")
-        lbl_dpi.setFixedWidth(70)
-        r2.addWidget(lbl_dpi)
+        lbl_dpi.setFixedWidth(72)
+        grid_top.addWidget(lbl_dpi, 1, 0)
 
         self.combo_dpi = QComboBox()
         self.combo_dpi.addItem("72 DPI", 72)
         self.combo_dpi.addItem("300 DPI", 300)
         self.combo_dpi.addItem("600 DPI", 600)
         self.combo_dpi.setCurrentIndex(1)
-        r2.addWidget(self.combo_dpi, 1)
+        grid_top.addWidget(self.combo_dpi, 1, 1)
 
         lbl_bit = QLabel("输出位深:")
         lbl_bit.setFixedWidth(65)
-        r2.addWidget(lbl_bit)
-        self.combo_depth = QComboBox()
-        r2.addWidget(self.combo_depth, 1)
+        grid_top.addWidget(lbl_bit, 1, 2)
 
-        card_layout.addLayout(r2)
+        self.combo_depth = QComboBox()
+        grid_top.addWidget(self.combo_depth, 1, 3)
+
+        card_layout.addLayout(grid_top)
 
         # Row 3: Format-Specific Settings Stack
         self.stack_settings = QStackedWidget()
-        self.stack_settings.setFixedHeight(82)
+        self.stack_settings.setFixedHeight(64)
 
         # --- Stack Page 0: JPEG Options ---
         page_jpeg = QWidget()
-        l_jpeg = QVBoxLayout(page_jpeg)
-        l_jpeg.setContentsMargins(0, 2, 0, 0)
-        l_jpeg.setSpacing(8)
+        grid_jpeg = QGridLayout(page_jpeg)
+        grid_jpeg.setContentsMargins(0, 0, 0, 0)
+        grid_jpeg.setHorizontalSpacing(12)
+        grid_jpeg.setVerticalSpacing(10)
+        grid_jpeg.setColumnStretch(0, 0)
+        grid_jpeg.setColumnStretch(1, 1)
+        grid_jpeg.setColumnStretch(2, 0)
+        grid_jpeg.setColumnStretch(3, 1)
 
-        row_jpeg_opts = QHBoxLayout()
-        row_jpeg_opts.setSpacing(10)
-
+        # Row 0: Scale & Subsampling
         lbl_scale = QLabel("输出尺寸:")
-        lbl_scale.setFixedWidth(65)
-        row_jpeg_opts.addWidget(lbl_scale)
+        lbl_scale.setFixedWidth(72)
+        grid_jpeg.addWidget(lbl_scale, 0, 0)
 
         self.combo_scale = QComboBox()
         self.combo_scale.addItem("100% (原始尺寸)", 100)
@@ -144,37 +126,26 @@ class BaseExportDialog(QDialog):
         self.combo_scale.addItem("33%", 33)
         self.combo_scale.addItem("25%", 25)
         self.combo_scale.setCurrentIndex(0)
-        self.combo_scale.setFixedWidth(130)
-        row_jpeg_opts.addWidget(self.combo_scale)
-
-        row_jpeg_opts.addSpacing(14)
+        grid_jpeg.addWidget(self.combo_scale, 0, 1)
 
         lbl_sub = QLabel("色彩抽样:")
-        lbl_sub.setFixedWidth(60)
-        row_jpeg_opts.addWidget(lbl_sub)
+        lbl_sub.setFixedWidth(65)
+        grid_jpeg.addWidget(lbl_sub, 0, 2)
 
         self.combo_subsampling = QComboBox()
         self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
         self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
         self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
-        self.combo_subsampling.setFixedWidth(135)
-        row_jpeg_opts.addWidget(self.combo_subsampling)
+        grid_jpeg.addWidget(self.combo_subsampling, 0, 3)
 
-        row_jpeg_opts.addSpacing(12)
-
-        self.chk_progressive = QCheckBox("渐进式")
-        self.chk_progressive.setChecked(True)
-        self.chk_progressive.setStyleSheet("color: #bbb; font-size: 11.5px;")
-        row_jpeg_opts.addWidget(self.chk_progressive)
-        row_jpeg_opts.addStretch()
-
-        l_jpeg.addLayout(row_jpeg_opts)
-
-        row_q = QHBoxLayout()
-        row_q.setSpacing(10)
+        # Row 1: Quality Slider & Progressive Checkbox
         lbl_q = QLabel("画质档位:")
-        lbl_q.setFixedWidth(65)
-        row_q.addWidget(lbl_q)
+        lbl_q.setFixedWidth(72)
+        grid_jpeg.addWidget(lbl_q, 1, 0)
+
+        box_q = QHBoxLayout()
+        box_q.setContentsMargins(0, 0, 0, 0)
+        box_q.setSpacing(8)
 
         self.slider_quality = QSlider(Qt.Orientation.Horizontal)
         self.slider_quality.setRange(1, 10)
@@ -182,66 +153,73 @@ class BaseExportDialog(QDialog):
         self.slider_quality.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider_quality.setTickInterval(1)
         self.slider_quality.valueChanged.connect(self._on_quality_changed)
-        row_q.addWidget(self.slider_quality, 1)
+        box_q.addWidget(self.slider_quality, 1)
 
         self.lbl_quality_val = QLabel("9 档 (90%)")
-        self.lbl_quality_val.setFixedWidth(75)
+        self.lbl_quality_val.setFixedWidth(68)
         self.lbl_quality_val.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 11px;")
-        row_q.addWidget(self.lbl_quality_val)
+        box_q.addWidget(self.lbl_quality_val)
 
-        l_jpeg.addLayout(row_q)
+        grid_jpeg.addLayout(box_q, 1, 1)
+
+        self.chk_progressive = QCheckBox("渐进式")
+        self.chk_progressive.setChecked(True)
+        grid_jpeg.addWidget(self.chk_progressive, 1, 3, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
         self.stack_settings.addWidget(page_jpeg)
 
         # --- Stack Page 1: TIFF Options ---
         page_tiff = QWidget()
-        l_tiff = QVBoxLayout(page_tiff)
-        l_tiff.setContentsMargins(0, 4, 0, 0)
-        l_tiff.setSpacing(8)
+        grid_tiff = QGridLayout(page_tiff)
+        grid_tiff.setContentsMargins(0, 0, 0, 0)
+        grid_tiff.setHorizontalSpacing(12)
+        grid_tiff.setVerticalSpacing(10)
+        grid_tiff.setColumnStretch(0, 0)
+        grid_tiff.setColumnStretch(1, 1)
+        grid_tiff.setColumnStretch(2, 0)
+        grid_tiff.setColumnStretch(3, 1)
 
-        row_t_comp = QHBoxLayout()
-        row_t_comp.setSpacing(10)
         lbl_t_comp = QLabel("压缩算法:")
-        lbl_t_comp.setFixedWidth(65)
-        row_t_comp.addWidget(lbl_t_comp)
+        lbl_t_comp.setFixedWidth(72)
+        grid_tiff.addWidget(lbl_t_comp, 0, 0)
 
         self.combo_tiff_comp = QComboBox()
         self.combo_tiff_comp.addItem("LZW 压缩 (无损推荐)", "lzw")
         self.combo_tiff_comp.addItem("Zip / Deflate 压缩 (小体积)", "deflate")
         self.combo_tiff_comp.addItem("无压缩 (Raw TIFF)", "none")
-        self.combo_tiff_comp.setFixedWidth(200)
-        row_t_comp.addWidget(self.combo_tiff_comp)
-        row_t_comp.addStretch()
-        l_tiff.addLayout(row_t_comp)
+        grid_tiff.addWidget(self.combo_tiff_comp, 0, 1)
 
         lbl_t_hint = QLabel("TIFF 支持最高 32 位浮点线性渲染，适合送印大型相纸展演或二次排版。")
         lbl_t_hint.setStyleSheet("color: #888; font-size: 11px;")
-        l_tiff.addWidget(lbl_t_hint)
+        grid_tiff.addWidget(lbl_t_hint, 1, 0, 1, 4)
+
         self.stack_settings.addWidget(page_tiff)
 
         # --- Stack Page 2: PNG Options ---
         page_png = QWidget()
-        l_png = QVBoxLayout(page_png)
-        l_png.setContentsMargins(0, 4, 0, 0)
-        l_png.setSpacing(8)
+        grid_png = QGridLayout(page_png)
+        grid_png.setContentsMargins(0, 0, 0, 0)
+        grid_png.setHorizontalSpacing(12)
+        grid_png.setVerticalSpacing(10)
+        grid_png.setColumnStretch(0, 0)
+        grid_png.setColumnStretch(1, 1)
+        grid_png.setColumnStretch(2, 0)
+        grid_png.setColumnStretch(3, 1)
 
-        row_p_comp = QHBoxLayout()
-        row_p_comp.setSpacing(10)
         lbl_p_comp = QLabel("压缩级别:")
-        lbl_p_comp.setFixedWidth(65)
-        row_p_comp.addWidget(lbl_p_comp)
+        lbl_p_comp.setFixedWidth(72)
+        grid_png.addWidget(lbl_p_comp, 0, 0)
 
         self.combo_png_level = QComboBox()
         self.combo_png_level.addItem("标准压缩 (Level 6)", 6)
         self.combo_png_level.addItem("极限压缩 (Level 9)", 9)
         self.combo_png_level.addItem("快速存储 (Level 1)", 1)
-        self.combo_png_level.setFixedWidth(200)
-        row_p_comp.addWidget(self.combo_png_level)
-        row_p_comp.addStretch()
-        l_png.addLayout(row_p_comp)
+        grid_png.addWidget(self.combo_png_level, 0, 1)
 
         lbl_p_hint = QLabel("PNG 支持 8位 与 16位 无损通道与广泛的网络兼容性。")
         lbl_p_hint.setStyleSheet("color: #888; font-size: 11px;")
-        l_png.addWidget(lbl_p_hint)
+        grid_png.addWidget(lbl_p_hint, 1, 0, 1, 4)
+
         self.stack_settings.addWidget(page_png)
 
         card_layout.addWidget(self.stack_settings)
@@ -275,11 +253,6 @@ class BaseExportDialog(QDialog):
             last = config_manager.get_last_export_settings()
             if not last:
                 return
-            eng = last.get("engine", "wysiwyg")
-            idx_eng = self.combo_engine.findData(eng)
-            if idx_eng >= 0:
-                self.combo_engine.setCurrentIndex(idx_eng)
-
             fmt = last.get("format", "jpeg")
             idx = self.combo_format.findData(fmt)
             if idx >= 0:
@@ -342,7 +315,7 @@ class BaseExportDialog(QDialog):
             dpi_val = 300
 
         return {
-            "engine": self.combo_engine.currentData() if hasattr(self, "combo_engine") else "wysiwyg",
+            "engine": "wysiwyg",
             "format": self.combo_format.currentData(),
             "colorspace": self.combo_colorspace.currentData(),
             "bit_depth": self.combo_depth.currentData(),
@@ -356,118 +329,257 @@ class BaseExportDialog(QDialog):
         }
 
     def _apply_style(self):
-        arrow_icon = get_icon_path("arrow_down.png").replace("\\", "/")
+        is_dark = theme_manager.is_dark()
+        arrow_name = "arrow_down.png" if is_dark else "arrow_down_dark.png"
+        arrow_icon = get_icon_path(arrow_name).replace("\\", "/")
         chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_amber.png").replace("\\", "/")
 
-        self.setStyleSheet(f"""
-            QDialog {{
-                background: #141416;
-            }}
-            QComboBox {{
-                background: #14151a;
-                color: #e2e8f0;
-                border: 1px solid #323542;
-                border-radius: 4px;
-                padding: 4px 26px 4px 8px;
-                font-size: 11.5px;
-            }}
-            QComboBox:hover {{
-                border-color: #4b5168;
-            }}
-            QComboBox:focus {{
-                border-color: #f59e0b;
-            }}
-            QComboBox::drop-down {{
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 22px;
-                border-left: 1px solid #282a36;
-                border-top-right-radius: 3px;
-                border-bottom-right-radius: 3px;
-                background: #181920;
-            }}
-            QComboBox::down-arrow {{
-                image: url("{arrow_icon}");
-                width: 10px;
-                height: 7px;
-            }}
-            QComboBox QAbstractItemView {{
-                background: #181920;
-                color: #e2e8f0;
-                selection-background-color: #f59e0b;
-                selection-color: #111;
-                border: 1px solid #333644;
-                padding: 4px;
-            }}
-            QLineEdit {{
-                background: #121215;
-                color: #e2e8f0;
-                border: 1px solid #323542;
-                border-radius: 4px;
-                padding: 5px 8px;
-                font-size: 12px;
-            }}
-            QLineEdit:focus {{
-                border: 1px solid #f59e0b;
-            }}
-            QSlider::groove:horizontal {{
-                height: 4px;
-                background: #2b2e3b;
-                border-radius: 2px;
-            }}
-            QSlider::handle:horizontal {{
-                background: #d8d8e0;
-                width: 14px;
-                height: 14px;
-                margin: -5px 0px;
-                border-radius: 7px;
-            }}
-            QSlider::handle:horizontal:hover {{
-                background: #f59e0b;
-            }}
-            QCheckBox {{
-                color: #c4c4cc;
-                spacing: 8px;
-                font-size: 11.5px;
-                outline: none;
-            }}
-            QCheckBox:focus {{
-                outline: none;
-            }}
-            QCheckBox::indicator {{
-                width: 12px;
-                height: 12px;
-                border: 1px solid #8b92a5;
-                border-radius: 2px;
-                background: transparent;
-                outline: none;
-            }}
-            QCheckBox::indicator:hover {{
-                border-color: #f59e0b;
-            }}
-            QCheckBox::indicator:checked {{
-                border: 1px solid #f59e0b;
-                background: #14151a;
-                image: url("{chk_amber}");
-            }}
-            QPushButton {{
-                background: #25262c;
-                color: #bbb;
-                border: 1px solid #3c3e4a;
-                border-radius: 4px;
-                padding: 6px 20px;
-                font-size: 12px;
-            }}
-            QPushButton:hover {{
-                background: #32343e;
-                color: #fff;
-            }}
-            QPushButton:pressed {{
-                background: #181920;
-                color: #d97706;
-                border-color: #d97706;
-            }}
-        """)
+        if is_dark:
+            self.setStyleSheet(f"""
+                QDialog {{
+                    background: #141416;
+                }}
+                QFrame#settingsCard {{
+                    background: #1a1a1e;
+                    border: 1px solid #2b2d38;
+                    border-radius: 8px;
+                    padding: 14px;
+                }}
+                QLabel {{
+                    border: none;
+                    background: transparent;
+                    color: #c4c4cc;
+                    font-size: 12px;
+                }}
+                QComboBox {{
+                    background: #14151a;
+                    color: #e2e8f0;
+                    border: 1px solid #323542;
+                    border-radius: 4px;
+                    padding: 4px 26px 4px 8px;
+                    font-size: 11.5px;
+                }}
+                QComboBox:hover {{
+                    border-color: #4b5168;
+                }}
+                QComboBox:focus {{
+                    border-color: #f59e0b;
+                }}
+                QComboBox::drop-down {{
+                    subcontrol-origin: padding;
+                    subcontrol-position: top right;
+                    width: 22px;
+                    border-left: 1px solid #282a36;
+                    border-top-right-radius: 3px;
+                    border-bottom-right-radius: 3px;
+                    background: #181920;
+                }}
+                QComboBox::down-arrow {{
+                    image: url("{arrow_icon}");
+                    width: 10px;
+                    height: 7px;
+                }}
+                QComboBox QAbstractItemView {{
+                    background: #181920;
+                    color: #e2e8f0;
+                    selection-background-color: #f59e0b;
+                    selection-color: #111;
+                    border: 1px solid #333644;
+                    padding: 4px;
+                }}
+                QLineEdit {{
+                    background: #121215;
+                    color: #e2e8f0;
+                    border: 1px solid #323542;
+                    border-radius: 4px;
+                    padding: 5px 8px;
+                    font-size: 12px;
+                }}
+                QLineEdit:focus {{
+                    border: 1px solid #f59e0b;
+                }}
+                QSlider::groove:horizontal {{
+                    height: 4px;
+                    background: #2b2e3b;
+                    border-radius: 2px;
+                }}
+                QSlider::handle:horizontal {{
+                    background: #d8d8e0;
+                    width: 14px;
+                    height: 14px;
+                    margin: -5px 0px;
+                    border-radius: 7px;
+                }}
+                QSlider::handle:horizontal:hover {{
+                    background: #f59e0b;
+                }}
+                QCheckBox {{
+                    color: #c4c4cc;
+                    spacing: 8px;
+                    font-size: 11.5px;
+                    outline: none;
+                    background: transparent;
+                }}
+                QCheckBox:focus {{
+                    outline: none;
+                }}
+                QCheckBox::indicator {{
+                    width: 12px;
+                    height: 12px;
+                    border: 1px solid #8b92a5;
+                    border-radius: 2px;
+                    background: transparent;
+                    outline: none;
+                }}
+                QCheckBox::indicator:hover {{
+                    border-color: #f59e0b;
+                }}
+                QCheckBox::indicator:checked {{
+                    border: 1px solid #f59e0b;
+                    background: #14151a;
+                    image: url("{chk_amber}");
+                }}
+                QPushButton {{
+                    background: #25262c;
+                    color: #bbb;
+                    border: 1px solid #3c3e4a;
+                    border-radius: 4px;
+                    padding: 6px 20px;
+                    font-size: 12px;
+                }}
+                QPushButton:hover {{
+                    background: #32343e;
+                    color: #fff;
+                }}
+                QPushButton:pressed {{
+                    background: #181920;
+                    color: #d97706;
+                    border-color: #d97706;
+                }}
+            """)
+        else:
+            self.setStyleSheet(f"""
+                QDialog {{
+                    background: #ebedf2;
+                }}
+                QFrame#settingsCard {{
+                    background: #ffffff;
+                    border: 1px solid #d5d9e4;
+                    border-radius: 8px;
+                    padding: 14px;
+                }}
+                QLabel {{
+                    border: none;
+                    background: transparent;
+                    color: #334155;
+                    font-size: 12px;
+                }}
+                QComboBox {{
+                    background: #ffffff;
+                    color: #1e293b;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    padding: 4px 26px 4px 8px;
+                    font-size: 11.5px;
+                }}
+                QComboBox:hover {{
+                    border-color: #f59e0b;
+                }}
+                QComboBox:focus {{
+                    border-color: #f59e0b;
+                }}
+                QComboBox::drop-down {{
+                    subcontrol-origin: padding;
+                    subcontrol-position: top right;
+                    width: 22px;
+                    border-left: 1px solid #e2e8f0;
+                    border-top-right-radius: 3px;
+                    border-bottom-right-radius: 3px;
+                    background: #f8fafc;
+                }}
+                QComboBox::down-arrow {{
+                    image: url("{arrow_icon}");
+                    width: 10px;
+                    height: 7px;
+                }}
+                QComboBox QAbstractItemView {{
+                    background: #ffffff;
+                    color: #1e293b;
+                    selection-background-color: #f59e0b;
+                    selection-color: #111;
+                    border: 1px solid #cbd5e1;
+                    padding: 4px;
+                }}
+                QLineEdit {{
+                    background: #ffffff;
+                    color: #1e293b;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    padding: 5px 8px;
+                    font-size: 12px;
+                }}
+                QLineEdit:focus {{
+                    border: 1px solid #f59e0b;
+                }}
+                QSlider::groove:horizontal {{
+                    height: 4px;
+                    background: #cbd5e1;
+                    border-radius: 2px;
+                }}
+                QSlider::handle:horizontal {{
+                    background: #64748b;
+                    width: 14px;
+                    height: 14px;
+                    margin: -5px 0px;
+                    border-radius: 7px;
+                }}
+                QSlider::handle:horizontal:hover {{
+                    background: #f59e0b;
+                }}
+                QCheckBox {{
+                    color: #334155;
+                    spacing: 8px;
+                    font-size: 11.5px;
+                    outline: none;
+                    background: transparent;
+                }}
+                QCheckBox:focus {{
+                    outline: none;
+                }}
+                QCheckBox::indicator {{
+                    width: 12px;
+                    height: 12px;
+                    border: 1px solid #94a3b8;
+                    border-radius: 2px;
+                    background: #ffffff;
+                    outline: none;
+                }}
+                QCheckBox::indicator:hover {{
+                    border-color: #f59e0b;
+                }}
+                QCheckBox::indicator:checked {{
+                    border: 1px solid #f59e0b;
+                    background: #ffffff;
+                    image: url("{chk_amber}");
+                }}
+                QPushButton {{
+                    background: #ffffff;
+                    color: #1e293b;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    padding: 6px 20px;
+                    font-size: 12px;
+                }}
+                QPushButton:hover {{
+                    background: #f8fafc;
+                    border-color: #f59e0b;
+                    color: #d97706;
+                }}
+                QPushButton:pressed {{
+                    background: #e2e8f0;
+                    color: #b45309;
+                }}
+            """)
 
 
 class SingleExportDialog(BaseExportDialog):
@@ -475,8 +587,8 @@ class SingleExportDialog(BaseExportDialog):
 
     def __init__(self, default_file_path: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("冲印照片")
-        self.setFixedSize(660, 455)
+        self.setWindowTitle("单片冲印")
+        self.setFixedSize(660, 360)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         self._init_ui()
@@ -488,34 +600,15 @@ class SingleExportDialog(BaseExportDialog):
         main_layout.setContentsMargins(24, 20, 24, 20)
         main_layout.setSpacing(14)
 
-        # 1. Header (Concise typography without emoji)
-        header_container = QWidget()
-        header_container.setFixedHeight(30)
-        h_layout = QHBoxLayout(header_container)
-        h_layout.setContentsMargins(0, 0, 0, 0)
-        h_layout.setSpacing(10)
-
-        lbl_title = QLabel("冲印照片")
-        lbl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #f59e0b;")
-        h_layout.addWidget(lbl_title)
-
-        if self._default_file_path:
-            src_fname = os.path.basename(self._default_file_path)
-            lbl_sub = QLabel(f"底片: {src_fname}")
-            lbl_sub.setStyleSheet("font-size: 12px; color: #8b92a5;")
-            h_layout.addWidget(lbl_sub)
-
-        h_layout.addStretch()
-        main_layout.addWidget(header_container)
-
-        # 2. Shared Settings Card
+        # 1. Shared Settings Card
         card, card_layout = self._init_settings_card()
 
         # Row 4: Exact Save Path for Single Photo
         row_path = QVBoxLayout()
+        row_path.setContentsMargins(0, 2, 0, 0)
         row_path.setSpacing(6)
         lbl_path = QLabel("保存路径:")
-        lbl_path.setStyleSheet("color: #bbb; font-size: 12px;")
+        lbl_path.setStyleSheet("font-size: 12px; background: transparent;")
         row_path.addWidget(lbl_path)
 
         path_box = QHBoxLayout()
@@ -541,6 +634,8 @@ class SingleExportDialog(BaseExportDialog):
         else:
             self.combo_format.setCurrentIndex(2)
         self._on_format_changed(self.combo_format.currentIndex())
+
+        main_layout.addStretch(1)
 
         # Buttons row
         btn_row = QHBoxLayout()
@@ -625,9 +720,9 @@ class BatchExportDialog(BaseExportDialog):
 
     def __init__(self, default_dir: str, batch_count: int = 0, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("批量冲印")
-        self.setFixedSize(660, 495)
         self.batch_count = batch_count
+        self.setWindowTitle(f"批量冲印：{self.batch_count}张")
+        self.setFixedSize(660, 420)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
@@ -646,33 +741,7 @@ class BatchExportDialog(BaseExportDialog):
         main_layout.setContentsMargins(24, 20, 24, 20)
         main_layout.setSpacing(14)
 
-        # 1. Header (Concise typography, badge without emoji)
-        header_container = QWidget()
-        header_container.setFixedHeight(30)
-        h_layout = QHBoxLayout(header_container)
-        h_layout.setContentsMargins(0, 0, 0, 0)
-        h_layout.setSpacing(10)
-
-        lbl_title = QLabel("批量冲印")
-        lbl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #f59e0b;")
-        h_layout.addWidget(lbl_title)
-
-        lbl_badge = QLabel(f"批量：选中了 {self.batch_count} 张")
-        lbl_badge.setStyleSheet("""
-            QLabel {
-                background: #25262c;
-                border: 1px solid #3c3e4a;
-                border-radius: 4px;
-                color: #e2e8f0;
-                padding: 2px 8px;
-                font-size: 11.5px;
-            }
-        """)
-        h_layout.addWidget(lbl_badge)
-        h_layout.addStretch()
-        main_layout.addWidget(header_container)
-
-        # 2. Shared Settings Card
+        # 1. Shared Settings Card
         card, card_layout = self._init_settings_card()
 
         # Row 4: File Naming Rules (Concise prefix and suffix)
@@ -680,7 +749,7 @@ class BatchExportDialog(BaseExportDialog):
         row_naming.setSpacing(10)
 
         lbl_name_tag = QLabel("文件命名:")
-        lbl_name_tag.setFixedWidth(65)
+        lbl_name_tag.setFixedWidth(72)
         row_naming.addWidget(lbl_name_tag)
 
         lbl_pre = QLabel("前缀:")
@@ -711,9 +780,10 @@ class BatchExportDialog(BaseExportDialog):
 
         # Row 5: Strictly Destination Directory
         row_path = QVBoxLayout()
+        row_path.setContentsMargins(0, 2, 0, 0)
         row_path.setSpacing(6)
         lbl_path = QLabel("目标输出文件夹:")
-        lbl_path.setStyleSheet("color: #bbb; font-size: 12px;")
+        lbl_path.setStyleSheet("font-size: 12px; background: transparent;")
         row_path.addWidget(lbl_path)
 
         path_box = QHBoxLayout()
@@ -732,6 +802,8 @@ class BatchExportDialog(BaseExportDialog):
 
         # Initial format setup
         self._on_format_changed(self.combo_format.currentIndex())
+
+        main_layout.addStretch(1)
 
         # Buttons row
         btn_row = QHBoxLayout()
@@ -822,56 +894,99 @@ class ExportProgressDialog(QDialog):
         self.setFixedSize(440, 155)
         self.setModal(True)
 
-        icon_path = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
-        if not os.path.exists(icon_path):
-            icon_path = os.path.join(get_resource_dir(), "app_icon.png")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-
-        self.setStyleSheet("""
-            QDialog {
-                background: #14151a;
-                border: 1px solid #2d303e;
-                border-radius: 8px;
-            }
-            QLabel {
-                color: #e2e8f0;
-                font-size: 12px;
-                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
-            }
-            QProgressBar {
-                background: #101115;
-                border: 1px solid #2a2d3b;
-                border-radius: 4px;
-                height: 16px;
-                text-align: center;
-                color: #fff;
-                font-size: 10px;
-                font-weight: bold;
-            }
-            QProgressBar::chunk {
-                background: #f59e0b;
-                border-radius: 3px;
-            }
-            QPushButton {
-                background: #20222a;
-                color: #cbd5e1;
-                border: 1px solid #353846;
-                border-radius: 4px;
-                font-size: 11.5px;
-                padding: 4px 16px;
-            }
-            QPushButton:hover {
-                background: #2d303e;
-                color: #ef4444;
-                border-color: #ef4444;
-            }
-            QPushButton:pressed {
-                background: #1b171a;
-                color: #dc2626;
-                border-color: #dc2626;
-            }
-        """)
+        is_dark = theme_manager.is_dark()
+        from ui.window_utils import get_icon
+        self.setWindowIcon(get_icon("dlg_export.png", is_dark=is_dark))
+        if is_dark:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #14151a;
+                    border: 1px solid #2d303e;
+                    border-radius: 8px;
+                }
+                QLabel {
+                    color: #e2e8f0;
+                    font-size: 12px;
+                    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                }
+                QProgressBar {
+                    background: #101115;
+                    border: 1px solid #2a2d3b;
+                    border-radius: 4px;
+                    height: 16px;
+                    text-align: center;
+                    color: #fff;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+                QProgressBar::chunk {
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }
+                QPushButton {
+                    background: #20222a;
+                    color: #cbd5e1;
+                    border: 1px solid #353846;
+                    border-radius: 4px;
+                    font-size: 11.5px;
+                    padding: 4px 16px;
+                }
+                QPushButton:hover {
+                    background: #2d303e;
+                    color: #ef4444;
+                    border-color: #ef4444;
+                }
+                QPushButton:pressed {
+                    background: #1b171a;
+                    color: #dc2626;
+                    border-color: #dc2626;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #ebedf2;
+                    border: 1px solid #d5d9e4;
+                    border-radius: 8px;
+                }
+                QLabel {
+                    color: #1e293b;
+                    font-size: 12px;
+                    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                }
+                QProgressBar {
+                    background: #ffffff;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    height: 16px;
+                    text-align: center;
+                    color: #111;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+                QProgressBar::chunk {
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }
+                QPushButton {
+                    background: #ffffff;
+                    color: #1e293b;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    font-size: 11.5px;
+                    padding: 4px 16px;
+                }
+                QPushButton:hover {
+                    background: #fef2f2;
+                    color: #ef4444;
+                    border-color: #ef4444;
+                }
+                QPushButton:pressed {
+                    background: #fee2e2;
+                    color: #dc2626;
+                    border-color: #dc2626;
+                }
+            """)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)

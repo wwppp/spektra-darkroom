@@ -83,7 +83,10 @@ def get_cache_dir() -> str:
 
 
 def get_cache_key(file_path: str) -> str:
-    """Generates a stable cache key based on absolute path, file modification time, and size."""
+    """Generates a stable cache key based on absolute path, file modification time, and size.
+    Notice: SDC sidecar mtime is intentionally excluded because RAW sensor demosaicing data
+    (float_img / raw_preview) is strictly invariant to SDC grading parameter changes.
+    """
     norm_path = os.path.abspath(file_path)
     try:
         st = os.stat(norm_path)
@@ -98,18 +101,52 @@ def get_cache_key(file_path: str) -> str:
         max_edge = int(config_manager.get_preferences().get("preview_max_edge", 2048))
     except Exception:
         max_edge = 2048
-    sdc_path = f"{norm_path}.sdc"
-    sdc_mtime = 0.0
-    if os.path.isfile(sdc_path):
-        try:
-            sdc_mtime = os.path.getmtime(sdc_path)
-        except OSError:
-            sdc_mtime = 0.0
-    token = f"prophoto_v3|{norm_path}|{mtime}|{size}|sdc_{sdc_mtime}|res_{max_edge}".encode("utf-8")
+    token = f"prophoto_v3|{norm_path}|{mtime}|{size}|res_{max_edge}".encode("utf-8")
     return hashlib.sha256(token).hexdigest()[:24]
 
 
 _path_cache_index = None
+
+def _ensure_path_cache_index():
+    global _path_cache_index
+    if _path_cache_index is None:
+        _path_cache_index = {}
+        cache_dir = get_cache_dir()
+        try:
+            if os.path.exists(cache_dir):
+                for f in os.listdir(cache_dir):
+                    if f.endswith("_entry.npz"):
+                        f_path = os.path.join(cache_dir, f)
+                        k = f[:-10]
+                        prev_path = os.path.join(cache_dir, f"{k}_preview.npy")
+                        has_prev = os.path.isfile(prev_path)
+                        try:
+                            with np.load(f_path, allow_pickle=False) as npz:
+                                meta = json.loads(str(npz["meta"]))
+                                p = meta.get("path")
+                                if p:
+                                    ap = os.path.abspath(p)
+                                    # Prioritize key that already has preview.npy on disk
+                                    if ap not in _path_cache_index or (has_prev and not os.path.isfile(os.path.join(cache_dir, f"{_path_cache_index[ap]}_preview.npy"))):
+                                        _path_cache_index[ap] = k
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+
+def _migrate_preview_from_index(norm_path: str, primary_prev: str, cache_dir: str):
+    """If primary_prev is missing, attempts to migrate preview array from an older key matching norm_path."""
+    _ensure_path_cache_index()
+    old_key = _path_cache_index.get(norm_path)
+    if old_key:
+        old_prev = os.path.join(cache_dir, f"{old_key}_preview.npy")
+        if os.path.isfile(old_prev) and not os.path.isfile(primary_prev):
+            try:
+                shutil.copy2(old_prev, primary_prev)
+            except Exception:
+                pass
+
 
 def _get_entry_path_with_fallback(file_path: str) -> tuple[str | None, str | None]:
     """Returns (entry_path, key) for a file, supporting seamless fallback to legacy/alternate keys."""
@@ -118,29 +155,16 @@ def _get_entry_path_with_fallback(file_path: str) -> tuple[str | None, str | Non
     key = get_cache_key(file_path)
     cache_dir = get_cache_dir()
     primary_entry = os.path.join(cache_dir, f"{key}_entry.npz")
+    primary_prev = os.path.join(cache_dir, f"{key}_preview.npy")
+    norm_path = os.path.abspath(file_path)
+
     if os.path.isfile(primary_entry):
+        if not os.path.isfile(primary_prev):
+            _migrate_preview_from_index(norm_path, primary_prev, cache_dir)
         return primary_entry, key
 
     # Check fallback index for existing cached entry matching path
-    norm_path = os.path.abspath(file_path)
-    global _path_cache_index
-    if _path_cache_index is None:
-        _path_cache_index = {}
-        try:
-            for f in os.listdir(cache_dir):
-                if f.endswith("_entry.npz"):
-                    f_path = os.path.join(cache_dir, f)
-                    try:
-                        with np.load(f_path, allow_pickle=False) as npz:
-                            meta = json.loads(str(npz["meta"]))
-                            p = meta.get("path")
-                            if p:
-                                _path_cache_index[os.path.abspath(p)] = f[:-10]
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
+    _ensure_path_cache_index()
     old_key = _path_cache_index.get(norm_path)
     if old_key:
         old_entry = os.path.join(cache_dir, f"{old_key}_entry.npz")
@@ -148,7 +172,6 @@ def _get_entry_path_with_fallback(file_path: str) -> tuple[str | None, str | Non
             try:
                 shutil.copy2(old_entry, primary_entry)
                 old_prev = os.path.join(cache_dir, f"{old_key}_preview.npy")
-                primary_prev = os.path.join(cache_dir, f"{key}_preview.npy")
                 if os.path.isfile(old_prev) and not os.path.isfile(primary_prev):
                     shutil.copy2(old_prev, primary_prev)
             except Exception:
@@ -292,6 +315,14 @@ def save_photo_cache(file_path: str, photo_data: dict, preview_array: np.ndarray
                             os.remove(tmp_prev)
                         except Exception:
                             pass
+        else:
+            if not os.path.isfile(preview_path):
+                norm_p = os.path.abspath(file_path)
+                _migrate_preview_from_index(norm_p, preview_path, cache_dir)
+
+        global _path_cache_index
+        if _path_cache_index is not None:
+            _path_cache_index[os.path.abspath(file_path)] = key
 
         return True
     except Exception as e:
@@ -472,11 +503,16 @@ def get_photo_cache(file_path: str, load_preview: bool = False) -> dict | None:
 
 def get_photo_preview(file_path: str) -> np.ndarray | None:
     """Loads only the viewport float preview array (float32) from cache."""
-    entry_path, key = _get_entry_path_with_fallback(file_path)
-    if not key:
+    if not file_path:
         return None
+    key = get_cache_key(file_path)
+    cache_dir = get_cache_dir()
+    preview_path = os.path.join(cache_dir, f"{key}_preview.npy")
 
-    preview_path = os.path.join(get_cache_dir(), f"{key}_preview.npy")
+    if not os.path.isfile(preview_path):
+        norm_path = os.path.abspath(file_path)
+        _migrate_preview_from_index(norm_path, preview_path, cache_dir)
+
     if not os.path.isfile(preview_path):
         return None
 
@@ -492,10 +528,11 @@ def save_photo_preview(file_path: str, preview_array: np.ndarray) -> bool:
     """Saves only the viewport float preview array (float16 on disk) into cache."""
     if not file_path or preview_array is None or not isinstance(preview_array, np.ndarray) or preview_array.size == 0:
         return False
-    entry_path, key = _get_entry_path_with_fallback(file_path)
+    key = get_cache_key(file_path)
     if not key:
         return False
     cache_dir = get_cache_dir()
+    os.makedirs(cache_dir, exist_ok=True)
     preview_path = os.path.join(cache_dir, f"{key}_preview.npy")
     import threading
     nonce = f"{os.getpid()}_{threading.get_ident()}_{time.time_ns()}"
@@ -508,6 +545,9 @@ def save_photo_preview(file_path: str, preview_array: np.ndarray) -> bool:
             except Exception:
                 pass
         os.replace(tmp_prev, preview_path)
+        global _path_cache_index
+        if _path_cache_index is not None:
+            _path_cache_index[os.path.abspath(file_path)] = key
         return True
     except Exception as e:
         logger.warning(f"Failed to save preview cache for {file_path}: {e}")

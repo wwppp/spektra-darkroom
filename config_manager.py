@@ -36,6 +36,8 @@ DEFAULT_CONFIG = {
     "preferences": {
         "gpu_acceleration": True,
         "theme": "adobe_dark",
+        "ui_theme": "dark",
+        "canvas_background": "dark_gray",
         "default_export_dir": "",
         "export_format": "jpeg",
         "export_quality": 95,
@@ -627,8 +629,17 @@ def set_last_dialog_dir(category: str, dir_or_file_path: str):
         cfg["last_dialog_dirs"] = {}
     cfg["last_dialog_dirs"][category] = os.path.abspath(target_dir)
     save_config(cfg)
+def get_preference(key: str, default=None):
+    """Retrieve a preference value from configuration."""
+    cfg = load_config()
+    return cfg.get("preferences", {}).get(key, default)
 
 
-
+def set_preference(key: str, value):
+    """Save a single preference value to configuration."""
+    cfg = load_config()
+    prefs = cfg.setdefault("preferences", {})
+    prefs[key] = value
+    save_config(cfg)
 
 

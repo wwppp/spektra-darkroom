@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from path_utils import get_resource_dir, normalize_path
 from ui.window_utils import apply_dark_titlebar
+from ui.theme_manager import theme_manager
 
 
 class RelinkMediaDialog(QDialog):
@@ -56,13 +57,16 @@ class RelinkMediaDialog(QDialog):
         header = QHBoxLayout()
         header.setSpacing(14)
 
+        is_dark = theme_manager.is_dark()
         lbl_badge = QLabel("!")
         lbl_badge.setFixedSize(36, 36)
         lbl_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_badge.setStyleSheet("""
-            background: #2b1f11;
+        badge_bg = "#2b1f11" if is_dark else "#fef3c7"
+        badge_border = "#78350f" if is_dark else "#f59e0b"
+        lbl_badge.setStyleSheet(f"""
+            background: {badge_bg};
             color: #f59e0b;
-            border: 1px solid #78350f;
+            border: 1px solid {badge_border};
             border-radius: 18px;
             font-size: 18px;
             font-weight: bold;
@@ -76,11 +80,12 @@ class RelinkMediaDialog(QDialog):
         text_layout.addWidget(lbl_title)
 
         missing_cnt = len(self.missing_entries)
+        desc_col = "#94a3b8" if is_dark else "#475569"
         lbl_desc = QLabel(
             f"会话共记录 {self.total_count} 张底片，其中 {missing_cnt} 张在原存储路径未找到。\n"
             "若您已将底片文件夹移动至其他位置或驱动器，请指定底片所在文件夹执行自动级联重链。"
         )
-        lbl_desc.setStyleSheet("font-size: 11.5px; color: #94a3b8; line-height: 1.4;")
+        lbl_desc.setStyleSheet(f"font-size: 11.5px; color: {desc_col}; line-height: 1.4;")
         text_layout.addWidget(lbl_desc)
 
         header.addLayout(text_layout, 1)
@@ -138,75 +143,140 @@ class RelinkMediaDialog(QDialog):
 
         self.btn_offline = QPushButton("保持脱机继续")
         self.btn_offline.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_offline.setStyleSheet("""
-            QPushButton {
-                background: #20222a;
-                color: #cbd5e1;
-                border: 1px solid #333647;
-                border-radius: 4px;
-                padding: 6px 14px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background: #2b2e3b;
-                color: #fff;
-            }
-        """)
+        if is_dark:
+            self.btn_offline.setStyleSheet("""
+                QPushButton {
+                    background: #20222a;
+                    color: #cbd5e1;
+                    border: 1px solid #333647;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background: #2b2e3b;
+                    color: #fff;
+                }
+            """)
+        else:
+            self.btn_offline.setStyleSheet("""
+                QPushButton {
+                    background: #ffffff;
+                    color: #334155;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background: #f1f5f9;
+                    color: #0f172a;
+                }
+            """)
         self.btn_offline.clicked.connect(self._on_keep_offline)
         btn_row.addWidget(self.btn_offline)
 
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_cancel.setStyleSheet("""
-            QPushButton {
-                background: #181920;
-                color: #94a3b8;
-                border: 1px solid #282a36;
-                border-radius: 4px;
-                padding: 6px 14px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background: #22242e;
-                color: #cbd5e1;
-            }
-        """)
+        if is_dark:
+            self.btn_cancel.setStyleSheet("""
+                QPushButton {
+                    background: #181920;
+                    color: #94a3b8;
+                    border: 1px solid #282a36;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background: #22242e;
+                    color: #cbd5e1;
+                }
+            """)
+        else:
+            self.btn_cancel.setStyleSheet("""
+                QPushButton {
+                    background: #ffffff;
+                    color: #64748b;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background: #f1f5f9;
+                    color: #334155;
+                }
+            """)
         self.btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(self.btn_cancel)
 
         main_layout.addLayout(btn_row)
 
     def _apply_style(self):
-        self.setStyleSheet("""
-            QDialog {
-                background: #14151a;
-                color: #e2e8f0;
-            }
-            QTableWidget {
-                background: #181920;
-                color: #cbd5e1;
-                border: 1px solid #282a36;
-                border-radius: 4px;
-                gridline-color: #22242e;
-                font-size: 11.5px;
-            }
-            QTableWidget::item {
-                padding: 4px 8px;
-            }
-            QTableWidget::item:selected {
-                background: #2b2e3b;
-                color: #f59e0b;
-            }
-            QHeaderView::section {
-                background: #1f212a;
-                color: #94a3b8;
-                border: none;
-                border-bottom: 1px solid #2b2d38;
-                padding: 6px 8px;
-                font-size: 11px;
-                font-weight: bold;
-            }
-        """)
+        is_dark = theme_manager.is_dark()
+        if is_dark:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #14151a;
+                    color: #e2e8f0;
+                }
+                QTableWidget {
+                    background: #181920;
+                    color: #cbd5e1;
+                    border: 1px solid #282a36;
+                    border-radius: 4px;
+                    gridline-color: #22242e;
+                    font-size: 11.5px;
+                }
+                QTableWidget::item {
+                    padding: 4px 8px;
+                }
+                QTableWidget::item:selected {
+                    background: #2b2e3b;
+                    color: #f59e0b;
+                }
+                QHeaderView::section {
+                    background: #1f212a;
+                    color: #94a3b8;
+                    border: none;
+                    border-bottom: 1px solid #2b2d38;
+                    padding: 6px 8px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #ebedf2;
+                    color: #1e293b;
+                }
+                QTableWidget {
+                    background: #ffffff;
+                    color: #1e293b;
+                    border: 1px solid #d5d9e4;
+                    border-radius: 4px;
+                    gridline-color: #f1f5f9;
+                    font-size: 11.5px;
+                }
+                QTableWidget::item {
+                    padding: 4px 8px;
+                }
+                QTableWidget::item:selected {
+                    background: #fef3c7;
+                    color: #b45309;
+                }
+                QHeaderView::section {
+                    background: #f1f4f9;
+                    color: #475569;
+                    border: none;
+                    border-bottom: 1px solid #d5d9e4;
+                    padding: 6px 8px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
 
     def _populate_table(self):
         self.table.setRowCount(len(self.missing_entries))

@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
 )
+from ui.theme_manager import theme_manager
 
 
 class ParameterGroupCard(QWidget):
@@ -19,7 +20,9 @@ class ParameterGroupCard(QWidget):
         super().__init__(parent)
         self.title_text = title
         self.is_expanded = True
+        self._is_reset_enabled = False
         self._init_ui()
+        theme_manager.themeChanged.connect(lambda _: self.apply_theme())
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -29,17 +32,6 @@ class ParameterGroupCard(QWidget):
         # Card container
         self.card = QFrame()
         self.card.setObjectName("paramGroupCard")
-        self.card.setStyleSheet("""
-            QFrame#paramGroupCard {
-                background: #17181e;
-                border: 1px solid #262834;
-                border-radius: 6px;
-            }
-            QFrame#paramGroupCard:disabled {
-                background: #131418;
-                border: 1px solid #1c1d24;
-            }
-        """)
 
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(8, 6, 8, 8)
@@ -51,44 +43,11 @@ class ParameterGroupCard(QWidget):
         header_layout.setSpacing(6)
 
         self.title_label = QLabel(self.title_text)
-        self.title_label.setStyleSheet("""
-            QLabel {
-                color: #f59e0b;
-                font-size: 11px;
-                font-weight: bold;
-                letter-spacing: 0.5px;
-            }
-            QLabel:disabled {
-                color: #52525b;
-            }
-        """)
         header_layout.addWidget(self.title_label, 1)
 
         self.reset_btn = QPushButton("重置")
         self.reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.reset_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                color: #7b8092;
-                font-size: 10.5px;
-                padding: 2px 4px;
-                border-radius: 3px;
-            }
-            QPushButton:hover {
-                color: #fbbf24;
-                background: rgba(251, 191, 36, 0.12);
-            }
-            QPushButton:pressed {
-                color: #d97706;
-                background: rgba(245, 158, 11, 0.22);
-            }
-            QPushButton:disabled {
-                color: #383a42;
-                background: transparent;
-            }
-        """)
         self.reset_btn.clicked.connect(self.resetClicked.emit)
         header_layout.addWidget(self.reset_btn)
 
@@ -101,6 +60,58 @@ class ParameterGroupCard(QWidget):
         card_layout.addLayout(self.content_layout)
 
         main_layout.addWidget(self.card)
+        self.apply_theme()
+
+    def apply_theme(self):
+        """Update card border, background, and reset button colors for active theme."""
+        is_dark = theme_manager.is_dark()
+        if is_dark:
+            self.card.setStyleSheet("""
+                QFrame#paramGroupCard {
+                    background: #17181e;
+                    border: 1px solid #262834;
+                    border-radius: 6px;
+                }
+                QFrame#paramGroupCard:disabled {
+                    background: #131418;
+                    border: 1px solid #1c1d24;
+                }
+            """)
+            self.title_label.setStyleSheet("""
+                QLabel {
+                    color: #f59e0b;
+                    font-size: 11px;
+                    font-weight: bold;
+                    letter-spacing: 0.5px;
+                }
+                QLabel:disabled {
+                    color: #52525b;
+                }
+            """)
+        else:
+            self.card.setStyleSheet("""
+                QFrame#paramGroupCard {
+                    background: #ffffff;
+                    border: 1px solid #d8dce6;
+                    border-radius: 6px;
+                }
+                QFrame#paramGroupCard:disabled {
+                    background: #f1f4f9;
+                    border: 1px solid #e2e8f0;
+                }
+            """)
+            self.title_label.setStyleSheet("""
+                QLabel {
+                    color: #d97706;
+                    font-size: 11px;
+                    font-weight: bold;
+                    letter-spacing: 0.5px;
+                }
+                QLabel:disabled {
+                    color: #94a3b8;
+                }
+            """)
+        self.set_reset_enabled(self._is_reset_enabled)
 
     def addWidget(self, widget):
         self.content_layout.addWidget(widget)
@@ -109,38 +120,43 @@ class ParameterGroupCard(QWidget):
         self.content_layout.addLayout(layout)
 
     def set_reset_enabled(self, enabled: bool):
-        """Enable or disable the section's reset button, graying it out when disabled."""
+        """Enable or disable the section's reset button, lighting it up when modified."""
+        self._is_reset_enabled = enabled
         self.reset_btn.setEnabled(enabled)
+        is_dark = theme_manager.is_dark()
         if enabled:
             self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.reset_btn.setStyleSheet("""
                 QPushButton {
                     background: transparent;
                     border: none;
-                    color: #7b8092;
+                    color: #f59e0b;
                     font-size: 10.5px;
-                    padding: 2px 4px;
+                    font-weight: 600;
+                    padding: 2px 5px;
                     border-radius: 3px;
                 }
                 QPushButton:hover {
-                    color: #f59e0b;
-                    background: rgba(245, 158, 11, 0.12);
+                    color: #fde68a;
+                    background: rgba(245, 158, 11, 0.15);
                 }
                 QPushButton:pressed {
                     color: #d97706;
-                    background: rgba(245, 158, 11, 0.22);
+                    background: rgba(245, 158, 11, 0.25);
                 }
             """)
         else:
             self.reset_btn.setCursor(Qt.CursorShape.ArrowCursor)
-            self.reset_btn.setStyleSheet("""
-                QPushButton {
+            dim_color = "#383a48" if is_dark else "#94a3b8"
+            self.reset_btn.setStyleSheet(f"""
+                QPushButton {{
                     background: transparent;
                     border: none;
-                    color: #383a48;
+                    color: {dim_color};
                     font-size: 10.5px;
-                    padding: 2px 4px;
-                }
+                    font-weight: normal;
+                    padding: 2px 5px;
+                }}
             """)
 
     def set_expanded(self, expanded: bool, animate: bool = False):

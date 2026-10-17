@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from path_utils import get_icon_path, get_resource_dir
-from ui.window_utils import apply_dark_titlebar
+from ui.window_utils import apply_dark_titlebar, get_icon
+from ui.theme_manager import theme_manager
 
 
 class StockManagerDialog(QDialog):
@@ -41,193 +42,376 @@ class StockManagerDialog(QDialog):
         self.setModal(True)
 
         icon_filename = "dlg_film.png" if self.is_film else "dlg_paper.png"
-        icon_path = os.path.join(get_resource_dir(), "icons", icon_filename)
-        if not os.path.exists(icon_path):
-            icon_path = os.path.join(get_resource_dir(), "app_icon.png")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        self.icon_filename = icon_filename
+        is_dark = theme_manager.is_dark()
+        self.setWindowIcon(get_icon(icon_filename, is_dark=is_dark))
 
         self._init_ui()
         self._load_stocks()
 
     def showEvent(self, event):
         super().showEvent(event)
-        apply_dark_titlebar(self)
+        is_dark = theme_manager.is_dark()
+        self.setWindowIcon(get_icon(self.icon_filename, is_dark=is_dark))
+        apply_dark_titlebar(self, is_dark=is_dark)
 
     def _init_ui(self):
         chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_amber.png").replace("\\", "/")
 
-        self.setStyleSheet(f"""
-            QDialog {{
-                background: #14151a;
-                color: #e2e8f0;
-            }}
-            QLabel {{
-                color: #e2e8f0;
-            }}
-            QTableWidget {{
-                background: #101115;
-                color: #e2e8f0;
-                gridline-color: #242735;
-                border: 1px solid #282a36;
-                border-radius: 6px;
-                selection-background-color: #1e222d;
-                selection-color: #f59e0b;
-                font-size: 12px;
-                outline: none;
-            }}
-            QTableWidget::item {{
-                outline: none;
-                border: none;
-            }}
-            QTableWidget::item:focus {{
-                outline: none;
-                border: none;
-            }}
-            QTableWidget::item:selected {{
-                background-color: #1e222d;
-                outline: none;
-                border: none;
-            }}
-            QHeaderView::section {{
-                background: #1a1c24;
-                color: #94a3b8;
-                border: none;
-                border-bottom: 1px solid #2d303f;
-                padding: 6px;
-                font-weight: bold;
-                font-size: 11px;
-            }}
-            QPushButton {{
-                background: #1f212a;
-                color: #e2e8f0;
-                border: 1px solid #333647;
-                border-radius: 4px;
-                padding: 6px 14px;
-                font-size: 12px;
-                font-weight: 500;
-            }}
-            QPushButton:hover {{
-                background: #282b37;
-                border-color: #f59e0b;
-                color: #f59e0b;
-            }}
-            QPushButton:pressed {{
-                background: #14151a;
-                color: #d97706;
-                border-color: #d97706;
-            }}
-            QPushButton#btnPrimary {{
-                background: #f59e0b;
-                color: #111;
-                border: none;
-                font-weight: bold;
-            }}
-            QPushButton#btnPrimary:hover {{
-                background: #d97706;
-            }}
-            QPushButton#btnPrimary:pressed {{
-                background: #b45309;
-            }}
-            QPushButton#btnDanger {{
-                background: #201a1d;
-                color: #f87171;
-                border: 1px solid #4a282f;
-            }}
-            QPushButton#btnDanger:hover {{
-                background: #2e1d23;
-                border-color: #ef4444;
-                color: #ffffff;
-            }}
-            QPushButton#btnDanger:pressed {{
-                background: #3b1219;
-                color: #ef4444;
-                border-color: #ef4444;
-            }}
-            QCheckBox {{
-                spacing: 6px;
-                color: #cbd5e1;
-                font-size: 12px;
-                outline: none;
-            }}
-            QCheckBox:focus {{
-                outline: none;
-            }}
-            QCheckBox::indicator {{
-                width: 12px;
-                height: 12px;
-                border: 1px solid #8b92a5;
-                border-radius: 2px;
-                background: transparent;
-                outline: none;
-            }}
-            QCheckBox::indicator:hover {{
-                border-color: #f59e0b;
-            }}
-            QCheckBox::indicator:checked {{
-                border: 1px solid #f59e0b;
-                background: #14151a;
-                image: url("{chk_amber}");
-            }}
-            QScrollBar:vertical {{
-                background: rgba(18, 19, 24, 0.75);
-                width: 6px;
-                margin: 0px;
-                border-radius: 3px;
-                border: none;
-            }}
-            QScrollBar::handle:vertical {{
-                background: #474d61;
-                min-height: 24px;
-                border-radius: 3px;
-                border: none;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: #f59e0b;
-            }}
-            QScrollBar::handle:vertical:pressed {{
-                background: #d97706;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0px;
-                width: 0px;
-                background: none;
-                border: none;
-            }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-                background: none;
-                border: none;
-            }}
-            QScrollBar:horizontal {{
-                background: rgba(18, 19, 24, 0.75);
-                height: 6px;
-                margin: 0px;
-                border-radius: 3px;
-                border: none;
-            }}
-            QScrollBar::handle:horizontal {{
-                background: #474d61;
-                min-width: 24px;
-                border-radius: 3px;
-                border: none;
-            }}
-            QScrollBar::handle:horizontal:hover {{
-                background: #f59e0b;
-            }}
-            QScrollBar::handle:horizontal:pressed {{
-                background: #d97706;
-            }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-                height: 0px;
-                width: 0px;
-                background: none;
-                border: none;
-            }}
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
-                background: none;
-                border: none;
-            }}
-        """)
+        is_dark = theme_manager.is_dark()
+        if is_dark:
+            self.setStyleSheet(f"""
+                QDialog {{
+                    background: #14151a;
+                    color: #e2e8f0;
+                }}
+                QLabel {{
+                    color: #e2e8f0;
+                }}
+                QTableWidget {{
+                    background: #101115;
+                    color: #e2e8f0;
+                    gridline-color: #242735;
+                    border: 1px solid #282a36;
+                    border-radius: 6px;
+                    selection-background-color: #1e222d;
+                    selection-color: #f59e0b;
+                    font-size: 12px;
+                    outline: none;
+                }}
+                QTableWidget::item {{
+                    outline: none;
+                    border: none;
+                }}
+                QTableWidget::item:focus {{
+                    outline: none;
+                    border: none;
+                }}
+                QTableWidget::item:selected {{
+                    background-color: #1e222d;
+                    outline: none;
+                    border: none;
+                }}
+                QHeaderView::section {{
+                    background: #1a1c24;
+                    color: #94a3b8;
+                    border: none;
+                    border-bottom: 1px solid #2d303f;
+                    padding: 6px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }}
+                QPushButton {{
+                    background: #1f212a;
+                    color: #e2e8f0;
+                    border: 1px solid #333647;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                    font-weight: 500;
+                }}
+                QPushButton:hover {{
+                    background: #282b37;
+                    border-color: #f59e0b;
+                    color: #f59e0b;
+                }}
+                QPushButton:pressed {{
+                    background: #14151a;
+                    color: #d97706;
+                    border-color: #d97706;
+                }}
+                QPushButton#btnPrimary {{
+                    background: #f59e0b;
+                    color: #111;
+                    border: none;
+                    font-weight: bold;
+                }}
+                QPushButton#btnPrimary:hover {{
+                    background: #d97706;
+                }}
+                QPushButton#btnPrimary:pressed {{
+                    background: #b45309;
+                }}
+                QPushButton#btnDanger {{
+                    background: #201a1d;
+                    color: #f87171;
+                    border: 1px solid #4a282f;
+                }}
+                QPushButton#btnDanger:hover {{
+                    background: #2e1d23;
+                    border-color: #ef4444;
+                    color: #ffffff;
+                }}
+                QPushButton#btnDanger:pressed {{
+                    background: #3b1219;
+                    color: #ef4444;
+                    border-color: #ef4444;
+                }}
+                QCheckBox {{
+                    spacing: 6px;
+                    color: #cbd5e1;
+                    font-size: 12px;
+                    outline: none;
+                }}
+                QCheckBox:focus {{
+                    outline: none;
+                }}
+                QCheckBox::indicator {{
+                    width: 12px;
+                    height: 12px;
+                    border: 1px solid #8b92a5;
+                    border-radius: 2px;
+                    background: transparent;
+                    outline: none;
+                }}
+                QCheckBox::indicator:hover {{
+                    border-color: #f59e0b;
+                }}
+                QCheckBox::indicator:checked {{
+                    border: 1px solid #f59e0b;
+                    background: #14151a;
+                    image: url("{chk_amber}");
+                }}
+                QScrollBar:vertical {{
+                    background: rgba(18, 19, 24, 0.75);
+                    width: 6px;
+                    margin: 0px;
+                    border-radius: 3px;
+                    border: none;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: #3f4350;
+                    min-height: 24px;
+                    border-radius: 3px;
+                    border: none;
+                }}
+                QScrollBar::handle:vertical:hover {{
+                    background: #cbd5e1;
+                    border-radius: 3px;
+                }}
+                QScrollBar::handle:vertical:pressed {{
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height: 0px;
+                    width: 0px;
+                    background: none;
+                    border: none;
+                }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                    background: none;
+                    border: none;
+                }}
+                QScrollBar:horizontal {{
+                    background: rgba(18, 19, 24, 0.75);
+                    height: 6px;
+                    margin: 0px;
+                    border-radius: 3px;
+                    border: none;
+                }}
+                QScrollBar::handle:horizontal {{
+                    background: #3f4350;
+                    min-width: 24px;
+                    border-radius: 3px;
+                    border: none;
+                }}
+                QScrollBar::handle:horizontal:hover {{
+                    background: #cbd5e1;
+                    border-radius: 3px;
+                }}
+                QScrollBar::handle:horizontal:pressed {{
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                    height: 0px;
+                    width: 0px;
+                    background: none;
+                    border: none;
+                }}
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                    background: none;
+                    border: none;
+                }}
+            """)
+        else:
+            self.setStyleSheet(f"""
+                QDialog {{
+                    background: #ebedf2;
+                    color: #1e293b;
+                }}
+                QLabel {{
+                    color: #1e293b;
+                }}
+                QTableWidget {{
+                    background: #ffffff;
+                    color: #1e293b;
+                    gridline-color: #e2e8f0;
+                    border: 1px solid #d5d9e4;
+                    border-radius: 6px;
+                    selection-background-color: #fef3c7;
+                    selection-color: #b45309;
+                    font-size: 12px;
+                    outline: none;
+                }}
+                QTableWidget::item {{
+                    outline: none;
+                    border: none;
+                }}
+                QTableWidget::item:focus {{
+                    outline: none;
+                    border: none;
+                }}
+                QTableWidget::item:selected {{
+                    background-color: #fef3c7;
+                    color: #b45309;
+                    outline: none;
+                    border: none;
+                }}
+                QHeaderView::section {{
+                    background: #f1f4f9;
+                    color: #475569;
+                    border: none;
+                    border-bottom: 1px solid #d5d9e4;
+                    padding: 6px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }}
+                QPushButton {{
+                    background: #ffffff;
+                    color: #1e293b;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                    font-weight: 500;
+                }}
+                QPushButton:hover {{
+                    background: #f8fafc;
+                    border-color: #f59e0b;
+                    color: #d97706;
+                }}
+                QPushButton:pressed {{
+                    background: #e2e8f0;
+                    color: #b45309;
+                    border-color: #d97706;
+                }}
+                QPushButton#btnPrimary {{
+                    background: #f59e0b;
+                    color: #111;
+                    border: none;
+                    font-weight: bold;
+                }}
+                QPushButton#btnPrimary:hover {{
+                    background: #d97706;
+                }}
+                QPushButton#btnPrimary:pressed {{
+                    background: #b45309;
+                }}
+                QPushButton#btnDanger {{
+                    background: #fef2f2;
+                    color: #ef4444;
+                    border: 1px solid #fecaca;
+                }}
+                QPushButton#btnDanger:hover {{
+                    background: #fee2e2;
+                    border-color: #ef4444;
+                    color: #b91c1c;
+                }}
+                QPushButton#btnDanger:pressed {{
+                    background: #fecaca;
+                    color: #991b1b;
+                    border-color: #dc2626;
+                }}
+                QCheckBox {{
+                    spacing: 6px;
+                    color: #334155;
+                    font-size: 12px;
+                    outline: none;
+                }}
+                QCheckBox:focus {{
+                    outline: none;
+                }}
+                QCheckBox::indicator {{
+                    width: 12px;
+                    height: 12px;
+                    border: 1px solid #94a3b8;
+                    border-radius: 2px;
+                    background: #ffffff;
+                    outline: none;
+                }}
+                QCheckBox::indicator:hover {{
+                    border-color: #f59e0b;
+                }}
+                QCheckBox::indicator:checked {{
+                    border: 1px solid #f59e0b;
+                    background: #ffffff;
+                    image: url("{chk_amber}");
+                }}
+                QScrollBar:vertical {{
+                    background: transparent;
+                    width: 6px;
+                    margin: 0px;
+                    border-radius: 3px;
+                    border: none;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: #94a3b8;
+                    min-height: 24px;
+                    border-radius: 3px;
+                    border: none;
+                }}
+                QScrollBar::handle:vertical:hover {{
+                    background: #64748b;
+                    border-radius: 3px;
+                }}
+                QScrollBar::handle:vertical:pressed {{
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height: 0px;
+                    width: 0px;
+                    background: none;
+                    border: none;
+                }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                    background: none;
+                    border: none;
+                }}
+                QScrollBar:horizontal {{
+                    background: transparent;
+                    height: 6px;
+                    margin: 0px;
+                    border-radius: 3px;
+                    border: none;
+                }}
+                QScrollBar::handle:horizontal {{
+                    background: #94a3b8;
+                    min-width: 24px;
+                    border-radius: 3px;
+                    border: none;
+                }}
+                QScrollBar::handle:horizontal:hover {{
+                    background: #64748b;
+                    border-radius: 3px;
+                }}
+                QScrollBar::handle:horizontal:pressed {{
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                    height: 0px;
+                    width: 0px;
+                    background: none;
+                    border: none;
+                }}
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                    background: none;
+                    border: none;
+                }}
+            """)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -244,23 +428,17 @@ class StockManagerDialog(QDialog):
         header_row.addWidget(self.lbl_count)
         header_row.addStretch()
 
-        # Action Buttons (with user inverted dark-mode PNG icons)
-        icon_import = os.path.join(get_resource_dir(), "icons", "dlg_import.png")
-        icon_export = os.path.join(get_resource_dir(), "icons", "dlg_export.png")
-        icon_save = os.path.join(get_resource_dir(), "icons", "dlg_save.png")
-
+        # Action Buttons (with theme-adaptive icons)
         btn_import = QPushButton(f"导入{self.term}配置 (.json)")
-        if os.path.exists(icon_import):
-            btn_import.setIcon(QIcon(icon_import))
-            btn_import.setIconSize(QSize(14, 14))
+        btn_import.setIcon(get_icon("dlg_import.png"))
+        btn_import.setIconSize(QSize(14, 14))
         btn_import.setToolTip(f"导入 SpektraDarkroom 完整物理参数配置 (.json)")
         btn_import.clicked.connect(self._import_preset)
         header_row.addWidget(btn_import)
 
         btn_export_sel_json = QPushButton(f"导出所选{self.term}配置 (.json)")
-        if os.path.exists(icon_save):
-            btn_export_sel_json.setIcon(QIcon(icon_save))
-            btn_export_sel_json.setIconSize(QSize(14, 14))
+        btn_export_sel_json.setIcon(get_icon("dlg_save.png"))
+        btn_export_sel_json.setIconSize(QSize(14, 14))
         btn_export_sel_json.setToolTip(f"导出所选{self.term}的完整物理感光曲线与化学反应光谱参数文件 (.json)")
         btn_export_sel_json.clicked.connect(self._export_selected_json)
         header_row.addWidget(btn_export_sel_json)
@@ -290,11 +468,9 @@ class StockManagerDialog(QDialog):
         btn_select_all.clicked.connect(self._toggle_select_all)
         footer.addWidget(btn_select_all)
 
-        icon_discard = os.path.join(get_resource_dir(), "icons", "dlg_discard.png")
         btn_delete_sel = QPushButton("丢弃所选", objectName="btnDanger")
-        if os.path.exists(icon_discard):
-            btn_delete_sel.setIcon(QIcon(icon_discard))
-            btn_delete_sel.setIconSize(QSize(14, 14))
+        btn_delete_sel.setIcon(get_icon("dlg_discard.png"))
+        btn_delete_sel.setIconSize(QSize(14, 14))
         btn_delete_sel.clicked.connect(self._delete_selected)
         footer.addWidget(btn_delete_sel)
 

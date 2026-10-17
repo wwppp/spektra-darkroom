@@ -1,7 +1,7 @@
 import os
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF
-from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
+from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QActionGroup, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
 from PySide6.QtWidgets import QMenu, QLabel, QWidget, QPushButton, QVBoxLayout
 from ui.window_utils import get_darkroom_menu_style, get_icon
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -9,6 +9,7 @@ from PySide6.QtOpenGL import (
     QOpenGLShaderProgram, QOpenGLShader, QOpenGLBuffer, QOpenGLFramebufferObject
 )
 from path_utils import get_resource_dir
+import config_manager
 from OpenGL import GL
 
 
@@ -35,6 +36,7 @@ uniform sampler3D u_lut;
 uniform int u_has_image;
 uniform int u_has_lut;
 uniform int u_is_bypass;
+uniform vec3 u_bg_color;
 
 uniform float u_exposure;
 uniform float u_temp;
@@ -60,6 +62,10 @@ uniform float u_grain;
 uniform float u_grain_scale;
 uniform float u_grain_size;
 uniform float u_grain_blur;
+uniform float u_grain_colour;
+uniform float u_stock_grain_size;
+uniform float u_stock_grain_strength;
+uniform vec3  u_stock_layer_weights;
 uniform vec2 u_master_resolution;
 
 // Diffusion filter
@@ -100,6 +106,15 @@ float pcg_float(uvec2 p) {
     return float(pcg_hash(p)) * (1.0 / 4294967296.0);
 }
 
+// Fast 3-channel decorrelated pseudo-random vector from 32-bit PCG hash
+vec3 pcg_vec3(uvec2 p) {
+    uint h = pcg_hash(p);
+    float r = float(h & 0x3FFu) * (1.0 / 1023.0);
+    float g = float((h >> 10u) & 0x3FFu) * (1.0 / 1023.0);
+    float b = float((h >> 20u) & 0x3FFu) * (1.0 / 1023.0);
+    return vec3(r, g, b);
+}
+
 // Smooth continuous organic dye cloud noise with Hermite interpolation
 float smooth_cloud_noise(vec2 p) {
     vec2 i = floor(p);
@@ -114,6 +129,23 @@ float smooth_cloud_noise(vec2 p) {
     
     float nx0 = mix(n00, n10, s.x);
     float nx1 = mix(n01, n11, s.x);
+    return mix(nx0, nx1, s.y);
+}
+
+// Multi-channel organic dye cloud noise vector with Hermite interpolation
+vec3 smooth_cloud_noise_rgb(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 s = f * f * (3.0 - 2.0 * f);
+    
+    uvec2 u = uvec2(ivec2(i));
+    vec3 n00 = pcg_vec3(u);
+    vec3 n10 = pcg_vec3(u + uvec2(1u, 0u));
+    vec3 n01 = pcg_vec3(u + uvec2(0u, 1u));
+    vec3 n11 = pcg_vec3(u + uvec2(1u, 1u));
+    
+    vec3 nx0 = mix(n00, n10, s.x);
+    vec3 nx1 = mix(n01, n11, s.x);
     return mix(nx0, nx1, s.y);
 }
 
@@ -206,7 +238,7 @@ vec3 compute_scene_radiance(vec3 raw_c) {
 
 void main() {
     if (u_has_image == 0) {
-        fragColor = vec4(0.08, 0.08, 0.08, 1.0);
+        fragColor = vec4(u_bg_color, 1.0);
         return;
     }
     
@@ -218,12 +250,9 @@ void main() {
         // Mode 2: Global side-by-side comparison (Both complete original and edited images)
         float vp_w = (u_viewport_size.x > 1.0) ? u_viewport_size.x : (1.0 / max(0.00001, fwidth(v_texcoord.x)));
         float dist_px = abs(v_texcoord.x - 0.5) * vp_w;
-        if (dist_px <= 2.2) {
-            vec3 amber_gold = vec3(0.96, 0.62, 0.05);
-            vec3 core_hl   = vec3(1.00, 0.88, 0.45);
-            vec3 dark_edge  = vec3(0.05, 0.05, 0.06);
-            vec3 line_col = (dist_px <= 0.8) ? mix(core_hl, amber_gold, dist_px / 0.8) : mix(amber_gold, dark_edge, clamp((dist_px - 0.8) / 1.4, 0.0, 1.0));
-            fragColor = vec4(line_col, 1.0);
+        // Delicate hairline divider (solid brand amber #f59e0b, 1px~1.5px, no black edges)
+        if (dist_px <= 0.85) {
+            fragColor = vec4(0.961, 0.620, 0.043, 1.0); // #f59e0b
             return;
         }
 
@@ -250,9 +279,9 @@ void main() {
     // Y-flip for OpenGL texture coordinates (row 0 at top)
     vec2 sample_uv = vec2(img_uv.x, 1.0 - img_uv.y);
     
-    // Letterbox dark background
+    // Letterbox background
     if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
-        fragColor = vec4(0.07, 0.07, 0.07, 1.0);
+        fragColor = vec4(u_bg_color, 1.0);
         return;
     }
     
@@ -269,21 +298,9 @@ void main() {
         float vp_w = (u_viewport_size.x > 1.0) ? u_viewport_size.x : (1.0 / max(0.00001, fwidth(v_texcoord.x)));
         float dist_px = abs(v_texcoord.x - u_split_x) * vp_w;
 
-        // High-visibility dual-layer hairline divider (solid amber gold core + drop shadow rim)
-        // 100% visible against bright snow, highlights, and deep shadows!
-        if (dist_px <= 2.2) {
-            vec3 amber_gold = vec3(0.96, 0.62, 0.05); // #f59e0b
-            vec3 core_hl   = vec3(1.00, 0.88, 0.45);
-            vec3 dark_edge  = vec3(0.05, 0.05, 0.06);
-
-            vec3 line_col;
-            if (dist_px <= 0.8) {
-                line_col = mix(core_hl, amber_gold, dist_px / 0.8);
-            } else {
-                float edge_t = clamp((dist_px - 0.8) / 1.4, 0.0, 1.0);
-                line_col = mix(amber_gold, dark_edge, edge_t);
-            }
-            fragColor = vec4(line_col, 1.0);
+        // Delicate hairline split divider (solid brand amber #f59e0b, 1px~1.5px, no black edges)
+        if (dist_px <= 0.85) {
+            fragColor = vec4(0.961, 0.620, 0.043, 1.0); // #f59e0b
             return;
         }
 
@@ -477,6 +494,78 @@ void main() {
         }
     }
 
+    // 3.5. Silver Halide Organic Film Grain & Multi-Octave Dye Cloud Mottle (Pre-LUT Transmittance Space)
+    if (u_grain > 0.01) {
+        // Golden-ratio irrational rotation matrix (breaks all raster / coordinate grid alignment)
+        const mat2 rot = mat2(0.9114, -0.4115, 0.4115, 0.9114);
+        float base_stock_size = (u_stock_grain_size > 0.0001) ? u_stock_grain_size : 0.005;
+        float scale = max(0.20, u_grain_scale * max(0.2, u_grain_size) * (base_stock_size / 0.005));
+
+        // Anchor grain coordinate to image/film master pixel space (WYSIWYG preview & export)
+        vec2 master_res = (u_master_resolution.x > 1.0) ? u_master_resolution : vec2(textureSize(u_image, 0));
+        vec2 film_coord = sample_uv * master_res;
+        vec2 gcoord = rot * (film_coord / scale);
+
+        // Anti-aliasing / Central Limit Theorem screen downsampling integration
+        // Averages micro-crystals across screen pixel footprint:
+        // - At 100%/91% zoom (footprint ~ 1.0): 100% full tactile micro-crystal bite & dye clouds.
+        // - At Fit view (15% zoom, footprint ~ 6.7): micro-crystals average down by CLT ~ 1/sqrt(N),
+        //   producing smooth, velvety, delicate 35mm negative film texture instead of coarse static!
+        vec2 d_gcoord = fwidth(gcoord);
+        float footprint = max(d_gcoord.x, d_gcoord.y);
+        float grain_att = 1.0 / sqrt(1.0 + 2.5 * max(0.0, footprint - 1.0));
+
+        // Multi-scale organic dye cloud clusters & micro-crystals:
+        // 1. High-frequency micro-crystals (~1.2 master px, ~7 um) with continuous subpixel continuity
+        vec3 fine_rgb = (smooth_cloud_noise_rgb(gcoord * 0.75) - vec3(0.5)) * 2.0;
+        // 2. Mid-frequency dye clouds (~1.8 master px, ~11 um)
+        vec3 cloud_rgb = (smooth_cloud_noise_rgb(gcoord * 0.45 + vec2(43.1, 89.4)) - vec3(0.5)) * 1.8;
+        // 3. Low-frequency organic dye mottle (~3.5 master px, ~21 um)
+        vec3 mottle_rgb = (smooth_cloud_noise_rgb(gcoord * 0.22 + vec2(17.3, 31.7)) - vec3(0.5)) * 1.6;
+
+        // Additive physical mixture governed by "染料云团柔化 (u_grain_blur)":
+        // Low blur: sharp silver crystal edges bite through.
+        // High blur: organic dye cloud mottle dominates.
+        float blur_t = clamp(u_grain_blur * 0.45, 0.1, 1.2);
+        float w_fine = max(0.15, 0.45 - 0.22 * blur_t);
+        float w_cloud = 0.50 + 0.20 * blur_t;
+        float w_mottle = 0.28 + 0.12 * blur_t;
+        vec3 raw_noise = fine_rgb * w_fine + cloud_rgb * w_cloud + mottle_rgb * w_mottle;
+
+        // Shared luminance grain stream across coupled emulsion layers
+        float shared_fine = (smooth_cloud_noise(gcoord * 0.75 + vec2(53.2, 19.8)) - 0.5) * 2.0;
+        float shared_cloud = (smooth_cloud_noise(gcoord * 0.45 + vec2(11.7, 73.2)) - 0.5) * 1.8;
+        float shared_mottle = (smooth_cloud_noise(gcoord * 0.22 + vec2(91.2, 53.4)) - 0.5) * 1.6;
+        float shared_noise = shared_fine * w_fine + shared_cloud * w_cloud + shared_mottle * w_mottle;
+
+        // Coupled C-41 emulsion layer correlation (organic dye clouds vs digital chroma noise)
+        // Fotufilm inter-channel correlation is ~0.72.
+        // When u_grain_colour = 1.0 (Color Film): rho = 0.72 (rich organic dye clouds, no digital noise)
+        // When u_grain_colour = 0.0 (B&W Film): rho = 1.0 (pure monochrome silver grain)
+        float colour_val = clamp(u_grain_colour, 0.0, 1.0);
+        float rho = mix(1.0, 0.72, colour_val);
+        vec3 final_noise = sqrt(1.0 - rho) * raw_noise + sqrt(rho) * vec3(shared_noise);
+
+        // Apply film stock layer weights (e.g. [0.70, 1.0, 1.35] or [0.90, 1.0, 2.71])
+        vec3 layer_grain = final_noise * u_stock_layer_weights;
+
+        // Stock strength & user slider modulation
+        float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
+        float eff_strength = (u_grain / 0.40) * (base_stock_strength / 0.010);
+
+        // Kodak sensitometric density modulation:
+        // In physical negative film, exposure produces dense silver halide deposits in highlights,
+        // which physically block optical transmittance through the negative onto the print paper (T -> 0).
+        // Consequently, highlight print regions naturally roll off to smooth, silky paper base white,
+        // while midtones produce maximum tactile dye cloud relief, and shadows roll off smoothly.
+        float lin_luma = dot(linear_rgb, vec3(0.2126, 0.7152, 0.0722));
+        float dens_mod = (1.0 - exp(-lin_luma * 15.0)) / (1.0 + pow(lin_luma / 0.28, 2.2));
+
+        // Transmittance modulation: T = T_in * 10^(-dD) = T_in * exp(-dD * 2.3025851)
+        vec3 dD = layer_grain * (eff_strength * 0.35 * grain_att * dens_mod);
+        linear_rgb = max(vec3(0.0), linear_rgb * exp(-dD * 2.3025851));
+    }
+
     // 4. Physical 3D LUT sampling with Log Shaper (Film emulsion + Paper D-max)
     vec3 film_rgb;
     if (u_has_lut == 1) {
@@ -509,51 +598,24 @@ void main() {
         film_rgb = mix(film_rgb, film_rgb * 0.88 + vec3(0.03), u_developer_exhaustion * 0.6);
     }
 
-    // 8. Multi-bounce Halation & Highlight Boost (Processed in scene-linear irradiance space before LUT)
-    
-    // 9. Silver Halide Organic Film Grain & Dye Cloud Blur (Film-space anchored)
-    if (u_grain > 0.01) {
-        float density = 1.0 - clamp(dot(film_rgb, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
-        // Optical density bell curve (most pronounced in midtones, decays smoothly in specular highlights and deep blacks)
-        float grain_mask = sqrt(max(0.0, density * (1.0 - density))) * 2.0;
-
-        // Golden-ratio irrational rotation matrix (breaks all raster / coordinate grid alignment)
-        const mat2 rot = mat2(0.9114, -0.4115, 0.4115, 0.9114);
-        float scale = max(0.25, u_grain_scale * max(0.2, u_grain_size));
-
-        // Anchor grain coordinate to image/film master pixel space (WYSIWYG preview & export)
-        vec2 master_res = (u_master_resolution.x > 1.0) ? u_master_resolution : vec2(textureSize(u_image, 0));
-        vec2 film_coord = sample_uv * master_res;
-        vec2 gcoord = rot * (film_coord / scale);
-
-        // Anti-aliasing / Central Limit Theorem screen downsampling integration
-        // When zoomed out (e.g. Fit to View), 1 screen pixel averages an area of film pixels,
-        // which physically attenuates high-frequency micro-crystals, perfectly matching viewer downsampling!
-        vec2 d_gcoord = fwidth(gcoord);
-        float footprint = max(d_gcoord.x, d_gcoord.y);
-        float crystal_att = 1.0 / sqrt(max(1.0, footprint));
-        float cloud_att = 1.0 / sqrt(max(1.0, footprint * 0.42));
-
-        // 1. High-frequency organic silver halide crystals (Gaussian distribution via Central Limit Theorem)
-        uvec2 u_crystal = uvec2(ivec2(floor(gcoord)));
-        float r1 = pcg_float(u_crystal);
-        float r2 = pcg_float(u_crystal + uvec2(1597334677u, 3812015801u));
-        float crystal_noise = ((r1 + r2) * 0.5 - 0.5) * crystal_att;
-
-        // 2. Multi-scale organic dye cloud clusters (smooth continuous interpolation)
-        float cloud_noise = (smooth_cloud_noise(gcoord * 0.42) - 0.5) * cloud_att;
-
-        // Blend between fine micro-crystals and soft organic dye clouds
-        float blur_w = clamp(u_grain_blur * 0.45, 0.0, 0.70);
-        float combined_noise = mix(crystal_noise, cloud_noise, blur_w);
-
-        float noise = combined_noise * u_grain * grain_mask * 0.28;
-        film_rgb += vec3(noise);
-    }
-    
     fragColor = vec4(clamp(film_rgb, 0.0, 1.0), 1.0);
 }
 """
+
+
+CANVAS_BG_COLORS = {
+    "white": (1.0, 1.0, 1.0),
+    "light_gray": (0.75, 0.75, 0.75),
+    "dark_gray": (0.07, 0.07, 0.07),
+    "black": (0.0, 0.0, 0.0),
+}
+
+CANVAS_BG_NAMES = [
+    ("白色", "white"),
+    ("浅灰", "light_gray"),
+    ("深灰", "dark_gray"),
+    ("黑色", "black"),
+]
 
 
 class DarkroomGLCanvas(QOpenGLWidget):
@@ -576,6 +638,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.setMouseTracking(True)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
         self.engine = getattr(parent, "engine", None)
+
+        # Canvas Background Color Configuration
+        self._bg_choice = config_manager.get_preference("canvas_background", "dark_gray")
+        if self._bg_choice not in CANVAS_BG_COLORS:
+            self._bg_choice = "dark_gray"
+        self._bg_color = CANVAS_BG_COLORS[self._bg_choice]
 
         # Texture state
         self._image_tex_id = None
@@ -625,6 +693,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             "grain": 0.4,
             "grain_size": 1.0,
             "grain_cloud_blur": 1.0,
+            "grain_colour": 1.0,
             "split_x": 0.5,
             "view_mode": 0   # 0: single, 1: split
         }
@@ -787,6 +856,18 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self._pending_lut = None
             self.update()
 
+    def set_canvas_background(self, choice: str):
+        """Change canvas background color mode ('white', 'light_gray', 'dark_gray', 'black')."""
+        if choice in CANVAS_BG_COLORS:
+            self._bg_choice = choice
+            self._bg_color = CANVAS_BG_COLORS[choice]
+            config_manager.set_preference("canvas_background", choice)
+            self.update()
+
+    def get_canvas_background(self) -> str:
+        """Returns the current canvas background key ('white', 'light_gray', 'dark_gray', 'black')."""
+        return self._bg_choice
+
     def resizeGL(self, w, h):
         pass
 
@@ -795,7 +876,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             return
 
         funcs = QOpenGLContext.currentContext().functions()
-        GL.glClearColor(0.07, 0.07, 0.07, 1.0)
+        GL.glClearColor(self._bg_color[0], self._bg_color[1], self._bg_color[2], 1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
 
         self.shader_program.bind()
@@ -826,6 +907,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if loc >= 0:
                 funcs.glUniform3f(loc, float(x), float(y), float(z))
 
+        u_3f("u_bg_color", self._bg_color[0], self._bg_color[1], self._bg_color[2])
+
         screen_aspect = float(max(1, self.width())) / float(max(1, self.height()))
         m_w = self._master_width if self._master_width > 0 else self._image_width
         m_h = self._master_height if self._master_height > 0 else self._image_height
@@ -844,7 +927,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             is_bypass = 1 if str(self.params.get("film_stock", "none")).lower() in ("none", "") else 0
         u_1i("u_is_bypass", is_bypass)
 
-        u_1f("u_exposure", self.params.get("exposure_ev", 0.0))
+        eff_exposure = float(self.params.get("exposure_ev", 0.0)) + float(self.params.get("base_ev", 0.0))
+        u_1f("u_exposure", eff_exposure)
         u_1f("u_temp", self.params.get("color_temp", 5500.0))
         u_1f("u_tint", self.params.get("tint", 1.0))
         u_1f("u_base_temp", self.params.get("base_temp", 5500.0))
@@ -881,6 +965,26 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_3f("u_hal_strength_rgb", float(strength[0]), float(strength[1]), float(strength[2]))
         u_1f("u_hal_sigma_um", sigma_um)
 
+        # Film Stock Crystal Grain physics (Per-stock crystal size, strength, layer weights)
+        grain_preset = self.params.get("_grain_preset")
+        if not grain_preset:
+            eng = getattr(self, "engine", None)
+            if not eng and hasattr(self.parent(), "engine"):
+                eng = self.parent().engine
+            if eng and hasattr(eng, "get_film_grain_preset"):
+                stock = self.params.get("film_stock", "kodak_portra_400")
+                grain_preset = eng.get_film_grain_preset(stock)
+        if not grain_preset:
+            grain_preset = {"size_mm": 0.005, "strength": 0.010, "layer_weights": [0.70, 1.0, 1.35]}
+
+        st_size = float(grain_preset.get("size_mm", 0.005))
+        st_strength = float(grain_preset.get("strength", 0.010))
+        st_lw = grain_preset.get("layer_weights", [0.70, 1.0, 1.35])
+
+        u_1f("u_stock_grain_size", st_size)
+        u_1f("u_stock_grain_strength", st_strength)
+        u_3f("u_stock_layer_weights", float(st_lw[0]), float(st_lw[1]), float(st_lw[2]))
+
         # Grain physics & format
         u_1f("u_grain", self.params.get("grain", 0.4))
         fmt_mm = float(self.params.get("film_format_mm", 35.0))
@@ -888,6 +992,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_grain_scale", grain_scale)
         u_1f("u_grain_size", float(self.params.get("grain_size", 1.0)))
         u_1f("u_grain_blur", self.params.get("grain_cloud_blur", 1.0))
+        u_1f("u_grain_colour", float(self.params.get("grain_colour", 1.0)))
         master_w = float(getattr(self, "_master_width", 0) or self._image_width)
         master_h = float(getattr(self, "_master_height", 0) or self._image_height)
         u_2f("u_master_resolution", master_w, master_h)
@@ -1449,6 +1554,20 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         menu.addSeparator()
 
+        menu_bg = menu.addMenu("背景颜色")
+        menu_bg.setStyleSheet(get_darkroom_menu_style())
+        bg_group = QActionGroup(self)
+        bg_group.setExclusive(True)
+        for label, key in CANVAS_BG_NAMES:
+            act = menu_bg.addAction(label)
+            act.setCheckable(True)
+            if key == self._bg_choice:
+                act.setChecked(True)
+            act.triggered.connect(lambda chk=False, k=key: self.set_canvas_background(k))
+            bg_group.addAction(act)
+
+        menu.addSeparator()
+
         act_quick = menu.addAction("快速冲印 (上次参数)")
         act_quick.setIcon(get_icon("quick_export.png"))
         act_quick.setShortcut(QKeySequence("Ctrl+Shift+E"))
@@ -1585,6 +1704,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 self.grabFramebuffer()
             except Exception:
                 pass
+        if not getattr(self, "_gl_initialized", False):
+            try:
+                self.makeCurrent()
+                self.initializeGL()
+            except Exception:
+                pass
         if not getattr(self, "_gl_initialized", False) or not self.isValid():
             return None
 
@@ -1603,15 +1728,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 temp_tex_id = GL.glGenTextures(1)
                 GL.glBindTexture(GL.GL_TEXTURE_2D, temp_tex_id)
                 GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+                GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
                 GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
                 GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
                 data = np.ascontiguousarray(float_img_rgb, dtype=np.float32)
                 GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB16F, src_w, src_h, 0, GL.GL_RGB, GL.GL_FLOAT, data)
-                try:
-                    GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
-                    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR_MIPMAP_LINEAR)
-                except Exception:
-                    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
                 GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
                 active_tex_id = temp_tex_id
             else:
@@ -1697,7 +1818,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 is_bypass = 1 if str(eff_params.get("film_stock", "none")).lower() in ("none", "") else 0
             u_1i("u_is_bypass", is_bypass)
 
-            u_1f("u_exposure", eff_params.get("exposure_ev", 0.0))
+            eff_exp = float(eff_params.get("exposure_ev", 0.0)) + float(eff_params.get("base_ev", 0.0))
+            u_1f("u_exposure", eff_exp)
             u_1f("u_temp", eff_params.get("color_temp", 5500.0))
             u_1f("u_tint", eff_params.get("tint", 1.0))
             u_1f("u_base_temp", eff_params.get("base_temp", 5500.0))
@@ -1734,12 +1856,37 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_3f("u_hal_strength_rgb", float(strength[0]), float(strength[1]), float(strength[2]))
             u_1f("u_hal_sigma_um", sigma_um)
 
-            u_1f("u_grain", eff_params.get("grain", 0.4))
+            # Film Stock Crystal Grain physics (Per-stock crystal size, strength, layer weights)
+            grain_preset = eff_params.get("_grain_preset")
+            if not grain_preset:
+                eng = getattr(self, "engine", None)
+                if not eng and hasattr(self.parent(), "engine"):
+                    eng = self.parent().engine
+                if eng and hasattr(eng, "get_film_grain_preset"):
+                    stock = eff_params.get("film_stock", "kodak_portra_400")
+                    grain_preset = eng.get_film_grain_preset(stock)
+            if not grain_preset:
+                grain_preset = {"size_mm": 0.005, "strength": 0.010, "layer_weights": [0.70, 1.0, 1.35]}
+
+            st_size = float(grain_preset.get("size_mm", 0.005))
+            st_strength = float(grain_preset.get("strength", 0.010))
+            st_lw = grain_preset.get("layer_weights", [0.70, 1.0, 1.35])
+
+            u_1f("u_stock_grain_size", st_size)
+            u_1f("u_stock_grain_strength", st_strength)
+            u_3f("u_stock_layer_weights", float(st_lw[0]), float(st_lw[1]), float(st_lw[2]))
+
+            is_thumbnail = (max(target_w, target_h) <= 512) or bool(eff_params.get("is_thumbnail", False)) or (params_override and params_override.get("grain") == 0.0)
+            if is_thumbnail:
+                u_1f("u_grain", 0.0)
+            else:
+                u_1f("u_grain", eff_params.get("grain", 0.4))
             fmt_mm = float(eff_params.get("film_format_mm", 35.0))
             grain_scale = 35.0 / max(5.0, fmt_mm)
             u_1f("u_grain_scale", grain_scale)
             u_1f("u_grain_size", float(eff_params.get("grain_size", 1.0)))
             u_1f("u_grain_blur", eff_params.get("grain_cloud_blur", 1.0))
+            u_1f("u_grain_colour", float(eff_params.get("grain_colour", 1.0)))
             u_2f("u_master_resolution", float(target_w), float(target_h))
 
             diff_family = str(eff_params.get("diffusion_family", "none")).lower()
@@ -1780,13 +1927,22 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if is_16bit:
                 raw_bytes = GL.glReadPixels(0, 0, target_w, target_h, GL.GL_RGBA, GL.GL_UNSIGNED_SHORT)
                 fbo.release()
-                img_arr = np.frombuffer(raw_bytes, dtype=np.uint16).reshape((target_h, target_w, 4))[..., :3]
+                rgba = np.frombuffer(raw_bytes, dtype=np.uint16).reshape((target_h, target_w, 4))
+                try:
+                    import cv2
+                    img_arr = cv2.flip(cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB), 0)
+                except Exception:
+                    img_arr = np.ascontiguousarray(np.flipud(rgba[..., :3]))
             else:
-                raw_bytes = GL.glReadPixels(0, 0, target_w, target_h, GL.GL_RGB, GL.GL_UNSIGNED_BYTE)
+                raw_bytes = GL.glReadPixels(0, 0, target_w, target_h, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE)
                 fbo.release()
-                img_arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((target_h, target_w, 3))
+                rgba = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((target_h, target_w, 4))
+                try:
+                    import cv2
+                    img_arr = cv2.flip(cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB), 0)
+                except Exception:
+                    img_arr = np.ascontiguousarray(np.flipud(rgba[..., :3]))
 
-            img_arr = np.ascontiguousarray(np.flipud(img_arr))
             return img_arr
 
         except Exception as e:

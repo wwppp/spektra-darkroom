@@ -1,7 +1,7 @@
 import os
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QRectF, QPoint, QEvent
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QFontMetrics, QKeySequence, QIcon
+from PySide6.QtCore import Qt, Signal, QRectF, QPoint, QEvent, QTimer
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QFontMetrics, QKeySequence, QIcon, QLinearGradient
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QScrollArea, QFrame,
     QMenu, QDialog, QTextEdit, QSizePolicy
@@ -11,6 +11,7 @@ import session_cache_manager
 from session_cache_manager import is_dummy_or_corrupted_thumbnail, is_valid_thumbnail
 from path_utils import get_icon_path, get_resource_dir
 from ui.window_utils import apply_dark_titlebar, get_darkroom_menu_style, get_icon
+from ui.theme_manager import theme_manager
 from ui.smooth_scroll import SmoothScrollArea
 
 
@@ -25,43 +26,83 @@ class DuplicateFilesDialog(QDialog):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        self.setStyleSheet("""
-            QDialog {
-                background: #14151a;
-                border: 1px solid #2b2e3b;
-                border-radius: 8px;
-            }
-            QLabel {
-                color: #e2e8f0;
-                font-family: "Microsoft YaHei UI", sans-serif;
-            }
-            QTextEdit {
-                background: #101115;
-                color: #cbd5e1;
-                border: 1px solid #282b37;
-                border-radius: 6px;
-                padding: 10px;
-                font-family: Consolas, "Courier New", monospace;
-                font-size: 11.5px;
-                line-height: 1.4;
-            }
-            QPushButton {
-                background: #f59e0b;
-                color: #111111;
-                font-weight: bold;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 24px;
-                font-size: 12px;
-                min-width: 72px;
-            }
-            QPushButton:hover {
-                background: #fbbf24;
-            }
-            QPushButton:pressed {
-                background: #d97706;
-            }
-        """)
+        is_dark = theme_manager.is_dark()
+        if is_dark:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #14151a;
+                    border: 1px solid #2b2e3b;
+                    border-radius: 8px;
+                }
+                QLabel {
+                    color: #e2e8f0;
+                    font-family: "Microsoft YaHei UI", sans-serif;
+                }
+                QTextEdit {
+                    background: #101115;
+                    color: #cbd5e1;
+                    border: 1px solid #282b37;
+                    border-radius: 6px;
+                    padding: 10px;
+                    font-family: Consolas, "Courier New", monospace;
+                    font-size: 11.5px;
+                    line-height: 1.4;
+                }
+                QPushButton {
+                    background: #f59e0b;
+                    color: #111111;
+                    font-weight: bold;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 6px 24px;
+                    font-size: 12px;
+                    min-width: 72px;
+                }
+                QPushButton:hover {
+                    background: #fbbf24;
+                }
+                QPushButton:pressed {
+                    background: #d97706;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #ebedf2;
+                    border: 1px solid #d5d9e4;
+                    border-radius: 8px;
+                }
+                QLabel {
+                    color: #1e293b;
+                    font-family: "Microsoft YaHei UI", sans-serif;
+                }
+                QTextEdit {
+                    background: #ffffff;
+                    color: #1e293b;
+                    border: 1px solid #d5d9e4;
+                    border-radius: 6px;
+                    padding: 10px;
+                    font-family: Consolas, "Courier New", monospace;
+                    font-size: 11.5px;
+                    line-height: 1.4;
+                }
+                QPushButton {
+                    background: #f59e0b;
+                    color: #111111;
+                    font-weight: bold;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 6px 24px;
+                    font-size: 12px;
+                    min-width: 72px;
+                }
+                QPushButton:hover {
+                    background: #fbbf24;
+                }
+                QPushButton:pressed {
+                    background: #d97706;
+                }
+            """)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
@@ -72,8 +113,9 @@ class DuplicateFilesDialog(QDialog):
         hdr.setSpacing(10)
         badge = QLabel("ℹ")
         badge.setFixedSize(28, 28)
-        badge.setStyleSheet("""
-            background: #261f14;
+        badge_bg = "#261f14" if is_dark else "#fef3c7"
+        badge.setStyleSheet(f"""
+            background: {badge_bg};
             border: 1px solid #f59e0b;
             border-radius: 6px;
             color: #f59e0b;
@@ -84,8 +126,9 @@ class DuplicateFilesDialog(QDialog):
         hdr.addWidget(badge)
 
         count = len(self.duplicate_names)
+        head_col = "#f8fafc" if is_dark else "#0f172a"
         lbl_head = QLabel(f"已自动跳过 {count} 个已在暗房底片库中的重复文件：")
-        lbl_head.setStyleSheet("color: #f8fafc; font-weight: bold; font-size: 13px;")
+        lbl_head.setStyleSheet(f"color: {head_col}; font-weight: bold; font-size: 13px;")
         hdr.addWidget(lbl_head, 1)
         layout.addLayout(hdr)
 
@@ -211,12 +254,14 @@ class FilmstripItemWidget(QFrame):
             self.update()
 
     def set_active(self, is_active):
-        self.is_active = is_active
-        self.update()
+        if self.is_active != is_active:
+            self.is_active = is_active
+            self.update()
 
     def set_selected(self, is_selected):
-        self.is_selected = is_selected
-        self.update()
+        if self.is_selected != is_selected:
+            self.is_selected = is_selected
+            self.update()
 
     def update_photo_data(self, photo_data):
         """Update photo metadata and ensure tooltip is synchronized."""
@@ -267,29 +312,50 @@ class FilmstripItemWidget(QFrame):
 
         w = float(self.width())
         h = float(self.height())
+        is_dark = theme_manager.is_dark()
 
-        # 1. Base Film Negative Border & Background
+        # 1. Base 35mm Film Negative Border & Background (真实胶片色深褐色 / Deep Authentic Film Acetate Base)
+        # Real C-41 / silver halide color negative film has an iconic deep dark amber-brown / espresso base
         if self.is_active:
-            bg_color = QColor(36, 30, 20)
-            border_color = QColor(245, 158, 11)
-            border_width = 1.8
+            # Active photo: deep luminous amber-brown illuminated by light table
+            bg_grad = QLinearGradient(0, 0, 0, h)
+            bg_grad.setColorAt(0.0, QColor(48, 26, 14))      # #301a0e
+            bg_grad.setColorAt(0.45, QColor(34, 18, 10))     # #22120a
+            bg_grad.setColorAt(1.0, QColor(24, 13, 7))       # #180d07
+            border_color = QColor("#f59e0b")                 # Signature brand amber
+            border_width = 2.0
+            sprocket_edge_color = QColor(180, 83, 9, 180)
         elif self.is_selected:
-            bg_color = QColor(28, 30, 36)
-            border_color = QColor(217, 119, 6)
-            border_width = 1.5
+            # Multi-selected photo: deep amber-brown with amber highlight border
+            bg_grad = QLinearGradient(0, 0, 0, h)
+            bg_grad.setColorAt(0.0, QColor(42, 22, 12))      # #2a160c
+            bg_grad.setColorAt(0.45, QColor(30, 16, 8))      # #1e1008
+            bg_grad.setColorAt(1.0, QColor(20, 11, 6))       # #140b06
+            border_color = QColor(245, 158, 11, 230)
+            border_width = 1.8
+            sprocket_edge_color = QColor(180, 83, 9, 140)
         else:
-            bg_color = QColor(20, 21, 25)
-            border_color = QColor(44, 48, 58)
+            # Normal photo: classic deep dark amber-brown (深邃经典胶片深褐色)
+            bg_grad = QLinearGradient(0, 0, 0, h)
+            bg_grad.setColorAt(0.0, QColor(34, 18, 10))      # #22120a Deep dark amber sheen
+            bg_grad.setColorAt(0.45, QColor(24, 13, 7))      # #180d07 Rich espresso film base
+            bg_grad.setColorAt(1.0, QColor(17, 9, 5))        # #110905 Dense negative base
+            border_color = QColor(48, 26, 14)                # #301a0e Subtle dark brown rim
             border_width = 1.0
+            sprocket_edge_color = QColor(14, 7, 3, 220) if is_dark else QColor(38, 20, 10, 180)
 
-        painter.setBrush(QBrush(bg_color))
+        painter.setBrush(QBrush(bg_grad))
         painter.setPen(QPen(border_color, border_width))
-        painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 4.0, 4.0)
+        painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 3.5, 3.5)
 
-        # 2. Draw 35mm Sprocket Holes with strict proportional scaling (Item 9)
-        sprocket_pen = QPen(QColor(36, 38, 48), 0.5)
-        sprocket_brush = QBrush(QColor(10, 11, 14))
-        painter.setPen(sprocket_pen)
+        # 2. Draw 35mm Sprocket Holes punched into the brown film base
+        # Holes reveal the underlying recessed track depth (dark or light groove)
+        if is_dark:
+            sprocket_brush = QBrush(QColor(8, 9, 13))
+        else:
+            sprocket_brush = QBrush(QColor(220, 224, 232))
+
+        painter.setPen(QPen(sprocket_edge_color, 0.7))
         painter.setBrush(sprocket_brush)
 
         margin_y = h * 0.14
@@ -307,20 +373,25 @@ class FilmstripItemWidget(QFrame):
             painter.drawRoundedRect(QRectF(hx, top_hy, hole_w, hole_h), hole_r, hole_r)
             painter.drawRoundedRect(QRectF(hx, bot_hy, hole_w, hole_h), hole_r, hole_r)
 
-        # 3. Draw Thumbnail strictly inside leader bands
+        # 3. Draw Thumbnail strictly inside leader bands with camera aperture frame border
         thumb_rect = QRectF(4.0, margin_y, w - 8.0, h - margin_y * 2.0)
         painter.setClipRect(thumb_rect)
+        painter.fillRect(thumb_rect, QColor(10, 8, 6))
         if self._pixmap and not self._pixmap.isNull():
             px = thumb_rect.x() + (thumb_rect.width() - self._pixmap.width()) / 2.0
             py = thumb_rect.y() + (thumb_rect.height() - self._pixmap.height()) / 2.0
             painter.drawPixmap(int(px), int(py), self._pixmap)
-        else:
-            painter.fillRect(thumb_rect, QColor(20, 20, 22))
 
-        # 4. Draw Filename Overlay at the bottom of the active frame (Light translucent glass)
+        # 4. Draw camera aperture frame border around the exposed thumbnail
+        painter.setClipping(False)
+        painter.setPen(QPen(QColor(14, 7, 4, 220), 0.8))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(thumb_rect)
+
+        # 5. Draw Filename Overlay at the bottom of the active frame (Light translucent glass)
         overlay_h = max(14.0, min(24.0, h * 0.20))
         overlay_rect = QRectF(thumb_rect.x(), thumb_rect.bottom() - overlay_h, thumb_rect.width(), overlay_h)
-        painter.fillRect(overlay_rect, QColor(0, 0, 0, 80))
+        painter.fillRect(overlay_rect, QColor(0, 0, 0, 85))
 
         painter.setPen(QPen(QColor(230, 230, 230)))
         font = painter.font()
@@ -332,23 +403,22 @@ class FilmstripItemWidget(QFrame):
         elided = fm.elidedText(self.filename, Qt.TextElideMode.ElideMiddle, int(overlay_rect.width() - 4))
         painter.drawText(overlay_rect, Qt.AlignmentFlag.AlignCenter, elided)
 
-        # 5. Draw Edited/Modified indicator badge (Item 1)
-        painter.setClipping(False)
+        # 6. Draw Edited/Modified indicator badge (Item 1)
         if self.photo_data.get("is_dirty") or self.photo_data.get("is_edited"):
             badge_sz = max(5.0, min(9.0, h * 0.07))
             painter.setPen(QPen(QColor(0, 0, 0, 200), 1.0))
             painter.setBrush(QBrush(QColor("#f59e0b")))
             painter.drawEllipse(QRectF(margin_y * 0.6, margin_y * 1.1, badge_sz, badge_sz))
 
-        # 6. Top layer: High-visibility Selection & Active Focus Border (Single and Multi-select)
+        # 7. Top layer: High-visibility Selection & Active Focus Border
         if self.is_active:
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor("#f59e0b"), 2.2))
-            painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 4.0, 4.0)
+            painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 3.5, 3.5)
         elif self.is_selected:
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor(245, 158, 11, 230), 2.0))
-            painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 4.0, 4.0)
+            painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 3.5, 3.5)
 
     @property
     def is_dirty(self):
@@ -362,6 +432,59 @@ class FilmstripItemWidget(QFrame):
             p_path = self.photo_data.get("path")
             self.photo_data["is_edited"] = bool(p_path and sdc_manager.has_sdc(p_path))
         self.update()
+
+
+class FilmTrackContainer(QFrame):
+    """Concave physical film groove / guide-rail channel with rounded corners.
+    Renders an authentic darkroom recessed track (长条凹形胶片条槽路) with subtle 3D sunken depth.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w, h = float(self.width()), float(self.height())
+        r = 8.0
+
+        is_dark = theme_manager.is_dark()
+        if is_dark:
+            # Inset recessed groove gradient: sunken dark charcoal/black
+            bg_grad = QLinearGradient(0, 0, 0, h)
+            bg_grad.setColorAt(0.0, QColor(6, 7, 10))
+            bg_grad.setColorAt(0.18, QColor(8, 9, 13))
+            bg_grad.setColorAt(0.85, QColor(10, 11, 16))
+            bg_grad.setColorAt(1.0, QColor(13, 14, 20))
+            painter.setBrush(QBrush(bg_grad))
+
+            # Outer groove rim border
+            pen = QPen(QColor(28, 30, 40), 1.0)
+            painter.setPen(pen)
+            painter.drawRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), r, r)
+
+            # Subtle inner top shadow to accentuate the concave depth
+            shadow_pen = QPen(QColor(0, 0, 0, 140), 1.0)
+            painter.setPen(shadow_pen)
+            painter.drawRoundedRect(QRectF(1.5, 1.5, w - 3.0, h - 3.0), r - 0.5, r - 0.5)
+        else:
+            # Inset recessed groove gradient: light metallic concave groove
+            bg_grad = QLinearGradient(0, 0, 0, h)
+            bg_grad.setColorAt(0.0, QColor(214, 219, 228))
+            bg_grad.setColorAt(0.18, QColor(224, 228, 236))
+            bg_grad.setColorAt(0.85, QColor(234, 238, 245))
+            bg_grad.setColorAt(1.0, QColor(242, 245, 250))
+            painter.setBrush(QBrush(bg_grad))
+
+            # Outer groove rim border
+            pen = QPen(QColor(194, 200, 212), 1.0)
+            painter.setPen(pen)
+            painter.drawRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), r, r)
+
+            # Subtle inner top shadow
+            shadow_pen = QPen(QColor(0, 0, 0, 25), 1.0)
+            painter.setPen(shadow_pen)
+            painter.drawRoundedRect(QRectF(1.5, 1.5, w - 3.0, h - 3.0), r - 0.5, r - 0.5)
 
 
 class FilmstripWidget(QWidget):
@@ -394,8 +517,41 @@ class FilmstripWidget(QWidget):
         self._active_id = None
         self._selected_ids = set()
         self._can_paste_params = False
-
+        self._pending_scroll_timers = []
         self._init_ui()
+        theme_manager.themeChanged.connect(lambda _: self.apply_theme())
+
+    def _cancel_pending_scroll_timers(self):
+        """Cancel any delayed scroll alignment timers to prevent jumping during user interactions."""
+        timers = getattr(self, '_pending_scroll_timers', [])
+        for timer in list(timers):
+            try:
+                timer.stop()
+                timer.deleteLater()
+            except Exception:
+                pass
+        self._pending_scroll_timers = []
+
+    def _safe_single_shot(self, delay_ms, callback):
+        """Spawn a cancellable single-shot timer tracked in self._pending_scroll_timers."""
+        if not hasattr(self, '_pending_scroll_timers'):
+            self._pending_scroll_timers = []
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def _wrapper():
+            if timer in self._pending_scroll_timers:
+                self._pending_scroll_timers.remove(timer)
+            timer.deleteLater()
+            try:
+                callback()
+            except Exception:
+                pass
+
+        timer.timeout.connect(_wrapper)
+        self._pending_scroll_timers.append(timer)
+        timer.start(delay_ms)
+        return timer
 
     def set_can_paste(self, can_paste: bool):
         """Update whether clipboard contains a valid darkroom recipe."""
@@ -437,10 +593,18 @@ class FilmstripWidget(QWidget):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 6, 10, 6)
         main_layout.setSpacing(8)
-        self.setStyleSheet("background: #0d0e11; border-top: 1px solid #20222a;")
+        self.setStyleSheet("background: #0d0e12; border: none;")
 
-        # Scroll area for items (Smooth non-linear scrolling with edge indicators)
-        self.scroll_area = SmoothScrollArea(self, is_horizontal=True)
+        # 1. Long Concave Film Track Channel (长条凹形胶片条槽路)
+        self.track_container = FilmTrackContainer(self)
+        self.track_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.track_container.customContextMenuRequested.connect(self._on_blank_context_menu)
+        track_layout = QVBoxLayout(self.track_container)
+        track_layout.setContentsMargins(6, 4, 6, 4)
+        track_layout.setSpacing(0)
+
+        # Scroll area for items (Smooth non-linear scrolling within the concave track)
+        self.scroll_area = SmoothScrollArea(self.track_container, is_horizontal=True, enable_edge_fade=False)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -450,23 +614,24 @@ class FilmstripWidget(QWidget):
                 border: none;
             }
             QScrollBar:horizontal {
-                background: rgba(18, 19, 24, 0.75);
+                background: transparent;
                 height: 6px;
-                margin: 0px 4px 1px 4px;
-                border-radius: 3px;
+                margin: 0px;
                 border: none;
             }
             QScrollBar::handle:horizontal {
-                background: #474d61;
+                background: #3f4350;
                 min-width: 24px;
                 border-radius: 3px;
                 border: none;
             }
             QScrollBar::handle:horizontal:hover {
-                background: #f59e0b;
+                background: #cbd5e1;
+                border-radius: 3px;
             }
             QScrollBar::handle:horizontal:pressed {
-                background: #d97706;
+                background: #f59e0b;
+                border-radius: 3px;
             }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
                 height: 0px;
@@ -482,78 +647,253 @@ class FilmstripWidget(QWidget):
 
         self.scroll_content = QWidget()
         self.scroll_layout = QHBoxLayout(self.scroll_content)
-        self.scroll_layout.setContentsMargins(0, 7, 0, 7)
+        self.scroll_layout.setContentsMargins(4, 0, 4, 0)
         self.scroll_layout.setSpacing(6)
+        self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件")
+        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+        self.scroll_layout.addWidget(self._empty_lbl, 1, Qt.AlignmentFlag.AlignCenter)
         self.scroll_layout.addStretch()
 
         self.scroll_area.setWidget(self.scroll_content)
+        hbar = self.scroll_area.horizontalScrollBar()
+        if hbar:
+            hbar.sliderMoved.connect(lambda _: self._cancel_pending_scroll_timers())
         self.scroll_area.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.scroll_area.customContextMenuRequested.connect(self._on_blank_context_menu)
         self.scroll_content.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.scroll_content.customContextMenuRequested.connect(self._on_blank_context_menu)
-        main_layout.addWidget(self.scroll_area, 1)
+        orig_content_press = self.scroll_content.mousePressEvent
+        def _content_mouse_press(ev):
+            if ev.button() == Qt.MouseButton.LeftButton:
+                child = self.scroll_content.childAt(ev.position().toPoint())
+                if child is None or child == self.scroll_content or child == self._empty_lbl:
+                    if len(self._selected_ids) > 1 and self._active_id:
+                        self.set_active_photo(self._active_id, reset_selection=True)
+                        ev.accept()
+                        return
+            orig_content_press(ev)
+        self.scroll_content.mousePressEvent = _content_mouse_press
 
-        # Right Action Container (Upper 50%: 1/4 胶片库 + 1/4 张数; Lower 50%: 2/4 铺满 ＋ 添加 button)
+        viewport = self.scroll_area.viewport()
+        orig_vp_press = viewport.mousePressEvent
+        def _vp_mouse_press(ev):
+            if ev.button() == Qt.MouseButton.LeftButton:
+                pos_in_content = self.scroll_content.mapFrom(viewport, ev.position().toPoint())
+                child = self.scroll_content.childAt(pos_in_content)
+                if child is None or child == self.scroll_content or child == self._empty_lbl:
+                    if len(self._selected_ids) > 1 and self._active_id:
+                        self.set_active_photo(self._active_id, reset_selection=True)
+                        ev.accept()
+                        return
+            orig_vp_press(ev)
+        viewport.mousePressEvent = _vp_mouse_press
+
+        orig_track_press = self.track_container.mousePressEvent
+        def _track_mouse_press(ev):
+            if ev.button() == Qt.MouseButton.LeftButton:
+                if len(self._selected_ids) > 1 and self._active_id:
+                    self.set_active_photo(self._active_id, reset_selection=True)
+                    ev.accept()
+                    return
+            orig_track_press(ev)
+        self.track_container.mousePressEvent = _track_mouse_press
+
+        track_layout.addWidget(self.scroll_area)
+        main_layout.addWidget(self.track_container, 1)
+
+        # 2. Right Action Container (Upper: 胶片库 + 张数; Lower: ＋ 添加 button)
         self.action_container = QWidget()
         self.action_container.setFixedWidth(66)
         action_layout = QVBoxLayout(self.action_container)
-        action_layout.setContentsMargins(1, 2, 1, 2)
-        action_layout.setSpacing(2)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(4)
 
-        # Upper container (50%): 1/4 胶片库 + 1/4 张数
-        top_box = QWidget()
-        top_layout = QVBoxLayout(top_box)
-        top_layout.setContentsMargins(0, 0, 0, 0)
+        # Upper container: 胶片库 + 张数
+        self.top_box = QFrame()
+        self.top_box.setStyleSheet("background: #13141a; border: 1px solid #20222a; border-radius: 6px;")
+        top_layout = QVBoxLayout(self.top_box)
+        top_layout.setContentsMargins(0, 2, 0, 2)
         top_layout.setSpacing(0)
 
         self.lbl_lib_title = QLabel("胶片库")
         self.lbl_lib_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_lib_title.setStyleSheet("color: #71717a; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px;")
+        self.lbl_lib_title.setStyleSheet("color: #71717a; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
         top_layout.addWidget(self.lbl_lib_title, 1)
 
         self.count_label = QLabel("0 张")
         self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.count_label.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold; padding: 0px; margin: 0px;")
+        self.count_label.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
         top_layout.addWidget(self.count_label, 1)
-        action_layout.addWidget(top_box, 1)
+        action_layout.addWidget(self.top_box, 1)
 
-        # Lower container (50%): ＋ 添加 按钮全部铺满
+        # Lower container: ＋ 添加 按钮全部铺满
         self.add_btn = QPushButton("＋ 添加")
         self.add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_btn.setToolTip("添加更多底片 / RAW 文件")
         self.add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.add_btn.setStyleSheet("""
-            QPushButton {
-                background: #181920;
-                color: #f59e0b;
-                border: 1px solid #2d303e;
-                border-radius: 4px;
-                font-size: 11px;
-                font-weight: bold;
-                padding: 0px;
-                margin: 0px;
-                outline: none;
-            }
-            QPushButton:hover {
-                background: #232530;
-                color: #fbbf24;
-                border: 1px solid #f59e0b;
-            }
-            QPushButton:pressed {
-                background: #121317;
-                color: #d97706;
-                border: 1px solid #d97706;
-            }
-            QPushButton:focus {
-                outline: none;
-                border: 1px solid #2d303e;
-            }
-        """)
         self.add_btn.clicked.connect(self.addRequested.emit)
         action_layout.addWidget(self.add_btn, 1)
 
         main_layout.addWidget(self.action_container)
+        self.apply_theme()
+
+    def apply_theme(self):
+        """Re-render filmstrip and track colors to match active UI theme (light / dark)."""
+        is_dark = theme_manager.is_dark()
+        if is_dark:
+            self.setStyleSheet("background: #0d0e12; border: none;")
+            self.scroll_area.setStyleSheet("""
+                QScrollArea {
+                    background: transparent;
+                    border: none;
+                }
+                QScrollBar:horizontal {
+                    background: transparent;
+                    height: 6px;
+                    margin: 0px;
+                    border: none;
+                }
+                QScrollBar::handle:horizontal {
+                    background: #3f4350;
+                    min-width: 24px;
+                    border-radius: 3px;
+                    border: none;
+                }
+                QScrollBar::handle:horizontal:hover {
+                    background: #cbd5e1;
+                    border-radius: 3px;
+                }
+                QScrollBar::handle:horizontal:pressed {
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                    height: 0px;
+                    width: 0px;
+                    background: none;
+                    border: none;
+                }
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                    background: none;
+                    border: none;
+                }
+            """)
+            if hasattr(self, "top_box"):
+                self.top_box.setStyleSheet("background: #13141a; border: 1px solid #20222a; border-radius: 6px;")
+            if hasattr(self, "lbl_lib_title"):
+                self.lbl_lib_title.setStyleSheet("color: #71717a; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
+            if hasattr(self, "count_label"):
+                self.count_label.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
+            if hasattr(self, "add_btn"):
+                self.add_btn.setStyleSheet("""
+                    QPushButton {
+                        background: #181920;
+                        color: #f59e0b;
+                        border: 1px solid #2d303e;
+                        border-radius: 6px;
+                        font-size: 11px;
+                        font-weight: bold;
+                        padding: 0px;
+                        margin: 0px;
+                        outline: none;
+                    }
+                    QPushButton:hover {
+                        background: #232530;
+                        color: #fbbf24;
+                        border: 1px solid #f59e0b;
+                    }
+                    QPushButton:pressed {
+                        background: #121317;
+                        color: #d97706;
+                        border: 1px solid #d97706;
+                    }
+                    QPushButton:focus {
+                        outline: none;
+                        border: 1px solid #2d303e;
+                    }
+                """)
+        else:
+            self.setStyleSheet("background: #e0e3ea; border: none;")
+            self.scroll_area.setStyleSheet("""
+                QScrollArea {
+                    background: transparent;
+                    border: none;
+                }
+                QScrollBar:horizontal {
+                    background: transparent;
+                    height: 6px;
+                    margin: 0px;
+                    border: none;
+                }
+                QScrollBar::handle:horizontal {
+                    background: #94a3b8;
+                    min-width: 24px;
+                    border-radius: 3px;
+                    border: none;
+                }
+                QScrollBar::handle:horizontal:hover {
+                    background: #64748b;
+                    border-radius: 3px;
+                }
+                QScrollBar::handle:horizontal:pressed {
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                    height: 0px;
+                    width: 0px;
+                    background: none;
+                    border: none;
+                }
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                    background: none;
+                    border: none;
+                }
+            """)
+            if hasattr(self, "top_box"):
+                self.top_box.setStyleSheet("background: #ffffff; border: 1px solid #d5d9e4; border-radius: 6px;")
+            if hasattr(self, "lbl_lib_title"):
+                self.lbl_lib_title.setStyleSheet("color: #64748b; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
+            if hasattr(self, "count_label"):
+                self.count_label.setStyleSheet("color: #d97706; font-size: 11px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
+            if hasattr(self, "add_btn"):
+                self.add_btn.setStyleSheet("""
+                    QPushButton {
+                        background: #ffffff;
+                        color: #d97706;
+                        border: 1px solid #d5d9e4;
+                        border-radius: 6px;
+                        font-size: 11px;
+                        font-weight: bold;
+                        padding: 0px;
+                        margin: 0px;
+                        outline: none;
+                    }
+                    QPushButton:hover {
+                        background: #fef3c7;
+                        color: #b45309;
+                        border: 1px solid #f59e0b;
+                    }
+                    QPushButton:pressed {
+                        background: #fde68a;
+                        color: #92400e;
+                        border: 1px solid #d97706;
+                    }
+                    QPushButton:focus {
+                        outline: none;
+                        border: 1px solid #d5d9e4;
+                    }
+                """)
+        if hasattr(self, "track_container"):
+            self.track_container.update()
+        for w in self._item_widgets.values():
+            w.update()
+        self.update()
+
 
     def set_photo_dirty(self, photo_id, is_dirty=True):
         if photo_id in self._item_widgets:
@@ -561,27 +901,112 @@ class FilmstripWidget(QWidget):
 
     def _compute_item_dimensions(self):
         """Computes (item_w, item_h) leaving comfortable vertical padding
-        above (so selection border doesn't touch the top dividing line)
-        and below (so horizontal scrollbar doesn't obscure sprocket holes).
+        inside the concave film track so selection border doesn't touch the groove rims
+        and horizontal scrollbar doesn't obscure sprocket holes.
         """
         avail_h = self.height()
-        item_h = max(48, min(240, avail_h - 26))
+        item_h = max(48, min(240, avail_h - 34))
         item_w = int(round(item_h * 0.92))
         return item_w, item_h
 
     def resizeEvent(self, event):
+        """Anchor visible photos during resize (e.g. splitter dragging) to eliminate
+        horizontal drift and preserve scroll stability.
+        """
+        if not hasattr(self, 'scroll_area') or not self.scroll_area:
+            super().resizeEvent(event)
+            return
+
+        vp = self.scroll_area.viewport()
+        hbar = self.scroll_area.horizontalScrollBar()
+        if not vp or not hbar or not self._item_widgets:
+            super().resizeEvent(event)
+            item_w, item_h = self._compute_item_dimensions()
+            for item in self._item_widgets.values():
+                item.set_item_size(item_w, item_h)
+            return
+
+        # Cancel any pending delayed timers so they don't fire mid-resize
+        self._cancel_pending_scroll_timers()
+
+        vp_w_before = vp.width()
+        vp_center = vp_w_before // 2
+
+        was_at_min = (hbar.value() <= hbar.minimum())
+        was_at_max = (hbar.value() >= hbar.maximum() and hbar.maximum() > 0)
+
+        anchor_item = None
+        if not was_at_min and not was_at_max:
+            # Priority 1: active photo if its center is within the viewport [0, vp_w_before]
+            if self._active_id and self._active_id in self._item_widgets:
+                act_w = self._item_widgets[self._active_id]
+                try:
+                    act_pos = act_w.mapTo(vp, QPoint(act_w.width() // 2, 0)).x()
+                    if 0 <= act_pos <= vp_w_before:
+                        anchor_item = act_w
+                except Exception:
+                    pass
+
+            # Priority 2: if active photo is outside viewport (scrolled elsewhere),
+            # pick the item whose center is closest to viewport center
+            if anchor_item is None:
+                closest_dist = float('inf')
+                for item in self._item_widgets.values():
+                    try:
+                        pos = item.mapTo(vp, QPoint(item.width() // 2, 0)).x()
+                        dist = abs(pos - vp_center)
+                        if dist < closest_dist:
+                            closest_dist = dist
+                            anchor_item = item
+                    except Exception:
+                        pass
+
+        center_before = None
+        ratio = 0.5
+        if anchor_item is not None:
+            try:
+                center_before = anchor_item.mapTo(vp, QPoint(anchor_item.width() // 2, 0)).x()
+                ratio = (center_before / vp_w_before) if vp_w_before > 0 else 0.5
+            except Exception:
+                pass
+
         super().resizeEvent(event)
+
         item_w, item_h = self._compute_item_dimensions()
         for item in self._item_widgets.values():
             item.set_item_size(item_w, item_h)
 
+        if hasattr(self, 'scroll_content') and self.scroll_content:
+            self.scroll_content.adjustSize()
+
+        if was_at_min:
+            target = hbar.minimum()
+        elif was_at_max:
+            target = hbar.maximum()
+        elif anchor_item is not None and center_before is not None:
+            vp_w_after = vp.width()
+            desired_center = int(vp_w_after * ratio)
+            new_target = anchor_item.x() + (anchor_item.width() // 2) - desired_center
+            target = max(hbar.minimum(), min(hbar.maximum(), new_target))
+        else:
+            target = hbar.value()
+
+        if hasattr(self.scroll_area, "scroll_to"):
+            self.scroll_area.scroll_to(target, animate=False)
+        else:
+            hbar.setValue(target)
+
     def wheelEvent(self, event):
         """Enable horizontal scrolling via standard mouse wheel over the filmstrip."""
+        self._cancel_pending_scroll_timers()
         delta = event.angleDelta().y() or event.angleDelta().x()
         if delta != 0:
-            h_bar = self.scroll_area.horizontalScrollBar()
-            h_bar.setValue(h_bar.value() - delta)
-            event.accept()
+            if hasattr(self.scroll_area, "wheelEvent"):
+                self.scroll_area.wheelEvent(event)
+            else:
+                h_bar = self.scroll_area.horizontalScrollBar()
+                h_bar.setValue(h_bar.value() - delta)
+                event.accept()
         else:
             super().wheelEvent(event)
 
@@ -604,9 +1029,10 @@ class FilmstripWidget(QWidget):
 
         if len(photos) == 0:
             if not hasattr(self, '_empty_lbl') or self._empty_lbl is None:
-                self._empty_lbl = QLabel("底片库为空，点击右侧「＋ 添加」或拖入文件开始导入")
-                self._empty_lbl.setStyleSheet("color: #64748b; font-size: 11px; margin-left: 14px;")
-            self.scroll_layout.insertWidget(0, self._empty_lbl)
+                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始冲印")
+                self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+            self.scroll_layout.insertWidget(0, self._empty_lbl, 1, Qt.AlignmentFlag.AlignCenter)
             self.selectionChanged.emit([])
             return
 
@@ -627,8 +1053,15 @@ class FilmstripWidget(QWidget):
             item.removeRequested.connect(self.photoRemoved.emit)
             item.contextMenuRequested.connect(self._show_context_menu)
             self._item_widgets[pid] = item
-            self.scroll_layout.insertWidget(idx, item)
+            self.scroll_layout.insertWidget(idx, item, 0, Qt.AlignmentFlag.AlignVCenter)
         self.selectionChanged.emit(list(self._selected_ids))
+
+        # Auto-scroll to active photo upon initial population with multi-phase layout calibration
+        if active_id:
+            self.scroll_to_active(animate=False, force_center=True)
+            self._safe_single_shot(0, lambda: self.scroll_to_active(animate=False, force_center=True))
+            self._safe_single_shot(60, lambda: self.scroll_to_active(animate=False, force_center=True))
+            self._safe_single_shot(260, lambda: self.scroll_to_active(animate=False, force_center=True))
 
     def append_photo(self, photo, is_active=False):
         """Incrementally appends a single photo entry to the filmstrip without clearing."""
@@ -655,16 +1088,87 @@ class FilmstripWidget(QWidget):
         item.contextMenuRequested.connect(self._show_context_menu)
         self._item_widgets[pid] = item
         idx = max(0, len(self._item_widgets) - 1)
-        self.scroll_layout.insertWidget(idx, item)
+        self.scroll_layout.insertWidget(idx, item, 0, Qt.AlignmentFlag.AlignVCenter)
         if is_active:
             self.selectionChanged.emit(list(self._selected_ids))
 
-    def set_active_photo(self, active_id):
+    def remove_photo(self, photo_id, next_active_id=None):
+        """Incrementally removes a single photo entry without flushing the entire layout,
+        strictly preserving the horizontal scroll position.
+        """
+        w = self._item_widgets.pop(photo_id, None)
+        if w is not None:
+            self.scroll_layout.removeWidget(w)
+            w.deleteLater()
+
+        self._photos_list = [p for p in self._photos_list if p.get("id") != photo_id]
+        self._selected_ids.discard(photo_id)
+        self.count_label.setText(f"{len(self._photos_list)} 张")
+
+        if len(self._photos_list) == 0:
+            if not hasattr(self, '_empty_lbl') or self._empty_lbl is None:
+                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始冲印")
+                self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+            self.scroll_layout.insertWidget(0, self._empty_lbl, 1, Qt.AlignmentFlag.AlignCenter)
+            self._active_id = None
+            self._selected_ids = set()
+            self.selectionChanged.emit([])
+            return
+
+        if next_active_id:
+            self.set_active_photo(next_active_id, scroll_to_visible=True)
+
+    def remove_multiple_photos(self, photo_ids, next_active_id=None):
+        """Incrementally removes multiple photo entries without flushing the entire layout."""
+        id_set = set(photo_ids)
+        for pid in id_set:
+            w = self._item_widgets.pop(pid, None)
+            if w is not None:
+                self.scroll_layout.removeWidget(w)
+                w.deleteLater()
+            self._selected_ids.discard(pid)
+
+        self._photos_list = [p for p in self._photos_list if p.get("id") not in id_set]
+        self.count_label.setText(f"{len(self._photos_list)} 张")
+
+        if len(self._photos_list) == 0:
+            if not hasattr(self, '_empty_lbl') or self._empty_lbl is None:
+                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始冲印")
+                self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+            self.scroll_layout.insertWidget(0, self._empty_lbl, 1, Qt.AlignmentFlag.AlignCenter)
+            self._active_id = None
+            self._selected_ids = set()
+            self.selectionChanged.emit([])
+            return
+
+        if next_active_id:
+            self.set_active_photo(next_active_id, scroll_to_visible=True)
+
+    def set_active_photo(self, active_id, scroll_to_visible=False, reset_selection=False, new_selected_ids=None):
+        old_active = self._active_id
+        old_selected = set(self._selected_ids)
         self._active_id = active_id
-        if active_id and active_id not in self._selected_ids:
-            self._selected_ids = {active_id}
-        self._update_items_selection()
+        if new_selected_ids is not None:
+            self._selected_ids = set(new_selected_ids)
+        elif reset_selection or (active_id and active_id not in self._selected_ids):
+            self._selected_ids = {active_id} if active_id else set()
+
+        affected = {old_active, active_id} | (old_selected ^ self._selected_ids)
+        affected.discard(None)
+        if len(affected) <= 20:
+            for pid in affected:
+                if pid in self._item_widgets:
+                    w = self._item_widgets[pid]
+                    w.set_active(pid == self._active_id)
+                    w.set_selected(pid in self._selected_ids)
+        else:
+            self._update_items_selection()
+
         self.selectionChanged.emit(list(self._selected_ids))
+        if scroll_to_visible and active_id:
+            self.scroll_to_photo(active_id, animate=True, force_center=False)
 
     def get_selected_photo_ids(self):
         return list(self._selected_ids) if self._selected_ids else ([self._active_id] if self._active_id else [])
@@ -704,15 +1208,13 @@ class FilmstripWidget(QWidget):
                 i1 = pids.index(self._active_id)
                 i2 = pids.index(photo_id)
                 start, end = min(i1, i2), max(i1, i2)
-                self._selected_ids = set(pids[start:end+1])
-                self.set_active_photo(photo_id)
+                range_ids = set(pids[start:end+1])
+                self.set_active_photo(photo_id, reset_selection=False, new_selected_ids=range_ids)
                 self.photoSelected.emit(photo_id)
         else:
-            # Normal single click
-            self._selected_ids = {photo_id}
-            self.set_active_photo(photo_id)
+            # Normal single click: cancels multi-selection, selecting ONLY this clicked photo
+            self.set_active_photo(photo_id, reset_selection=True)
             self.photoSelected.emit(photo_id)
-        self.selectionChanged.emit(list(self._selected_ids))
 
     def update_photo_thumbnail(self, photo_id, pixmap):
         """Update thumbnail for specific photo item."""
@@ -724,11 +1226,58 @@ class FilmstripWidget(QWidget):
         if photo_id in self._item_widgets:
             self._item_widgets[photo_id].update_photo_data(photo_data)
 
-    def scroll_to_active(self):
-        """Smoothly ensure active photo item is centered in view."""
-        if self._active_id in self._item_widgets:
-            w = self._item_widgets[self._active_id]
-            self.scroll_area.ensureWidgetVisible(w, 50, 0)
+    def scroll_to_photo(self, photo_id, animate=False, force_center=False):
+        """Ensure the specified photo widget is visible in the scroll area.
+        If force_center is True, or if the widget is outside the visible viewport,
+        scroll it to the center smoothly or instantly.
+        """
+        if not photo_id or photo_id not in self._item_widgets:
+            return
+
+        w = self._item_widgets[photo_id]
+        hbar = self.scroll_area.horizontalScrollBar()
+        vp = self.scroll_area.viewport()
+        if not hbar or not vp:
+            return
+
+        vp_w = vp.width()
+        if vp_w <= 0:
+            self._safe_single_shot(25, lambda: self.scroll_to_photo(photo_id, animate=animate, force_center=force_center))
+            return
+
+        self.scroll_content.adjustSize()
+        w_x = w.x()
+        w_w = w.width()
+
+        # If w.x() is still 0 but it's not the first item, estimate from index
+        if w_x == 0 and photo_id in [p.get("id") for p in self._photos_list]:
+            idx = next((i for i, p in enumerate(self._photos_list) if p.get("id") == photo_id), 0)
+            if idx > 0:
+                item_w, _ = self._compute_item_dimensions()
+                w_x = idx * (item_w + 6)
+                w_w = item_w
+
+        cur_val = hbar.value()
+        is_visible = (w_x >= cur_val + 10) and (w_x + w_w <= cur_val + vp_w - 10)
+
+        if not force_center and is_visible:
+            return
+
+        target_x = int(w_x - (vp_w - w_w) / 2)
+        target_x = max(hbar.minimum(), min(hbar.maximum(), target_x))
+
+        if hasattr(self.scroll_area, "scroll_to"):
+            self.scroll_area.scroll_to(target_x, animate=animate)
+        else:
+            hbar.setValue(target_x)
+
+    def scroll_to_active(self, animate=False, force_center=True):
+        """Ensure active photo item is centered in view with multi-tick alignment."""
+        if not self._active_id:
+            return
+        self.scroll_to_photo(self._active_id, animate=animate, force_center=force_center)
+        # Double-check calibration on next tick to guarantee perfection after Qt layout pass
+        self._safe_single_shot(30, lambda: self.scroll_to_photo(self._active_id, animate=False, force_center=force_center))
 
     def scroll_to_start(self):
         """Scroll filmstrip to the very beginning."""
@@ -750,8 +1299,7 @@ class FilmstripWidget(QWidget):
             return
         first_id = self._photos_list[0].get("id")
         if first_id:
-            self._selected_ids = {first_id}
-            self.set_active_photo(first_id)
+            self.set_active_photo(first_id, reset_selection=True)
             self.photoSelected.emit(first_id)
             self.scroll_to_start()
             self.scroll_to_active()
@@ -762,8 +1310,7 @@ class FilmstripWidget(QWidget):
             return
         last_id = self._photos_list[-1].get("id")
         if last_id:
-            self._selected_ids = {last_id}
-            self.set_active_photo(last_id)
+            self.set_active_photo(last_id, reset_selection=True)
             self.photoSelected.emit(last_id)
             self.scroll_to_end()
             self.scroll_to_active()
@@ -778,9 +1325,9 @@ class FilmstripWidget(QWidget):
         curr_idx = pids.index(self._active_id) if self._active_id in pids else (0 if to_start else len(pids) - 1)
         target_idx = 0 if to_start else len(pids) - 1
         start, end = min(curr_idx, target_idx), max(curr_idx, target_idx)
-        self._selected_ids = set(pids[start:end + 1])
+        range_ids = set(pids[start:end + 1])
         target_id = pids[target_idx]
-        self.set_active_photo(target_id)
+        self.set_active_photo(target_id, new_selected_ids=range_ids)
         self.photoSelected.emit(target_id)
         if to_start:
             self.scroll_to_start()

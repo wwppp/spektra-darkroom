@@ -7092,6 +7092,102 @@
                     0.7005540490274742
                 ]
             ]
+        },
+        "physical_extensions": {
+            "crystal_grain": {
+                "population": {
+                    "coatingDensityScale": 1,
+                    "radiusSpan": 6,
+                    "sublayerShares": [
+                        0.25,
+                        0.25,
+                        0.25,
+                        0.25
+                    ]
+                },
+                "size_mm": 0.0075,
+                "strength": 0.0171,
+                "density_profile": [
+                    [
+                        20.0,
+                        0.3373,
+                        0.2629,
+                        0.8187,
+                        1.1811,
+                        0.3212
+                    ],
+                    [
+                        20.0,
+                        0.3583,
+                        0.3183,
+                        1.6514,
+                        1.4856,
+                        0.3631
+                    ],
+                    [
+                        20.0,
+                        0.1069,
+                        0.5457,
+                        4.2644,
+                        1.38,
+                        0.3446
+                    ]
+                ],
+                "layer_weights": [
+                    0.7,
+                    1,
+                    1.35
+                ],
+                "density_law": 2
+            },
+            "halation": {
+                "look_scale": 1,
+                "strength": [
+                    0.0055,
+                    0.00010804,
+                    0
+                ],
+                "return_matrix": [
+                    [
+                        0.001183,
+                        0,
+                        4.4e-05
+                    ],
+                    [
+                        3e-06,
+                        1.9e-05,
+                        0
+                    ],
+                    [
+                        0,
+                        0,
+                        0
+                    ]
+                ],
+                "profile": null
+            },
+            "couplers": {
+                "coupler_diffusion_mm": 0.009,
+                "adjacency_radius_mm": 0.026249,
+                "adjacency_strength": 0.984293,
+                "coupler_inhibition": [
+                    [
+                        0.042552,
+                        0.068887,
+                        0.0
+                    ],
+                    [
+                        0.140233,
+                        0.020903,
+                        0.0
+                    ],
+                    [
+                        0.053359,
+                        0.087401,
+                        0.0
+                    ]
+                ]
+            }
         }
     }
 }

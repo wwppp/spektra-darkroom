@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QPixmap, QImage, QColor, QIcon, QFontMetrics
 
 from ui.window_utils import apply_dark_titlebar
+from ui.theme_manager import theme_manager
 
 logger = logging.getLogger("SpektraDarkroom.ExportQueue")
 
@@ -58,13 +59,14 @@ class ExportTask:
 
 
 class _LoadImageWorker(QThread):
-    finished_load = Signal(object, str)  # raw_target, error_msg
+    finished_load = Signal(object, object, str)  # raw_target, lut_arr, error_msg
 
-    def __init__(self, engine, photo_path, base_ev=0.0):
+    def __init__(self, engine, photo_path, base_ev=0.0, params=None):
         super().__init__()
         self.engine = engine
         self.photo_path = photo_path
         self.base_ev = base_ev
+        self.params = params or {}
         self._is_cancelled = False
 
     def cancel(self):
@@ -72,7 +74,7 @@ class _LoadImageWorker(QThread):
 
     def run(self):
         if self._is_cancelled:
-            self.finished_load.emit(None, "任务已取消")
+            self.finished_load.emit(None, None, "任务已取消")
             return
         try:
             raw_target = None
@@ -88,13 +90,27 @@ class _LoadImageWorker(QThread):
                     raw_target = self.engine.raw_preview
 
             if self._is_cancelled:
-                self.finished_load.emit(None, "任务已取消")
+                self.finished_load.emit(None, None, "任务已取消")
+                return
+
+            lut_arr = None
+            if raw_target is not None and hasattr(self.engine, "get_3d_lut") and self.params:
+                film_stock = self.params.get("film_stock", "kodak_portra_400")
+                paper_stock = self.params.get("paper_stock", "kodak_2383")
+                print_mode = self.params.get("print_mode", "optical")
+                try:
+                    lut_arr = self.engine.get_3d_lut(film_stock, paper_stock, lut_size=33, print_mode=print_mode)
+                except Exception as ex_lut:
+                    logger.warning(f"Failed to fetch 3D LUT in background loader: {ex_lut}")
+
+            if self._is_cancelled:
+                self.finished_load.emit(None, None, "任务已取消")
             elif raw_target is not None:
-                self.finished_load.emit(raw_target, "")
+                self.finished_load.emit(raw_target, lut_arr, "")
             else:
-                self.finished_load.emit(None, "无法载入底片图像数据")
+                self.finished_load.emit(None, None, "无法载入底片图像数据")
         except Exception as e:
-            self.finished_load.emit(None, str(e))
+            self.finished_load.emit(None, None, str(e))
 
 
 class _SaveImageWorker(QThread):
@@ -199,6 +215,16 @@ class ExportQueueManager(QObject):
         if not isinstance(task, ExportTask):
             return
         self.tasks.append(task)
+        self.queue_changed.emit()
+        self._update_overall_status()
+        QTimer.singleShot(0, self._process_next)
+
+    def enqueue_batch(self, tasks):
+        """Enqueue multiple ExportTasks into the queue with a single unified UI notification."""
+        valid_tasks = [t for t in tasks if isinstance(t, ExportTask)]
+        if not valid_tasks:
+            return
+        self.tasks.extend(valid_tasks)
         self.queue_changed.emit()
         self._update_overall_status()
         QTimer.singleShot(0, self._process_next)
@@ -313,16 +339,12 @@ class ExportQueueManager(QObject):
         except Exception:
             hw_mode = "global"
 
-        # Check engine mode
-        engine_mode = str(next_task.params.get("engine", "wysiwyg")).lower()
-
-        # Ultra-fast GPU Pipeline (only for WYSIWYG engine when hardware acceleration is enabled):
+        # Hardware-accelerated GPU Pipeline:
         # Step 1 (Thread): Load 100% full-resolution RAW image in background
         # Step 2 (Main Thread): Render on GPU via FBO shader in ~20ms (zero freeze!)
         # Step 3 (Thread): Compress & write image to disk in background
         can_use_gpu = (
-            engine_mode != "official"
-            and hw_mode != "off"
+            hw_mode != "off"
             and self.canvas is not None
             and hasattr(self.canvas, "render_offscreen")
         )
@@ -336,11 +358,12 @@ class ExportQueueManager(QObject):
         task.params.setdefault("format", task.format_type or "jpeg")
         task.params.setdefault("bit_depth", task.bit_depth or 8)
         base_ev = float(task.params.get("base_ev", 0.0))
-        worker = _LoadImageWorker(self.engine, task.photo_path, base_ev=base_ev)
+        worker = _LoadImageWorker(self.engine, task.photo_path, base_ev=base_ev, params=task.params)
         self._current_worker = worker
 
-        def _on_load_done(raw_target, err_msg):
-            self._current_worker = None
+        def _on_load_done(raw_target, lut_arr, err_msg):
+            if self._current_worker is worker:
+                self._current_worker = None
             if task.status == "cancelled":
                 self._finish_task(task, False, "任务已取消")
                 return
@@ -353,62 +376,73 @@ class ExportQueueManager(QObject):
             task.progress = 35
             self.task_progress.emit(task.task_id, 35)
 
-            # Step 2: GPU FBO Offscreen Render (Executes on Main Thread, ~20ms runtime)
-            try:
-                src_h, src_w = raw_target.shape[:2]
-                scale_pct = int(task.params.get("scale_pct", 100))
-                tgt_w = max(1, int(src_w * scale_pct / 100.0))
-                tgt_h = max(1, int(src_h * scale_pct / 100.0))
-                bit_depth = int(task.params.get("bit_depth", 8))
-
-                film_stock = task.params.get("film_stock", "kodak_portra_400")
-                paper_stock = task.params.get("paper_stock", "kodak_2383")
-                print_mode = task.params.get("print_mode", "optical")
-                lut_arr = None
-                if hasattr(self.engine, "get_3d_lut"):
-                    try:
-                        lut_arr = self.engine.get_3d_lut(film_stock, paper_stock, lut_size=33, print_mode=print_mode)
-                    except Exception as ex_lut:
-                        logger.warning(f"Failed to fetch 3D LUT for GPU export: {ex_lut}")
-
-                rendered_arr = self.canvas.render_offscreen(
-                    tgt_w, tgt_h,
-                    float_img_rgb=raw_target,
-                    params_override=task.params,
-                    bit_depth=bit_depth,
-                    lut_override=lut_arr
-                )
-            except Exception as ex_gl:
-                logger.warning(f"GPU offscreen render exception, falling back to CPU: {ex_gl}")
-                rendered_arr = None
-
-            if rendered_arr is None:
-                self._start_cpu_export(task)
-                return
-
-            if task.status == "cancelled":
-                self._finish_task(task, False, "任务已取消")
-                return
-
-            task.progress = 65
-            self.task_progress.emit(task.task_id, 65)
-
-            # Step 3: Save to disk in background worker
-            save_worker = _SaveImageWorker(rendered_arr, task.output_path, task.params)
-            self._current_worker = save_worker
-
-            def _on_save_done(succ, err):
-                if self._current_worker is save_worker:
-                    self._current_worker = None
+            # Step 2: GPU FBO Offscreen Render (scheduled via QTimer to yield to Qt event loop)
+            def _do_render():
                 if task.status == "cancelled":
                     self._finish_task(task, False, "任务已取消")
-                elif succ:
-                    self._finish_task(task, True, "")
-                else:
-                    self._finish_task(task, False, err or "写入文件失败")
+                    return
 
-            save_worker.finished_save.connect(_on_save_done)
-            save_worker.start()
+                try:
+                    from PySide6.QtCore import QCoreApplication
+                    QCoreApplication.processEvents()
+
+                    src_h, src_w = raw_target.shape[:2]
+                    scale_pct = int(task.params.get("scale_pct", 100))
+                    tgt_w = max(1, int(src_w * scale_pct / 100.0))
+                    tgt_h = max(1, int(src_h * scale_pct / 100.0))
+                    bit_depth = int(task.params.get("bit_depth", 8))
+
+                    eff_lut = lut_arr
+                    if eff_lut is None and hasattr(self.engine, "get_3d_lut"):
+                        film_stock = task.params.get("film_stock", "kodak_portra_400")
+                        paper_stock = task.params.get("paper_stock", "kodak_2383")
+                        print_mode = task.params.get("print_mode", "optical")
+                        try:
+                            eff_lut = self.engine.get_3d_lut(film_stock, paper_stock, lut_size=33, print_mode=print_mode)
+                        except Exception as ex_lut:
+                            logger.warning(f"Failed to fetch 3D LUT for GPU export: {ex_lut}")
+
+                    rendered_arr = self.canvas.render_offscreen(
+                        tgt_w, tgt_h,
+                        float_img_rgb=raw_target,
+                        params_override=task.params,
+                        bit_depth=bit_depth,
+                        lut_override=eff_lut
+                    )
+                    QCoreApplication.processEvents()
+                except Exception as ex_gl:
+                    logger.warning(f"GPU offscreen render exception, falling back to CPU: {ex_gl}")
+                    rendered_arr = None
+
+                if rendered_arr is None:
+                    self._start_cpu_export(task)
+                    return
+
+                if task.status == "cancelled":
+                    self._finish_task(task, False, "任务已取消")
+                    return
+
+                task.progress = 65
+                self.task_progress.emit(task.task_id, 65)
+
+                # Step 3: Save to disk in background worker
+                save_worker = _SaveImageWorker(rendered_arr, task.output_path, task.params)
+                self._current_worker = save_worker
+
+                def _on_save_done(succ, err):
+                    if self._current_worker is save_worker:
+                        self._current_worker = None
+                    if task.status == "cancelled":
+                        self._finish_task(task, False, "任务已取消")
+                    elif succ:
+                        self._finish_task(task, True, "")
+                    else:
+                        self._finish_task(task, False, err or "写入文件失败")
+
+                save_worker.finished_save.connect(_on_save_done)
+                save_worker.start()
+
+            QTimer.singleShot(0, _do_render)
 
         worker.finished_load.connect(_on_load_done)
         worker.start()
@@ -509,60 +543,121 @@ class ExportQueueDialog(QDialog):
             Qt.WindowType.WindowCloseButtonHint
         )
 
-        self.setStyleSheet("""
-            QDialog {
-                background: #14151a;
-                border: 1px solid #2b2e3b;
-                border-radius: 8px;
-            }
-            QLabel {
-                color: #e2e8f0;
-                font-family: "Microsoft YaHei UI", sans-serif;
-            }
-            QPushButton {
-                font-family: "Microsoft YaHei UI", sans-serif;
-                font-size: 11px;
-                padding: 4px 10px;
-                border-radius: 4px;
-            }
-            QPushButton:pressed {
-                padding-top: 5px;
-                padding-bottom: 3px;
-            }
-            QScrollArea {
-                border: none;
-                background: transparent;
-            }
-            QScrollBar:vertical {
-                background: rgba(20, 22, 28, 0.6);
-                width: 6px;
-                margin: 0px;
-                border-radius: 3px;
-                border: none;
-            }
-            QScrollBar::handle:vertical {
-                background: #474d61;
-                min-height: 24px;
-                border-radius: 3px;
-                border: none;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #f59e0b;
-            }
-            QScrollBar::handle:vertical:pressed {
-                background: #d97706;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-                width: 0px;
-                background: none;
-                border: none;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: none;
-                border: none;
-            }
-        """)
+        is_dark = theme_manager.is_dark()
+        if is_dark:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #14151a;
+                    border: 1px solid #2b2e3b;
+                    border-radius: 8px;
+                }
+                QLabel {
+                    color: #e2e8f0;
+                    font-family: "Microsoft YaHei UI", sans-serif;
+                }
+                QPushButton {
+                    font-family: "Microsoft YaHei UI", sans-serif;
+                    font-size: 11px;
+                    padding: 4px 10px;
+                    border-radius: 4px;
+                }
+                QPushButton:pressed {
+                    padding-top: 5px;
+                    padding-bottom: 3px;
+                }
+                QScrollArea {
+                    border: none;
+                    background: transparent;
+                }
+                QScrollBar:vertical {
+                    background: rgba(20, 22, 28, 0.6);
+                    width: 6px;
+                    margin: 0px;
+                    border-radius: 3px;
+                    border: none;
+                }
+                QScrollBar::handle:vertical {
+                    background: #3f4350;
+                    min-height: 24px;
+                    border-radius: 3px;
+                    border: none;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #cbd5e1;
+                    border-radius: 3px;
+                }
+                QScrollBar::handle:vertical:pressed {
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0px;
+                    width: 0px;
+                    background: none;
+                    border: none;
+                }
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                    background: none;
+                    border: none;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QDialog {
+                    background: #ebedf2;
+                    border: 1px solid #d5d9e4;
+                    border-radius: 8px;
+                }
+                QLabel {
+                    color: #1e293b;
+                    font-family: "Microsoft YaHei UI", sans-serif;
+                }
+                QPushButton {
+                    font-family: "Microsoft YaHei UI", sans-serif;
+                    font-size: 11px;
+                    padding: 4px 10px;
+                    border-radius: 4px;
+                }
+                QPushButton:pressed {
+                    padding-top: 5px;
+                    padding-bottom: 3px;
+                }
+                QScrollArea {
+                    border: none;
+                    background: transparent;
+                }
+                QScrollBar:vertical {
+                    background: transparent;
+                    width: 6px;
+                    margin: 0px;
+                    border-radius: 3px;
+                    border: none;
+                }
+                QScrollBar::handle:vertical {
+                    background: #94a3b8;
+                    min-height: 24px;
+                    border-radius: 3px;
+                    border: none;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #64748b;
+                    border-radius: 3px;
+                }
+                QScrollBar::handle:vertical:pressed {
+                    background: #f59e0b;
+                    border-radius: 3px;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0px;
+                    width: 0px;
+                    background: none;
+                    border: none;
+                }
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                    background: none;
+                    border: none;
+                }
+            """)
 
         self._cards = {}
         self._empty_label = None
@@ -583,6 +678,7 @@ class ExportQueueDialog(QDialog):
             super().keyPressEvent(event)
 
     def _init_ui(self):
+        is_dark = theme_manager.is_dark()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
@@ -596,43 +692,79 @@ class ExportQueueDialog(QDialog):
 
         self.btn_cancel_all = QPushButton("全部取消")
         self.btn_cancel_all.setToolTip("取消所有排队中与正在冲印的任务")
-        self.btn_cancel_all.setStyleSheet("""
-            QPushButton {
-                background: rgba(239, 68, 68, 0.15);
-                border: 1px solid rgba(239, 68, 68, 0.40);
-                color: #f87171;
-            }
-            QPushButton:hover {
-                background: rgba(239, 68, 68, 0.28);
-                color: #ffffff;
-            }
-            QPushButton:pressed {
-                background: rgba(220, 38, 38, 0.50);
-                color: #ffffff;
-                border-color: #ef4444;
-            }
-        """)
+        if is_dark:
+            self.btn_cancel_all.setStyleSheet("""
+                QPushButton {
+                    background: rgba(239, 68, 68, 0.15);
+                    border: 1px solid rgba(239, 68, 68, 0.40);
+                    color: #f87171;
+                }
+                QPushButton:hover {
+                    background: rgba(239, 68, 68, 0.28);
+                    color: #ffffff;
+                }
+                QPushButton:pressed {
+                    background: rgba(220, 38, 38, 0.50);
+                    color: #ffffff;
+                    border-color: #ef4444;
+                }
+            """)
+        else:
+            self.btn_cancel_all.setStyleSheet("""
+                QPushButton {
+                    background: #fee2e2;
+                    border: 1px solid #fca5a5;
+                    color: #dc2626;
+                }
+                QPushButton:hover {
+                    background: #fecaca;
+                    color: #b91c1c;
+                }
+                QPushButton:pressed {
+                    background: #f87171;
+                    color: #ffffff;
+                    border-color: #ef4444;
+                }
+            """)
         self.btn_cancel_all.clicked.connect(self.queue_mgr.cancel_all)
         hdr.addWidget(self.btn_cancel_all)
 
         self.btn_clear_hist = QPushButton("清除已完成")
         self.btn_clear_hist.setToolTip("从列表中清除已完成或已取消的历史任务")
-        self.btn_clear_hist.setStyleSheet("""
-            QPushButton {
-                background: #1e2029;
-                border: 1px solid #363949;
-                color: #94a3b8;
-            }
-            QPushButton:hover {
-                background: #282b37;
-                color: #e2e8f0;
-            }
-            QPushButton:pressed {
-                background: #14151a;
-                color: #cbd5e1;
-                border-color: #282b37;
-            }
-        """)
+        if is_dark:
+            self.btn_clear_hist.setStyleSheet("""
+                QPushButton {
+                    background: #1e2029;
+                    border: 1px solid #363949;
+                    color: #94a3b8;
+                }
+                QPushButton:hover {
+                    background: #282b37;
+                    color: #e2e8f0;
+                }
+                QPushButton:pressed {
+                    background: #14151a;
+                    color: #cbd5e1;
+                    border-color: #282b37;
+                }
+            """)
+        else:
+            self.btn_clear_hist.setStyleSheet("""
+                QPushButton {
+                    background: #ffffff;
+                    border: 1px solid #cbd5e1;
+                    color: #475569;
+                }
+                QPushButton:hover {
+                    background: #f1f5f9;
+                    color: #1e293b;
+                }
+                QPushButton:pressed {
+                    background: #e2e8f0;
+                    color: #0f172a;
+                    border-color: #94a3b8;
+                }
+            """)
         self.btn_clear_hist.clicked.connect(self.queue_mgr.clear_history)
         hdr.addWidget(self.btn_clear_hist)
 
@@ -736,9 +868,10 @@ class ExportQueueDialog(QDialog):
         if pbar:
             pbar.setValue(task.progress if task.status != "queued" else 0)
             pbar_color = "#f59e0b" if task.status in ("running", "finished") else ("#64748b" if task.status == "cancelled" else "#ef4444")
+            pbar_bg = "#20232e" if theme_manager.is_dark() else "#e2e8f0"
             pbar.setStyleSheet(f"""
                 QProgressBar {{
-                    background: #20232e;
+                    background: {pbar_bg};
                     border: none;
                     border-radius: 2px;
                 }}
@@ -755,20 +888,23 @@ class ExportQueueDialog(QDialog):
                 btn_x.hide()
 
     def _build_task_card(self, task: ExportTask):
+        is_dark = theme_manager.is_dark()
         card = QFrame()
         card.setObjectName("exportTaskCard")
-        card.setStyleSheet("""
-            QFrame#exportTaskCard {
-                background: #171922;
-                border: 1px solid #262937;
+        card_bg = "#171922" if is_dark else "#ffffff"
+        card_border = "#262937" if is_dark else "#d5d9e4"
+        card.setStyleSheet(f"""
+            QFrame#exportTaskCard {{
+                background: {card_bg};
+                border: 1px solid {card_border};
                 border-radius: 6px;
-            }
-            QFrame#exportTaskCard QLabel {
+            }}
+            QFrame#exportTaskCard QLabel {{
                 background: transparent;
                 border: none;
                 padding: 0px;
                 margin: 0px;
-            }
+            }}
         """)
         h = QHBoxLayout(card)
         h.setContentsMargins(12, 10, 12, 10)
@@ -779,12 +915,14 @@ class ExportQueueDialog(QDialog):
         lbl_th.setObjectName("exportTaskThumb")
         lbl_th.setFixedSize(96, 64)
         lbl_th.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_th.setStyleSheet("""
-            QLabel#exportTaskThumb {
-                background: #0f1015;
-                border: none;
+        th_bg = "#0f1015" if is_dark else "#f1f5f9"
+        th_border = "none" if is_dark else "1px solid #e2e8f0"
+        lbl_th.setStyleSheet(f"""
+            QLabel#exportTaskThumb {{
+                background: {th_bg};
+                border: {th_border};
                 border-radius: 4px;
-            }
+            }}
         """)
         
         orig_pix = None
@@ -806,8 +944,9 @@ class ExportQueueDialog(QDialog):
         mid.setSpacing(6)
 
         info_row = QHBoxLayout()
+        fn_color = "#f1f5f9" if is_dark else "#1e293b"
         fn_lbl = QLabel(task.filename)
-        fn_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #f1f5f9; background: transparent; border: none;")
+        fn_lbl.setStyleSheet(f"font-size: 11px; font-weight: bold; color: {fn_color}; background: transparent; border: none;")
         info_row.addWidget(fn_lbl)
         info_row.addStretch()
 
@@ -832,17 +971,18 @@ class ExportQueueDialog(QDialog):
         path_lbl = QLabel(elided_path)
         path_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
         path_lbl.setToolTip(f"点击在文件资源管理器中定位:\n{path_text}")
-        path_lbl.setStyleSheet("""
-            QLabel {
+        path_color = "#94a3b8" if is_dark else "#64748b"
+        path_lbl.setStyleSheet(f"""
+            QLabel {{
                 font-size: 10px;
-                color: #94a3b8;
+                color: {path_color};
                 text-decoration: underline;
                 background: transparent;
                 border: none;
-            }
-            QLabel:hover {
+            }}
+            QLabel:hover {{
                 color: #f59e0b;
-            }
+            }}
         """)
 
         def _make_reveal_handler(out_p):
@@ -868,9 +1008,10 @@ class ExportQueueDialog(QDialog):
         pbar.setTextVisible(False)
         pbar.setValue(task.progress if task.status != "queued" else 0)
         pbar_color = "#f59e0b" if task.status in ("running", "finished") else ("#64748b" if task.status == "cancelled" else "#ef4444")
+        pbar_bg = "#20232e" if is_dark else "#e2e8f0"
         pbar.setStyleSheet(f"""
             QProgressBar {{
-                background: #20232e;
+                background: {pbar_bg};
                 border: none;
                 border-radius: 2px;
             }}
@@ -886,27 +1027,50 @@ class ExportQueueDialog(QDialog):
         btn_x = QPushButton("✕")
         btn_x.setFixedSize(22, 22)
         btn_x.setToolTip("取消该冲印任务")
-        btn_x.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #94a3b8;
-                border: 1px solid #333644;
-                border-radius: 11px;
-                font-size: 11px;
-                font-weight: bold;
-                padding: 0;
-            }
-            QPushButton:hover {
-                background: rgba(239, 68, 68, 0.25);
-                color: #ef4444;
-                border-color: #ef4444;
-            }
-            QPushButton:pressed {
-                background: rgba(220, 38, 38, 0.50);
-                color: #ffffff;
-                border-color: #dc2626;
-            }
-        """)
+        if is_dark:
+            btn_x.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    color: #94a3b8;
+                    border: 1px solid #333644;
+                    border-radius: 11px;
+                    font-size: 11px;
+                    font-weight: bold;
+                    padding: 0;
+                }
+                QPushButton:hover {
+                    background: rgba(239, 68, 68, 0.25);
+                    color: #ef4444;
+                    border-color: #ef4444;
+                }
+                QPushButton:pressed {
+                    background: rgba(220, 38, 38, 0.50);
+                    color: #ffffff;
+                    border-color: #dc2626;
+                }
+            """)
+        else:
+            btn_x.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    color: #64748b;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 11px;
+                    font-size: 11px;
+                    font-weight: bold;
+                    padding: 0;
+                }
+                QPushButton:hover {
+                    background: #fee2e2;
+                    color: #ef4444;
+                    border-color: #ef4444;
+                }
+                QPushButton:pressed {
+                    background: #fca5a5;
+                    color: #ffffff;
+                    border-color: #dc2626;
+                }
+            """)
         btn_x.clicked.connect(lambda checked=False, tid=task.task_id: self.queue_mgr.cancel_task(tid))
         if task.status not in ("queued", "running"):
             btn_x.hide()

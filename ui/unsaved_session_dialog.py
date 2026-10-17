@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 
 from path_utils import get_resource_dir
 from ui.window_utils import apply_dark_titlebar
+from ui.theme_manager import theme_manager
 
 
 class UnsavedSessionDialog(QDialog):
@@ -41,48 +42,95 @@ class UnsavedSessionDialog(QDialog):
         apply_dark_titlebar(self)
 
     def _init_ui(self, session_name):
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #14151a;
-                color: #e2e8f0;
-            }
-            QLabel {
-                color: #cbd5e1;
-            }
-            QPushButton {
-                background: #1f212a;
-                color: #e2e8f0;
-                border: 1px solid #333647;
-                border-radius: 4px;
-                font-size: 12px;
-                font-weight: 500;
-                height: 28px;
-            }
-            QPushButton:hover {
-                background: #282b37;
-                border-color: #f59e0b;
-                color: #f59e0b;
-            }
-            QPushButton:pressed {
-                background: #14151a;
-            }
-            QPushButton#btnSave {
-                background: #f59e0b;
-                color: #111111;
-                border: none;
-                font-weight: bold;
-            }
-            QPushButton#btnSave:hover {
-                background: #fbbf24;
-            }
-            QPushButton#btnSave:pressed {
-                background: #d97706;
-            }
-            QPushButton#btnDiscard:hover {
-                border-color: #ef4444;
-                color: #f87171;
-            }
-        """)
+        is_dark = theme_manager.is_dark()
+        if is_dark:
+            self.setStyleSheet("""
+                QDialog {
+                    background-color: #14151a;
+                    color: #e2e8f0;
+                }
+                QLabel {
+                    color: #cbd5e1;
+                }
+                QPushButton {
+                    background: #1f212a;
+                    color: #e2e8f0;
+                    border: 1px solid #333647;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    font-weight: 500;
+                    height: 28px;
+                }
+                QPushButton:hover {
+                    background: #282b37;
+                    border-color: #f59e0b;
+                    color: #f59e0b;
+                }
+                QPushButton:pressed {
+                    background: #14151a;
+                }
+                QPushButton#btnSave {
+                    background: #f59e0b;
+                    color: #111111;
+                    border: none;
+                    font-weight: bold;
+                }
+                QPushButton#btnSave:hover {
+                    background: #fbbf24;
+                }
+                QPushButton#btnSave:pressed {
+                    background: #d97706;
+                }
+                QPushButton#btnDiscard:hover {
+                    border-color: #ef4444;
+                    color: #f87171;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QDialog {
+                    background-color: #ebedf2;
+                    color: #1e293b;
+                }
+                QLabel {
+                    color: #1e293b;
+                }
+                QPushButton {
+                    background: #ffffff;
+                    color: #1e293b;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    font-weight: 500;
+                    height: 28px;
+                }
+                QPushButton:hover {
+                    background: #f8fafc;
+                    border-color: #f59e0b;
+                    color: #d97706;
+                }
+                QPushButton:pressed {
+                    background: #e2e8f0;
+                    color: #b45309;
+                }
+                QPushButton#btnSave {
+                    background: #f59e0b;
+                    color: #111111;
+                    border: none;
+                    font-weight: bold;
+                }
+                QPushButton#btnSave:hover {
+                    background: #fbbf24;
+                }
+                QPushButton#btnSave:pressed {
+                    background: #d97706;
+                }
+                QPushButton#btnDiscard:hover {
+                    background: #fef2f2;
+                    border-color: #ef4444;
+                    color: #dc2626;
+                }
+            """)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 18)
@@ -96,8 +144,9 @@ class UnsavedSessionDialog(QDialog):
         # Elegant Amber Warning Icon Badge
         badge = QLabel()
         badge.setFixedSize(40, 40)
-        badge.setStyleSheet("""
-            background: #261f14;
+        badge_bg = "#261f14" if is_dark else "#fef3c7"
+        badge.setStyleSheet(f"""
+            background: {badge_bg};
             border: 1px solid #f59e0b;
             border-radius: 8px;
             color: #f59e0b;
@@ -112,12 +161,14 @@ class UnsavedSessionDialog(QDialog):
         text_layout = QVBoxLayout()
         text_layout.setSpacing(6)
 
+        title_col = "#f8fafc" if is_dark else "#0f172a"
         title_lbl = QLabel("未保存的会话")
-        title_lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #f8fafc;")
+        title_lbl.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {title_col};")
         text_layout.addWidget(title_lbl)
 
+        desc_col = "#94a3b8" if is_dark else "#475569"
         desc_lbl = QLabel(f"会话「{session_name}」有尚未保存的修改。\n是否在退出前保存当前会话工程？")
-        desc_lbl.setStyleSheet("font-size: 12px; color: #94a3b8; line-height: 1.4;")
+        desc_lbl.setStyleSheet(f"font-size: 12px; color: {desc_col}; line-height: 1.4;")
         desc_lbl.setWordWrap(True)
         text_layout.addWidget(desc_lbl)
 

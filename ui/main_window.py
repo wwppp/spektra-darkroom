@@ -27,7 +27,7 @@ import numpy as np
 from PIL import Image
 
 from PySide6.QtCore import (
-    Qt, QPoint, QPointF, QSize, QRect, QRectF, Signal, QTimer, QEvent, QThread,
+    Qt, QPoint, QPointF, QSize, QRect, QRectF, Signal, QTimer, QEvent, QThread, QObject,
     QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 )
 from PySide6.QtGui import (
@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QDialog, QLineEdit, QTextEdit
 )
 
-from path_utils import get_icon_path, get_resource_dir
+from path_utils import get_icon_path, get_resource_dir, normalize_path
 from format_constants import (
     RAW_EXTENSIONS,
     ALL_SUPPORTED_IMAGE_EXTENSIONS,
@@ -53,9 +53,23 @@ import session_cache_manager
 from ui.export_queue_manager import ExportQueueManager, ExportQueueDialog, ExportTask
 from ui.unsaved_session_dialog import UnsavedSessionDialog
 from ui.thumbnail_controller import ThumbnailController, StockThumbnailWorker
+from ui.film_filter_header import FilmFilterHeader
 
 if sys.platform == "win32":
     from ctypes import wintypes
+    class POINT(ctypes.Structure):
+        _fields_ = [
+            ("x", wintypes.LONG),
+            ("y", wintypes.LONG)
+        ]
+    class MINMAXINFO(ctypes.Structure):
+        _fields_ = [
+            ("ptReserved", POINT),
+            ("ptMaxSize", POINT),
+            ("ptMaxPosition", POINT),
+            ("ptMinTrackSize", POINT),
+            ("ptMaxTrackSize", POINT),
+        ]
     class RECT(ctypes.Structure):
         _fields_ = [
             ("left", wintypes.LONG),
@@ -91,6 +105,7 @@ from ui.filmstrip_widget import FilmstripWidget, DuplicateFilesDialog
 from ui.spinner_widget import SpinnerWidget
 from ui.histogram_widget import HistogramWidget
 from ui.fading_stacked_widget import FadingStackedWidget
+from ui.theme_manager import theme_manager
 
 
 class WindowCaptionButton(QPushButton):
@@ -101,6 +116,7 @@ class WindowCaptionButton(QPushButton):
         self.setFixedSize(46, 38)
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.is_maximized_state = False
+        theme_manager.themeChanged.connect(lambda _: self.update())
 
     def set_maximized_state(self, is_max):
         if self.is_maximized_state != is_max:
@@ -109,14 +125,15 @@ class WindowCaptionButton(QPushButton):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        is_dark = theme_manager.is_dark()
 
         # 1. 始终彻底填充背景，防止重绘/DPI变换时的残影与双边伪影
         if self.isDown():
-            bg = QColor(241, 112, 122) if self.btn_type == "close" else QColor(38, 40, 50)
+            bg = QColor(241, 112, 122) if self.btn_type == "close" else (QColor(38, 40, 50) if is_dark else QColor(218, 222, 230))
         elif self.underMouse():
-            bg = QColor(232, 17, 35) if self.btn_type == "close" else QColor(48, 50, 60)
+            bg = QColor(232, 17, 35) if self.btn_type == "close" else (QColor(48, 50, 60) if is_dark else QColor(226, 232, 240))
         else:
-            bg = QColor(20, 21, 24)
+            bg = QColor(20, 21, 24) if is_dark else QColor(240, 242, 246)
 
         if not self.is_maximized_state and self.btn_type == "close":
             from PySide6.QtGui import QPainterPath
@@ -134,7 +151,7 @@ class WindowCaptionButton(QPushButton):
 
         painter.fillRect(self.rect(), bg)
 
-        icon_color = QColor(255, 255, 255) if (self.underMouse() and self.btn_type == "close") else QColor(220, 222, 230)
+        icon_color = QColor(255, 255, 255) if (self.underMouse() and self.btn_type == "close") else (QColor(220, 222, 230) if is_dark else QColor(30, 41, 59))
         cx, cy = self.width() // 2, self.height() // 2
 
         if self.btn_type == "min":
@@ -274,6 +291,15 @@ class SinglePhotoLoadWorker(QThread):
 
             # 2. Full demosaiced floating-point master load (~200-300ms)
             res = self.engine.load_image(self.path)
+            if res and res.get("success") and not self._stopped:
+                f_img = res.get("float_img")
+                if f_img is None:
+                    f_img = res.get("raw_preview")
+                if f_img is not None:
+                    try:
+                        session_cache_manager.save_photo_preview(self.path, f_img)
+                    except Exception:
+                        pass
             if not self._stopped:
                 self.photoLoaded.emit(self.photo_id, self.path, res if isinstance(res, dict) else {"success": False})
         except Exception as e:
@@ -704,10 +730,7 @@ class FilmGridCard(QFrame):
     """
     selected = Signal(str)
     exportRequested = Signal(str)
-    removeRequested = Signal(str)
-    hoverEntered = Signal(str, str)
     sortRequested = Signal(str, str)
-    importRequested = Signal(str)
 
     SWATCH_COLORS = {
         "kodak_portra_400": ("#eab308", "#f97316"),
@@ -754,11 +777,13 @@ class FilmGridCard(QFrame):
     def __init__(self, stock_info, is_active=False, is_custom=False, stock_type="film", parent=None):
         super().__init__(parent)
         self.setObjectName("filmGridCard")
+        self.stock_info = stock_info
         self.stock_id = stock_info["id"]
         self.stock_name = stock_info["name"]
         self.stock_type = stock_type
         self.is_active = is_active
         self.is_custom = is_custom
+        self.is_filter_matched = True
         self._thumb_pixmap = None
 
         # Compact photographic card dynamically resizable
@@ -773,6 +798,7 @@ class FilmGridCard(QFrame):
         self.original_tooltip = f"{self.stock_name}\n{stock_info.get('badge', '')}\n{stock_info.get('desc', '')}".strip()
 
         self._init_ui()
+        theme_manager.themeChanged.connect(lambda _: self._update_appearance())
 
     def setToolTip(self, tip: str):
         super().setToolTip(tip)
@@ -791,13 +817,15 @@ class FilmGridCard(QFrame):
 
         # Image preview frame (centered, rounded corners)
         self.lbl_thumb = QLabel()
+        self.lbl_thumb.setObjectName("filmCardThumb")
         self.lbl_thumb.setFixedSize(98, 70)
         self.lbl_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_thumb.setStyleSheet("border-radius: 4px; background: #18191f;")
+        self.lbl_thumb.setStyleSheet("QLabel#filmCardThumb { border-radius: 4px; background: #18191f; border: none; }")
         layout.addWidget(self.lbl_thumb, 0, Qt.AlignmentFlag.AlignCenter)
 
         # Bottom label container
         self.lbl_name = QLabel(self.clean_name)
+        self.lbl_name.setObjectName("filmCardName")
         self.lbl_name.setFixedHeight(28)
         self.lbl_name.setWordWrap(True)
         self.lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -807,7 +835,7 @@ class FilmGridCard(QFrame):
         self.set_card_tooltip(self.original_tooltip)
 
     def update_card_dimensions(self, new_w):
-        new_w = max(96, min(160, int(new_w)))
+        new_w = max(96, min(220, int(new_w)))
         thumb_w = new_w - 12
         thumb_h = int(round(thumb_w * (66.0 / 98.0)))
         new_h = thumb_h + 40
@@ -836,16 +864,205 @@ class FilmGridCard(QFrame):
 
     def _draw_color_pill(self):
         tw, th = max(10, self.lbl_thumb.width()), max(10, self.lbl_thumb.height())
-        c1_str, c2_str = self.SWATCH_COLORS.get(self.stock_id, ("#f59e0b", "#d97706"))
         pm = QPixmap(tw, th)
-        pm.fill(QColor(22, 23, 28))
+        pm.fill(QColor("#131418"))
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(c1_str))
-        p.drawRoundedRect(QRectF(tw * 0.15, th * 0.14, tw * 0.70, th * 0.72), 6, 6)
+
+        s_id = str(self.stock_id).lower()
+
+        if s_id in ("none", ""):
+            # 1. Digital RAW Bypass / Direct Scan
+            pad = 8.0
+            card_rect = QRectF(pad, pad, tw - pad * 2, th - pad * 2)
+            p.setPen(QPen(QColor("#2d313e"), 1.0))
+            p.setBrush(QBrush(QColor("#181920")))
+            p.drawRoundedRect(card_rect, 4.0, 4.0)
+
+            # Silicon sensor grid icon
+            gx = tw / 2.0 - 12.0
+            gy = th / 2.0 - 13.0
+            gw, gh = 24.0, 15.0
+            p.setPen(QPen(QColor("#475569"), 0.8))
+            p.setBrush(QBrush(QColor("#1e293b")))
+            p.drawRect(QRectF(gx, gy, gw, gh))
+            p.setPen(QPen(QColor("#38bdf8"), 0.8, Qt.PenStyle.DashLine))
+            p.drawLine(gx + gw * 0.33, gy, gx + gw * 0.33, gy + gh)
+            p.drawLine(gx + gw * 0.66, gy, gx + gw * 0.66, gy + gh)
+            p.drawLine(gx, gy + gh * 0.5, gx + gw, gy + gh * 0.5)
+
+            p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+            p.setPen(QColor("#94a3b8"))
+            p.drawText(QRectF(0, gy + gh + 3.0, tw, 12.0), Qt.AlignmentFlag.AlignCenter, "RAW BYPASS" if self.stock_type == "film" else "DIRECT SCAN")
+
+        elif self.stock_type == "paper":
+            # 2. Darkroom Enlarging Paper Sheet on Easel
+            pw = tw * 0.68
+            ph = th * 0.76
+            px = (tw - pw) / 2.0
+            py = (th - ph) / 2.0
+
+            # Easel metal base
+            p.setPen(QPen(QColor("#282b36"), 1.0))
+            p.setBrush(QBrush(QColor("#1c1e25")))
+            p.drawRoundedRect(QRectF(px - 3, py - 3, pw + 6, ph + 6), 3.0, 3.0)
+
+            # Photo paper white base
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor("#f1f5f9")))
+            p.drawRect(QRectF(px, py, pw, ph))
+
+            # Paper emulsion tone swatch
+            emul_grad = QLinearGradient(px + 4, py + 4, px + pw - 4, py + ph - 4)
+            if "2383" in s_id or "2393" in s_id:
+                emul_grad.setColorAt(0.0, QColor("#1e293b"))
+                emul_grad.setColorAt(1.0, QColor("#020617"))
+            elif "premier" in s_id or "endura" in s_id:
+                emul_grad.setColorAt(0.0, QColor("#475569"))
+                emul_grad.setColorAt(0.5, QColor("#d97706"))
+                emul_grad.setColorAt(1.0, QColor("#1e293b"))
+            elif "crystal" in s_id:
+                emul_grad.setColorAt(0.0, QColor("#334155"))
+                emul_grad.setColorAt(0.5, QColor("#059669"))
+                emul_grad.setColorAt(1.0, QColor("#0f172a"))
+            else:
+                emul_grad.setColorAt(0.0, QColor("#475569"))
+                emul_grad.setColorAt(1.0, QColor("#1e293b"))
+
+            p.setBrush(emul_grad)
+            p.drawRect(QRectF(px + 3, py + 3, pw - 6, ph - 6))
+
+            # Paper typography
+            p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+            p.setPen(QColor("#f8fafc"))
+            p.drawText(QRectF(px, py + ph - 13, pw, 10), Qt.AlignmentFlag.AlignCenter, "AGX PAPER")
+
+        else:
+            # 3. Authentic 35mm Metal Film Canister (拟真暗盒)
+            can_w = 32.0
+            can_h = 48.0
+            cx = (tw - can_w) / 2.0 - 2.0
+            cy = (th - can_h) / 2.0 + 1.0
+
+            # 3.1 Top spool hub (金属轴心)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#334155"))
+            p.drawRoundedRect(QRectF(cx + (can_w - 8) / 2, cy - 4.5, 8, 5), 1.5, 1.5)
+
+            # 3.2 Top & Bottom metal end caps
+            cap_grad = QLinearGradient(cx - 2, cy, cx + can_w + 2, cy)
+            cap_grad.setColorAt(0.0, QColor("#475569"))
+            cap_grad.setColorAt(0.35, QColor("#94a3b8"))
+            cap_grad.setColorAt(0.75, QColor("#475569"))
+            cap_grad.setColorAt(1.0, QColor("#1e293b"))
+            p.setBrush(cap_grad)
+            p.drawRoundedRect(QRectF(cx - 2, cy - 0.5, can_w + 4, 3.5), 1.5, 1.5)
+            p.drawRoundedRect(QRectF(cx - 2, cy + can_h - 3.0, can_w + 4, 3.5), 1.5, 1.5)
+
+            # 3.3 Main canister cylinder body
+            body_grad = QLinearGradient(cx, cy, cx + can_w, cy)
+            body_grad.setColorAt(0.0, QColor("#1e222a"))
+            body_grad.setColorAt(0.25, QColor("#333846"))
+            body_grad.setColorAt(0.65, QColor("#181a20"))
+            body_grad.setColorAt(1.0, QColor("#0f1115"))
+            p.setBrush(body_grad)
+            p.drawRect(QRectF(cx, cy + 3, can_w, can_h - 6))
+
+            # 3.4 Film leader tongue protruding on right
+            p.setBrush(QColor("#0a0d14"))
+            p.drawRoundedRect(QRectF(cx + can_w - 0.5, cy + 18, 9, 13), 2, 2)
+            p.setPen(QPen(QColor("#2d3342"), 0.8))
+            p.drawLine(cx + can_w + 2, cy + 19, cx + can_w + 2, cy + 30)
+            p.setPen(Qt.PenStyle.NoPen)
+
+            # 3.5 Brand Identity Label Band
+            band_y = cy + 12
+            band_h = 24
+
+            c_main = QColor("#f59e0b")
+            c_sub = QColor("#dc2626")
+            text_color = QColor("#ffffff")
+            short_code = "FILM"
+
+            if "gold" in s_id:
+                c_main = QColor("#d97706")
+                c_sub = QColor("#b91c1c")
+                short_code = "200"
+            elif "portra_400" in s_id:
+                c_main = QColor("#475569")
+                c_sub = QColor("#cbd5e1")
+                short_code = "400"
+            elif "portra_160" in s_id:
+                c_main = QColor("#334155")
+                c_sub = QColor("#94a3b8")
+                short_code = "160"
+            elif "portra_800" in s_id:
+                c_main = QColor("#1e293b")
+                c_sub = QColor("#e2e8f0")
+                short_code = "800"
+            elif "ektar" in s_id:
+                c_main = QColor("#991b1b")
+                c_sub = QColor("#f59e0b")
+                short_code = "100"
+            elif "ultramax" in s_id:
+                c_main = QColor("#1d4ed8")
+                c_sub = QColor("#facc15")
+                short_code = "400"
+            elif "vision" in s_id:
+                c_main = QColor("#09090b")
+                c_sub = QColor("#eab308")
+                short_code = "500T" if "500t" in s_id else ("250D" if "250d" in s_id else "50D")
+            elif "c200" in s_id:
+                c_main = QColor("#047857")
+                c_sub = QColor("#dc2626")
+                short_code = "C200"
+            elif "400h" in s_id:
+                c_main = QColor("#0f766e")
+                c_sub = QColor("#ec4899")
+                short_code = "400H"
+            elif "xtra" in s_id or "superia" in s_id:
+                c_main = QColor("#065f46")
+                c_sub = QColor("#ef4444")
+                short_code = "X-TRA"
+            elif "velvia" in s_id:
+                c_main = QColor("#4c1d95")
+                c_sub = QColor("#059669")
+                short_code = "50" if "50" in s_id else "100"
+            elif "provia" in s_id:
+                c_main = QColor("#1e3a8a")
+                c_sub = QColor("#38bdf8")
+                short_code = "100F"
+            elif "cinestill" in s_id:
+                c_main = QColor("#090d16")
+                c_sub = QColor("#f43f5e")
+                short_code = "800T" if "800" in s_id else "400D"
+            elif any(bw in s_id for bw in ("hp5", "delta", "tri_x", "tmax", "acros", "double_x", "fp4")):
+                c_main = QColor("#09090b")
+                c_sub = QColor("#f8fafc")
+                short_code = "B&W"
+            elif "kodachrome" in s_id:
+                c_main = QColor("#b45309")
+                c_sub = QColor("#dc2626")
+                short_code = "K-64" if "64" in s_id else "K-25"
+            elif "agfa" in s_id:
+                c_main = QColor("#c2410c")
+                c_sub = QColor("#ea580c")
+                short_code = "AGFA"
+
+            p.fillRect(QRectF(cx, band_y, can_w, band_h), c_main)
+            p.fillRect(QRectF(cx, band_y, can_w, 2.5), c_sub)
+
+            p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+            p.setPen(text_color)
+            p.drawText(QRectF(cx, band_y + 3, can_w, band_h - 3), Qt.AlignmentFlag.AlignCenter, short_code)
+
+        # Subtle card thumbnail outer frame
+        p.setPen(QPen(QColor("#222530"), 1.0))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(0.5, 0.5, tw - 1.0, th - 1.0), 4.0, 4.0)
         p.end()
         self.lbl_thumb.setPixmap(pm)
+
 
     def set_active(self, is_active):
         self.is_active = is_active
@@ -856,41 +1073,75 @@ class FilmGridCard(QFrame):
         self._update_appearance()
 
     def _update_appearance(self):
+        is_dark = theme_manager.is_dark()
+        tooltip_bg = "rgba(22, 24, 30, 0.88)" if is_dark else "rgba(255, 255, 255, 0.95)"
+        tooltip_fg = "#ffffff" if is_dark else "#1e293b"
+        tooltip_border = "none" if is_dark else "1px solid #cbd5e1"
+        tooltip_bubble_style = f"""
+            QToolTip {{
+                background-color: {tooltip_bg};
+                color: {tooltip_fg};
+                border: {tooltip_border};
+                border-radius: 8px;
+                padding: 7px 11px;
+                font-size: 11px;
+                font-weight: 400;
+                line-height: 1.4;
+                font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+            }}
+        """
+        thumb_bg = "#18191f" if is_dark else "#e6eaf0"
+
         if not self.isEnabled():
-            self.setStyleSheet("""
-                QFrame#filmGridCard {
-                    background: #101114;
-                    border: 1px solid #1c1d22;
+            dis_bg = "#101114" if is_dark else "#f1f5f9"
+            dis_border = "#1c1d22" if is_dark else "#e2e8f0"
+            dis_name = "#404452" if is_dark else "#94a3b8"
+            self.setStyleSheet(f"""
+                QFrame#filmGridCard {{
+                    background: {dis_bg};
+                    border: 1px solid {dis_border};
                     border-radius: 6px;
-                }
-                QLabel { border: none; background: transparent; color: #404452; }
+                }}
+                QLabel#filmCardThumb {{ border: none; background: {thumb_bg}; border-radius: 4px; }}
+                QLabel#filmCardName {{ border: none; background: transparent; color: {dis_name}; font-size: 9.5px; }}
+                {tooltip_bubble_style}
             """)
-            self.lbl_name.setStyleSheet("color: #404452; font-size: 9.5px;")
+            self.lbl_name.setStyleSheet(f"QLabel#filmCardName {{ color: {dis_name}; font-size: 9.5px; border: none; background: transparent; }}")
             return
         if self.is_active:
-            self.setStyleSheet("""
-                QFrame#filmGridCard {
-                    background: rgba(245, 158, 11, 0.08);
+            act_bg = "rgba(245, 158, 11, 0.08)" if is_dark else "rgba(245, 158, 11, 0.12)"
+            self.setStyleSheet(f"""
+                QFrame#filmGridCard {{
+                    background: {act_bg};
                     border: 1px solid #f59e0b;
                     border-radius: 6px;
-                }
-                QLabel { border: none; background: transparent; }
+                }}
+                QLabel#filmCardThumb {{ border: none; background: {thumb_bg}; border-radius: 4px; }}
+                QLabel#filmCardName {{ border: none; background: transparent; color: #f59e0b; font-size: 9.5px; font-weight: bold; }}
+                {tooltip_bubble_style}
             """)
-            self.lbl_name.setStyleSheet("color: #f59e0b; font-size: 9.5px; font-weight: bold;")
+            self.lbl_name.setStyleSheet("QLabel#filmCardName { color: #f59e0b; font-size: 9.5px; font-weight: bold; border: none; background: transparent; }")
         else:
-            self.setStyleSheet("""
-                QFrame#filmGridCard {
-                    background: #15161c;
-                    border: 1px solid #282a36;
+            idle_bg = "#15161c" if is_dark else "#ffffff"
+            idle_border = "#282a36" if is_dark else "#d8dce6"
+            hover_bg = "#1b1d24" if is_dark else "#f1f4f9"
+            hover_border = "#4b5168" if is_dark else "#94a3b8"
+            name_color = "#cbd5e1" if is_dark else "#1e293b"
+            self.setStyleSheet(f"""
+                QFrame#filmGridCard {{
+                    background: {idle_bg};
+                    border: 1px solid {idle_border};
                     border-radius: 6px;
-                }
-                QFrame#filmGridCard:hover {
-                    border-color: #4b5168;
-                    background: #1b1d24;
-                }
-                QLabel { border: none; background: transparent; }
+                }}
+                QFrame#filmGridCard:hover {{
+                    border-color: {hover_border};
+                    background: {hover_bg};
+                }}
+                QLabel#filmCardThumb {{ border: none; background: {thumb_bg}; border-radius: 4px; }}
+                QLabel#filmCardName {{ border: none; background: transparent; color: {name_color}; font-size: 9.5px; font-weight: 500; }}
+                {tooltip_bubble_style}
             """)
-            self.lbl_name.setStyleSheet("color: #cbd5e1; font-size: 9.5px; font-weight: 500;")
+            self.lbl_name.setStyleSheet(f"QLabel#filmCardName {{ color: {name_color}; font-size: 9.5px; font-weight: 500; border: none; background: transparent; }}")
 
     def mousePressEvent(self, event):
         if not self.isEnabled():
@@ -915,32 +1166,10 @@ class FilmGridCard(QFrame):
             act_by_time = sort_menu.addAction("按添加时间排序 (最新在前)")
             act_by_time.triggered.connect(lambda: self.sortRequested.emit(self.stock_type, "time"))
 
-            act_imp = menu.addAction(f"导入{'胶卷' if self.stock_type == 'film' else '相纸'}配置...")
-            icon_imp = os.path.join(get_resource_dir(), "icons", "dlg_import.png")
-            if os.path.exists(icon_imp):
-                act_imp.setIcon(QIcon(icon_imp))
-            act_imp.triggered.connect(lambda: self.importRequested.emit(self.stock_type))
-
-            menu.addSeparator()
-
-            act_del = menu.addAction("丢弃")
-            icon_del = os.path.join(get_resource_dir(), "icons", "dlg_discard.png")
-            if os.path.exists(icon_del):
-                act_del.setIcon(QIcon(icon_del))
-            if not self.is_custom:
-                act_del.setEnabled(False)
-                act_del.setText("丢弃 (官方内置不可删)")
-            else:
-                act_del.triggered.connect(lambda: self.removeRequested.emit(self.stock_id))
-
             menu.exec(event.globalPosition().toPoint())
             event.accept()
         else:
             super().mousePressEvent(event)
-
-    def enterEvent(self, event):
-        super().enterEvent(event)
-        self.hoverEntered.emit(self.stock_type, self.stock_id)
 
 
 class ImportStockDialog(QDialog):
@@ -1043,34 +1272,25 @@ class CompactExifWidget(QWidget):
     """Item 7: High-density compact EXIF property grid with pinned header and anti-jitter margins."""
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.key_labels = []
         self._init_ui()
+        self.apply_theme()
+        theme_manager.themeChanged.connect(self.apply_theme)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(0)
 
-        card = QFrame()
-        card.setObjectName("exifCard")
-        card.setStyleSheet("""
-            QFrame#exifCard {
-                background: #15161a;
-                border: 1px solid #262834;
-                border-radius: 6px;
-            }
-            QLabel {
-                border: none;
-                background: transparent;
-            }
-        """)
-        c_layout = QVBoxLayout(card)
+        self.card = QFrame()
+        self.card.setObjectName("exifCard")
+        c_layout = QVBoxLayout(self.card)
         c_layout.setContentsMargins(8, 6, 4, 6)
         c_layout.setSpacing(4)
 
         # Fixed Header (Issue 4: Title pinned, never scrolls)
-        title = QLabel("EXIF")
-        title.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold; letter-spacing: 0.5px;")
-        c_layout.addWidget(title)
+        self.lbl_title = QLabel("EXIF")
+        c_layout.addWidget(self.lbl_title)
 
         # Scroll area for metadata rows only
         self.scroll_area = SmoothScrollArea(self)
@@ -1083,10 +1303,10 @@ class CompactExifWidget(QWidget):
         content = QWidget()
         content.setStyleSheet("background: transparent;")
         grid = QGridLayout(content)
-        grid.setHorizontalSpacing(14)
+        grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(2)
-        grid.setContentsMargins(0, 2, 8, 2)
-        grid.setColumnMinimumWidth(0, 75)
+        grid.setContentsMargins(0, 2, 6, 2)
+        grid.setColumnMinimumWidth(0, 68)
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
 
@@ -1118,10 +1338,9 @@ class CompactExifWidget(QWidget):
 
         for row, (label_text, key) in enumerate(fields):
             lbl_k = QLabel(label_text)
-            lbl_k.setFixedWidth(75)
-            lbl_k.setStyleSheet("color: #7b8092; font-size: 10px;")
+            lbl_k.setFixedWidth(68)
+            self.key_labels.append(lbl_k)
             lbl_v = QLabel("-")
-            lbl_v.setStyleSheet("color: #e2e8f0; font-size: 10px; font-weight: 500;")
             lbl_v.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             lbl_v.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             lbl_v.setWordWrap(True)
@@ -1132,14 +1351,43 @@ class CompactExifWidget(QWidget):
         self.scroll_area.setWidget(content)
         c_layout.addWidget(self.scroll_area, 1)
 
-        layout.addWidget(card)
+        layout.addWidget(self.card)
+
+    def apply_theme(self, theme_name=None):
+        is_dark = theme_manager.is_dark()
+        card_bg = "#15161a" if is_dark else "#ffffff"
+        card_border = "#262834" if is_dark else "#d8dce6"
+        key_color = "#7b8092" if is_dark else "#64748b"
+        val_color = "#e2e8f0" if is_dark else "#1e293b"
+        title_color = "#f59e0b" if is_dark else "#d97706"
+
+        if hasattr(self, 'card'):
+            self.card.setStyleSheet(f"""
+                QFrame#exifCard {{
+                    background: {card_bg};
+                    border: 1px solid {card_border};
+                    border-radius: 6px;
+                }}
+                QLabel {{
+                    border: none;
+                    background: transparent;
+                }}
+            """)
+        if hasattr(self, 'lbl_title'):
+            self.lbl_title.setStyleSheet(f"color: {title_color}; font-size: 11px; font-weight: bold; letter-spacing: 0.5px;")
+        if hasattr(self, 'key_labels'):
+            for lbl in self.key_labels:
+                lbl.setStyleSheet(f"color: {key_color}; font-size: 10px;")
+        if hasattr(self, 'labels'):
+            for lbl in self.labels.values():
+                lbl.setStyleSheet(f"color: {val_color}; font-size: 10px; font-weight: 500;")
 
     def set_exif_data(self, data):
         for k, lbl in self.labels.items():
             raw_val = data.get(k, "-")
             val = str(raw_val).strip() if raw_val is not None and str(raw_val).strip() != "" else "-"
             lbl.setText(val)
-            lbl.setToolTip(val if val != "-" else "")
+            lbl.setToolTip("")
 
 
 class FadingSplitterHandle(QSplitterHandle):
@@ -1148,6 +1396,7 @@ class FadingSplitterHandle(QSplitterHandle):
         super().__init__(orientation, parent)
         self.setMouseTracking(True)
         self._hovered = False
+        theme_manager.themeChanged.connect(lambda _: self.update())
 
     def enterEvent(self, ev):
         self._hovered = True
@@ -1162,51 +1411,87 @@ class FadingSplitterHandle(QSplitterHandle):
     def paintEvent(self, ev):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        is_dark = theme_manager.is_dark()
         w, h = self.width(), self.height()
-        painter.fillRect(0, 0, w, h, QColor('#121316'))
+        bg_col = QColor('#121316') if is_dark else QColor('#ebedf2')
+        painter.fillRect(0, 0, w, h, bg_col)
 
         if self.orientation() == Qt.Orientation.Vertical:
             # Horizontal line separating vertical tiers (left sidebar, center splitter)
             cy = h // 2
-            margin_x = 4
-            line_w = max(0, w - margin_x * 2)
-            grad = QLinearGradient(margin_x, cy, max(margin_x + 1, w - margin_x), cy)
+            # User requirement: 10% length centered, gray-white subtle indicator
+            line_w = max(24, int(w * 0.10))
+            start_x = (w - line_w) // 2
+            end_x = start_x + line_w
+
+            grad = QLinearGradient(start_x, cy, end_x, cy)
             if self._hovered:
-                grad.setColorAt(0.0, QColor(245, 158, 11, 40))
-                grad.setColorAt(0.03, QColor(245, 158, 11, 200))
-                grad.setColorAt(0.5, QColor(251, 191, 36, 255))
-                grad.setColorAt(0.97, QColor(245, 158, 11, 200))
-                grad.setColorAt(1.0, QColor(245, 158, 11, 40))
+                if is_dark:
+                    grad.setColorAt(0.0, QColor(248, 250, 252, 20))
+                    grad.setColorAt(0.2, QColor(248, 250, 252, 180))
+                    grad.setColorAt(0.5, QColor(255, 255, 255, 240))
+                    grad.setColorAt(0.8, QColor(248, 250, 252, 180))
+                    grad.setColorAt(1.0, QColor(248, 250, 252, 20))
+                else:
+                    grad.setColorAt(0.0, QColor(51, 65, 85, 20))
+                    grad.setColorAt(0.2, QColor(51, 65, 85, 180))
+                    grad.setColorAt(0.5, QColor(15, 23, 42, 240))
+                    grad.setColorAt(0.8, QColor(51, 65, 85, 180))
+                    grad.setColorAt(1.0, QColor(51, 65, 85, 20))
             else:
-                grad.setColorAt(0.0, QColor(217, 119, 6, 30))
-                grad.setColorAt(0.04, QColor(217, 119, 6, 150))
-                grad.setColorAt(0.5, QColor(217, 119, 6, 185))
-                grad.setColorAt(0.96, QColor(217, 119, 6, 150))
-                grad.setColorAt(1.0, QColor(217, 119, 6, 30))
+                if is_dark:
+                    grad.setColorAt(0.0, QColor(203, 213, 225, 0))
+                    grad.setColorAt(0.2, QColor(203, 213, 225, 60))
+                    grad.setColorAt(0.5, QColor(226, 232, 240, 110))
+                    grad.setColorAt(0.8, QColor(203, 213, 225, 60))
+                    grad.setColorAt(1.0, QColor(203, 213, 225, 0))
+                else:
+                    grad.setColorAt(0.0, QColor(100, 116, 139, 0))
+                    grad.setColorAt(0.2, QColor(100, 116, 139, 80))
+                    grad.setColorAt(0.5, QColor(71, 85, 105, 140))
+                    grad.setColorAt(0.8, QColor(100, 116, 139, 80))
+                    grad.setColorAt(1.0, QColor(100, 116, 139, 0))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(grad)
-            painter.drawRect(margin_x, cy, line_w, 1)
+            painter.drawRect(start_x, cy, line_w, 1)
         else:
             # Vertical line separating horizontal columns
             cx = w // 2
-            margin_y = 4
-            line_h = max(0, h - margin_y * 2)
-            grad = QLinearGradient(cx, margin_y, cx, max(margin_y + 1, h - margin_y))
+            # User requirement: 10% length centered, gray-white subtle indicator
+            line_h = max(32, int(h * 0.10))
+            start_y = (h - line_h) // 2
+            end_y = start_y + line_h
+
+            grad = QLinearGradient(cx, start_y, cx, end_y)
             if self._hovered:
-                grad.setColorAt(0.0, QColor(245, 158, 11, 40))
-                grad.setColorAt(0.03, QColor(245, 158, 11, 200))
-                grad.setColorAt(0.5, QColor(251, 191, 36, 255))
-                grad.setColorAt(0.97, QColor(245, 158, 11, 200))
-                grad.setColorAt(1.0, QColor(245, 158, 11, 40))
+                if is_dark:
+                    grad.setColorAt(0.0, QColor(248, 250, 252, 20))
+                    grad.setColorAt(0.2, QColor(248, 250, 252, 180))
+                    grad.setColorAt(0.5, QColor(255, 255, 255, 240))
+                    grad.setColorAt(0.8, QColor(248, 250, 252, 180))
+                    grad.setColorAt(1.0, QColor(248, 250, 252, 20))
+                else:
+                    grad.setColorAt(0.0, QColor(51, 65, 85, 20))
+                    grad.setColorAt(0.2, QColor(51, 65, 85, 180))
+                    grad.setColorAt(0.5, QColor(15, 23, 42, 240))
+                    grad.setColorAt(0.8, QColor(51, 65, 85, 180))
+                    grad.setColorAt(1.0, QColor(51, 65, 85, 20))
             else:
-                grad.setColorAt(0.0, QColor(217, 119, 6, 30))
-                grad.setColorAt(0.04, QColor(217, 119, 6, 140))
-                grad.setColorAt(0.5, QColor(217, 119, 6, 180))
-                grad.setColorAt(0.96, QColor(217, 119, 6, 140))
-                grad.setColorAt(1.0, QColor(217, 119, 6, 30))
+                if is_dark:
+                    grad.setColorAt(0.0, QColor(203, 213, 225, 0))
+                    grad.setColorAt(0.2, QColor(203, 213, 225, 60))
+                    grad.setColorAt(0.5, QColor(226, 232, 240, 110))
+                    grad.setColorAt(0.8, QColor(203, 213, 225, 60))
+                    grad.setColorAt(1.0, QColor(203, 213, 225, 0))
+                else:
+                    grad.setColorAt(0.0, QColor(100, 116, 139, 0))
+                    grad.setColorAt(0.2, QColor(100, 116, 139, 80))
+                    grad.setColorAt(0.5, QColor(71, 85, 105, 140))
+                    grad.setColorAt(0.8, QColor(100, 116, 139, 80))
+                    grad.setColorAt(1.0, QColor(100, 116, 139, 0))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(grad)
-            painter.drawRect(cx, margin_y, 1, line_h)
+            painter.drawRect(cx, start_y, 1, line_h)
 
 
 class FadingSplitter(QSplitter):
@@ -1218,6 +1503,19 @@ class FadingSplitter(QSplitter):
 
     def createHandle(self):
         return FadingSplitterHandle(self.orientation(), self)
+
+
+class ViewportResizeFilter(QObject):
+    """Filters Resize events on QScrollArea viewports to trigger immediate, synchronized grid reflows."""
+    def __init__(self, callback, parent=None):
+        super().__init__(parent)
+        self.callback = callback
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Resize:
+            self.callback()
+        return super().eventFilter(watched, event)
+
 
 class CompareButton(QPushButton):
     """Compare button supporting:
@@ -1341,6 +1639,7 @@ class DarkroomMainWindow(QMainWindow):
             "grain": 0.4,
             "grain_size": 1.0,
             "grain_cloud_blur": 1.0,
+            "grain_colour": 1.0,
             "split_x": 0.5,
             "view_mode": 0
         }
@@ -1367,6 +1666,11 @@ class DarkroomMainWindow(QMainWindow):
         self._pending_session_map = None
         self.export_queue = ExportQueueManager(self.engine, self.canvas, self)
         self._is_importing = False
+        self._pending_import_queue = []
+        self._current_import_batch = []
+        self._import_session_completed = 0
+        self._import_session_target_total = 0
+        self._photo_id_counter = 0
         self._status_timer = QTimer(self)
         self._status_timer.setSingleShot(True)
         self._status_timer.timeout.connect(self._on_status_timeout)
@@ -1381,16 +1685,6 @@ class DarkroomMainWindow(QMainWindow):
         self._backslash_timer.timeout.connect(self._on_backslash_timeout)
         self._backslash_pressed = False
         self._backslash_long_pressed = False
-
-        # Film & Paper 1s hover preview state machine
-        self._hover_preview_active = False
-        self._hover_pending_stock = None
-        self._saved_film_stock = None
-        self._saved_paper_stock = None
-        self._saved_print_mode = None
-        self._hover_timer = QTimer(self)
-        self._hover_timer.setSingleShot(True)
-        self._hover_timer.timeout.connect(self._on_hover_timer_timeout)
 
         # Real-time throttled thumbnail & card preview update timer (60ms) during slider dragging & scrubbing
         self._live_thumb_timer = QTimer(self)
@@ -1411,6 +1705,8 @@ class DarkroomMainWindow(QMainWindow):
         self._init_menu_and_actions()
         self._wire_canvas_events()
         self._restore_saved_state()
+        self._on_theme_changed()
+        theme_manager.themeChanged.connect(self._on_theme_changed)
 
         # If CLI session or files provided, queue their loading
         if self._initial_session:
@@ -1491,14 +1787,29 @@ class DarkroomMainWindow(QMainWindow):
             if not os.environ.get("FAST_TEST") and restore_session_enabled and not getattr(self, "_has_cli_targets", False) and not self.photos and not self._current_session_path:
                 last_session = config_manager.get_last_session_path()
                 if last_session and os.path.exists(last_session):
-                    QTimer.singleShot(40, lambda: (not self.photos and not self._current_session_path) and self._open_session_by_path(last_session))
+                    auto_temp = config_manager.get_auto_saved_session_path()
+                    is_temp = (normalize_path(last_session).lower() == normalize_path(auto_temp).lower())
+                    if is_temp:
+                        sess_data = session_cache_manager.load_session_file(last_session)
+                        if not sess_data or not sess_data.get("photos"):
+                            # Empty auto-saved session should not restore into workbench
+                            config_manager.save_last_session_path(None)
+                            last_session = None
+                    if last_session:
+                        QTimer.singleShot(40, lambda: (not self.photos and not self._current_session_path) and self._open_session_by_path(last_session))
+                    else:
+                        self.stack.setCurrentIndex(0)
+                        self.btn_title_export.setVisible(False)
+                        self._update_window_title()
                 else:
                     self.stack.setCurrentIndex(0)
                     self.btn_title_export.setVisible(False)
+                    self._update_window_title()
             else:
                 if not getattr(self, "_has_cli_targets", False) and not self.photos:
                     self.stack.setCurrentIndex(0)
                     self.btn_title_export.setVisible(False)
+                    self._update_window_title()
 
             # 6. Silent session cache auto-cleaning check
             if not os.environ.get("FAST_TEST"):
@@ -1545,13 +1856,15 @@ class DarkroomMainWindow(QMainWindow):
         def _on_active_photo_ready(target_idx, target_entry):
             if getattr(self, "_session_restore_worker", None) != worker:
                 return
-            self.photos[target_idx] = target_entry
+            if 0 <= target_idx < len(self.photos):
+                self.photos[target_idx] = target_entry
             target_id = target_entry.get("id")
             if target_id and target_entry.get("float_img") is not None:
                 try:
                     self.on_switch_photo(target_id)
                 except Exception as e:
                     logger.debug(f"Immediate active photo activation: {e}")
+            self._update_window_title()
 
         def _on_progress(current, total):
             if getattr(self, "_session_restore_worker", None) != worker:
@@ -1584,6 +1897,14 @@ class DarkroomMainWindow(QMainWindow):
                 except Exception as e:
                     logger.error(f"Error activating photo on session restore: {e}")
 
+            # Ensure filmstrip jumps smoothly to the focus photo upon session restore
+            if target_id and hasattr(self.filmstrip, 'scroll_to_photo'):
+                self.filmstrip.scroll_to_photo(target_id, animate=False, force_center=True)
+                QTimer.singleShot(60, lambda: self.filmstrip.scroll_to_photo(target_id, animate=False, force_center=True))
+                QTimer.singleShot(260, lambda: self.filmstrip.scroll_to_photo(target_id, animate=False, force_center=True))
+
+            self._update_window_title()
+
             # Uncached slots handling
             if uncached_slots:
                 self._is_importing = True
@@ -1596,6 +1917,8 @@ class DarkroomMainWindow(QMainWindow):
                 self._slot_decode_worker.finished.connect(self._on_all_slots_decoded)
                 self._slot_decode_worker.start()
             else:
+                if self._start_next_pending_import_batch():
+                    return
                 self._is_importing = False
                 if hasattr(self, "btn_cancel_import"):
                     self.btn_cancel_import.setVisible(False)
@@ -1611,6 +1934,8 @@ class DarkroomMainWindow(QMainWindow):
             if getattr(self, "_session_restore_worker", None) != worker:
                 return
             self._session_restore_worker = None
+            if self._start_next_pending_import_batch():
+                return
             self._is_importing = False
             if hasattr(self, "btn_cancel_import"):
                 self.btn_cancel_import.setVisible(False)
@@ -1764,8 +2089,36 @@ class DarkroomMainWindow(QMainWindow):
                     ]
                 msg = MSG.from_address(int(message))
 
+                # 0. WM_GETMINMAXINFO (0x0024): Constrain maximized window strictly to work area (excluding taskbar)
+                if msg.message == 0x0024:
+                    h_mon = ctypes.windll.user32.MonitorFromWindow(msg.hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+                    mi = MONITORINFO()
+                    mi.cbSize = ctypes.sizeof(MONITORINFO)
+                    if ctypes.windll.user32.GetMonitorInfoW(h_mon, ctypes.byref(mi)):
+                        mmi = MINMAXINFO.from_address(msg.lParam)
+                        w = mi.rcWork.right - mi.rcWork.left
+                        h = mi.rcWork.bottom - mi.rcWork.top
+                        bx = ctypes.windll.user32.GetSystemMetrics(32) + ctypes.windll.user32.GetSystemMetrics(92)  # SM_CXFRAME + SM_CXPADDEDBORDER
+                        by = ctypes.windll.user32.GetSystemMetrics(33) + ctypes.windll.user32.GetSystemMetrics(92)  # SM_CYFRAME + SM_CXPADDEDBORDER
+                        mmi.ptMaxPosition.x = mi.rcWork.left - bx
+                        mmi.ptMaxPosition.y = mi.rcWork.top - by
+                        mmi.ptMaxSize.x = w + 2 * bx
+                        mmi.ptMaxSize.y = h + 2 * by
+                    return True, 0
+
                 # 1. WM_NCCALCSIZE (0x0083): Remove standard title bar and frame while keeping DWM animations
                 if msg.message == 0x0083:
+                    if msg.wParam and ctypes.windll.user32.IsZoomed(msg.hwnd):
+                        h_mon = ctypes.windll.user32.MonitorFromWindow(msg.hwnd, 2)
+                        mi = MONITORINFO()
+                        mi.cbSize = ctypes.sizeof(MONITORINFO)
+                        if ctypes.windll.user32.GetMonitorInfoW(h_mon, ctypes.byref(mi)):
+                            params = NCCALCSIZE_PARAMS.from_address(msg.lParam)
+                            params.rgrc[0].left = mi.rcWork.left
+                            params.rgrc[0].top = mi.rcWork.top
+                            params.rgrc[0].right = mi.rcWork.right
+                            params.rgrc[0].bottom = mi.rcWork.bottom
+                            return True, 0
                     return True, 0
 
                 # 2. WM_NCHITTEST (0x0084): Handle border resize hover and dragging with physical coords
@@ -1804,27 +2157,32 @@ class DarkroomMainWindow(QMainWindow):
 
     def _set_dropzone_active(self, is_active):
         if hasattr(self, 'dropzone'):
+            is_dark = theme_manager.is_dark()
             if is_active:
-                self.dropzone.setStyleSheet("""
-                    QFrame#welcomeDropzone {
+                bg = "rgba(245, 158, 11, 0.08)" if is_dark else "rgba(245, 158, 11, 0.12)"
+                self.dropzone.setStyleSheet(f"""
+                    QFrame#welcomeDropzone {{
                         border: 2px dashed #f59e0b;
                         border-radius: 14px;
-                        background: rgba(245, 158, 11, 0.08);
-                    }
-                    QLabel { border: none; background: transparent; }
+                        background: {bg};
+                    }}
+                    QLabel {{ border: none; background: transparent; }}
                 """)
             else:
-                self.dropzone.setStyleSheet("""
-                    QFrame#welcomeDropzone {
-                        border: 1.5px dashed #353846;
+                border_color = "#353846" if is_dark else "#cbd5e1"
+                bg_color = "rgba(255, 255, 255, 0.015)" if is_dark else "#ffffff"
+                hover_bg = "rgba(245, 158, 11, 0.03)" if is_dark else "rgba(245, 158, 11, 0.06)"
+                self.dropzone.setStyleSheet(f"""
+                    QFrame#welcomeDropzone {{
+                        border: 1.5px dashed {border_color};
                         border-radius: 14px;
-                        background: rgba(255, 255, 255, 0.015);
-                    }
-                    QFrame#welcomeDropzone:hover {
+                        background: {bg_color};
+                    }}
+                    QFrame#welcomeDropzone:hover {{
                         border-color: #f59e0b;
-                        background: rgba(245, 158, 11, 0.03);
-                    }
-                    QLabel { border: none; background: transparent; }
+                        background: {hover_bg};
+                    }}
+                    QLabel {{ border: none; background: transparent; }}
                 """)
 
     def dragEnterEvent(self, event):
@@ -1893,19 +2251,26 @@ class DarkroomMainWindow(QMainWindow):
             event.ignore()
 
     def _update_root_style(self, is_max):
+        is_dark = theme_manager.is_dark()
+        app_bg = "#121316" if is_dark else "#ebedf2"
+        root_border_color = "#282a34" if is_dark else "#c8ccd8"
+        tb_bg = "#141518" if is_dark else "#f0f2f6"
+        scroll_handle = "#3f4350" if is_dark else "#94a3b8"
+        scroll_hover = "#cbd5e1" if is_dark else "#64748b"
+        tooltip_bg = "rgba(22, 24, 30, 0.88)" if is_dark else "rgba(255, 255, 255, 0.95)"
+        tooltip_fg = "#ffffff" if is_dark else "#1e293b"
+        tooltip_border = "none" if is_dark else "1px solid #cbd5e1"
+
         radius = "0px" if is_max else "8px"
-        border = "none" if is_max else "1px solid #282a34"
+        border = "none" if is_max else f"1px solid {root_border_color}"
         tb_radius = "0px" if is_max else "8px"
         cw = self.centralWidget()
         if cw:
             if cw.layout():
-                if is_max:
-                    cw.layout().setContentsMargins(8, 8, 8, 8)
-                else:
-                    cw.layout().setContentsMargins(0, 0, 0, 0)
+                cw.layout().setContentsMargins(0, 0, 0, 0)
             cw.setStyleSheet(f"""
                 QWidget#rootContainer {{
-                    background: #121316;
+                    background: {app_bg};
                     border: {border};
                     border-radius: {radius};
                 }}
@@ -1916,13 +2281,18 @@ class DarkroomMainWindow(QMainWindow):
                     border: none;
                 }}
                 QScrollBar::handle:vertical {{
-                    background: #353846;
+                    background: {scroll_handle};
                     min-height: 24px;
                     border-radius: 3px;
                     border: none;
                 }}
                 QScrollBar::handle:vertical:hover {{
+                    background: {scroll_hover};
+                    border-radius: 3px;
+                }}
+                QScrollBar::handle:vertical:pressed {{
                     background: #f59e0b;
+                    border-radius: 3px;
                 }}
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                     height: 0px;
@@ -1941,13 +2311,18 @@ class DarkroomMainWindow(QMainWindow):
                     border: none;
                 }}
                 QScrollBar::handle:horizontal {{
-                    background: #353846;
+                    background: {scroll_handle};
                     min-width: 24px;
                     border-radius: 3px;
                     border: none;
                 }}
                 QScrollBar::handle:horizontal:hover {{
+                    background: {scroll_hover};
+                    border-radius: 3px;
+                }}
+                QScrollBar::handle:horizontal:pressed {{
                     background: #f59e0b;
+                    border-radius: 3px;
                 }}
                 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                     height: 0px;
@@ -1959,9 +2334,167 @@ class DarkroomMainWindow(QMainWindow):
                     background: none;
                     border: none;
                 }}
+                QToolTip {{
+                    background-color: {tooltip_bg};
+                    color: {tooltip_fg};
+                    border: {tooltip_border};
+                    border-radius: 8px;
+                    padding: 7px 11px;
+                    font-size: 11px;
+                    font-weight: 400;
+                    line-height: 1.4;
+                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+                }}
             """)
         if hasattr(self, 'title_bar'):
-            self.title_bar.setStyleSheet(f"background: #141518; border: none; border-top-left-radius: {tb_radius}; border-top-right-radius: {tb_radius};")
+            self.title_bar.setStyleSheet(f"background: {tb_bg}; border: none; border-top-left-radius: {tb_radius}; border-top-right-radius: {tb_radius};")
+
+    def _on_theme_changed(self, theme_name=None):
+        is_dark = theme_manager.is_dark()
+        colors = theme_manager.get_colors()
+
+        # 1. Update native titlebar
+        apply_dark_titlebar(self, is_dark=is_dark)
+
+        # 2. Update rootContainer stylesheet
+        self._update_root_style(self.isMaximized())
+
+        # 3. Update Menu Bar
+        if hasattr(self, 'menu_bar'):
+            self.menu_bar.setStyleSheet(theme_manager.get_menu_stylesheet())
+
+        # 4. Brand title & header titles
+        if hasattr(self, 'lbl_brand'):
+            brand_col = "#f59e0b" if is_dark else "#d97706"
+            self.lbl_brand.setStyleSheet(f"color: {brand_col}; font-size: 13px; font-weight: bold; letter-spacing: 0.5px; border: none;")
+        if hasattr(self, 'lbl_paper_title'):
+            paper_col = "#f59e0b" if is_dark else "#d97706"
+            self.lbl_paper_title.setStyleSheet(f"color: {paper_col}; font-size: 11.5px; font-weight: bold;")
+
+        # 5. Right Sidebar Container
+        if hasattr(self, 'sidebar_container'):
+            self.sidebar_container.setStyleSheet(f"background: {colors['panel_bg']};")
+
+        # 6. View Toolbar & Status Bar Controls
+        self._update_view_toolbar_style()
+
+        # 7. Welcome View
+        self._update_welcome_view_style()
+
+        # 8. Editor View Background
+        if hasattr(self, 'editor_widget'):
+            self.editor_widget.setStyleSheet(f"background: {colors['app_bg']};")
+
+        # 9. Stock cards reflow / refresh appearance
+        for card in getattr(self, 'film_cards', {}).values():
+            if hasattr(card, '_update_appearance'):
+                card._update_appearance()
+        for card in getattr(self, 'paper_cards', {}).values():
+            if hasattr(card, '_update_appearance'):
+                card._update_appearance()
+
+        # 10. Update menu action icons
+        actions_icons = [
+            ('act_open_file', "open_file.png"),
+            ('act_save_session', "save.png"),
+            ('act_quick_export', "quick_export.png"),
+            ('act_export', "export.png"),
+            ('act_undo', "undo.png"),
+            ('act_redo', "redo.png"),
+            ('act_reset_all', "reset.png"),
+            ('act_prefs', "preferences.png"),
+            ('act_fit_img', "fit_window.png"),
+            ('act_compare', "compare.png"),
+            ('act_fit_win', "fit_window.png"),
+            ('act_100', "zoom_100.png"),
+        ]
+        for attr, icon_name in actions_icons:
+            act = getattr(self, attr, None)
+            if act:
+                act.setIcon(get_icon(icon_name, is_dark=is_dark))
+
+        # 11. Force update
+        self.update()
+
+    def _update_view_toolbar_style(self):
+        is_dark = theme_manager.is_dark()
+        colors = theme_manager.get_colors()
+        if hasattr(self, 'view_toolbar'):
+            self.view_toolbar.setStyleSheet(f"background: {colors['view_toolbar_bg']}; border: none;")
+        if hasattr(self, 'lbl_photo_info'):
+            self.lbl_photo_info.setStyleSheet(f"QLabel#lbl_photo_info {{ color: {colors['text_secondary']}; font-size: 11px; font-weight: 500; padding-top: 1px; }}")
+        if hasattr(self, 'status_label'):
+            self.status_label.setStyleSheet(f"QLabel#status_label {{ color: {colors['text_muted']}; font-size: 11px; padding-top: 1px; }}")
+
+        btn_bg = colors['view_toolbar_btn_bg']
+        btn_border = colors['view_toolbar_btn_border']
+        btn_hover = colors['view_toolbar_btn_hover']
+        btn_pressed = "#14151a" if is_dark else "#cbd5e1"
+        btn_style = f"""
+            QPushButton {{
+                background: {btn_bg};
+                border: 1px solid {btn_border};
+                border-radius: 3px;
+            }}
+            QPushButton:hover {{
+                background: {btn_hover};
+                border-color: #f59e0b;
+            }}
+            QPushButton:pressed {{
+                background: {btn_pressed};
+                border-color: {btn_border};
+            }}
+            QPushButton:checked {{
+                background: #f59e0b;
+                border-color: #f59e0b;
+            }}
+        """
+        for btn in (getattr(self, 'btn_split', None), getattr(self, 'btn_fit', None), getattr(self, 'btn_100', None)):
+            if btn:
+                btn.setStyleSheet(btn_style)
+
+        if getattr(self, 'btn_split', None):
+            self.btn_split.setIcon(get_icon("compare.png", is_dark=is_dark))
+        if getattr(self, 'btn_fit', None):
+            self.btn_fit.setIcon(get_icon("fit_window.png", is_dark=is_dark))
+        if getattr(self, 'btn_100', None):
+            self.btn_100.setIcon(get_icon("zoom_100.png", is_dark=is_dark))
+
+    def _update_welcome_view_style(self):
+        is_dark = theme_manager.is_dark()
+        colors = theme_manager.get_colors()
+        if hasattr(self, 'welcome_widget'):
+            self.welcome_widget.setStyleSheet(f"background: {colors['app_bg']};")
+        if hasattr(self, 'dropzone'):
+            self._set_dropzone_active(False)
+        if hasattr(self, 'lbl_drop'):
+            self.lbl_drop.setStyleSheet(f"color: {colors['text_primary']}; font-size: 16px; font-weight: 600;")
+        if hasattr(self, 'lbl_sub'):
+            self.lbl_sub.setStyleSheet(f"color: {colors['text_muted']}; font-size: 12px;")
+        if hasattr(self, 'btn_import_folder'):
+            folder_bg = "#252732" if is_dark else "#ffffff"
+            folder_fg = "#e2e8f0" if is_dark else "#1e293b"
+            folder_border = "#383c4c" if is_dark else "#cbd5e1"
+            folder_hover = "#303342" if is_dark else "#f1f4f9"
+            folder_pressed = "#1e2029" if is_dark else "#e2e8f0"
+            self.btn_import_folder.setStyleSheet(f"""
+                QPushButton {{
+                    background: {folder_bg};
+                    color: {folder_fg};
+                    font-size: 13px;
+                    font-weight: 500;
+                    border: 1px solid {folder_border};
+                    border-radius: 6px;
+                }}
+                QPushButton:hover {{
+                    background: {folder_hover};
+                    border-color: #555b70;
+                }}
+                QPushButton:pressed {{
+                    background: {folder_pressed};
+                    border-color: {folder_border};
+                }}
+            """)
 
     def _init_ui(self):
         central_widget = QWidget(self)
@@ -2056,7 +2589,7 @@ class DarkroomMainWindow(QMainWindow):
         tb_layout.addStretch(1)
 
         # App Brand Title (居中放置，鼠标穿透可拖动窗口)
-        self.lbl_brand = QLabel(get_app_title())
+        self.lbl_brand = QLabel("SpektraDarkroom")
         self.lbl_brand.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.lbl_brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_brand.setStyleSheet("color: #f59e0b; font-size: 13px; font-weight: bold; letter-spacing: 0.5px; border: none;")
@@ -2125,9 +2658,9 @@ class DarkroomMainWindow(QMainWindow):
         self._init_editor_view()
 
     def _init_welcome_view(self):
-        welcome_widget = QWidget()
-        welcome_widget.setStyleSheet("background: #111215;")
-        v_layout = QVBoxLayout(welcome_widget)
+        self.welcome_widget = QWidget()
+        self.welcome_widget.setStyleSheet(f"background: {theme_manager.color('app_bg')};")
+        v_layout = QVBoxLayout(self.welcome_widget)
         v_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         c_widget = QWidget()
@@ -2140,21 +2673,7 @@ class DarkroomMainWindow(QMainWindow):
         self.dropzone.setObjectName("welcomeDropzone")
         self.dropzone.setFixedSize(580, 260)
         self.dropzone.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.dropzone.setStyleSheet("""
-            QFrame#welcomeDropzone {
-                border: 1.5px dashed #353846;
-                border-radius: 14px;
-                background: rgba(255, 255, 255, 0.015);
-            }
-            QFrame#welcomeDropzone:hover {
-                border-color: #f59e0b;
-                background: rgba(245, 158, 11, 0.03);
-            }
-            QLabel {
-                border: none;
-                background: transparent;
-            }
-        """)
+        self._set_dropzone_active(False)
         drop_layout = QVBoxLayout(self.dropzone)
         drop_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         drop_layout.setSpacing(14)
@@ -2168,15 +2687,15 @@ class DarkroomMainWindow(QMainWindow):
             lbl_icon.setPixmap(pix)
             drop_layout.addWidget(lbl_icon, 0, Qt.AlignmentFlag.AlignCenter)
 
-        lbl_drop = QLabel("点击或拖入照片 / RAW 负片文件")
-        lbl_drop.setStyleSheet("color: #f1f5f9; font-size: 16px; font-weight: 600;")
-        lbl_drop.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_layout.addWidget(lbl_drop)
+        self.lbl_drop = QLabel("点击或拖入照片 / RAW 负片文件")
+        self.lbl_drop.setStyleSheet(f"color: {theme_manager.color('text_primary')}; font-size: 16px; font-weight: 600;")
+        self.lbl_drop.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_layout.addWidget(self.lbl_drop)
 
-        lbl_sub = QLabel("支持格式: ARW · CR2 · CR3 · NEF · RAF · DNG · TIFF · PNG")
-        lbl_sub.setStyleSheet("color: #71717a; font-size: 12px;")
-        lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_layout.addWidget(lbl_sub)
+        self.lbl_sub = QLabel("支持格式: ARW · CR2 · CR3 · NEF · RAF · DNG · TIFF · PNG")
+        self.lbl_sub.setStyleSheet(f"color: {theme_manager.color('text_muted')}; font-size: 12px;")
+        self.lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_layout.addWidget(self.lbl_sub)
 
         self.dropzone.mousePressEvent = lambda e: self.action_open_files()
         c_layout.addWidget(self.dropzone)
@@ -2207,10 +2726,10 @@ class DarkroomMainWindow(QMainWindow):
         btn_import_file.clicked.connect(self.action_open_files)
         btn_layout.addWidget(btn_import_file)
 
-        btn_import_folder = QPushButton("导入文件夹")
-        btn_import_folder.setFixedSize(160, 38)
-        btn_import_folder.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_import_folder.setStyleSheet("""
+        self.btn_import_folder = QPushButton("导入文件夹")
+        self.btn_import_folder.setFixedSize(160, 38)
+        self.btn_import_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_import_folder.setStyleSheet("""
             QPushButton {
                 background: #252732;
                 color: #e2e8f0;
@@ -2228,17 +2747,17 @@ class DarkroomMainWindow(QMainWindow):
                 border-color: #383c4c;
             }
         """)
-        btn_import_folder.clicked.connect(self.action_open_folder)
-        btn_layout.addWidget(btn_import_folder)
+        self.btn_import_folder.clicked.connect(self.action_open_folder)
+        btn_layout.addWidget(self.btn_import_folder)
 
         c_layout.addLayout(btn_layout)
         v_layout.addWidget(c_widget)
-        self.stack.addWidget(welcome_widget)
+        self.stack.addWidget(self.welcome_widget)
 
     def _init_editor_view(self):
-        editor_widget = QWidget()
-        editor_widget.setStyleSheet("background: #121316;")
-        e_layout = QVBoxLayout(editor_widget)
+        self.editor_widget = QWidget()
+        self.editor_widget.setStyleSheet(f"background: {theme_manager.color('app_bg')};")
+        e_layout = QVBoxLayout(self.editor_widget)
         
         # Item 2: Margins and Padding around work area
         e_layout.setContentsMargins(6, 6, 6, 6)
@@ -2251,7 +2770,7 @@ class DarkroomMainWindow(QMainWindow):
         # 1. Left Sidebar: 3-Tier Resizable Splitter (Films, Papers, EXIF)
         # -------------------------------------------------------------
         left_panel = QWidget()
-        left_panel.setMinimumWidth(220)
+        left_panel.setMinimumWidth(160)
         left_panel.setMaximumWidth(460)
         lp_layout = QVBoxLayout(left_panel)
         lp_layout.setContentsMargins(4, 4, 4, 4)
@@ -2266,40 +2785,11 @@ class DarkroomMainWindow(QMainWindow):
         film_layout.setContentsMargins(0, 0, 0, 0)
         film_layout.setSpacing(4)
 
-        f_header = QHBoxLayout()
-        f_header.setContentsMargins(4, 2, 4, 0)
-        self.lbl_film_title = QLabel("胶卷型号 (Films)")
-        self.lbl_film_title.setStyleSheet("color: #f59e0b; font-size: 11.5px; font-weight: bold;")
-        f_header.addWidget(self.lbl_film_title)
-        f_header.addStretch()
-
-        btn_import_film = QPushButton("＋导入")
-        btn_import_film.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_import_film.setToolTip("导入外部胶卷物理配置 (.json)")
-        btn_import_film.setStyleSheet("""
-            QPushButton {
-                background: #1a1b22;
-                color: #94a3b8;
-                border: 1px solid #2b2e3c;
-                border-radius: 3px;
-                padding: 1px 6px;
-                font-size: 10.5px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #252836;
-                color: #f59e0b;
-                border-color: #f59e0b;
-            }
-            QPushButton:pressed {
-                background: #121317;
-                color: #d97706;
-                border-color: #d97706;
-            }
-        """)
-        btn_import_film.clicked.connect(self._import_film_lut)
-        f_header.addWidget(btn_import_film)
-        film_layout.addLayout(f_header)
+        self.film_header = FilmFilterHeader()
+        self.lbl_film_title = self.film_header.lbl_title
+        self.film_header.searchChanged.connect(self._on_film_search_changed)
+        self.film_header.categoryChanged.connect(self._on_film_category_changed)
+        film_layout.addWidget(self.film_header)
 
         self.film_scroll = SmoothScrollArea()
         self.film_scroll.setWidgetResizable(True)
@@ -2311,13 +2801,16 @@ class DarkroomMainWindow(QMainWindow):
         self.film_grid.setContentsMargins(4, 4, 4, 4)
         self.film_grid.setHorizontalSpacing(6)
         self.film_grid.setVerticalSpacing(6)
-        self.film_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.film_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.film_scroll.setWidget(self.film_container)
 
         self.film_scroll.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.film_scroll.customContextMenuRequested.connect(self._on_film_blank_context_menu)
         self.film_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.film_container.customContextMenuRequested.connect(self._on_film_blank_context_menu)
+
+        self._film_vp_filter = ViewportResizeFilter(self.reflow_grids, self)
+        self.film_scroll.viewport().installEventFilter(self._film_vp_filter)
 
         film_layout.addWidget(self.film_scroll, 1)
 
@@ -2336,33 +2829,6 @@ class DarkroomMainWindow(QMainWindow):
         self.lbl_paper_title.setStyleSheet("color: #f59e0b; font-size: 11.5px; font-weight: bold;")
         p_header.addWidget(self.lbl_paper_title)
         p_header.addStretch()
-
-        btn_import_paper = QPushButton("＋导入")
-        btn_import_paper.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_import_paper.setToolTip("导入外部相纸物理配置 (.json)")
-        btn_import_paper.setStyleSheet("""
-            QPushButton {
-                background: #1a1b22;
-                color: #94a3b8;
-                border: 1px solid #2b2e3c;
-                border-radius: 3px;
-                padding: 1px 6px;
-                font-size: 10.5px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #252836;
-                color: #f59e0b;
-                border-color: #f59e0b;
-            }
-            QPushButton:pressed {
-                background: #121317;
-                color: #d97706;
-                border-color: #d97706;
-            }
-        """)
-        btn_import_paper.clicked.connect(self._import_paper_lut)
-        p_header.addWidget(btn_import_paper)
         paper_layout.addLayout(p_header)
 
 
@@ -2376,13 +2842,16 @@ class DarkroomMainWindow(QMainWindow):
         self.paper_grid.setContentsMargins(4, 4, 4, 4)
         self.paper_grid.setHorizontalSpacing(6)
         self.paper_grid.setVerticalSpacing(6)
-        self.paper_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.paper_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.paper_scroll.setWidget(self.paper_container)
 
         self.paper_scroll.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.paper_scroll.customContextMenuRequested.connect(self._on_paper_blank_context_menu)
         self.paper_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.paper_container.customContextMenuRequested.connect(self._on_paper_blank_context_menu)
+
+        self._paper_vp_filter = ViewportResizeFilter(self.reflow_grids, self)
+        self.paper_scroll.viewport().installEventFilter(self._paper_vp_filter)
 
         paper_layout.addWidget(self.paper_scroll, 1)
 
@@ -2423,25 +2892,29 @@ class DarkroomMainWindow(QMainWindow):
         cc_layout.addWidget(self.canvas, 1)
 
         # View Toolbar (Item 6: Status on Left, Buttons on Right)
-        # View Toolbar (Status on Left, Buttons on Right - Narrow 26px, clean borderless background)
-        view_toolbar = QFrame()
-        view_toolbar.setFixedHeight(26)
-        view_toolbar.setStyleSheet("background: #141518; border: none;")
-        tb_layout = QHBoxLayout(view_toolbar)
-        tb_layout.setContentsMargins(10, 0, 10, 0)
+        # View Toolbar (Status on Left, Buttons on Right - Narrow 28px, clean borderless background)
+        self.view_toolbar = QFrame()
+        self.view_toolbar.setFixedHeight(28)
+        self.view_toolbar.setStyleSheet(f"background: {theme_manager.color('view_toolbar_bg')}; border: none;")
+        tb_layout = QHBoxLayout(self.view_toolbar)
+        tb_layout.setContentsMargins(10, 2, 10, 1)
+        tb_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         tb_layout.setSpacing(6)
 
         # Permanent photo filename & zoom percentage display (never erased or overwritten by transient notifications)
         self.lbl_photo_info = QLabel("")
+        self.lbl_photo_info.setObjectName("lbl_photo_info")
         self.lbl_photo_info.setFixedWidth(160)
-        self.lbl_photo_info.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: 500;")
+        self.lbl_photo_info.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.lbl_photo_info.setStyleSheet("QLabel#lbl_photo_info { color: #cbd5e1; font-size: 11px; font-weight: 500; padding-top: 1px; }")
         tb_layout.addWidget(self.lbl_photo_info)
 
         # Subtle separator between permanent photo info and transient system notification
         self.status_sep = QLabel("│")
+        self.status_sep.setObjectName("status_sep")
         self.status_sep.setFixedWidth(10)
-        self.status_sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_sep.setStyleSheet("color: transparent; font-size: 11px;")
+        self.status_sep.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+        self.status_sep.setStyleSheet("QLabel#status_sep { color: transparent; font-size: 11px; padding-top: 1px; }")
         tb_layout.addWidget(self.status_sep)
 
         # Left: Spinner & Status Label (Item 6 & 8)
@@ -2449,7 +2922,9 @@ class DarkroomMainWindow(QMainWindow):
         tb_layout.addWidget(self.spinner)
 
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.status_label.setObjectName("status_label")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; padding-top: 1px; }")
         self.status_label.mousePressEvent = self._on_status_label_clicked
         tb_layout.addWidget(self.status_label)
 
@@ -2476,7 +2951,7 @@ class DarkroomMainWindow(QMainWindow):
                 background: #1f0d0d;
             }
         """)
-        self.btn_cancel_import.clicked.connect(self._cancel_active_import)
+        self.btn_cancel_import.clicked.connect(lambda: self._cancel_active_import(notify_user=True))
         tb_layout.addWidget(self.btn_cancel_import)
 
         tb_layout.addStretch(1)
@@ -2490,6 +2965,7 @@ class DarkroomMainWindow(QMainWindow):
         self.export_status_container.mousePressEvent = self._on_export_status_clicked
         export_layout = QHBoxLayout(self.export_status_container)
         export_layout.setContentsMargins(0, 0, 0, 0)
+        export_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         export_layout.setSpacing(6)
 
         self.export_spinner = SpinnerWidget(size=12)
@@ -2497,7 +2973,8 @@ class DarkroomMainWindow(QMainWindow):
 
         self.lbl_export_status = QLabel("")
         self.lbl_export_status.setObjectName("lbl_export_status")
-        self.lbl_export_status.setStyleSheet("color: #f59e0b; font-size: 11px; text-decoration: underline;")
+        self.lbl_export_status.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; padding-top: 1px; }")
         export_layout.addWidget(self.lbl_export_status)
 
         self.export_status_container.setStyleSheet("""
@@ -2510,9 +2987,10 @@ class DarkroomMainWindow(QMainWindow):
         tb_layout.addWidget(self.export_status_container)
 
         self.export_sep = QLabel("│")
+        self.export_sep.setObjectName("export_sep")
         self.export_sep.setFixedWidth(12)
-        self.export_sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.export_sep.setStyleSheet("color: #2e3444; font-size: 11px;")
+        self.export_sep.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+        self.export_sep.setStyleSheet("QLabel#export_sep { color: #2e3444; font-size: 11px; padding-top: 1px; }")
         self.export_sep.setVisible(False)
         tb_layout.addWidget(self.export_sep)
 
@@ -2538,7 +3016,7 @@ class DarkroomMainWindow(QMainWindow):
         """
 
         self.btn_split = CompareButton(self)
-        self.btn_split.setFixedSize(28, 24)
+        self.btn_split.setFixedSize(28, 22)
         self.btn_split.setIcon(get_icon("compare.png"))
         self.btn_split.setIconSize(QSize(14, 14))
         self.btn_split.setCheckable(True)
@@ -2549,26 +3027,26 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_split.longPressFinished.connect(self._on_compare_long_press_end)
         tb_layout.addWidget(self.btn_split)
 
-        btn_fit = QPushButton()
-        btn_fit.setFixedSize(28, 24)
-        btn_fit.setIcon(get_icon("fit_window.png"))
-        btn_fit.setIconSize(QSize(14, 14))
-        btn_fit.setToolTip("适应图像全貌 (Ctrl+0)")
-        btn_fit.setStyleSheet(btn_style)
-        btn_fit.clicked.connect(self.canvas.fit_to_view)
-        tb_layout.addWidget(btn_fit)
+        self.btn_fit = QPushButton()
+        self.btn_fit.setFixedSize(28, 22)
+        self.btn_fit.setIcon(get_icon("fit_window.png"))
+        self.btn_fit.setIconSize(QSize(14, 14))
+        self.btn_fit.setToolTip("适应图像全貌 (Ctrl+0)")
+        self.btn_fit.setStyleSheet(btn_style)
+        self.btn_fit.clicked.connect(self.canvas.fit_to_view)
+        tb_layout.addWidget(self.btn_fit)
 
-        btn_100 = QPushButton()
-        btn_100.setFixedSize(28, 24)
-        btn_100.setIcon(get_icon("zoom_100.png"))
-        btn_100.setIconSize(QSize(14, 14))
-        btn_100.setToolTip("1:1 实际像素 (Ctrl+1)")
-        btn_100.setStyleSheet(btn_style)
-        btn_100.clicked.connect(self.canvas.set_zoom_100)
-        tb_layout.addWidget(btn_100)
+        self.btn_100 = QPushButton()
+        self.btn_100.setFixedSize(28, 22)
+        self.btn_100.setIcon(get_icon("zoom_100.png"))
+        self.btn_100.setIconSize(QSize(14, 14))
+        self.btn_100.setToolTip("1:1 实际像素 (Ctrl+1)")
+        self.btn_100.setStyleSheet(btn_style)
+        self.btn_100.clicked.connect(self.canvas.set_zoom_100)
+        tb_layout.addWidget(self.btn_100)
 
         self.canvas.zoomChanged.connect(self._on_zoom_changed)
-        cc_layout.addWidget(view_toolbar)
+        cc_layout.addWidget(self.view_toolbar)
         self.center_splitter.addWidget(canvas_container)
 
         # Bottom 35mm Filmstrip (Item 8, 16)
@@ -2599,11 +3077,11 @@ class DarkroomMainWindow(QMainWindow):
         # -------------------------------------------------------------
         # 3. Right Sidebar: Pinned Histogram + Adjustments Scroll
         # -------------------------------------------------------------
-        sidebar_container = QWidget()
-        sidebar_container.setMinimumWidth(260)
-        sidebar_container.setMaximumWidth(420)
-        sidebar_container.setStyleSheet("background: #141518;")
-        sb_outer_layout = QVBoxLayout(sidebar_container)
+        self.sidebar_container = QWidget()
+        self.sidebar_container.setMinimumWidth(260)
+        self.sidebar_container.setMaximumWidth(420)
+        self.sidebar_container.setStyleSheet(f"background: {theme_manager.color('panel_bg')};")
+        sb_outer_layout = QVBoxLayout(self.sidebar_container)
         sb_outer_layout.setContentsMargins(8, 8, 8, 8)
         sb_outer_layout.setSpacing(6)
 
@@ -2619,6 +3097,7 @@ class DarkroomMainWindow(QMainWindow):
         sidebar_scroll.setWidgetResizable(True)
         sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.sidebar_scroll = sidebar_scroll
 
         self.sidebar_content = QWidget()
         self.sidebar_layout = QVBoxLayout(self.sidebar_content)
@@ -2636,7 +3115,7 @@ class DarkroomMainWindow(QMainWindow):
 
         sidebar_scroll.setWidget(self.sidebar_content)
         sb_outer_layout.addWidget(sidebar_scroll, 1)
-        self.main_splitter.addWidget(sidebar_container)
+        self.main_splitter.addWidget(self.sidebar_container)
         self.main_splitter.setCollapsible(2, False)
 
         # Splitter proportion defaults: Left panel 320px (comfortably fits 3 columns), Center 800px, Right 320px
@@ -2647,7 +3126,7 @@ class DarkroomMainWindow(QMainWindow):
         self.main_splitter.splitterMoved.connect(lambda pos, idx: self.reflow_grids())
 
         e_layout.addWidget(self.main_splitter)
-        self.stack.addWidget(editor_widget)
+        self.stack.addWidget(self.editor_widget)
         self.stack.currentChanged.connect(self._on_stack_page_changed)
 
     def _on_stack_page_changed(self, index):
@@ -2671,8 +3150,8 @@ class DarkroomMainWindow(QMainWindow):
             QTimer.singleShot(60, self.reflow_grids)
 
     def reflow_grids(self):
-        # Dynamic responsive layout: compact card dimensions to accommodate more stocks
-        min_card_w = 90
+        # Dynamic responsive layout: unified minimum card width 96px to prevent clipping
+        min_card_w = 96
         spacing = 6
         margins = 8
 
@@ -2680,33 +3159,49 @@ class DarkroomMainWindow(QMainWindow):
         def _reflow_container(scroll_widget, cards_dict, grid_layout):
             if not scroll_widget or not cards_dict:
                 return
-            viewport_w = scroll_widget.viewport().width()
+            vp = scroll_widget.viewport()
+            viewport_w = vp.width() if vp else 0
             if viewport_w <= 0 and hasattr(self, "left_splitter"):
                 viewport_w = self.left_splitter.width() - 16
-            avail_w = max(90, viewport_w - margins)
+            avail_w = max(96, viewport_w - margins)
 
-            # Determine number of columns (accommodates 3-4 columns in typical sidebar widths)
-            if avail_w >= 378:
+            # Strict column thresholds based on min_card_w=96, spacing=6, margins=8:
+            # 4 cols: 96 * 4 + 6 * 3 + 8 = 410px
+            # 3 cols: 96 * 3 + 6 * 2 + 8 = 308px
+            # 2 cols: 96 * 2 + 6 * 1 + 8 = 206px
+            if avail_w >= 410:
                 cols = 4
-            elif avail_w >= 282:
+            elif avail_w >= 308:
                 cols = 3
-            elif avail_w >= 186:
+            elif avail_w >= 206:
                 cols = 2
             else:
                 cols = 1
 
-            # Dynamically scale card width to fill row up to 135px max
+            # Dynamically scale card width to fill row up to 220px max
             target_card_w = int((avail_w - (cols - 1) * spacing) / cols)
-            target_card_w = max(min_card_w, min(135, target_card_w))
+            target_card_w = max(min_card_w, min(220, target_card_w))
 
-            for card in cards_dict.values():
+            visible_cards = [c for c in cards_dict.values() if getattr(c, "is_filter_matched", True)]
+            for card in visible_cards:
                 card.update_card_dimensions(target_card_w)
 
-            for i, (sid, card) in enumerate(cards_dict.items()):
+            # Remove all cards from grid first to prevent stale positions
+            for card in cards_dict.values():
                 grid_layout.removeWidget(card)
+
+            # Re-pack only visible cards in tight, gap-free arrangement
+            for i, card in enumerate(visible_cards):
                 grid_layout.addWidget(card, i // cols, i % cols)
-            total_rows = (len(cards_dict) + cols - 1) // cols
-            for r in range(total_rows):
+                card.setVisible(True)
+
+            # Explicitly hide non-matched cards
+            for card in cards_dict.values():
+                if not getattr(card, "is_filter_matched", True):
+                    card.setVisible(False)
+
+            total_rows = (len(visible_cards) + cols - 1) // cols if visible_cards else 0
+            for r in range(max(1, total_rows)):
                 grid_layout.setRowStretch(r, 0)
             grid_layout.setRowStretch(total_rows, 1)
 
@@ -2716,128 +3211,92 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, "paper_scroll") and self.paper_cards:
             _reflow_container(self.paper_scroll, self.paper_cards, self.paper_grid)
 
+    def _on_film_search_changed(self, query: str):
+        self._film_search_query = query.strip().lower()
+        self._apply_film_filters()
+
+    def _on_film_category_changed(self, category: str):
+        self._film_category_filter = category
+        self._apply_film_filters()
+
+    def _apply_film_filters(self):
+        query = getattr(self, "_film_search_query", "").strip().lower()
+        cat = getattr(self, "_film_category_filter", "all")
+        visible_count = 0
+        total_count = len(self.film_cards)
+
+        for sid, card in self.film_cards.items():
+            info = getattr(card, "stock_info", {})
+            model = info.get("channel_model", "color")
+            ftype = info.get("type", "negative")
+            use = info.get("use", "still")
+            badge = (info.get("badge") or "").lower()
+
+            # 1. Category match
+            cat_match = False
+            if cat == "all":
+                cat_match = True
+            elif cat == "color":
+                cat_match = (model == "color")
+            elif cat == "bw":
+                cat_match = (model == "bw")
+            elif cat == "negative":
+                cat_match = (ftype == "negative")
+            elif cat == "positive":
+                cat_match = (ftype == "positive")
+            elif cat == "cine":
+                cat_match = (use == "cine" or "电影" in badge or "cinestill" in sid.lower() or "vision3" in sid.lower() or "eterna" in sid.lower())
+
+            # 2. Query match
+            query_match = True
+            if query:
+                s_name = card.stock_name.lower()
+                s_desc = (info.get("desc") or "").lower()
+                s_id = sid.lower()
+                query_match = (query in s_name or query in badge or query in s_desc or query in s_id)
+
+            # Special case for "none" bypass stock
+            if sid == "none":
+                is_visible = (cat == "all") and (not query or query in "无原生bypass数码")
+            else:
+                is_visible = cat_match and query_match
+
+            card.is_filter_matched = is_visible
+            card.setVisible(is_visible)
+            if is_visible:
+                visible_count += 1
+
+        if hasattr(self, "film_header"):
+            self.film_header.set_title_count(visible_count, total_count)
+        elif hasattr(self, "lbl_film_title"):
+            self.lbl_film_title.setText(f"胶卷型号 ({visible_count}/{total_count} 卷)")
+
+        self.reflow_grids()
+
     def _populate_film_grid(self):
         stocks = self.engine.get_film_stocks()
         for group in stocks:
             for item in group.get("stocks", group.get("items", [])):
-                is_custom = bool(item.get("is_custom", False) or (hasattr(self.engine, 'BUILTIN_FILM_IDS') and item["id"] not in self.engine.BUILTIN_FILM_IDS))
-                card = FilmGridCard(item, is_active=(item["id"] == self.current_film_stock), is_custom=is_custom, stock_type="film")
+                card = FilmGridCard(item, is_active=(item["id"] == self.current_film_stock), is_custom=False, stock_type="film")
                 card.selected.connect(self.on_switch_film)
-                card.hoverEntered.connect(self._on_card_hover_entered)
-                card.exportRequested.connect(lambda sid: self._export_film_lut(sid))
-                card.removeRequested.connect(lambda sid: self._remove_film_lut(sid))
                 card.sortRequested.connect(lambda st, sb: self._sort_and_reflow_stocks(st, sb))
-                card.importRequested.connect(lambda st: self._import_film_lut())
                 self.film_cards[item["id"]] = card
-        if hasattr(self, 'lbl_film_title'):
+        if hasattr(self, 'film_header'):
+            self.film_header.set_title_count(len(self.film_cards), len(self.film_cards))
+        elif hasattr(self, 'lbl_film_title'):
             self.lbl_film_title.setText(f"胶卷型号 ({len(self.film_cards)} 卷)")
         self.reflow_grids()
 
     def _populate_paper_grid(self):
         papers = self.engine.get_paper_stocks()
         for item in papers:
-            is_custom = bool(item.get("is_custom", False) or (hasattr(self.engine, 'BUILTIN_PAPER_IDS') and item["id"] not in self.engine.BUILTIN_PAPER_IDS))
-            card = FilmGridCard(item, is_active=(item["id"] == self.current_paper_stock), is_custom=is_custom, stock_type="paper")
+            card = FilmGridCard(item, is_active=(item["id"] == self.current_paper_stock), is_custom=False, stock_type="paper")
             card.selected.connect(self.on_switch_paper)
-            card.hoverEntered.connect(self._on_card_hover_entered)
-            card.exportRequested.connect(lambda sid: self._export_paper_lut(sid))
-            card.removeRequested.connect(lambda sid: self._remove_paper_lut(sid))
             card.sortRequested.connect(lambda st, sb: self._sort_and_reflow_stocks(st, sb))
-            card.importRequested.connect(lambda st: self._import_paper_lut())
             self.paper_cards[item["id"]] = card
         if hasattr(self, 'lbl_paper_title'):
             self.lbl_paper_title.setText(f"放大相纸 ({len(self.paper_cards)} 张)")
         self.reflow_grids()
-
-    def _on_card_hover_entered(self, stock_type, stock_id):
-        """Item 3: 1s hover activates temporary preview; subsequent hovers preview immediately."""
-        if not self._current_photo_path:
-            return
-
-        if not getattr(self, "_hover_preview_active", False):
-            current_sel = self.current_film_stock if stock_type == "film" else self.current_paper_stock
-            if stock_id == current_sel and getattr(self, "_saved_film_stock", None) is None:
-                if hasattr(self, "_hover_timer") and self._hover_timer.isActive():
-                    self._hover_timer.stop()
-                self._hover_pending_stock = None
-                return
-            if getattr(self, "_saved_film_stock", None) is None:
-                self._saved_film_stock = self.current_film_stock
-                self._saved_paper_stock = self.current_paper_stock
-                self._saved_print_mode = self.current_print_mode
-            self._hover_pending_stock = (stock_type, stock_id)
-            if hasattr(self, "_hover_timer"):
-                self._hover_timer.stop()
-                self._hover_timer.start(1000)
-        else:
-            self._apply_temp_preview(stock_type, stock_id)
-
-    def _on_hover_timer_timeout(self):
-        if getattr(self, "_hover_pending_stock", None):
-            self._hover_preview_active = True
-            st, sid = self._hover_pending_stock
-            self._apply_temp_preview(st, sid)
-
-    def _apply_temp_preview(self, stock_type, stock_id):
-        if not self._current_photo_path:
-            return
-        if getattr(self, "_saved_film_stock", None) is None:
-            self._saved_film_stock = self.current_film_stock
-            self._saved_paper_stock = self.current_paper_stock
-            self._saved_print_mode = self.current_print_mode
-
-        if stock_type == "film":
-            temp_film = stock_id
-            temp_paper = self._saved_paper_stock
-            temp_mode = self._saved_print_mode
-            if stock_id == "none":
-                temp_paper = "none"
-                temp_mode = "scan"
-        else:
-            temp_film = self._saved_film_stock
-            temp_paper = stock_id
-            temp_mode = "scan" if stock_id == "none" else "optical"
-
-        lut_params = dict(self.current_params)
-        lut_params["print_mode"] = temp_mode
-        lut_3d = self.engine.get_3d_lut(temp_film, temp_paper, lut_size=33, params_dict=lut_params)
-        self.canvas.set_lut(lut_3d)
-        self._schedule_histogram_update()
-
-        for sid, card in self.film_cards.items():
-            card.set_active(sid == temp_film)
-        for pid, card in self.paper_cards.items():
-            card.set_active(pid == temp_paper)
-
-
-
-    def _revert_temp_preview(self):
-        if getattr(self, "_saved_film_stock", None) is not None:
-            saved_film = self._saved_film_stock
-            saved_paper = self._saved_paper_stock
-            saved_mode = self._saved_print_mode
-            self._saved_film_stock = None
-            self._saved_paper_stock = None
-            self._saved_print_mode = None
-
-            lut_params = dict(self.current_params)
-            lut_params["print_mode"] = saved_mode
-            lut_3d = self.engine.get_3d_lut(saved_film, saved_paper, lut_size=33, params_dict=lut_params)
-            self.canvas.set_lut(lut_3d)
-            self._schedule_histogram_update()
-
-            for sid, card in self.film_cards.items():
-                card.set_active(sid == saved_film)
-            for pid, card in self.paper_cards.items():
-                card.set_active(pid == saved_paper)
-
-    def _on_film_paper_pane_left(self):
-        """Called when mouse leaves the left film & paper cards pane."""
-        if hasattr(self, "_hover_timer") and self._hover_timer.isActive():
-            self._hover_timer.stop()
-        self._hover_pending_stock = None
-        self._hover_preview_active = False
-        self._revert_temp_preview()
 
     def _init_exposure_section(self):
         self.sec_exposure = AccordionSection("场景曝光")
@@ -3149,6 +3608,14 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_grain_cloud.sliderReleased.connect(self._on_slider_committed)
         self.sec_grain.addWidget(self.slider_grain_cloud)
 
+        self.slider_grain_colour = AdobeScrubSlider(
+            "色彩微粒 (彩噪)", 0.0, 1.0, 1.0, step=0.05, unit="", decimals=2,
+            tooltip="0.0为纯单色明度颗粒，1.0为真实彩色胶片独立多层染料云(彩噪)"
+        )
+        self.slider_grain_colour.valueChanged.connect(lambda v: self._on_slider_live("grain_colour", v))
+        self.slider_grain_colour.sliderReleased.connect(self._on_slider_committed)
+        self.sec_grain.addWidget(self.slider_grain_colour)
+
         self.sidebar_layout.addWidget(self.sec_grain)
 
     _init_texture_section = _init_halation_section
@@ -3158,11 +3625,11 @@ class DarkroomMainWindow(QMainWindow):
         # 1. File Menu
         file_menu = self.menu_bar.addMenu("文件 (F)")
         
-        act_open_file = QAction("打开文件...", self)
-        act_open_file.setIcon(get_icon("open_file.png"))
-        act_open_file.setShortcut(QKeySequence("Ctrl+O"))
-        act_open_file.triggered.connect(self.action_open_files)
-        file_menu.addAction(act_open_file)
+        self.act_open_file = QAction("打开文件...", self)
+        self.act_open_file.setIcon(get_icon("open_file.png"))
+        self.act_open_file.setShortcut(QKeySequence("Ctrl+O"))
+        self.act_open_file.triggered.connect(self.action_open_files)
+        file_menu.addAction(self.act_open_file)
 
         act_open_folder = QAction("打开文件夹...", self)
         act_open_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
@@ -3235,17 +3702,17 @@ class DarkroomMainWindow(QMainWindow):
         # 2. Edit Menu (Item 5: Simplified concise labels, 13px icons)
         edit_menu = self.menu_bar.addMenu("编辑 (E)")
         
-        act_undo = QAction("撤销", self)
-        act_undo.setIcon(get_icon("undo.png"))
-        act_undo.setShortcut(QKeySequence("Ctrl+Z"))
-        act_undo.triggered.connect(self.undo)
-        edit_menu.addAction(act_undo)
+        self.act_undo = QAction("撤销", self)
+        self.act_undo.setIcon(get_icon("undo.png"))
+        self.act_undo.setShortcut(QKeySequence("Ctrl+Z"))
+        self.act_undo.triggered.connect(self.undo)
+        edit_menu.addAction(self.act_undo)
 
-        act_redo = QAction("重做", self)
-        act_redo.setIcon(get_icon("redo.png"))
-        act_redo.setShortcut(QKeySequence("Ctrl+Y"))
-        act_redo.triggered.connect(self.redo)
-        edit_menu.addAction(act_redo)
+        self.act_redo = QAction("重做", self)
+        self.act_redo.setIcon(get_icon("redo.png"))
+        self.act_redo.setShortcut(QKeySequence("Ctrl+Y"))
+        self.act_redo.triggered.connect(self.redo)
+        edit_menu.addAction(self.act_redo)
 
         edit_menu.addSeparator()
 
@@ -3266,44 +3733,63 @@ class DarkroomMainWindow(QMainWindow):
 
         edit_menu.addSeparator()
 
-        act_reset_all = QAction("重置所有参数", self)
-        act_reset_all.setIcon(get_icon("reset.png"))
-        act_reset_all.setShortcut(QKeySequence("Ctrl+R"))
-        act_reset_all.triggered.connect(self.reset_all_params)
-        edit_menu.addAction(act_reset_all)
+        self.act_reset_all = QAction("重置所有参数", self)
+        self.act_reset_all.setIcon(get_icon("reset.png"))
+        self.act_reset_all.setShortcut(QKeySequence("Ctrl+R"))
+        self.act_reset_all.triggered.connect(self.reset_all_params)
+        edit_menu.addAction(self.act_reset_all)
 
         edit_menu.addSeparator()
 
-        act_prefs = QAction("首选项...", self)
-        act_prefs.setIcon(get_icon("preferences.png"))
-        act_prefs.setShortcut(QKeySequence("Ctrl+,"))
-        act_prefs.triggered.connect(self.open_preferences)
-        edit_menu.addAction(act_prefs)
+        self.act_prefs = QAction("首选项...", self)
+        self.act_prefs.setIcon(get_icon("preferences.png"))
+        self.act_prefs.setShortcut(QKeySequence("Ctrl+,"))
+        self.act_prefs.triggered.connect(self.open_preferences)
+        edit_menu.addAction(self.act_prefs)
 
         # 3. View Menu
         view_menu = self.menu_bar.addMenu("视图 (V)")
         
-        act_fit_img = QAction("适应图像", self)
-        act_fit_img.setIcon(get_icon("fit_window.png"))
-        act_fit_img.setShortcut(QKeySequence("Ctrl+0"))
-        act_fit_img.triggered.connect(self.canvas.fit_to_view)
-        view_menu.addAction(act_fit_img)
+        self.act_fit_img = QAction("适应图像", self)
+        self.act_fit_img.setIcon(get_icon("fit_window.png"))
+        self.act_fit_img.setShortcut(QKeySequence("Ctrl+0"))
+        self.act_fit_img.triggered.connect(self.canvas.fit_to_view)
+        view_menu.addAction(self.act_fit_img)
 
-        act_compare = QAction("对比\t\\", self)
-        act_compare.setIcon(get_icon("compare.png"))
-        act_compare.triggered.connect(self.toggle_split_view)
-        view_menu.addAction(act_compare)
+        self.act_compare = QAction("对比\t\\", self)
+        self.act_compare.setIcon(get_icon("compare.png"))
+        self.act_compare.triggered.connect(self.toggle_split_view)
+        view_menu.addAction(self.act_compare)
 
-        act_fit_win = QAction("适应窗口", self)
-        act_fit_win.setIcon(get_icon("fit_window.png"))
-        act_fit_win.triggered.connect(self.canvas.fit_to_view)
-        view_menu.addAction(act_fit_win)
+        self.act_fit_win = QAction("适应窗口", self)
+        self.act_fit_win.setIcon(get_icon("fit_window.png"))
+        self.act_fit_win.triggered.connect(self.canvas.fit_to_view)
+        view_menu.addAction(self.act_fit_win)
 
-        act_100 = QAction("1:1 实际像素", self)
-        act_100.setIcon(get_icon("zoom_100.png"))
-        act_100.setShortcut(QKeySequence("Ctrl+1"))
-        act_100.triggered.connect(self.canvas.set_zoom_100)
-        view_menu.addAction(act_100)
+        self.act_100 = QAction("1:1 实际像素", self)
+        self.act_100.setIcon(get_icon("zoom_100.png"))
+        self.act_100.setShortcut(QKeySequence("Ctrl+1"))
+        self.act_100.triggered.connect(self.canvas.set_zoom_100)
+        view_menu.addAction(self.act_100)
+
+        act_zoom_in = QAction("放大", self)
+        act_zoom_in.setShortcuts([
+            QKeySequence.StandardKey.ZoomIn,
+            QKeySequence("Ctrl+="),
+            QKeySequence("Ctrl++")
+        ])
+        act_zoom_in.triggered.connect(lambda: self.canvas.zoom_in(animate=True))
+        view_menu.addAction(act_zoom_in)
+        self.addAction(act_zoom_in)
+
+        act_zoom_out = QAction("缩小", self)
+        act_zoom_out.setShortcuts([
+            QKeySequence.StandardKey.ZoomOut,
+            QKeySequence("Ctrl+-")
+        ])
+        act_zoom_out.triggered.connect(lambda: self.canvas.zoom_out(animate=True))
+        view_menu.addAction(act_zoom_out)
+        self.addAction(act_zoom_out)
 
         view_menu.addSeparator()
 
@@ -3385,11 +3871,8 @@ class DarkroomMainWindow(QMainWindow):
     def _update_window_title(self):
         base_title = get_app_title()
         is_startup = (hasattr(self, 'stack') and self.stack.currentIndex() == 0)
-        has_session = not is_startup and bool(
-            (self._current_session_path and not getattr(self, "_is_temp_session", False)) or
-            self.photos or
-            getattr(self, "_is_temp_session", False)
-        )
+        has_named_session = bool(self._current_session_path and not getattr(self, "_is_temp_session", False))
+        has_session = bool(has_named_session or self.photos or (getattr(self, "_is_temp_session", False) and not is_startup))
         has_photo = bool(self._current_photo_path) and bool(self.photos) and not is_startup
 
         if hasattr(self, 'act_export'):
@@ -3405,7 +3888,8 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'act_close_session'):
             self.act_close_session.setEnabled(has_session)
 
-        if not self.photos and is_startup:
+        # Only display pure app brand on the startup welcome screen when NO session is loaded
+        if not self.photos and not self._current_session_path and is_startup:
             self.setWindowTitle(base_title)
             if sys.platform == "win32":
                 try:
@@ -3501,16 +3985,8 @@ class DarkroomMainWindow(QMainWindow):
             self._on_compare_long_press_start()
 
     def eventFilter(self, watched, event):
-        """Handle global backslash key and mouse exit detection for film/paper hover preview."""
+        """Handle global backslash key and navigation shortcuts."""
         et = event.type()
-
-        # Film & paper pane hover exit detection on real mouse movement
-        if et == QEvent.Type.MouseMove and self.isVisible() and hasattr(self, "left_splitter"):
-            if getattr(self, "_hover_preview_active", False) or (hasattr(self, "_hover_timer") and self._hover_timer.isActive()):
-                from PySide6.QtGui import QCursor
-                pos_in_splitter = self.left_splitter.mapFromGlobal(QCursor.pos())
-                if not self.left_splitter.rect().contains(pos_in_splitter):
-                    self._on_film_paper_pane_left()
 
         if et in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             # Do not intercept if a dialog or child modal is active and event belongs to it
@@ -3568,7 +4044,6 @@ class DarkroomMainWindow(QMainWindow):
                         return True
 
         elif et in (QEvent.Type.WindowDeactivate, QEvent.Type.FocusOut):
-            self._on_film_paper_pane_left()
             if watched == self and getattr(self, "_backslash_pressed", False):
                 self._backslash_pressed = False
                 if hasattr(self, "_backslash_timer") and self._backslash_timer.isActive():
@@ -3655,12 +4130,12 @@ class DarkroomMainWindow(QMainWindow):
         self.status_label.setText(text)
         if hasattr(self, "status_sep"):
             if text or spinning:
-                self.status_sep.setStyleSheet("color: #333644; font-size: 11px;")
+                self.status_sep.setStyleSheet("QLabel#status_sep { color: #333644; font-size: 11px; }")
             else:
-                self.status_sep.setStyleSheet("color: transparent; font-size: 11px;")
+                self.status_sep.setStyleSheet("QLabel#status_sep { color: transparent; font-size: 11px; }")
 
         self.status_label.setCursor(Qt.CursorShape.ArrowCursor)
-        self.status_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; }")
         self.status_label.setToolTip("")
 
         if timeout_ms > 0:
@@ -3677,7 +4152,7 @@ class DarkroomMainWindow(QMainWindow):
         self.status_label.setText("")
         self.spinner.stop()
         if hasattr(self, "status_sep"):
-            self.status_sep.setStyleSheet("color: transparent; font-size: 11px;")
+            self.status_sep.setStyleSheet("QLabel#status_sep { color: transparent; font-size: 11px; }")
 
     def _on_status_label_clicked(self, event):
         pass
@@ -3710,17 +4185,17 @@ class DarkroomMainWindow(QMainWindow):
 
         if state == "busy":
             self.export_spinner.start()
-            self.lbl_export_status.setStyleSheet("color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none;")
+            self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
             self.export_status_container.setToolTip("正在后台冲印，点击查看冲印队列 (Ctrl+J)")
         elif state == "success":
             self.export_spinner.stop()
-            self.lbl_export_status.setStyleSheet("color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none;")
+            self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
             self.export_status_container.setToolTip("冲印完成，点击查看冲印队列 (Ctrl+J)")
             # Permanent display on success as requested by user
             timeout_ms = 0
         elif state == "error":
             self.export_spinner.stop()
-            self.lbl_export_status.setStyleSheet("color: #ef4444; font-size: 11px; text-decoration: underline; background: transparent; border: none;")
+            self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #ef4444; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
             self.export_status_container.setToolTip("冲印发生错误，点击查看冲印队列 (Ctrl+J)")
             if timeout_ms <= 0:
                 timeout_ms = 6000
@@ -3800,9 +4275,48 @@ class DarkroomMainWindow(QMainWindow):
             return self._do_save_session(file_path)
         return False
 
+    def _schedule_session_focus_save(self, delay_ms: int = 300):
+        """Debounced session focus saving so rapid photo switching does not synchronously read/write disk."""
+        if not hasattr(self, "_focus_save_timer"):
+            self._focus_save_timer = QTimer(self)
+            self._focus_save_timer.setSingleShot(True)
+            self._focus_save_timer.timeout.connect(self._update_session_focus_on_disk)
+        self._focus_save_timer.start(delay_ms)
+
+    def _update_session_focus_on_disk(self):
+        """Silently persist the current active photo focus to session storage without marking the session dirty."""
+        if not self.photos or not self._current_photo_path:
+            return
+        try:
+            from path_utils import normalize_path
+            curr_path = self._current_photo_path
+            curr_norm = normalize_path(curr_path)
+            # 1. Update config_manager last_session state so fallback restore knows the exact active photo
+            all_paths = [normalize_path(p["path"]) for p in self.photos if p and p.get("path")]
+            config_manager.save_session_state(all_paths, curr_norm)
+
+            # 2. Update .sdss session file on disk
+            if self._current_session_path and os.path.exists(self._current_session_path) and not getattr(self, "_is_temp_session", False):
+                session_data = session_cache_manager.load_session_file(self._current_session_path)
+                if session_data and isinstance(session_data, dict):
+                    session_dir = os.path.dirname(os.path.abspath(self._current_session_path))
+                    session_data["active_photo_id"] = self.active_photo_id
+                    session_data["active_photo_path"] = curr_norm
+                    session_data["active_photo_filename"] = os.path.basename(curr_path)
+                    try:
+                        session_data["active_photo_rel_path"] = normalize_path(os.path.relpath(os.path.abspath(curr_path), session_dir))
+                    except Exception:
+                        session_data["active_photo_rel_path"] = None
+                    session_cache_manager.save_session_file(self._current_session_path, session_data)
+            else:
+                self._save_auto_temp_session()
+        except Exception as e:
+            logger.debug(f"Silent session focus update: {e}")
+
     def _save_auto_temp_session(self):
         """Item 2: Auto-save temporary session state to auto_saved_session.sdss so work is preserved across restarts."""
         if not self.photos:
+            config_manager.clear_auto_saved_session()
             return
         if self._current_session_path and not getattr(self, "_is_temp_session", False):
             return
@@ -3939,7 +4453,7 @@ class DarkroomMainWindow(QMainWindow):
 
     def action_close_session(self):
         """Item 4: Closes the current session, prompts if dirty, and returns cleanly to welcome page."""
-        if not self.photos and getattr(self, 'stack', None) and self.stack.currentIndex() == 0:
+        if not self.photos and not self._current_session_path and getattr(self, 'stack', None) and self.stack.currentIndex() == 0:
             return
         if not self._prompt_save_if_session_dirty():
             return
@@ -3970,7 +4484,7 @@ class DarkroomMainWindow(QMainWindow):
             logger.warning(f"Auto-saving .sdc on close session: {e}")
 
         # 0. Cancel any active background import worker and slot workers immediately
-        self._cancel_active_import()
+        self._cancel_active_import(notify_user=False)
 
         # 2. Clear engine and photo arrays
         if hasattr(self, 'engine'):
@@ -4127,7 +4641,7 @@ class DarkroomMainWindow(QMainWindow):
             return
 
         # Cancel any active imports from previous session immediately
-        self._cancel_active_import()
+        self._cancel_active_import(notify_user=False)
 
         # 1. Clean previous session photos and workspace completely to prevent photo stacking
         if hasattr(self, 'engine'):
@@ -4148,6 +4662,17 @@ class DarkroomMainWindow(QMainWindow):
 
         # Active path resolution
         active_path = session_data.get("active_photo_path")
+        if not active_path:
+            afn = session_data.get("active_photo_filename")
+            if afn:
+                for rf in resolved_files:
+                    if os.path.basename(rf).lower() == afn.lower():
+                        active_path = rf
+                        break
+        if not active_path:
+            _, cfg_active = config_manager.get_session_state()
+            if cfg_active and cfg_active in resolved_files:
+                active_path = cfg_active
         if active_path:
             if not os.path.exists(active_path):
                 active_fn = os.path.basename(active_path).lower()
@@ -4172,13 +4697,26 @@ class DarkroomMainWindow(QMainWindow):
         if resolved_files:
             self._restore_saved_session(resolved_files, active_file=active_path, session_name=fn, path_updated=path_updated)
         else:
-            self.stack.setCurrentIndexAnimated(1, duration_ms=250)
-            self.canvas.set_has_library_photos(False)
-            self.canvas.set_image(None)
-            self.filmstrip.set_photos([], None)
-            self.btn_title_export.setVisible(False)
-            self.thumb_controller.reset_all_cards_to_color_pills(self.film_cards, self.paper_cards)
-            self.set_app_status(f"会话已恢复 (空工程): {fn}", timeout_ms=2500)
+            if is_temp:
+                # If opening an empty temporary/auto-saved session, stay on the welcome start screen
+                self.stack.setCurrentIndex(0)
+                self.canvas.set_has_library_photos(False)
+                self.canvas.set_image(None)
+                self.filmstrip.set_photos([], None)
+                self.btn_title_export.setVisible(False)
+                self._current_session_path = None
+                self._is_temp_session = False
+                config_manager.save_last_session_path(None)
+                self._update_window_title()
+            else:
+                self.stack.setCurrentIndexAnimated(1, duration_ms=250)
+                self.canvas.set_has_library_photos(False)
+                self.canvas.set_image(None)
+                self.filmstrip.set_photos([], None)
+                self.btn_title_export.setVisible(False)
+                self.thumb_controller.reset_all_cards_to_color_pills(self.film_cards, self.paper_cards)
+                self.set_app_status(f"会话已恢复 (空工程): {fn}", timeout_ms=2500)
+                self._update_window_title()
 
     def action_quick_export(self, target_ids=None):
         """Item 4: Quick export selected or active photo(s) using remembered last export settings."""
@@ -4211,6 +4749,7 @@ class DarkroomMainWindow(QMainWindow):
                 out_dir = os.path.expanduser("~")
 
         enqueued_count = 0
+        new_tasks = []
         import uuid
         for p in photos_to_export:
             src = p["path"]
@@ -4251,8 +4790,14 @@ class DarkroomMainWindow(QMainWindow):
 
             tid = f"task_{uuid.uuid4().hex[:8]}"
             task = ExportTask(tid, os.path.basename(out_file), src, out_file, task_params, thumbnail=pix)
-            self.export_queue.enqueue(task)
+            new_tasks.append(task)
             enqueued_count += 1
+
+        if hasattr(self.export_queue, "enqueue_batch"):
+            self.export_queue.enqueue_batch(new_tasks)
+        else:
+            for t in new_tasks:
+                self.export_queue.enqueue(t)
 
         self._set_export_status(f"已加入冲印队列 ({enqueued_count} 张)", state="busy")
 
@@ -4745,7 +5290,6 @@ class DarkroomMainWindow(QMainWindow):
             if pid == self.active_photo_id:
                 active_restored = True
 
-        self._session_is_dirty = True
         self._update_window_title()
 
         # 3. Synchronize viewport if active photo was in the batch
@@ -4820,7 +5364,9 @@ class DarkroomMainWindow(QMainWindow):
                     lut_size=17,
                     params_dict=self.current_params
                 )
-                graded = self.engine.apply_lut_to_linear(self._current_photo_linear, lut_3d)
+                eff_exp = float(self.current_params.get("exposure_ev", 0.0)) + float(self.current_params.get("base_ev", 0.0))
+                src_lin = self._current_photo_linear * (2.0 ** eff_exp) if abs(eff_exp) > 0.001 else self._current_photo_linear
+                graded = self.engine.apply_lut_to_linear(src_lin, lut_3d)
                 self.histogram_widget.update_from_rgb(graded)
             elif self._current_photo_thumb is not None:
                 self.histogram_widget.update_from_rgb(self._current_photo_thumb)
@@ -4831,6 +5377,7 @@ class DarkroomMainWindow(QMainWindow):
         return {
             "print_mode": "optical",
             "exposure_ev": 0.0,
+            "base_ev": 0.0,
             "highlights": 0.0,
             "shadows": 0.0,
             "color_temp": float(base_temp),
@@ -4862,6 +5409,7 @@ class DarkroomMainWindow(QMainWindow):
             "grain": 0.4,
             "grain_size": 1.0,
             "grain_cloud_blur": 1.0,
+            "grain_colour": 1.0,
             "split_x": 0.5,
             "view_mode": 0
         }
@@ -5057,13 +5605,13 @@ class DarkroomMainWindow(QMainWindow):
                 "halation": 1.0, "halation_boost": 0.0
             },
             "grain": {
-                "grain": 0.4, "grain_size": 1.0, "grain_cloud_blur": 1.0
+                "grain": 0.4, "grain_size": 1.0, "grain_cloud_blur": 1.0, "grain_colour": 1.0
             },
             "texture": {
                 "halation_amount": 1.0, "halation_spatial_scale": 1.0,
                 "scatter_amount": 1.0, "boost_ev": 0.0,
                 "halation": 1.0, "halation_boost": 0.0,
-                "grain": 0.4, "grain_size": 1.0, "grain_cloud_blur": 1.0
+                "grain": 0.4, "grain_size": 1.0, "grain_cloud_blur": 1.0, "grain_colour": 1.0
             }
         }
 
@@ -5211,6 +5759,7 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, 'slider_grain'): self.slider_grain.set_value(p.get("grain", 0.4))
             if hasattr(self, 'slider_grain_size'): self.slider_grain_size.set_value(p.get("grain_size", 1.0))
             if hasattr(self, 'slider_grain_cloud'): self.slider_grain_cloud.set_value(p.get("grain_cloud_blur", 1.0))
+            if hasattr(self, 'slider_grain_colour'): self.slider_grain_colour.set_value(p.get("grain_colour", 1.0))
         finally:
             self._is_updating_sliders = False
         self._update_reset_buttons_state()
@@ -5257,7 +5806,8 @@ class DarkroomMainWindow(QMainWindow):
         lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
         self.canvas.set_lut(lut_3d)
         hal_preset = self.engine.get_film_halation_preset(stock_id) if hasattr(self.engine, 'get_film_halation_preset') else None
-        self.canvas.update_params(film_stock=stock_id, _halation_preset=hal_preset)
+        grain_preset = self.engine.get_film_grain_preset(stock_id) if hasattr(self.engine, 'get_film_grain_preset') else None
+        self.canvas.update_params(film_stock=stock_id, _halation_preset=hal_preset, _grain_preset=grain_preset)
         self._schedule_histogram_update()
         if self._current_photo_path:
             self._update_active_thumbnails()
@@ -5416,14 +5966,23 @@ class DarkroomMainWindow(QMainWindow):
             self._import_files_list([file_path])
 
     def _import_files_list(self, file_paths):
+        # 1. Three-tier deduplication:
+        # Tier 1: Photos already loaded in library
         existing_norm_paths = {os.path.normcase(os.path.abspath(p["path"])) for p in self.photos if p and "path" in p}
+        # Tier 2: Photos currently being decoded in-flight by the running worker
+        in_flight_norm_paths = {os.path.normcase(os.path.abspath(p)) for p in getattr(self, "_current_import_batch", [])}
+        # Tier 3: Photos currently waiting in the pending FIFO import queue
+        queued_norm_paths = {os.path.normcase(os.path.abspath(p)) for p in getattr(self, "_pending_import_queue", [])}
+
+        all_known_paths = existing_norm_paths | in_flight_norm_paths | queued_norm_paths
+
         new_paths = []
         dup_names = []
         seen_in_batch = set()
 
         for fp in file_paths:
             norm_p = os.path.normcase(os.path.abspath(fp))
-            if norm_p in existing_norm_paths or norm_p in seen_in_batch:
+            if norm_p in all_known_paths or norm_p in seen_in_batch:
                 dup_names.append(os.path.basename(fp))
             else:
                 seen_in_batch.add(norm_p)
@@ -5455,21 +6014,88 @@ class DarkroomMainWindow(QMainWindow):
         for p in new_paths:
             config_manager.add_recent_file(p)
 
-        # 3. Start progress spinner & status text
-        self._is_importing = True
+        # 3. Ensure cancel button is visible
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(True)
-        self._last_import_status_time = 0.0
-        total_count = len(new_paths)
-        self.set_app_status(f"正在导入底片 (0/{total_count})...", spinning=True, timeout_ms=0)
 
-        # 4. Asynchronous streaming import worker
-        self._import_worker = BatchImportWorker(new_paths, self.engine, start_idx=len(self.photos), parent=self)
+        # 4. Check if an import or restore worker is actively running
+        active_worker_running = (
+            (getattr(self, "_import_worker", None) is not None and self._import_worker.isRunning()) or
+            (getattr(self, "_slot_decode_worker", None) is not None and self._slot_decode_worker.isRunning()) or
+            (getattr(self, "_session_restore_worker", None) is not None and self._session_restore_worker.isRunning())
+        )
+
+        if getattr(self, "_is_importing", False):
+            # Enqueue new files into pending FIFO import queue
+            if not hasattr(self, "_pending_import_queue") or self._pending_import_queue is None:
+                self._pending_import_queue = []
+            self._pending_import_queue.extend(new_paths)
+            self._import_session_target_total = getattr(self, "_import_session_target_total", 0) + len(new_paths)
+
+            cur = getattr(self, "_import_session_completed", 0)
+            tot = self._import_session_target_total
+            self.set_app_status(f"正在导入底片 ({cur}/{tot})...", spinning=True, timeout_ms=0)
+            logger.info(f"Import queue: appended {len(new_paths)} files, pending queue size: {len(self._pending_import_queue)}, target total: {tot}")
+
+            if not active_worker_running:
+                self._start_next_pending_import_batch()
+            return
+
+        # 5. No worker running: initialize and start fresh import session
+        self._is_importing = True
+        self._pending_import_queue = []
+        self._current_import_batch = list(new_paths)
+        self._import_session_completed = 0
+        self._import_session_target_total = len(new_paths)
+        self._last_import_status_time = 0.0
+
+        self.set_app_status(f"正在导入底片 (0/{self._import_session_target_total})...", spinning=True, timeout_ms=0)
+
+        # Asynchronous streaming import worker
+        start_idx = max(getattr(self, "_photo_id_counter", 0), len(self.photos))
+        self._photo_id_counter = start_idx + len(new_paths)
+
+        self._import_worker = BatchImportWorker(new_paths, self.engine, start_idx=start_idx, parent=self)
         self._import_worker.photoLoaded.connect(self._on_single_photo_imported)
         self._import_worker.importFinished.connect(self._on_all_photos_imported)
         self._import_worker.start()
 
+    def _start_next_pending_import_batch(self):
+        """Dispatches the next queued batch of photos from _pending_import_queue to a new BatchImportWorker."""
+        if not getattr(self, "_pending_import_queue", None):
+            return False
+
+        next_batch = list(self._pending_import_queue)
+        self._pending_import_queue.clear()
+        self._current_import_batch = next_batch
+
+        start_idx = max(getattr(self, "_photo_id_counter", 0), len(self.photos))
+        self._photo_id_counter = start_idx + len(next_batch)
+
+        self._is_importing = True
+        if hasattr(self, "btn_cancel_import"):
+            self.btn_cancel_import.setVisible(True)
+
+        logger.info(f"Import queue: starting next batch with {len(next_batch)} files (start_idx={start_idx})")
+        self._import_worker = BatchImportWorker(next_batch, self.engine, start_idx=start_idx, parent=self)
+        self._import_worker.photoLoaded.connect(self._on_single_photo_imported)
+        self._import_worker.importFinished.connect(self._on_all_photos_imported)
+        self._import_worker.start()
+        return True
+
     def _on_single_photo_imported(self, photo_entry, current_idx, total_count):
+        # Defensive check: ensure photo_entry ID is strictly unique
+        existing_ids = {p["id"] for p in self.photos if p and "id" in p}
+        pid = photo_entry.get("id")
+        if not pid or pid in existing_ids:
+            base_pid = pid or f"photo_{len(self.photos)}_{os.path.basename(photo_entry.get('path', ''))}"
+            unique_pid = base_pid
+            counter = 1
+            while unique_pid in existing_ids:
+                unique_pid = f"{base_pid}_{counter}"
+                counter += 1
+            photo_entry["id"] = unique_pid
+
         try:
             raw_th = self.thumb_controller.get_raw_thumbnail(photo_entry)
             if raw_th is not None:
@@ -5562,14 +6188,19 @@ class DarkroomMainWindow(QMainWindow):
             else:
                 self.engine.session_photos.append(ep_dict)
 
-        # Status updates: strictly synchronized with actual imported count len(self.photos)
-        imported_count = len(self.photos)
+        # Strictly synchronized progress: increment session completed count
+        self._import_session_completed = getattr(self, "_import_session_completed", 0) + 1
+        cur = self._import_session_completed
+        if not getattr(self, "_import_session_target_total", 0) and total_count:
+            self._import_session_target_total = total_count
+        tot = max(getattr(self, "_import_session_target_total", 0), cur)
+        status_text = f"正在导入底片 ({cur}/{tot})..."
+
         import time
         now = time.time()
         last_t = getattr(self, "_last_import_status_time", 0.0)
-        status_text = f"正在导入底片 ({imported_count}/{total_count})..."
 
-        if (now - last_t >= 0.08) or imported_count == total_count or imported_count == 1:
+        if (now - last_t >= 0.08) or cur >= tot or cur == 1:
             self._last_import_status_time = now
             self.set_app_status(status_text, spinning=True, timeout_ms=0)
         else:
@@ -5578,19 +6209,34 @@ class DarkroomMainWindow(QMainWindow):
                 self._import_flush_timer = QTimer(self)
                 self._import_flush_timer.setSingleShot(True)
                 self._import_flush_timer.timeout.connect(self._flush_import_status)
-            self._pending_import_status = (imported_count, total_count)
             self._import_flush_timer.start(50)
 
     def _flush_import_status(self):
-        if getattr(self, "_is_importing", False) and hasattr(self, "_pending_import_status"):
-            cur = len(self.photos)
-            _, tot = self._pending_import_status
+        if getattr(self, "_is_importing", False):
+            cur = getattr(self, "_import_session_completed", len(self.photos))
+            tot = max(getattr(self, "_import_session_target_total", cur), cur)
             self.set_app_status(f"正在导入底片 ({cur}/{tot})...", spinning=True, timeout_ms=0)
 
     def _on_all_photos_imported(self, total_loaded):
+        if getattr(self, "_import_worker", None):
+            try:
+                self._import_worker.photoLoaded.disconnect()
+                self._import_worker.importFinished.disconnect()
+            except Exception:
+                pass
+            self._import_worker = None
+        self._current_import_batch = []
+
+        # If there are files queued in the FIFO pipeline, start next batch immediately
+        if self._start_next_pending_import_batch():
+            return
+
+        # All batches have finished: finalize session
         if hasattr(self, "_import_flush_timer") and self._import_flush_timer is not None:
             self._import_flush_timer.stop()
         self._is_importing = False
+        self._current_import_batch = []
+        self._pending_import_queue = []
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(False)
         self._pending_session_map = None
@@ -5602,43 +6248,65 @@ class DarkroomMainWindow(QMainWindow):
             target_entry = next((p for p in self.photos if p.get("path") == target_path), None)
             if target_entry:
                 self.on_switch_photo(target_entry["id"])
-        self.set_app_status(f"底片库导入完成 ({total_loaded} 张)", spinning=False, timeout_ms=3000)
+
+        completed_count = getattr(self, "_import_session_completed", len(self.photos))
+        self.set_app_status(f"底片库导入完成 (共 {completed_count} 张)", spinning=False, timeout_ms=3000)
 
         # Real-time session state save & cache maintenance
         try:
             if self._current_session_path and os.path.exists(self._current_session_path):
                 config_manager.save_last_session_path(self._current_session_path)
             elif getattr(self, "_is_temp_session", False) or not self._current_session_path:
-                self._save_auto_temp_session()
-                config_manager.save_last_session_path(config_manager.get_auto_saved_session_path())
+                if self.photos:
+                    self._save_auto_temp_session()
+                    config_manager.save_last_session_path(config_manager.get_auto_saved_session_path())
             session_cache_manager.prune_cache_if_needed()
         except Exception:
             pass
 
-    def _cancel_active_import(self):
+    def _cancel_active_import(self, notify_user=True):
         """Forcefully cancels active batch import worker or slot decode worker, freeing CPU and memory."""
-        if getattr(self, "_import_worker", None) and self._import_worker.isRunning():
+        was_importing = getattr(self, "_is_importing", False) or bool(getattr(self, "_pending_import_queue", None))
+        # 1. Clear pending queues immediately so no more batches trigger
+        self._pending_import_queue = []
+        self._current_import_batch = []
+        self._import_session_completed = 0
+        self._import_session_target_total = 0
+
+        if hasattr(self, "_import_flush_timer") and self._import_flush_timer is not None:
+            self._import_flush_timer.stop()
+
+        # 2. Terminate and disconnect batch import worker
+        if getattr(self, "_import_worker", None):
             try:
                 self._import_worker.photoLoaded.disconnect()
                 self._import_worker.importFinished.disconnect()
             except Exception:
                 pass
-            self._import_worker.stop()
-            self._import_worker.wait(150)
+            if hasattr(self._import_worker, "isRunning") and self._import_worker.isRunning():
+                if hasattr(self._import_worker, "stop"):
+                    self._import_worker.stop()
+                if hasattr(self._import_worker, "wait"):
+                    self._import_worker.wait(150)
             self._import_worker = None
 
-        if getattr(self, "_slot_decode_worker", None) and self._slot_decode_worker.isRunning():
+        # 3. Terminate slot decode worker
+        if getattr(self, "_slot_decode_worker", None):
             try:
                 self._slot_decode_worker.slotDecoded.disconnect()
                 self._slot_decode_worker.progress.disconnect()
                 self._slot_decode_worker.finished.disconnect()
             except Exception:
                 pass
-            self._slot_decode_worker.stop()
-            self._slot_decode_worker.wait(150)
+            if hasattr(self._slot_decode_worker, "isRunning") and self._slot_decode_worker.isRunning():
+                if hasattr(self._slot_decode_worker, "stop"):
+                    self._slot_decode_worker.stop()
+                if hasattr(self._slot_decode_worker, "wait"):
+                    self._slot_decode_worker.wait(150)
             self._slot_decode_worker = None
 
-        if getattr(self, "_session_restore_worker", None) and self._session_restore_worker.isRunning():
+        # 4. Terminate session restore worker
+        if getattr(self, "_session_restore_worker", None):
             try:
                 self._session_restore_worker.activePhotoReady.disconnect()
                 self._session_restore_worker.progress.disconnect()
@@ -5646,15 +6314,19 @@ class DarkroomMainWindow(QMainWindow):
                 self._session_restore_worker.failed.disconnect()
             except Exception:
                 pass
-            self._session_restore_worker.stop()
-            self._session_restore_worker.wait(150)
+            if hasattr(self._session_restore_worker, "isRunning") and self._session_restore_worker.isRunning():
+                if hasattr(self._session_restore_worker, "stop"):
+                    self._session_restore_worker.stop()
+                if hasattr(self._session_restore_worker, "wait"):
+                    self._session_restore_worker.wait(150)
             self._session_restore_worker = None
 
         self._is_importing = False
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(False)
         self.restore_default_status()
-        self.set_app_status("已取消导入", timeout_ms=3000)
+        if notify_user and was_importing:
+            self.set_app_status("已取消导入", timeout_ms=3000)
 
     def _on_slot_photo_decoded(self, slot_idx, decoded_entry):
         if slot_idx < 0 or slot_idx >= len(self.photos):
@@ -5733,6 +6405,18 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status(f"正在恢复底片库 ({curr}/{total} 张)...", spinning=True, timeout_ms=0)
 
     def _on_all_slots_decoded(self):
+        if getattr(self, "_slot_decode_worker", None):
+            try:
+                self._slot_decode_worker.slotDecoded.disconnect()
+                self._slot_decode_worker.progress.disconnect()
+                self._slot_decode_worker.finished.disconnect()
+            except Exception:
+                pass
+            self._slot_decode_worker = None
+
+        if self._start_next_pending_import_batch():
+            return
+
         self._is_importing = False
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(False)
@@ -5873,8 +6557,7 @@ class DarkroomMainWindow(QMainWindow):
         if first_photo and first_photo.get("id"):
             target_id = first_photo["id"]
             if hasattr(self, "filmstrip"):
-                self.filmstrip._selected_ids = {target_id}
-                self.filmstrip.set_active_photo(target_id)
+                self.filmstrip.set_active_photo(target_id, reset_selection=True)
             if self.active_photo_id != target_id:
                 self.on_switch_photo(target_id)
             if hasattr(self, "filmstrip"):
@@ -5889,8 +6572,7 @@ class DarkroomMainWindow(QMainWindow):
         if last_photo and last_photo.get("id"):
             target_id = last_photo["id"]
             if hasattr(self, "filmstrip"):
-                self.filmstrip._selected_ids = {target_id}
-                self.filmstrip.set_active_photo(target_id)
+                self.filmstrip.set_active_photo(target_id, reset_selection=True)
             if self.active_photo_id != target_id:
                 self.on_switch_photo(target_id)
             if hasattr(self, "filmstrip"):
@@ -5902,6 +6584,14 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'thumb_controller'):
             return self.thumb_controller.grade_thumbnail_fast(raw_thumb, film=film, paper=paper, params=params)
         return raw_thumb
+
+    def _schedule_active_thumbnail_update(self, delay_ms: int = 150):
+        """Debounces offscreen active thumbnail render so UI interaction stays 60 FPS silky smooth."""
+        if not hasattr(self, "_active_thumb_timer"):
+            self._active_thumb_timer = QTimer(self)
+            self._active_thumb_timer.setSingleShot(True)
+            self._active_thumb_timer.timeout.connect(self._update_active_thumbnails)
+        self._active_thumb_timer.start(delay_ms)
 
     def _update_active_thumbnails(self):
         """Update active filmstrip thumbnail and active film/paper card thumbnails with WYSIWYG graded rendering,
@@ -5941,7 +6631,7 @@ class DarkroomMainWindow(QMainWindow):
                 tgt_h = 120
                 tgt_w = max(10, int(round(120.0 * asp)))
 
-            rendered_rgb = self.canvas.render_offscreen(target_w=tgt_w, target_h=tgt_h, bit_depth=8)
+            rendered_rgb = self.canvas.render_offscreen(target_w=tgt_w, target_h=tgt_h, params_override={"grain": 0.0}, bit_depth=8)
             if rendered_rgb is not None and rendered_rgb.size > 0:
                 is_valid = bool(rendered_rgb.mean() > 1.0 or rendered_rgb.max() > 10)
                 if not is_valid and not getattr(self.canvas, '_has_image', False):
@@ -6093,12 +6783,11 @@ class DarkroomMainWindow(QMainWindow):
 
         self._is_switching_photo = True
         try:
-            # 1. Update in-memory state and ensure SDC is saved for previous photo
+            # 1. Update in-memory state and ensure SDC is saved for previous photo ONLY if genuinely dirty
             if self.active_photo_id:
                 prev_photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
-                if prev_photo:
-                    if getattr(self, "_photo_is_dirty", False) or prev_photo.get("is_edited", False):
-                        self._save_current_photo_sdc()
+                if prev_photo and getattr(self, "_photo_is_dirty", False):
+                    self._save_current_photo_sdc()
 
             # 2. Find photo entry
             photo = next((p for p in self.photos if p["id"] == photo_id), None)
@@ -6107,8 +6796,13 @@ class DarkroomMainWindow(QMainWindow):
 
             self.active_photo_id = photo_id
             self._current_photo_path = photo["path"]
-            self.filmstrip.set_active_photo(photo_id)
+            if getattr(self.filmstrip, "_active_id", None) != photo_id:
+                self.filmstrip.set_active_photo(photo_id, scroll_to_visible=True, reset_selection=True)
             self.canvas.set_has_library_photos(bool(self.photos))
+
+            # Automatically return parameter sidebar to top (exposure pipeline start)
+            if hasattr(self, "sidebar_scroll") and self.sidebar_scroll:
+                self.sidebar_scroll.verticalScrollBar().setValue(0)
 
             # 3. Ensure EXIF metadata (camera WB, model, etc.)
             exif_data = photo.get("exif")
@@ -6126,8 +6820,10 @@ class DarkroomMainWindow(QMainWindow):
 
             base_temp = float(exif_data.get("color_temp", 5500.0) if exif_data else 5500.0)
             base_tint = float(exif_data.get("tint", 1.0) if exif_data else 1.0)
+            base_ev = float(photo.get("base_ev", 0.0))
             self._active_base_temp = base_temp
             self._active_base_tint = base_tint
+            self._active_base_ev = base_ev
             self.slider_temp.set_default_value(base_temp)
             self.slider_tint.set_default_value(base_tint)
 
@@ -6146,6 +6842,7 @@ class DarkroomMainWindow(QMainWindow):
                 base_dict["print_mode"] = self.current_print_mode
                 base_dict["base_temp"] = base_temp
                 base_dict["base_tint"] = base_tint
+                base_dict["base_ev"] = base_ev
                 self.current_params.clear()
                 self.current_params.update(base_dict)
                 self._photo_is_dirty = photo.get("is_dirty", False)
@@ -6169,6 +6866,7 @@ class DarkroomMainWindow(QMainWindow):
                         base_dict["tint"] = base_tint
                     base_dict["base_temp"] = base_temp
                     base_dict["base_tint"] = base_tint
+                    base_dict["base_ev"] = base_ev
                     self.current_params.clear()
                     self.current_params.update(base_dict)
                     self._photo_is_dirty = False
@@ -6178,6 +6876,7 @@ class DarkroomMainWindow(QMainWindow):
                     self.current_print_mode = "scan"
                     defaults = self.get_default_params(base_temp, base_tint)
                     defaults["print_mode"] = "scan"
+                    defaults["base_ev"] = base_ev
                     self.current_params.clear()
                     self.current_params.update(defaults)
                     self._photo_is_dirty = False
@@ -6231,7 +6930,6 @@ class DarkroomMainWindow(QMainWindow):
                                 pass
                             if hasattr(self._single_photo_loader, "stop"):
                                 self._single_photo_loader.stop()
-                            self._single_photo_loader.wait(300)
 
                         self._single_photo_loader = SinglePhotoLoadWorker(photo_id, photo["path"], self.engine, self)
                         self._single_photo_loader.previewReady.connect(self._on_single_photo_preview_ready)
@@ -6245,14 +6943,14 @@ class DarkroomMainWindow(QMainWindow):
                 if not getattr(self, "_is_multi_selecting", False):
                     self.set_app_status(f"底片已就绪: {fn}", spinning=False, timeout_ms=2000)
 
-            # Memory LRU management: Keep only current and most recent photo float_img in RAM
-            # to strictly prevent gigabyte memory bloat across dozens of RAW photos
+            # Memory LRU management: Keep up to 10 most recent photos' float_img in RAM
+            # (~330MB total) for instantaneous 0ms photo switching without RAW re-parsing
             if not hasattr(self, "_loaded_photos_lru"):
                 self._loaded_photos_lru = []
             if photo_id in self._loaded_photos_lru:
                 self._loaded_photos_lru.remove(photo_id)
             self._loaded_photos_lru.append(photo_id)
-            while len(self._loaded_photos_lru) > 2:
+            while len(self._loaded_photos_lru) > 10:
                 old_pid = self._loaded_photos_lru.pop(0)
                 if old_pid != photo_id:
                     old_p = next((p for p in self.photos if p.get("id") == old_pid), None)
@@ -6261,28 +6959,40 @@ class DarkroomMainWindow(QMainWindow):
             self.canvas.update_params(**self.current_params)
             self._update_all_sliders_from_params()
 
-            # 6. Apply print mode, film & paper LUT
-            self.on_switch_print_mode(self.current_print_mode, push_undo=False)
-            self.on_switch_film(self.current_film_stock, push_undo=False)
-            if self.current_print_mode == "optical":
-                self.on_switch_paper(self.current_paper_stock, push_undo=False)
-            else:
-                self.on_switch_paper("none", push_undo=False)
+            # 6. Apply print mode, film & paper LUT in a single unified, instant pass
+            eff_paper = self.current_paper_stock if self.current_print_mode == "optical" else "none"
+            lut_params = dict(self.current_params)
+            lut_params["print_mode"] = self.current_print_mode
+            lut_3d = self.engine.get_3d_lut(self.current_film_stock, eff_paper, lut_size=33, params_dict=lut_params)
+            self.canvas.set_lut(lut_3d)
+
+            hal_preset = self.engine.get_film_halation_preset(self.current_film_stock) if hasattr(self.engine, 'get_film_halation_preset') else None
+            grain_preset = self.engine.get_film_grain_preset(self.current_film_stock) if hasattr(self.engine, 'get_film_grain_preset') else None
+            self.canvas.update_params(film_stock=self.current_film_stock, _halation_preset=hal_preset, _grain_preset=grain_preset)
+
+            # Sync active card highlights
+            for sid, card in self.film_cards.items():
+                card.set_active(sid == self.current_film_stock)
+            for pid, card in self.paper_cards.items():
+                card.set_active(pid == self.current_paper_stock)
 
             # 7. Update status text with 1:1 image native pixel scale percentage
             self._update_photo_info_display()
 
-            # 8. Update live 2:3 thumbnails on Film & Paper cards with real film emulation
+            # 8. Update live thumbnails on Film & Paper cards and filmstrip (debounced for 60 FPS smoothness)
             self._current_photo_thumb = photo.get("thumbnail_rgb")
             float_img = photo.get("float_img")
             if float_img is not None:
+                if hasattr(self, 'engine'):
+                    self.engine.raw_preview = float_img
                 lh, lw = float_img.shape[:2]
                 lscale = 120.0 / float(max(lh, lw))
                 ltw = max(1, int(round(lw * lscale)))
                 lth = max(1, int(round(lh * lscale)))
                 self._current_photo_linear = cv2.resize(float_img, (ltw, lth), interpolation=cv2.INTER_AREA)
-                self._update_card_live_thumbnails(self._current_photo_linear)
-                self._update_active_thumbnails()
+                if hasattr(self, '_cards_debounce_timer'):
+                    self._cards_debounce_timer.start(200)
+                self._schedule_active_thumbnail_update(150)
             else:
                 self._current_photo_linear = None
                 if hasattr(self, 'engine'):
@@ -6315,9 +7025,9 @@ class DarkroomMainWindow(QMainWindow):
                     if self.paper_cards and self.current_paper_stock in self.paper_cards:
                         self.paper_cards[self.current_paper_stock].set_thumbnail(None)
 
-                # For candidate cards, strictly use the unedited RAW base negative thumbnail
-                if raw_thumb is not None:
-                    self._update_card_live_thumbnails(raw_thumb)
+                # For candidate cards, debounce update
+                if hasattr(self, '_cards_debounce_timer'):
+                    self._cards_debounce_timer.start(200)
 
             self._schedule_histogram_update()
             self._update_stock_mode_ui()
@@ -6342,6 +7052,7 @@ class DarkroomMainWindow(QMainWindow):
                 self.engine.active_photo_id = photo_id
         finally:
             self._is_switching_photo = False
+            self._schedule_session_focus_save(300)
 
     def _on_single_photo_preview_ready(self, photo_id, photo_path, preview_rgb):
         if self.active_photo_id == photo_id and preview_rgb is not None:
@@ -6371,10 +7082,7 @@ class DarkroomMainWindow(QMainWindow):
                 self.set_app_status("底片解析失败", spinning=False, timeout_ms=3000)
             return
 
-        try:
-            session_cache_manager.save_photo_preview(photo_path, float_img)
-        except Exception as e:
-            logger.debug(f"save_photo_preview failed: {e}")
+
 
         target_photo = next((p for p in self.photos if p["id"] == photo_id), None)
         if target_photo:
@@ -6400,6 +7108,9 @@ class DarkroomMainWindow(QMainWindow):
         if self.active_photo_id == photo_id:
             fn = target_photo.get("filename", os.path.basename(photo_path)) if target_photo else os.path.basename(photo_path)
             try:
+                if "base_ev" in res:
+                    self._active_base_ev = float(res["base_ev"])
+                    self.current_params["base_ev"] = self._active_base_ev
                 if res.get("exif"):
                     exif_meta = res["exif"]
                     self._active_base_temp = float(exif_meta.get("color_temp", 5500.0))
@@ -6429,13 +7140,13 @@ class DarkroomMainWindow(QMainWindow):
                 m_h = target_photo.get("height") or (target_photo.get("meta", {}).get("height") if isinstance(target_photo.get("meta"), dict) else None) if target_photo else None
                 self.canvas.set_image(float_img, master_width=m_w, master_height=m_h, reset_zoom=False, photo_id=photo_id)
 
-                # Update LRU queue
+                # Update LRU queue (keep up to 10 photos in RAM for 0ms switching)
                 if not hasattr(self, "_loaded_photos_lru"):
                     self._loaded_photos_lru = []
                 if photo_id in self._loaded_photos_lru:
                     self._loaded_photos_lru.remove(photo_id)
                 self._loaded_photos_lru.append(photo_id)
-                while len(self._loaded_photos_lru) > 2:
+                while len(self._loaded_photos_lru) > 10:
                     old_pid = self._loaded_photos_lru.pop(0)
                     if old_pid != photo_id:
                         old_p = next((p for p in self.photos if p.get("id") == old_pid), None)
@@ -6450,10 +7161,11 @@ class DarkroomMainWindow(QMainWindow):
                 lth = max(1, int(round(lh * lscale)))
                 self._current_photo_linear = cv2.resize(float_img, (ltw, lth), interpolation=cv2.INTER_AREA)
 
-                self._update_card_live_thumbnails(self._current_photo_linear)
+                if hasattr(self, '_cards_debounce_timer'):
+                    self._cards_debounce_timer.start(200)
 
                 self._schedule_histogram_update()
-                self._update_active_thumbnails()
+                self._schedule_active_thumbnail_update(150)
                 self._update_photo_info_display()
             except Exception as e:
                 logger.error(f"Error updating GUI for loaded photo {photo_id}: {e}")
@@ -6538,10 +7250,8 @@ class DarkroomMainWindow(QMainWindow):
         if not self.photos:
             self.action_clear_photos()
         else:
-            self.filmstrip.set_photos(self.photos, next_id)
+            self.filmstrip.remove_photo(photo_id, next_active_id=next_id)
             self.on_switch_photo(next_id)
-            if hasattr(self.filmstrip, 'scroll_to_active'):
-                self.filmstrip.scroll_to_active()
 
     def on_remove_multiple_photos(self, photo_ids):
         id_set = set(photo_ids)
@@ -6588,10 +7298,8 @@ class DarkroomMainWindow(QMainWindow):
         else:
             if not next_id and self.photos:
                 next_id = self.photos[0]["id"]
-            self.filmstrip.set_photos(self.photos, next_id)
+            self.filmstrip.remove_multiple_photos(photo_ids, next_active_id=next_id)
             self.on_switch_photo(next_id)
-            if hasattr(self.filmstrip, 'scroll_to_active'):
-                self.filmstrip.scroll_to_active()
 
     def on_clear_sdc_config(self, photo_ids):
         """Delete .sdc configuration sidecar, revert filmstrip thumbnails to raw base,
@@ -6681,7 +7389,6 @@ class DarkroomMainWindow(QMainWindow):
                 "path": p_path,
             }
 
-        self._session_is_dirty = True
         self._update_window_title()
 
         # 3. If active photo was cleared, reset live controls, canvas, and cards
@@ -6747,6 +7454,8 @@ class DarkroomMainWindow(QMainWindow):
 
     def action_clear_photos(self):
         """Completely flush bottom filmstrip, engine session, and canvas without exiting to start screen."""
+        self._cancel_active_import(notify_user=False)
+        self._photo_id_counter = 0
         if self._photo_is_dirty and self._current_photo_path:
             sdc_manager.save_sdc(
                 self._current_photo_path,
@@ -6968,6 +7677,7 @@ class DarkroomMainWindow(QMainWindow):
 
         import uuid
         enqueued_count = 0
+        new_tasks = []
         for i, pid in enumerate(photo_ids):
             photo = next((p for p in self.photos if p["id"] == pid), None)
             if not photo:
@@ -7016,6 +7726,7 @@ class DarkroomMainWindow(QMainWindow):
                 "grain": params.get("grain", 0.4),
                 "grain_size": params.get("grain_size", 1.0),
                 "grain_cloud_blur": params.get("grain_cloud_blur", 1.0),
+                "grain_colour": params.get("grain_colour", 1.0),
                 "engine": cfg.get("engine", "wysiwyg"),
                 "format": fmt,
                 "quality": cfg.get("quality", 9),
@@ -7042,8 +7753,14 @@ class DarkroomMainWindow(QMainWindow):
 
             tid = f"task_{uuid.uuid4().hex[:8]}"
             task = ExportTask(tid, os.path.basename(out_target), file_p, out_target, export_params, thumbnail=pix)
-            self.export_queue.enqueue(task)
+            new_tasks.append(task)
             enqueued_count += 1
+
+        if hasattr(self.export_queue, "enqueue_batch"):
+            self.export_queue.enqueue_batch(new_tasks)
+        else:
+            for t in new_tasks:
+                self.export_queue.enqueue(t)
 
         self._set_export_status(f"已将 {enqueued_count} 张底片加入冲印队列", state="busy")
 
@@ -7108,12 +7825,6 @@ class DarkroomMainWindow(QMainWindow):
         global_pos = sender.mapToGlobal(pos) if sender else QCursor.pos()
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
-        
-        act_imp = menu.addAction("导入胶卷配置...")
-        icon_imp = os.path.join(get_resource_dir(), "icons", "dlg_import.png")
-        if os.path.exists(icon_imp):
-            act_imp.setIcon(QIcon(icon_imp))
-        act_imp.triggered.connect(self._import_film_lut)
 
         sort_menu = menu.addMenu("整理排列")
         sort_menu.setStyleSheet(get_darkroom_menu_style())
@@ -7129,12 +7840,6 @@ class DarkroomMainWindow(QMainWindow):
         global_pos = sender.mapToGlobal(pos) if sender else QCursor.pos()
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
-        
-        act_imp = menu.addAction("导入相纸配置...")
-        icon_imp = os.path.join(get_resource_dir(), "icons", "dlg_import.png")
-        if os.path.exists(icon_imp):
-            act_imp.setIcon(QIcon(icon_imp))
-        act_imp.triggered.connect(self._import_paper_lut)
 
         sort_menu = menu.addMenu("整理排列")
         sort_menu.setStyleSheet(get_darkroom_menu_style())
@@ -7417,6 +8122,9 @@ class DarkroomMainWindow(QMainWindow):
                 last_paper_stock=self.current_paper_stock,
             )
 
+            # Ensure active photo focus is persisted to session storage
+            self._update_session_focus_on_disk()
+
             # Remember active session path ONLY if it is a saved session on disk
             if self._current_session_path and os.path.exists(self._current_session_path) and not getattr(self, "_is_temp_session", False):
                 config_manager.save_last_session_path(self._current_session_path)
@@ -7427,9 +8135,7 @@ class DarkroomMainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"Error saving config on close: {e}")
 
-        if self._import_worker and self._import_worker.isRunning():
-            self._import_worker.stop()
-            self._import_worker.wait(300)
+        self._cancel_active_import(notify_user=False)
 
         if hasattr(self, 'export_queue') and self.export_queue:
             self.export_queue.close()
