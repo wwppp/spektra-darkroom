@@ -19,9 +19,8 @@ from scipy.optimize import root
 
 # Ensure spektrafilm is in python path
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SPEKTRA_SRC = os.path.join(ROOT_DIR, 'spektrafilm-repo', 'src')
-if SPEKTRA_SRC not in sys.path:
-    sys.path.insert(0, SPEKTRA_SRC)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from spektrafilm.profiles.io import (
     Profile, ProfileMetadata, ProfileInfo, ProfileData,
@@ -479,11 +478,11 @@ def main():
     stocks_dir = os.path.join(ROOT_DIR, 'fotufilm-engine', 'Sources', 'FotufilmCore', 'Stocks')
     output_dirs = [
         os.path.join(ROOT_DIR, 'resources', 'profiles'),
-        os.path.join(ROOT_DIR, 'spektrafilm-repo', 'src', 'spektrafilm', 'data', 'profiles')
+        os.path.join(ROOT_DIR, 'spektrafilm', 'data', 'profiles')
     ]
     filter_files = [
         os.path.join(ROOT_DIR, 'resources', 'neutral_print_filters.json'),
-        os.path.join(ROOT_DIR, 'spektrafilm-repo', 'src', 'spektrafilm', 'data', 'filters', 'neutral_print_filters.json')
+        os.path.join(ROOT_DIR, 'spektrafilm', 'data', 'filters', 'neutral_print_filters.json')
     ]
 
     converted = {}

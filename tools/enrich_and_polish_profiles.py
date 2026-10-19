@@ -14,7 +14,7 @@ import glob
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROFILES_DIRS = [
     os.path.join(ROOT_DIR, 'resources', 'profiles'),
-    os.path.join(ROOT_DIR, 'spektrafilm-repo', 'src', 'spektrafilm', 'data', 'profiles')
+    os.path.join(ROOT_DIR, 'spektrafilm', 'data', 'profiles')
 ]
 FOTU_STOCKS_DIR = os.path.join(ROOT_DIR, 'fotufilm-engine', 'Sources', 'FotufilmCore', 'Stocks')
 
@@ -312,7 +312,7 @@ def main():
     # Also clean filter databases of _fotu entries
     filter_files = [
         os.path.join(ROOT_DIR, 'resources', 'neutral_print_filters.json'),
-        os.path.join(ROOT_DIR, 'spektrafilm-repo', 'src', 'spektrafilm', 'data', 'filters', 'neutral_print_filters.json')
+        os.path.join(ROOT_DIR, 'spektrafilm', 'data', 'filters', 'neutral_print_filters.json')
     ]
     for ff in filter_files:
         if os.path.exists(ff):

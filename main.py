@@ -22,9 +22,6 @@ else:
     _app_root = os.path.dirname(os.path.abspath(__file__))
     if _app_root not in sys.path:
         sys.path.insert(0, _app_root)
-    _spektrafilm_src = os.path.join(_app_root, "spektrafilm-repo", "src")
-    if os.path.exists(_spektrafilm_src) and _spektrafilm_src not in sys.path:
-        sys.path.insert(0, _spektrafilm_src)
 
 import ctypes
 from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen

@@ -2,9 +2,23 @@
  SpektraDarkroom Vulkan Edition - 物理胶片暗房工作站 更新日志
 ========================================================================
 
-【当前版本】 v0.2.22 (Build 111)
-【发布日期】 2026-10-17
+【当前版本】 v0.2.23 (Build 112)
+【发布日期】 2026-10-19
 【适用平台】 Windows 10 / 11 (64-bit)
+
+------------------------------------------------------------------------
+v0.2.23 (Build 112) 物理仿真核心 spektrafilm 一体化内置整改、彻底摆脱外部 Git 依赖断层
+------------------------------------------------------------------------
+
+1. 物理仿真内核 spektrafilm 一体化内置 (Vendor / Monorepo Core Integration)
+   - 彻底将定制优化的物理连续光谱仿真引擎包（含 61 款物理胶卷与相纸吸收测定数据、81 波段光谱升采样 LUT 矩阵、Snell 全内反射光晕模型、Jarvis 染料云颗粒扩散、以及明度/色度颗粒解耦控制）直接内置到根目录 `spektrafilm/` 中；
+   - 解决此前克隆代码时因 `requirements.txt` 指向外部原作者仓库而缺少定制物理参数（`colour_grain`, `crystal_grain`, `film_base`, `coupler_geometry` 等）导致主程序崩溃的严重架构断层；
+   - 消除对 Windows 平台下极难编译安装的外部 C++ 库（`exiv2`, `OpenImageIO`, `lensfunpy`）的强制依赖，内置安全纯 Python 回退机制。
+
+2. 依赖与开发工具链全面脱耦清整 (Decoupled Requirements & Development Scripts)
+   - 彻底从 `requirements.txt` 中剔除 `git+https://...` 外部源码拉取配置，使用者克隆本仓库后只需常规 `pip install -r requirements.txt` 即可 100% 保证开箱即用；
+   - 重构 `main.py`、`launcher.cs`、PyInstaller 打包脚本以及 `tools/` 目录下全部 14 个回归测试与工具脚本，默认直接加载内置核心；
+   - 重建无黑框原生宿主启动器 `SpektraDarkroom.exe`，更新用户克隆运行指南。
 
 ------------------------------------------------------------------------
 v0.2.22 (Build 111) 冲印界面全量栅格像素级对齐、行距垂直节奏紧凑重构、浅色复选框恢复纯正“回”字形

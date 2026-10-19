@@ -4,7 +4,7 @@ import numpy as np
 import rawpy
 from PIL import Image
 
-sys.path.insert(0, os.path.abspath("spektrafilm-repo/src"))
+sys.path.insert(0, os.path.abspath("."))
 sys.path.insert(0, os.path.abspath("."))
 
 from spektrafilm.runtime.api import simulate, init_params

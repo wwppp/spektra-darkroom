@@ -117,16 +117,11 @@ python -m venv .venv
 .\.venv\Scripts\activate.bat
 ```
 
-### 3. 安装项目依赖与物理光学仿真内核
-本项目依赖 `spektrafilm` 官方光谱物理显影内核，可在安装依赖时一键自动拉取安装：
+### 3. 安装运行依赖
+物理光学仿真内核 `spektrafilm` 已全量一体化内置于本仓库中，无需额外克隆或联网下载子模块，直接一键安装通用依赖即可：
 ```bash
 pip install -r requirements.txt
 ```
-> **提示**：若网络无法直接通过 pip 拉取 GitHub 源码，亦可手动拉取并以开发模式安装：
-> ```bash
-> git clone https://github.com/andreavolpato/spektrafilm.git spektrafilm-repo
-> pip install -e spektrafilm-repo
-> ```
 
 ### 4. 启动应用
 - **双击启动器**（推荐，无黑框）：直接双击根目录下的 **`SpektraDarkroom.exe`**；

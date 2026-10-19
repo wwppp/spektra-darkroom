@@ -10,7 +10,7 @@ import numpy as np
 
 # Add project root to sys.path
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(root_dir, "spektrafilm-repo", "src"))
+sys.path.insert(0, root_dir)
 sys.path.insert(0, root_dir)
 
 from app_core import SpektraEngine
