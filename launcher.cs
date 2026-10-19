@@ -67,7 +67,6 @@ namespace SpektraDarkroom
 
             string venvDir = Path.Combine(baseDir, ".venv");
             string venvSite = Path.Combine(venvDir, "Lib", "site-packages");
-            string spektraSrc = Path.Combine(baseDir, "spektrafilm-repo", "src");
 
             // 3. Locate python313.dll dynamically
             string dllPath = null;
@@ -150,7 +149,6 @@ namespace SpektraDarkroom
             paths.Add(basePrefix);
             if (Directory.Exists(venvSite)) paths.Add(venvSite);
             paths.Add(baseDir);
-            if (Directory.Exists(spektraSrc)) paths.Add(spektraSrc);
 
             string pythonPath = string.Join(";", paths.ToArray());
             Environment.SetEnvironmentVariable("PYTHONPATH", pythonPath);
