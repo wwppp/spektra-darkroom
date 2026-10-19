@@ -7,7 +7,10 @@ import threading
 import uuid
 import numpy as np
 import cv2
+import logging
 from PIL import Image
+
+logger = logging.getLogger("SpektraEngine")
 
 import spektrafilm
 from spektrafilm.runtime.api import init_params, digest_params
@@ -2474,7 +2477,7 @@ class SpektraEngine:
             "width": res["width"],
             "height": res["height"],
             "thumbnail_rgb": res["thumbnail_rgb"],
-            "raw_preview": self.raw_preview,
+            "raw_preview": None,
             "meta": dict(self.original_meta),
             "is_raw": res["is_raw"],
             "base_ev": res["base_ev"],
@@ -2535,10 +2538,11 @@ class SpektraEngine:
             return {"success": False, "error": "未找到指定底片"}
 
         self.active_photo_id = photo_id
-        self.raw_preview = photo["raw_preview"]
+        if photo.get("raw_preview") is not None:
+            self.raw_preview = photo["raw_preview"]
         self.raw_full = None
-        self.original_meta = dict(photo["meta"])
-        self.current_file_path = photo["path"]
+        self.original_meta = dict(photo.get("meta") or {})
+        self.current_file_path = photo.get("path")
 
         return {
             "success": True,

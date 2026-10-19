@@ -1065,6 +1065,8 @@ class FilmGridCard(QFrame):
 
 
     def set_active(self, is_active):
+        if self.is_active == is_active:
+            return
         self.is_active = is_active
         self._update_appearance()
 
@@ -1506,15 +1508,26 @@ class FadingSplitter(QSplitter):
 
 
 class ViewportResizeFilter(QObject):
-    """Filters Resize events on QScrollArea viewports to trigger immediate, synchronized grid reflows."""
+    """Filters Resize events on QScrollArea widgets to trigger immediate, synchronized grid reflows."""
     def __init__(self, callback, parent=None):
         super().__init__(parent)
         self.callback = callback
+        self._last_w = -1
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.Resize:
+            new_w = event.size().width()
+            old_w = event.oldSize().width()
+            # In a vertical wrapping card grid, column layout is solely determined by width.
+            # Strictly ignore height-only resizes or identical width to prevent redundant reflows.
+            if old_w != -1 and new_w == old_w:
+                return super().eventFilter(watched, event)
+            if new_w == self._last_w:
+                return super().eventFilter(watched, event)
+            self._last_w = new_w
             self.callback()
         return super().eventFilter(watched, event)
+
 
 
 class CompareButton(QPushButton):
@@ -1697,6 +1710,12 @@ class DarkroomMainWindow(QMainWindow):
         self._cards_debounce_timer.setSingleShot(True)
         self._cards_debounce_timer.setInterval(220)
         self._cards_debounce_timer.timeout.connect(self._refresh_card_previews)
+
+        # Debounced film-only cards update timer (120ms when switching film category pills)
+        self._film_filter_debounce_timer = QTimer(self)
+        self._film_filter_debounce_timer.setSingleShot(True)
+        self._film_filter_debounce_timer.setInterval(120)
+        self._film_filter_debounce_timer.timeout.connect(lambda: self._refresh_card_previews(film_only=True))
 
         QApplication.instance().installEventFilter(self)
 
@@ -2810,7 +2829,7 @@ class DarkroomMainWindow(QMainWindow):
         self.film_container.customContextMenuRequested.connect(self._on_film_blank_context_menu)
 
         self._film_vp_filter = ViewportResizeFilter(self.reflow_grids, self)
-        self.film_scroll.viewport().installEventFilter(self._film_vp_filter)
+        self.film_scroll.installEventFilter(self._film_vp_filter)
 
         film_layout.addWidget(self.film_scroll, 1)
 
@@ -2851,7 +2870,7 @@ class DarkroomMainWindow(QMainWindow):
         self.paper_container.customContextMenuRequested.connect(self._on_paper_blank_context_menu)
 
         self._paper_vp_filter = ViewportResizeFilter(self.reflow_grids, self)
-        self.paper_scroll.viewport().installEventFilter(self._paper_vp_filter)
+        self.paper_scroll.installEventFilter(self._paper_vp_filter)
 
         paper_layout.addWidget(self.paper_scroll, 1)
 
@@ -3150,66 +3169,89 @@ class DarkroomMainWindow(QMainWindow):
             QTimer.singleShot(60, self.reflow_grids)
 
     def reflow_grids(self):
-        # Dynamic responsive layout: unified minimum card width 96px to prevent clipping
-        min_card_w = 96
-        spacing = 6
-        margins = 8
+        if getattr(self, "_is_reflowing", False):
+            return
+        self._is_reflowing = True
+        try:
+            # Dynamic responsive layout: unified minimum card width 96px to prevent clipping
+            min_card_w = 96
+            spacing = 6
+            margins = 8
 
-        # Helper function for grid reflow with dynamic card resizing
-        def _reflow_container(scroll_widget, cards_dict, grid_layout):
-            if not scroll_widget or not cards_dict:
-                return
-            vp = scroll_widget.viewport()
-            viewport_w = vp.width() if vp else 0
-            if viewport_w <= 0 and hasattr(self, "left_splitter"):
-                viewport_w = self.left_splitter.width() - 16
-            avail_w = max(96, viewport_w - margins)
+            # Helper function for grid reflow with dynamic card resizing
+            def _reflow_container(scroll_widget, cards_dict, grid_layout):
+                if not scroll_widget or not cards_dict:
+                    return
+                # Calculate stable width from scroll area itself, reserving 6px for vertical scrollbar
+                # This guarantees that card widths and layout do not oscillate when a scrollbar appears or disappears.
+                container_w = scroll_widget.width()
+                if container_w <= 0:
+                    vp = scroll_widget.viewport()
+                    container_w = vp.width() if vp else 0
+                if container_w <= 0 and hasattr(self, "left_splitter"):
+                    container_w = self.left_splitter.width() - 16
+                avail_w = max(96, container_w - margins - 6)
 
-            # Strict column thresholds based on min_card_w=96, spacing=6, margins=8:
-            # 4 cols: 96 * 4 + 6 * 3 + 8 = 410px
-            # 3 cols: 96 * 3 + 6 * 2 + 8 = 308px
-            # 2 cols: 96 * 2 + 6 * 1 + 8 = 206px
-            if avail_w >= 410:
-                cols = 4
-            elif avail_w >= 308:
-                cols = 3
-            elif avail_w >= 206:
-                cols = 2
-            else:
-                cols = 1
+                # Strict column thresholds based on min_card_w=96, spacing=6, margins=8:
+                # 4 cols: 96 * 4 + 6 * 3 + 8 = 410px
+                # 3 cols: 96 * 3 + 6 * 2 + 8 = 308px
+                # 2 cols: 96 * 2 + 6 * 1 + 8 = 206px
+                if avail_w >= 410:
+                    cols = 4
+                elif avail_w >= 308:
+                    cols = 3
+                elif avail_w >= 206:
+                    cols = 2
+                else:
+                    cols = 1
 
-            # Dynamically scale card width to fill row up to 220px max
-            target_card_w = int((avail_w - (cols - 1) * spacing) / cols)
-            target_card_w = max(min_card_w, min(220, target_card_w))
+                # Dynamically scale card width to fill row up to 220px max
+                target_card_w = int((avail_w - (cols - 1) * spacing) / cols)
+                target_card_w = max(min_card_w, min(220, target_card_w))
 
-            visible_cards = [c for c in cards_dict.values() if getattr(c, "is_filter_matched", True)]
-            for card in visible_cards:
-                card.update_card_dimensions(target_card_w)
+                visible_cards = [c for c in cards_dict.values() if getattr(c, "is_filter_matched", True)]
 
-            # Remove all cards from grid first to prevent stale positions
-            for card in cards_dict.values():
-                grid_layout.removeWidget(card)
+                # Check if repack is completely redundant (same visible cards, same columns, same card width)
+                current_keys = (tuple(id(c) for c in visible_cards), cols, target_card_w)
+                if getattr(grid_layout, "_last_reflow_keys", None) == current_keys:
+                    return
+                grid_layout._last_reflow_keys = current_keys
 
-            # Re-pack only visible cards in tight, gap-free arrangement
-            for i, card in enumerate(visible_cards):
-                grid_layout.addWidget(card, i // cols, i % cols)
-                card.setVisible(True)
+                scroll_widget.setUpdatesEnabled(False)
+                try:
+                    for card in visible_cards:
+                        card.update_card_dimensions(target_card_w)
 
-            # Explicitly hide non-matched cards
-            for card in cards_dict.values():
-                if not getattr(card, "is_filter_matched", True):
-                    card.setVisible(False)
+                    # Only rebuild grid layout slots if card membership or column count changed
+                    pos_keys = (tuple(id(c) for c in visible_cards), cols)
+                    if getattr(grid_layout, "_last_pos_keys", None) != pos_keys:
+                        for card in cards_dict.values():
+                            grid_layout.removeWidget(card)
 
-            total_rows = (len(visible_cards) + cols - 1) // cols if visible_cards else 0
-            for r in range(max(1, total_rows)):
-                grid_layout.setRowStretch(r, 0)
-            grid_layout.setRowStretch(total_rows, 1)
+                        for i, card in enumerate(visible_cards):
+                            grid_layout.addWidget(card, i // cols, i % cols)
+                            card.setVisible(True)
 
-        if hasattr(self, "film_scroll") and self.film_cards:
-            _reflow_container(self.film_scroll, self.film_cards, self.film_grid)
+                        for card in cards_dict.values():
+                            if not getattr(card, "is_filter_matched", True):
+                                card.setVisible(False)
 
-        if hasattr(self, "paper_scroll") and self.paper_cards:
-            _reflow_container(self.paper_scroll, self.paper_cards, self.paper_grid)
+                        grid_layout._last_pos_keys = pos_keys
+
+                    total_rows = (len(visible_cards) + cols - 1) // cols if visible_cards else 0
+                    for r in range(max(1, total_rows)):
+                        grid_layout.setRowStretch(r, 0)
+                    grid_layout.setRowStretch(total_rows, 1)
+                finally:
+                    scroll_widget.setUpdatesEnabled(True)
+
+            if hasattr(self, "film_scroll") and self.film_cards:
+                _reflow_container(self.film_scroll, self.film_cards, self.film_grid)
+
+            if hasattr(self, "paper_scroll") and self.paper_cards:
+                _reflow_container(self.paper_scroll, self.paper_cards, self.paper_grid)
+        finally:
+            self._is_reflowing = False
 
     def _on_film_search_changed(self, query: str):
         self._film_search_query = query.strip().lower()
@@ -3272,6 +3314,8 @@ class DarkroomMainWindow(QMainWindow):
             self.lbl_film_title.setText(f"胶卷型号 ({visible_count}/{total_count} 卷)")
 
         self.reflow_grids()
+        if hasattr(self, '_film_filter_debounce_timer'):
+            self._film_filter_debounce_timer.start(120)
 
     def _populate_film_grid(self):
         stocks = self.engine.get_film_stocks()
@@ -6177,7 +6221,7 @@ class DarkroomMainWindow(QMainWindow):
                 "width": photo_entry.get("width", 0),
                 "height": photo_entry.get("height", 0),
                 "thumbnail_rgb": photo_entry.get("thumbnail_rgb"),
-                "raw_preview": photo_entry.get("float_img"),
+                "raw_preview": None,
                 "meta": dict(photo_entry.get("exif") or {}),
                 "is_raw": photo_entry.get("is_raw", False),
                 "base_ev": photo_entry.get("base_ev", 0.0),
@@ -6536,18 +6580,9 @@ class DarkroomMainWindow(QMainWindow):
         self.set_app_status(msg, timeout_ms=3000)
 
     def _on_step_photo(self, delta):
-        """Step previous (-1) or next (+1) photo in filmstrip."""
-        if not self.photos or not self.active_photo_id:
-            return
-        idx = next((i for i, p in enumerate(self.photos) if p and p.get("id") == self.active_photo_id), -1)
-        if idx == -1:
-            return
-        new_idx = idx + delta
-        if 0 <= new_idx < len(self.photos):
-            target = self.photos[new_idx]
-            if target and target.get("id"):
-                self.on_switch_photo(target["id"])
-                self.filmstrip.scroll_to_active()
+        """Step previous (-1) or next (+1) photo in filmstrip with 0ms visual responsiveness."""
+        if hasattr(self, 'filmstrip') and self.filmstrip:
+            self.filmstrip.step_photo(delta)
 
     def _on_navigate_first_photo(self):
         """Navigate to the first photo in filmstrip, activate and select it (Home key)."""
@@ -6763,6 +6798,48 @@ class DarkroomMainWindow(QMainWindow):
             else:
                 self.slider_diff_warmth.setToolTip(getattr(self.slider_diff_warmth, "default_tooltip", "柔光光晕波长能量再分配，正值偏复古暖金，负值偏清冷晨光"))
 
+    def _manage_photo_memory_lru(self, active_photo_id: str):
+        """Strict LRU memory management: Keeps at most 2 photos' float_img in RAM
+        (active photo + most recent previous photo, ~580MB max).
+        All other photos rely on ultra-fast (20ms) disk session cache.
+        Evicts float arrays from self.photos, engine.session_photos, and runs gc.collect().
+        """
+        if not hasattr(self, "_loaded_photos_lru"):
+            self._loaded_photos_lru = []
+        if active_photo_id in self._loaded_photos_lru:
+            self._loaded_photos_lru.remove(active_photo_id)
+        self._loaded_photos_lru.append(active_photo_id)
+
+        evicted = False
+        while len(self._loaded_photos_lru) > 2:
+            old_pid = self._loaded_photos_lru.pop(0)
+            if old_pid != active_photo_id:
+                old_p = next((p for p in self.photos if p.get("id") == old_pid), None)
+                if old_p and old_p.get("float_img") is not None:
+                    old_p["float_img"] = None
+                    evicted = True
+                if hasattr(self, 'engine') and hasattr(self.engine, 'session_photos'):
+                    for ep in self.engine.session_photos:
+                        if ep.get("id") == old_pid and ep.get("raw_preview") is not None:
+                            ep["raw_preview"] = None
+                            evicted = True
+
+        # Safety sweep: Purge any non-LRU photos that inadvertently hold float_img
+        lru_set = set(self._loaded_photos_lru)
+        for p in self.photos:
+            if p.get("id") not in lru_set and p.get("float_img") is not None:
+                p["float_img"] = None
+                evicted = True
+        if hasattr(self, 'engine') and hasattr(self.engine, 'session_photos'):
+            for ep in self.engine.session_photos:
+                if ep.get("id") not in lru_set and ep.get("raw_preview") is not None:
+                    ep["raw_preview"] = None
+                    evicted = True
+
+        if evicted:
+            import gc
+            gc.collect()
+
     def on_switch_photo(self, photo_id):
         # Stop any lingering live/debounce timers from previous photo
         if hasattr(self, '_live_thumb_timer') and self._live_thumb_timer.isActive():
@@ -6943,19 +7020,7 @@ class DarkroomMainWindow(QMainWindow):
                 if not getattr(self, "_is_multi_selecting", False):
                     self.set_app_status(f"底片已就绪: {fn}", spinning=False, timeout_ms=2000)
 
-            # Memory LRU management: Keep up to 10 most recent photos' float_img in RAM
-            # (~330MB total) for instantaneous 0ms photo switching without RAW re-parsing
-            if not hasattr(self, "_loaded_photos_lru"):
-                self._loaded_photos_lru = []
-            if photo_id in self._loaded_photos_lru:
-                self._loaded_photos_lru.remove(photo_id)
-            self._loaded_photos_lru.append(photo_id)
-            while len(self._loaded_photos_lru) > 10:
-                old_pid = self._loaded_photos_lru.pop(0)
-                if old_pid != photo_id:
-                    old_p = next((p for p in self.photos if p.get("id") == old_pid), None)
-                    if old_p:
-                        old_p["float_img"] = None
+            self._manage_photo_memory_lru(photo_id)
             self.canvas.update_params(**self.current_params)
             self._update_all_sliders_from_params()
 
@@ -6979,25 +7044,22 @@ class DarkroomMainWindow(QMainWindow):
             # 7. Update status text with 1:1 image native pixel scale percentage
             self._update_photo_info_display()
 
-            # 8. Update live thumbnails on Film & Paper cards and filmstrip (debounced for 60 FPS smoothness)
+            # 8. Update live thumbnails on Film & Paper cards and filmstrip
             self._current_photo_thumb = photo.get("thumbnail_rgb")
             float_img = photo.get("float_img")
             if float_img is not None:
                 if hasattr(self, 'engine'):
                     self.engine.raw_preview = float_img
-                lh, lw = float_img.shape[:2]
-                lscale = 120.0 / float(max(lh, lw))
-                ltw = max(1, int(round(lw * lscale)))
-                lth = max(1, int(round(lh * lscale)))
-                self._current_photo_linear = cv2.resize(float_img, (ltw, lth), interpolation=cv2.INTER_AREA)
+                self._current_photo_linear = float_img
+                self._schedule_active_thumbnail_update(100)
+                # Active photo is already in RAM: refresh all 61 candidate cards in background after UI settles
                 if hasattr(self, '_cards_debounce_timer'):
-                    self._cards_debounce_timer.start(200)
-                self._schedule_active_thumbnail_update(150)
+                    self._cards_debounce_timer.start(250)
             else:
                 self._current_photo_linear = None
                 if hasattr(self, 'engine'):
                     self.engine.raw_preview = None
-                # Immediate (0ms) active card update with existing thumbnail:
+                # Immediate (0ms) active card update with existing thumbnail (Important active card):
                 th_display = photo.get("graded_thumbnail_rgb")
                 raw_thumb = self.thumb_controller.get_raw_thumbnail(photo)
                 if th_display is None and raw_thumb is not None:
@@ -7025,9 +7087,7 @@ class DarkroomMainWindow(QMainWindow):
                     if self.paper_cards and self.current_paper_stock in self.paper_cards:
                         self.paper_cards[self.current_paper_stock].set_thumbnail(None)
 
-                # For candidate cards, debounce update
-                if hasattr(self, '_cards_debounce_timer'):
-                    self._cards_debounce_timer.start(200)
+                # Non-essential candidate cards (remaining 60 cards) are queued to refresh AFTER the negative is ready (_on_single_photo_loaded)
 
             self._schedule_histogram_update()
             self._update_stock_mode_ui()
@@ -7086,7 +7146,10 @@ class DarkroomMainWindow(QMainWindow):
 
         target_photo = next((p for p in self.photos if p["id"] == photo_id), None)
         if target_photo:
-            target_photo["float_img"] = float_img
+            if self.active_photo_id == photo_id:
+                target_photo["float_img"] = float_img
+            else:
+                target_photo["float_img"] = None
             if res.get("width") and res.get("height"):
                 target_photo["width"] = res["width"]
                 target_photo["height"] = res["height"]
@@ -7140,29 +7203,14 @@ class DarkroomMainWindow(QMainWindow):
                 m_h = target_photo.get("height") or (target_photo.get("meta", {}).get("height") if isinstance(target_photo.get("meta"), dict) else None) if target_photo else None
                 self.canvas.set_image(float_img, master_width=m_w, master_height=m_h, reset_zoom=False, photo_id=photo_id)
 
-                # Update LRU queue (keep up to 10 photos in RAM for 0ms switching)
-                if not hasattr(self, "_loaded_photos_lru"):
-                    self._loaded_photos_lru = []
-                if photo_id in self._loaded_photos_lru:
-                    self._loaded_photos_lru.remove(photo_id)
-                self._loaded_photos_lru.append(photo_id)
-                while len(self._loaded_photos_lru) > 10:
-                    old_pid = self._loaded_photos_lru.pop(0)
-                    if old_pid != photo_id:
-                        old_p = next((p for p in self.photos if p.get("id") == old_pid), None)
-                        if old_p:
-                            old_p["float_img"] = None
+                self._manage_photo_memory_lru(photo_id)
 
-                # Update live 2:3 thumbnails on cards
+                # Update live 2:3 thumbnails on cards (background worker will downsample as needed)
                 self._current_photo_thumb = target_photo.get("thumbnail_rgb") if target_photo else None
-                lh, lw = float_img.shape[:2]
-                lscale = 120.0 / float(max(lh, lw))
-                ltw = max(1, int(round(lw * lscale)))
-                lth = max(1, int(round(lh * lscale)))
-                self._current_photo_linear = cv2.resize(float_img, (ltw, lth), interpolation=cv2.INTER_AREA)
+                self._current_photo_linear = float_img
 
                 if hasattr(self, '_cards_debounce_timer'):
-                    self._cards_debounce_timer.start(200)
+                    self._cards_debounce_timer.start(250)
 
                 self._schedule_histogram_update()
                 self._schedule_active_thumbnail_update(150)
@@ -7177,7 +7225,12 @@ class DarkroomMainWindow(QMainWindow):
         if thumb_data is None:
             return
 
-        film_cards_dict = self.film_cards if do_films else {}
+        if do_films:
+            # Prioritize filter-matched cards currently visible to user (e.g. 11 cine cards instead of all 51)
+            matched_films = {k: v for k, v in self.film_cards.items() if getattr(v, "is_filter_matched", True)}
+            film_cards_dict = matched_films if matched_films else self.film_cards
+        else:
+            film_cards_dict = {}
         paper_cards_dict = self.paper_cards if do_papers else {}
 
         params = dict(self.current_params)
@@ -7500,8 +7553,12 @@ class DarkroomMainWindow(QMainWindow):
         # Item 6: Reset cards thumbnails to default swatch
         self._current_photo_thumb = None
         self._current_photo_linear = None
+        if hasattr(self, "_loaded_photos_lru"):
+            self._loaded_photos_lru.clear()
         self.thumb_controller.reset_all_cards_to_color_pills(self.film_cards, self.paper_cards)
         self.restore_default_status()
+        import gc
+        gc.collect()
 
     def action_export_image(self):
         # 1. Check filmstrip multi-selection

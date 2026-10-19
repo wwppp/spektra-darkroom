@@ -518,8 +518,38 @@ class FilmstripWidget(QWidget):
         self._selected_ids = set()
         self._can_paste_params = False
         self._pending_scroll_timers = []
+        self._select_debounce_timer = QTimer(self)
+        self._select_debounce_timer.setSingleShot(True)
+        self._select_debounce_timer.setInterval(25)
+        self._select_debounce_timer.timeout.connect(self._dispatch_photo_selected)
+        self._pending_select_id = None
         self._init_ui()
         theme_manager.themeChanged.connect(lambda _: self.apply_theme())
+
+    def _schedule_photo_selected(self, photo_id):
+        """Debounces photoSelected signal emission by 25ms so selection frame moves in 0ms without UI hitch."""
+        self._pending_select_id = photo_id
+        self._select_debounce_timer.start(25)
+
+    def _dispatch_photo_selected(self):
+        if self._pending_select_id:
+            pid = self._pending_select_id
+            self._pending_select_id = None
+            self.photoSelected.emit(pid)
+
+    def step_photo(self, delta):
+        """Immediately moves the visual selection box (0ms) and smoothly navigates previous (-1) or next (+1) photo."""
+        if not self._photos_list or not self._active_id:
+            return
+        pids = [p["id"] for p in self._photos_list if p and "id" in p]
+        if self._active_id not in pids:
+            return
+        idx = pids.index(self._active_id)
+        new_idx = idx + delta
+        if 0 <= new_idx < len(pids):
+            target_id = pids[new_idx]
+            self.set_active_photo(target_id, scroll_to_visible=True, reset_selection=True)
+            self._schedule_photo_selected(target_id)
 
     def _cancel_pending_scroll_timers(self):
         """Cancel any delayed scroll alignment timers to prevent jumping during user interactions."""
@@ -564,11 +594,11 @@ class FilmstripWidget(QWidget):
                 event.accept()
                 return
         elif event.key() == Qt.Key.Key_Left:
-            self.stepPhotoRequested.emit(-1)
+            self.step_photo(-1)
             event.accept()
             return
         elif event.key() == Qt.Key.Key_Right:
-            self.stepPhotoRequested.emit(1)
+            self.step_photo(1)
             event.accept()
             return
         elif event.key() == Qt.Key.Key_Home:
@@ -1163,8 +1193,16 @@ class FilmstripWidget(QWidget):
                     w = self._item_widgets[pid]
                     w.set_active(pid == self._active_id)
                     w.set_selected(pid in self._selected_ids)
+                    try:
+                        w.repaint()
+                    except Exception:
+                        pass
         else:
             self._update_items_selection()
+            try:
+                self.scroll_content.repaint()
+            except Exception:
+                pass
 
         self.selectionChanged.emit(list(self._selected_ids))
         if scroll_to_visible and active_id:
@@ -1210,11 +1248,12 @@ class FilmstripWidget(QWidget):
                 start, end = min(i1, i2), max(i1, i2)
                 range_ids = set(pids[start:end+1])
                 self.set_active_photo(photo_id, reset_selection=False, new_selected_ids=range_ids)
-                self.photoSelected.emit(photo_id)
+                self._schedule_photo_selected(photo_id)
         else:
             # Normal single click: cancels multi-selection, selecting ONLY this clicked photo
+            # Instant 0ms visual update: selection border jumps over immediately
             self.set_active_photo(photo_id, reset_selection=True)
-            self.photoSelected.emit(photo_id)
+            self._schedule_photo_selected(photo_id)
 
     def update_photo_thumbnail(self, photo_id, pixmap):
         """Update thumbnail for specific photo item."""
@@ -1300,7 +1339,7 @@ class FilmstripWidget(QWidget):
         first_id = self._photos_list[0].get("id")
         if first_id:
             self.set_active_photo(first_id, reset_selection=True)
-            self.photoSelected.emit(first_id)
+            self._schedule_photo_selected(first_id)
             self.scroll_to_start()
             self.scroll_to_active()
 
@@ -1311,7 +1350,7 @@ class FilmstripWidget(QWidget):
         last_id = self._photos_list[-1].get("id")
         if last_id:
             self.set_active_photo(last_id, reset_selection=True)
-            self.photoSelected.emit(last_id)
+            self._schedule_photo_selected(last_id)
             self.scroll_to_end()
             self.scroll_to_active()
 
@@ -1328,7 +1367,7 @@ class FilmstripWidget(QWidget):
         range_ids = set(pids[start:end + 1])
         target_id = pids[target_idx]
         self.set_active_photo(target_id, new_selected_ids=range_ids)
-        self.photoSelected.emit(target_id)
+        self._schedule_photo_selected(target_id)
         if to_start:
             self.scroll_to_start()
         else:

@@ -66,7 +66,8 @@ class StockThumbnailWorker(QThread):
                  params_dict=None, parent=None):
         super().__init__(parent)
         self.engine = engine
-        self.linear_thumb = linear_thumb.copy() if linear_thumb is not None else None
+        # Store reference without deepcopying large arrays synchronously on GUI thread
+        self.linear_thumb = linear_thumb
         self.film_stocks = list(film_stocks)
         self.paper_stocks = list(paper_stocks)
         self.current_film = current_film
@@ -82,6 +83,7 @@ class StockThumbnailWorker(QThread):
 
     def stop(self):
         self._stopped = True
+        self.linear_thumb = None
 
     def run(self):
         if self.linear_thumb is None or self._stopped:
@@ -89,13 +91,16 @@ class StockThumbnailWorker(QThread):
 
         from core.app_core import prophoto_to_srgb_filmic, srgb_to_linear, SRGB_TO_PROPHOTO
 
+        raw_input = self.linear_thumb
         # If passed an 8-bit integer image, accurately convert sRGB uint8 to linear ProPhoto float32
-        if self.linear_thumb.dtype == np.uint8:
-            srgb_norm = self.linear_thumb.astype(np.float32) / 255.0
+        if raw_input.dtype == np.uint8:
+            srgb_norm = raw_input.astype(np.float32) / 255.0
             lin_srgb = srgb_to_linear(srgb_norm)
             small_float = np.maximum(0.0, lin_srgb @ SRGB_TO_PROPHOTO.T)
+        elif raw_input.dtype == np.float32:
+            small_float = raw_input
         else:
-            small_float = self.linear_thumb.astype(np.float32)
+            small_float = raw_input.astype(np.float32)
 
         # Scale down while strictly preserving aspect ratio so 3D LUT grading is ultra-fast
         h, w = small_float.shape[:2]
@@ -107,6 +112,10 @@ class StockThumbnailWorker(QThread):
             small_linear = cv2.resize(small_float, (target_w, target_h), interpolation=cv2.INTER_AREA)
         else:
             small_linear = small_float.copy()
+
+        # Immediately release full-resolution reference so worker only holds tiny 120px array in RAM
+        self.linear_thumb = None
+        del raw_input, small_float
 
         # 1. Apply exposure EV & Scene-Linear Highlights / Shadows (Strictly aligned with GLSL u_exposure)
         total_ev = self.ev + self.base_ev
@@ -178,6 +187,9 @@ class StockThumbnailWorker(QThread):
                         self.film_ready.emit(sid, pix)
                 except Exception:
                     pass
+                # Cooperatively yield GIL to GUI thread so mouse, scroll, and clicks stay at 60 FPS
+                if not self._stopped:
+                    QThread.msleep(4)
 
         # 5. Process Paper stocks (paired with current film or reference film)
         if self.do_papers:
@@ -206,6 +218,9 @@ class StockThumbnailWorker(QThread):
                         self.paper_ready.emit(sid, pix)
                 except Exception:
                     pass
+                # Cooperatively yield GIL to GUI thread so mouse, scroll, and clicks stay at 60 FPS
+                if not self._stopped:
+                    QThread.msleep(4)
 
 
 class ThumbnailController(QObject):
@@ -489,15 +504,17 @@ class ThumbnailController(QObject):
                 card.set_active(sid == "none")
 
     def cancel_card_preview_worker(self):
-        """Safely stops any active background candidate preview generator."""
+        """Safely stops any active background candidate preview generator without blocking GUI thread."""
         if self._card_worker and self._card_worker.isRunning():
             self._card_worker.stop()
             try:
                 self._card_worker.film_ready.disconnect()
+            except Exception:
+                pass
+            try:
                 self._card_worker.paper_ready.disconnect()
             except Exception:
                 pass
-            self._card_worker.wait(200)
             self._card_worker = None
 
     def update_active_card_wysiwyg(self, film_cards: dict, paper_cards: dict,
