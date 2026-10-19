@@ -75,8 +75,13 @@ ARCHITECTURAL_CONSTRAINTS.md
 changelogs/
 CROP_TOOL_IMPLEMENTATION_PLAN.md
 REVERSAL_COLOR_AND_HALATION_FIX_PLAN.md
+PROFILES_MANIFEST.md
+使用说明.txt
+更新日志.txt
 
-# External repositories & local visual comparison exports
+# Development & debug tools
+tools/
+
 fotufilm-engine/
 对比/
 
