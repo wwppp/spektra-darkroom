@@ -19,7 +19,7 @@ import numpy as np
 
 logger = logging.getLogger("SpektraDarkroom.SessionCache")
 
-from format_constants import RAW_EXTENSIONS
+from .format_constants import RAW_EXTENSIONS
 
 
 def is_dummy_or_corrupted_thumbnail(arr) -> bool:
@@ -53,7 +53,7 @@ def is_valid_thumbnail(arr) -> bool:
 def get_cache_dir() -> str:
     """Returns path to the session cache folder, creating it if needed."""
     try:
-        import config_manager
+        from . import config_manager
         app_dir = config_manager.get_app_dir()
         local_cache = os.path.join(app_dir, ".session_cache")
         os.makedirs(local_cache, exist_ok=True)
@@ -97,7 +97,7 @@ def get_cache_key(file_path: str) -> str:
         size = 0
     max_edge = 2048
     try:
-        import config_manager
+        from . import config_manager
         max_edge = int(config_manager.get_preferences().get("preview_max_edge", 2048))
     except Exception:
         max_edge = 2048
@@ -241,7 +241,7 @@ def save_photo_cache(file_path: str, photo_data: dict, preview_array: np.ndarray
                 if prev is not None and isinstance(prev, np.ndarray) and prev.size > 0:
                     try:
                         import cv2
-                        from app_core import prophoto_to_srgb_filmic
+                        from .app_core import prophoto_to_srgb_filmic
                         th_h = 72
                         th_w = max(48, int(prev.shape[1] * (th_h / float(prev.shape[0]))))
                         th_img = cv2.resize(prev, (th_w, th_h), interpolation=cv2.INTER_AREA)
@@ -467,7 +467,7 @@ def get_photo_cache(file_path: str, load_preview: bool = False) -> dict | None:
             if preview_src is not None and preview_src.size > 0:
                 try:
                     import cv2
-                    from app_core import prophoto_to_srgb_filmic
+                    from .app_core import prophoto_to_srgb_filmic
                     th_h = 72
                     th_w = max(48, int(preview_src.shape[1] * (th_h / float(preview_src.shape[0]))))
                     th_img = cv2.resize(preview_src, (th_w, th_h), interpolation=cv2.INTER_AREA)
@@ -703,7 +703,7 @@ def prune_cache_if_needed(max_size_bytes: int = None):
     """Wrapper for backward compatibility and auto-pruning."""
     if max_size_bytes is None:
         try:
-            import config_manager
+            from . import config_manager
             prefs = config_manager.get_preferences()
             max_gb = float(prefs.get("session_cache_max_gb", 2.0))
             preview_res = int(prefs.get("preview_max_edge", 2048))
@@ -720,7 +720,7 @@ def prune_cache_if_needed(max_size_bytes: int = None):
 def check_and_auto_clean():
     """Performs scheduled cache cleanup based on user preferences."""
     try:
-        import config_manager
+        from . import config_manager
         prefs = config_manager.get_preferences()
         interval_days = int(prefs.get("session_cache_clean_interval_days", 7))
         last_clean = float(prefs.get("session_cache_last_clean_time", 0.0))
@@ -809,7 +809,7 @@ def load_session_file(file_path: str) -> dict | None:
         # Normalize photos array
         raw_photos = data.get("photos", [])
         norm_photos = []
-        import sdc_manager
+        from . import sdc_manager
 
         for item in raw_photos:
             if isinstance(item, str):

@@ -2,9 +2,26 @@
  SpektraDarkroom Vulkan Edition - 物理胶片暗房工作站 更新日志
 ========================================================================
 
-【当前版本】 v0.2.24 (Build 113)
+【当前版本】 v0.2.25 (Build 114)
 【发布日期】 2026-10-19
 【适用平台】 Windows 10 / 11 (64-bit)
+
+------------------------------------------------------------------------
+v0.2.25 (Build 114) 业务逻辑全量归拢至 core/ 模块化架构重构、根目录整洁化与测试脚本全面清整
+------------------------------------------------------------------------
+
+1. 业务逻辑全量归拢至 core/ 模块化架构 (Modular Clean Architecture Migration)
+   - 彻底清整此前散落在根目录下的 7 个核心业务模块（`app_core.py`、`config_manager.py`、`session_cache_manager.py`、`sdc_manager.py`、`format_constants.py`、`path_utils.py`、`version.py`），全量规范收拢至二级包 `core/`；
+   - 项目根目录下仅保留单一清晰的主程序入口 `main.py`，工程根结构达到工业级干净标准；
+   - 建立高内聚的 `core/__init__.py` 统一出口，导出核心引擎与关键常量接口，并内嵌 `sys.modules` 向下兼容映射；
+   - 全面系统化重构 `main.py`、`ui/`（全量 15 个窗口组件与控制器）及 `tools/` 中的所有导入声明，彻底消除散乱导入；
+   - 升级 `path_utils.py` 与 `config_manager.py` 的基准路径解析逻辑，在进入二级包后精准自适应项目根目录与 resources 资源路径，确保无论直接源码启动还是 PyInstaller 打包运行均 100% 稳定可靠。
+
+2. 构建脚本归拢与无用测试脚本彻底移除 (Tools Cleanliness & Legacy Tests Removal)
+   - 将原位于根目录的打包与资源生成脚本（`package_standalone.py`、`prune_standalone.py`、`patch_engine_pe.py`、`generate_modern_splash.py`、`generate_sdss_icon.py`）统一定位归入 `tools/` 目录并修复相对路径解析；
+   - 彻底移除前期各阶段开发调试遗留的历史临时测试脚本（`tests/` 目录及 `tools/test_*.py` 等），避免冗余测试代码累赘；
+   - 同步升级 `SpektraDarkroom.spec` 与 `SpektraDarkroom_Onefile.spec`，加入 `core` 模块包动态打包与 hiddenimports 声明；
+   - 经全量静态导入检测与运行时动态模块加载测试，所有核心引擎接口与 15 个 GUI 组件均 100% 正确就绪。
 
 ------------------------------------------------------------------------
 v0.2.24 (Build 113) 根除 PyInstaller 打包配置硬编码绝对路径、实现全平台全路径动态适配

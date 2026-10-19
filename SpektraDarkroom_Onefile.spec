@@ -15,8 +15,7 @@ datas_gl, bin_gl, hid_gl = collect_all('OpenGL')
 
 added_datas = [
     (os.path.join(ROOT_DIR, 'resources'), 'resources'),
-    (os.path.join(ROOT_DIR, 'app_core.py'), '.'),
-    (os.path.join(ROOT_DIR, 'path_utils.py'), '.'),
+    (os.path.join(ROOT_DIR, 'core'), 'core'),
 ] + datas_spektra + datas_colour + datas_rawpy + datas_gl
 
 sample_arw = os.path.join(ROOT_DIR, 'sample.ARW')
@@ -25,8 +24,14 @@ if os.path.exists(sample_arw):
 
 added_binaries = bin_spektra + bin_colour + bin_rawpy + bin_gl
 added_hidden = [
-    'app_core',
-    'path_utils',
+    'core',
+    'core.path_utils',
+    'core.app_core',
+    'core.config_manager',
+    'core.session_cache_manager',
+    'core.sdc_manager',
+    'core.format_constants',
+    'core.version',
     'ui',
     'ui.main_window',
     'ui.adobe_scrub_slider',

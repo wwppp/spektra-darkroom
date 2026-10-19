@@ -11,10 +11,10 @@ from PySide6.QtWidgets import (
     QFrame, QTextBrowser
 )
 
-from path_utils import get_resource_dir
+from core.path_utils import get_resource_dir
 from ui.window_utils import apply_dark_titlebar
 from ui.theme_manager import theme_manager
-from version import get_full_version_info
+from core.version import get_full_version_info
 
 
 class AboutDialog(QDialog):

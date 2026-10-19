@@ -212,7 +212,7 @@ def generate_sdss_icon(size: int = 256) -> Image.Image:
 
 
 def update_all_sdss_icons():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     res_dir = os.path.join(base_dir, "resources")
     os.makedirs(res_dir, exist_ok=True)
 

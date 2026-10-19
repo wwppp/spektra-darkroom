@@ -71,7 +71,8 @@ def get_app_dir() -> str:
     """Returns application root directory."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    core_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(core_dir)
 
 
 def get_config_path() -> str:
@@ -488,7 +489,7 @@ def register_sdss_file_association() -> bool:
         import winreg
         import ctypes
 
-        app_dir = os.path.dirname(os.path.abspath(__file__))
+        app_dir = get_app_dir()
         exe_path = os.path.join(app_dir, "SpektraDarkroom.exe")
         if not os.path.exists(exe_path):
             exe_path = sys.executable

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
 from PySide6.QtCore import Qt, QRect, QRectF
 from PySide6.QtGui import QFont, QFontMetrics, QPalette, QColor, QPainter, QPen, QBrush, QPixmap, QImage
 
-from version import VERSION_STRING, get_app_title
+from core.version import VERSION_STRING, get_app_title
 
 
 class DarkroomSplashScreen(QSplashScreen):
@@ -180,7 +180,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(get_app_title())
 
-    from path_utils import get_resource_dir
+    from core.path_utils import get_resource_dir
     from PySide6.QtGui import QIcon
     ico_path = os.path.join(get_resource_dir(), "app_icon.ico")
     png_path = os.path.join(get_resource_dir(), "app_icon.png")
@@ -281,7 +281,7 @@ def main():
         pass
 
     notify_status("正在装载胶卷与相纸光谱配置文件...")
-    from app_core import SpektraEngine
+    from core.app_core import SpektraEngine
     resources_dir = get_resource_dir()
     engine = SpektraEngine(resources_dir=resources_dir)
 

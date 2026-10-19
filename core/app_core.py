@@ -19,7 +19,7 @@ try:
 except ImportError:
     rawpy = None
 
-from format_constants import (
+from .format_constants import (
     RAW_EXTENSIONS,
     STANDARD_IMAGE_EXTENSIONS,
     ALL_SUPPORTED_IMAGE_EXTENSIONS
@@ -229,7 +229,7 @@ def convert_image_colorspace(img_rgb_float, target_colorspace="sRGB"):
 
 def get_icc_profile_bytes(target_colorspace="sRGB"):
     """Retrieve standard embedded ICC profile bytes for target colorspace."""
-    from path_utils import get_resource_dir
+    from .path_utils import get_resource_dir
     target = str(target_colorspace).strip().lower()
     icc_dir = os.path.join(get_resource_dir(), "icc")
 
@@ -872,8 +872,12 @@ def save_encoded_image(rendered_data, output_path, params_dict):
 
 
 class SpektraEngine:
-    def __init__(self, resources_dir="resources"):
-        self.resources_dir = os.path.abspath(resources_dir)
+    def __init__(self, resources_dir=None):
+        if resources_dir is None:
+            from .path_utils import get_resource_dir
+            self.resources_dir = os.path.abspath(get_resource_dir())
+        else:
+            self.resources_dir = os.path.abspath(resources_dir)
         self.profiles_dir = os.path.join(self.resources_dir, "profiles")
         self.filters_file = os.path.join(self.resources_dir, "neutral_print_filters.json")
         
@@ -2224,7 +2228,7 @@ class SpektraEngine:
                                         th_w = max(48, int(rgb.shape[1] * (th_h / float(rgb.shape[0]))))
                                         th_u8 = cv2.resize(rgb, (th_w, th_h), interpolation=cv2.INTER_AREA)
 
-                                        import session_cache_manager
+                                        from . import session_cache_manager
                                         cache_entry = {
                                             "path": file_path,
                                             "filename": original_meta["filename"],
@@ -2400,7 +2404,7 @@ class SpektraEngine:
             th_u8 = (prophoto_to_srgb_filmic(th_img) * 255.0).astype(np.uint8)
 
             # Save through to session cache for sub-100ms subsequent loads
-            import session_cache_manager
+            from . import session_cache_manager
             cache_entry = {
                 "path": file_path,
                 "filename": original_meta["filename"],
@@ -2447,7 +2451,7 @@ class SpektraEngine:
         """Load RAW or high-fidelity image into float32 array for GPU texture."""
         max_edge = 2048
         try:
-            import config_manager
+            from . import config_manager
             max_edge = int(config_manager.get_preferences().get("preview_max_edge", 2048))
         except Exception:
             max_edge = 2048

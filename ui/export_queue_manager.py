@@ -24,7 +24,7 @@ def _save_rendered_file(rendered_arr, output_path, params_dict):
     """Encodes and saves the rendered image array to disk according to parameters,
     embedding complete camera EXIF metadata bundle and target colorspace ICC profile.
     """
-    from app_core import save_encoded_image
+    from core.app_core import save_encoded_image
     return save_encoded_image(rendered_arr, output_path, params_dict)
 
 
@@ -34,7 +34,7 @@ class ExportTask:
         if output_path is not None:
             # Called as ExportTask(tid, title, source_path, output_path, params, thumbnail=pix)
             self.task_id = str(task_id_or_path)
-            from path_utils import normalize_path
+            from core.path_utils import normalize_path
             self.photo_path = normalize_path(source_path)
             self.output_path = normalize_path(output_path)
             self.filename = os.path.basename(self.output_path) if self.output_path else (str(title_or_output) if title_or_output else "image")
@@ -44,7 +44,7 @@ class ExportTask:
             self.format_type = self.params.get("format", "jpeg")
         else:
             # Called as ExportTask(photo_path, output_path, params, filename=None, thumb_img=None, bit_depth=8, format_type="jpeg")
-            from path_utils import normalize_path
+            from core.path_utils import normalize_path
             self.task_id = f"task_{uuid.uuid4().hex[:8]}"
             self.photo_path = normalize_path(task_id_or_path)
             self.output_path = normalize_path(title_or_output)
@@ -334,7 +334,7 @@ class ExportQueueManager(QObject):
         # Check Hardware Acceleration Mode
         hw_mode = "global"
         try:
-            import config_manager
+            from core import config_manager
             hw_mode = config_manager.get_preferences().get("hardware_acceleration_mode", "global")
         except Exception:
             hw_mode = "global"
@@ -526,7 +526,7 @@ class ExportQueueDialog(QDialog):
         self.setFixedSize(680, 420)
 
         try:
-            from path_utils import get_resource_dir
+            from core.path_utils import get_resource_dir
             ico_path = os.path.join(get_resource_dir(), "app_icon.ico")
             png_path = os.path.join(get_resource_dir(), "app_icon.png")
             icon_file = ico_path if os.path.exists(ico_path) else png_path

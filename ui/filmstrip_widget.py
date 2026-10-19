@@ -6,10 +6,10 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QScrollArea, QFrame,
     QMenu, QDialog, QTextEdit, QSizePolicy
 )
-import sdc_manager
-import session_cache_manager
-from session_cache_manager import is_dummy_or_corrupted_thumbnail, is_valid_thumbnail
-from path_utils import get_icon_path, get_resource_dir
+from core import sdc_manager
+from core import session_cache_manager
+from core.session_cache_manager import is_dummy_or_corrupted_thumbnail, is_valid_thumbnail
+from core.path_utils import get_icon_path, get_resource_dir
 from ui.window_utils import apply_dark_titlebar, get_darkroom_menu_style, get_icon
 from ui.theme_manager import theme_manager
 from ui.smooth_scroll import SmoothScrollArea
@@ -171,7 +171,7 @@ class FilmstripItemWidget(QFrame):
         super().__init__(parent)
         self.photo_id = photo_data.get("id", "")
         self.filename = photo_data.get("filename") or (os.path.basename(photo_data.get("path", "image")) if photo_data.get("path") else "image")
-        from path_utils import normalize_path
+        from core.path_utils import normalize_path
         self.file_path = normalize_path(photo_data.get("path", ""))
         self.is_active = is_active
         self.is_selected = is_selected
@@ -271,7 +271,7 @@ class FilmstripItemWidget(QFrame):
         if photo_data.get("filename"):
             self.filename = photo_data["filename"]
         if photo_data.get("path"):
-            from path_utils import normalize_path
+            from core.path_utils import normalize_path
             self.file_path = normalize_path(photo_data["path"])
         self.update_tooltip()
 
@@ -281,7 +281,7 @@ class FilmstripItemWidget(QFrame):
         h = int(self.photo_data.get("height", 0))
         if (w <= 0 or h <= 0) and self.file_path and os.path.isfile(self.file_path):
             try:
-                import session_cache_manager
+                from core import session_cache_manager
                 dw, dh = session_cache_manager.get_image_dimensions(self.file_path)
                 if dw > 0 and dh > 0:
                     w, h = dw, dh

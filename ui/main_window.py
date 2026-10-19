@@ -40,16 +40,16 @@ from PySide6.QtWidgets import (
     QDialog, QLineEdit, QTextEdit
 )
 
-from path_utils import get_icon_path, get_resource_dir, normalize_path
-from format_constants import (
+from core.path_utils import get_icon_path, get_resource_dir, normalize_path
+from core.format_constants import (
     RAW_EXTENSIONS,
     ALL_SUPPORTED_IMAGE_EXTENSIONS,
     FILE_DIALOG_IMAGE_FILTER
 )
-from version import get_app_title, get_full_version_info
-import sdc_manager
-import config_manager
-import session_cache_manager
+from core.version import get_app_title, get_full_version_info
+from core import sdc_manager
+from core import config_manager
+from core import session_cache_manager
 from ui.export_queue_manager import ExportQueueManager, ExportQueueDialog, ExportTask
 from ui.unsaved_session_dialog import UnsavedSessionDialog
 from ui.thumbnail_controller import ThumbnailController, StockThumbnailWorker
@@ -336,7 +336,7 @@ class BatchImportWorker(QThread):
 
         preview_max_edge = 2048
         try:
-            import config_manager
+            from core import config_manager
             preview_max_edge = int(config_manager.get_preferences().get("preview_max_edge", 2048))
         except Exception:
             preview_max_edge = 2048
@@ -480,7 +480,7 @@ class SlotDecodeWorker(QThread):
         import concurrent.futures
         preview_max_edge = 2048
         try:
-            import config_manager
+            from core import config_manager
             preview_max_edge = int(config_manager.get_preferences().get("preview_max_edge", 2048))
         except Exception:
             preview_max_edge = 2048
@@ -541,7 +541,7 @@ class SessionRestoreWorker(QThread):
 
     def _process_single_photo(self, idx: int, p: str, is_target: bool) -> tuple:
         """Processes a single photo entry: sdc, cache, thumbnails, dimensions."""
-        import sdc_manager
+        from core import sdc_manager
         pid = f"photo_{idx}_{os.path.basename(p)}"
         sdc = sdc_manager.load_sdc(p)
         film_profile = sdc.get("film_profile", "none") if sdc else "none"
@@ -1992,7 +1992,7 @@ class DarkroomMainWindow(QMainWindow):
             return
         try:
             hwnd = int(self.winId())
-            from version import get_app_title
+            from core.version import get_app_title
             ctypes.windll.user32.SetWindowTextW(hwnd, get_app_title())
 
             ico_path = os.path.join(get_resource_dir(), "app_icon.ico")
@@ -2208,7 +2208,7 @@ class DarkroomMainWindow(QMainWindow):
             event.ignore()
             return
 
-        from path_utils import normalize_path
+        from core.path_utils import normalize_path
         valid_exts = ALL_SUPPORTED_IMAGE_EXTENSIONS
         sdss_files = []
         img_files = []
@@ -3847,7 +3847,7 @@ class DarkroomMainWindow(QMainWindow):
         act_clear.triggered.connect(lambda: (config_manager.clear_recent_sessions(), self._update_recent_menu()))
 
     def _open_recent_session(self, path):
-        from path_utils import normalize_path
+        from core.path_utils import normalize_path
         if self._current_session_path and normalize_path(path).lower() == normalize_path(self._current_session_path).lower():
             return
         if not self._prompt_save_if_session_dirty():
@@ -4268,7 +4268,7 @@ class DarkroomMainWindow(QMainWindow):
         )
         if file_path:
             config_manager.set_last_dialog_dir("session", file_path)
-            from path_utils import normalize_path
+            from core.path_utils import normalize_path
             file_path = normalize_path(file_path)
             self._current_session_path = file_path
             self._is_temp_session = False
@@ -4288,7 +4288,7 @@ class DarkroomMainWindow(QMainWindow):
         if not self.photos or not self._current_photo_path:
             return
         try:
-            from path_utils import normalize_path
+            from core.path_utils import normalize_path
             curr_path = self._current_photo_path
             curr_norm = normalize_path(curr_path)
             # 1. Update config_manager last_session state so fallback restore knows the exact active photo
@@ -4321,7 +4321,7 @@ class DarkroomMainWindow(QMainWindow):
         if self._current_session_path and not getattr(self, "_is_temp_session", False):
             return
         try:
-            from path_utils import normalize_path
+            from core.path_utils import normalize_path
             if self.active_photo_id:
                 photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
                 if photo:
@@ -4351,7 +4351,7 @@ class DarkroomMainWindow(QMainWindow):
                     "is_edited": p.get("is_edited", False)
                 })
 
-            from version import VERSION_STRING
+            from core.version import VERSION_STRING
             session_data = {
                 "format": "SpektraDarkroomSession",
                 "version": VERSION_STRING,
@@ -4384,7 +4384,7 @@ class DarkroomMainWindow(QMainWindow):
                     p["is_edited"] = True
             self.filmstrip.set_photo_dirty(self.active_photo_id, True)
 
-        from path_utils import normalize_path
+        from core.path_utils import normalize_path
         session_dir = os.path.dirname(os.path.abspath(file_path))
         session_photos = []
         for p in self.photos:
@@ -4547,7 +4547,7 @@ class DarkroomMainWindow(QMainWindow):
         )
         if file_path:
             config_manager.set_last_dialog_dir("session", file_path)
-            from path_utils import normalize_path
+            from core.path_utils import normalize_path
             if self._current_session_path and normalize_path(file_path).lower() == normalize_path(self._current_session_path).lower():
                 return
             self._open_session_by_path(file_path)
@@ -4563,7 +4563,7 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("会话文件损坏或无效", timeout_ms=3000)
             return
 
-        from path_utils import normalize_path
+        from core.path_utils import normalize_path
         session_dir = os.path.dirname(os.path.abspath(file_path))
         photo_entries = session_data["photos"]
 
@@ -6107,7 +6107,7 @@ class DarkroomMainWindow(QMainWindow):
             logger.warning(f"Error resolving thumbnail for imported photo: {e}")
 
         if hasattr(self, "_pending_session_map") and self._pending_session_map:
-            from path_utils import normalize_path
+            from core.path_utils import normalize_path
             s_p = self._pending_session_map.get(normalize_path(photo_entry.get("path", "")))
             if s_p:
                 photo_entry["film_profile"] = s_p.get("film_stock", "none")
@@ -6131,7 +6131,7 @@ class DarkroomMainWindow(QMainWindow):
         else:
             # Check for existing .sdc sidecar metadata for newly imported photo
             try:
-                import sdc_manager
+                from core import sdc_manager
                 sdc = sdc_manager.load_sdc(photo_entry.get("path", ""))
                 if sdc:
                     photo_entry["film_profile"] = sdc.get("film_profile", "none")
@@ -6453,7 +6453,7 @@ class DarkroomMainWindow(QMainWindow):
             # If not in photo dict, check cached metadata
             if (not dt_str or dt_str == "-") and photo.get("path"):
                 try:
-                    import session_cache_manager
+                    from core import session_cache_manager
                     cached = session_cache_manager.get_photo_cache(photo["path"], load_preview=False)
                     if cached and cached.get("exif"):
                         c_exif = cached["exif"]

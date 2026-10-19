@@ -16,10 +16,10 @@ from PySide6.QtWidgets import (
     QStackedWidget, QCheckBox, QProgressBar
 )
 
-from path_utils import get_icon_path, get_resource_dir, normalize_path
+from core.path_utils import get_icon_path, get_resource_dir, normalize_path
 from ui.window_utils import apply_dark_titlebar
 from ui.theme_manager import theme_manager
-import config_manager
+from core import config_manager
 
 
 class BaseExportDialog(QDialog):

@@ -6,7 +6,7 @@ Maintains brand amber gold (#f59e0b) accent color strictly invariant across all 
 import sys
 from PySide6.QtCore import QObject, Signal, Qt
 from PySide6.QtGui import QGuiApplication
-import config_manager
+from core import config_manager
 
 DARK_COLORS = {
     "app_bg": "#121316",

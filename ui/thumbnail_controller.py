@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QObject, Signal, QThread, Qt
 from PySide6.QtGui import QImage, QPixmap
-import session_cache_manager
+from core import session_cache_manager
 import logging
 logger = logging.getLogger("SpektraDarkroom.ThumbnailController")
 
@@ -87,7 +87,7 @@ class StockThumbnailWorker(QThread):
         if self.linear_thumb is None or self._stopped:
             return
 
-        from app_core import prophoto_to_srgb_filmic, srgb_to_linear, SRGB_TO_PROPHOTO
+        from core.app_core import prophoto_to_srgb_filmic, srgb_to_linear, SRGB_TO_PROPHOTO
 
         # If passed an 8-bit integer image, accurately convert sRGB uint8 to linear ProPhoto float32
         if self.linear_thumb.dtype == np.uint8:
@@ -130,7 +130,7 @@ class StockThumbnailWorker(QThread):
         sh_val = float(self.params_dict.get("shadows", self.shadows))
         if abs(hl_val) > 0.001 or abs(sh_val) > 0.001:
             try:
-                from app_core import apply_highlights_shadows_np
+                from core.app_core import apply_highlights_shadows_np
                 small_linear = apply_highlights_shadows_np(small_linear, hl_val, sh_val)
             except Exception as e:
                 logger.error(f"Error applying highlights/shadows: {e}")
@@ -141,7 +141,7 @@ class StockThumbnailWorker(QThread):
         diff_warmth = float(self.params_dict.get("diffusion_warmth", 0.0))
         if diff_family != "none" and diff_strength > 0.001:
             try:
-                from app_core import apply_diffusion_np
+                from core.app_core import apply_diffusion_np
                 small_linear = apply_diffusion_np(small_linear, diff_family, diff_strength, diff_warmth)
             except Exception as e:
                 logger.error(f"Error applying optical diffusion: {e}")
@@ -260,7 +260,7 @@ class ThumbnailController(QObject):
         if float_img is not None and isinstance(float_img, np.ndarray) and float_img.size > 0:
             try:
                 import cv2
-                from app_core import prophoto_to_srgb_filmic
+                from core.app_core import prophoto_to_srgb_filmic
                 th_h = 72
                 th_w = max(48, int(float_img.shape[1] * (th_h / float(float_img.shape[0]))))
                 th_img = cv2.resize(float_img, (th_w, th_h), interpolation=cv2.INTER_AREA)
@@ -383,7 +383,7 @@ class ThumbnailController(QObject):
             return raw_thumb
         params = params or {}
         try:
-            from app_core import srgb_to_linear, SRGB_TO_PROPHOTO, prophoto_to_srgb_filmic
+            from core.app_core import srgb_to_linear, SRGB_TO_PROPHOTO, prophoto_to_srgb_filmic
             if raw_thumb.dtype == np.uint8:
                 srgb_norm = raw_thumb.astype(np.float32) / 255.0
                 lin_srgb = srgb_to_linear(srgb_norm)
@@ -411,7 +411,7 @@ class ThumbnailController(QObject):
             sh = float(params.get("shadows", 0.0))
             if abs(hl) > 0.001 or abs(sh) > 0.001:
                 try:
-                    from app_core import apply_highlights_shadows_np
+                    from core.app_core import apply_highlights_shadows_np
                     small_linear = apply_highlights_shadows_np(small_linear, hl, sh)
                 except Exception:
                     pass
@@ -422,7 +422,7 @@ class ThumbnailController(QObject):
             diff_warmth = float(params.get("diffusion_warmth", 0.0))
             if diff_family != "none" and diff_strength > 0.001:
                 try:
-                    from app_core import apply_diffusion_np
+                    from core.app_core import apply_diffusion_np
                     small_linear = apply_diffusion_np(small_linear, diff_family, diff_strength, diff_warmth)
                 except Exception:
                     pass

@@ -11,7 +11,7 @@ import time
 import subprocess
 import concurrent.futures
 
-SOURCE_DIR = os.path.abspath(os.path.dirname(__file__))
+SOURCE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DEST_DIR = r"D:\app\spektra-darkroom"
 PYTHON_BASE = r"C:\Users\wp\AppData\Local\Programs\Python\Python312"
 VENV_SITE_PACKAGES = os.path.join(SOURCE_DIR, ".venv", "Lib", "site-packages")
@@ -74,16 +74,10 @@ def main():
     os.makedirs(DEST_DIR, exist_ok=True)
 
     # 2. 复制应用程序主代码及资源文件
-    print("[2/6] 正在复制主程序文件与资源 (ui, resources, profiles, launcher)...")
+    print("[2/6] 正在复制主程序文件与资源 (core, ui, resources, profiles, launcher)...")
     app_files = [
         "SpektraDarkroom.exe",
         "main.py",
-        "app_core.py",
-        "config_manager.py",
-        "session_cache_manager.py",
-        "path_utils.py",
-        "sdc_manager.py",
-        "version.py",
         "CHANGELOG.md",
         "DEVELOPMENT_SUMMARY.md"
     ]
@@ -91,6 +85,14 @@ def main():
         src = os.path.join(SOURCE_DIR, af)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(DEST_DIR, af))
+
+    # 复制 core 目录
+    fast_copy_tree(
+        os.path.join(SOURCE_DIR, "core"),
+        os.path.join(DEST_DIR, "core"),
+        ignore_dirs={"__pycache__"},
+        ignore_exts={".pyc"}
+    )
 
     # 复制 ui 目录
     fast_copy_tree(
@@ -235,7 +237,7 @@ pause
         "-c",
         "import sys, os; sys.path.insert(0, r'" + DEST_DIR + "'); "
         "import PySide6, cv2, numpy, rawpy, spektrafilm, PIL; "
-        "from app_core import SpektraEngine; "
+        "from core.app_core import SpektraEngine; "
         "eng = SpektraEngine(resources_dir=r'" + os.path.join(DEST_DIR, "resources") + "'); "
         "print('PORTABLE_VERIFY_SUCCESS: Engine profiles loaded:', len(eng.get_film_stocks()))"
     ]

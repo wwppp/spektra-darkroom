@@ -4,7 +4,8 @@ import sys
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+    core_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(core_dir)
 
 def get_resource_dir():
     if getattr(sys, 'frozen', False):
@@ -19,7 +20,7 @@ def get_resource_dir():
             if os.path.exists(cand):
                 return cand
         return os.path.join(base, "resources")
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources")
+    return os.path.join(get_base_dir(), "resources")
 
 def get_icon_dir():
     res = get_resource_dir()
@@ -37,7 +38,7 @@ def normalize_path(path: str) -> str:
 
 
 # Re-export centralized format constants
-from format_constants import (
+from .format_constants import (
     RAW_EXTENSIONS,
     STANDARD_IMAGE_EXTENSIONS,
     ALL_SUPPORTED_IMAGE_EXTENSIONS,

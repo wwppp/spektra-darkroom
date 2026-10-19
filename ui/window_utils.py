@@ -8,7 +8,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor
-from path_utils import get_icon_path
+from core.path_utils import get_icon_path
 
 _ICON_CACHE = {}
 
@@ -151,7 +151,7 @@ def show_dark_message_box(parent, title: str, text: str, icon=None, buttons=None
     """Universal themed QMessageBox with native titlebar and amber hover/pressed effects."""
     from PySide6.QtWidgets import QMessageBox
     from PySide6.QtGui import QIcon
-    from path_utils import get_resource_dir
+    from core.path_utils import get_resource_dir
     from ui.theme_manager import theme_manager
 
     is_dark = theme_manager.is_dark()

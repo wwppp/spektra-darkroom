@@ -30,7 +30,7 @@ def delete_sdc(image_path: str) -> bool:
         try:
             os.remove(sdc_path)
             try:
-                import session_cache_manager
+                from . import session_cache_manager
                 session_cache_manager.invalidate_photo_cache(image_path)
             except Exception:
                 pass

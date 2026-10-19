@@ -8,8 +8,8 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
     QOpenGLShaderProgram, QOpenGLShader, QOpenGLBuffer, QOpenGLFramebufferObject
 )
-from path_utils import get_resource_dir
-import config_manager
+from core.path_utils import get_resource_dir
+from core import config_manager
 from OpenGL import GL
 
 

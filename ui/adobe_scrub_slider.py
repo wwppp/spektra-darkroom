@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication
 )
 
-from path_utils import get_icon_path
+from core.path_utils import get_icon_path
 from ui.theme_manager import theme_manager
 
 

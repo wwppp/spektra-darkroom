@@ -188,11 +188,8 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 # 2. 验证暗房全部业务核心模块
 import main
-import app_core
-import config_manager
-import session_cache_manager
-import path_utils
-import sdc_manager
+import core
+from core import app_core, config_manager, session_cache_manager, path_utils, sdc_manager
 
 # 3. 验证光谱物理管线与 3D LUT 计算
 eng = app_core.SpektraEngine()

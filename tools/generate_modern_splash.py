@@ -161,7 +161,7 @@ def create_splash(width: int = BASE_WIDTH, height: int = BASE_HEIGHT, out_path: 
 
 
 def generate_all_splash_screens():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     res_dir = os.path.join(base_dir, "resources")
     
     specs = [

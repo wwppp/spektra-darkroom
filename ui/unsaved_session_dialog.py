@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QWidget
 )
 
-from path_utils import get_resource_dir
+from core.path_utils import get_resource_dir
 from ui.window_utils import apply_dark_titlebar
 from ui.theme_manager import theme_manager
 

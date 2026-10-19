@@ -16,11 +16,11 @@ from PySide6.QtWidgets import (
     QPushButton, QTabWidget, QWidget, QFrame, QMessageBox, QSpinBox
 )
 
-from path_utils import get_resource_dir, get_icon_path
+from core.path_utils import get_resource_dir, get_icon_path
 from ui.window_utils import apply_dark_titlebar, show_dark_message_box, get_icon
 from ui.theme_manager import theme_manager
-import config_manager
-import session_cache_manager
+from core import config_manager
+from core import session_cache_manager
 
 
 class PreferencesDialog(QDialog):
