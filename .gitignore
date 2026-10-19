@@ -29,6 +29,8 @@ MANIFEST
 # PyInstaller
 *.manifest
 *.spec
+!SpektraDarkroom.spec
+!SpektraDarkroom_Onefile.spec
 
 # Environments
 .env
