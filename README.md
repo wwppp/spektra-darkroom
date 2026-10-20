@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎞️ SpektraDarkroom Vulkan Edition
+# SpektraDarkroom Vulkan Edition
 
 ### 专业级 35mm 胶片物理显影与放大暗房模拟工作站 (Windows)
 
@@ -18,13 +18,15 @@
 
 ---
 
-## 📖 项目简介
+## 项目简介
 
-**SpektraDarkroom** 是一款面向 Windows 平台的专业级 35mm 胶片物理显影与放大暗房模拟工作站。软件基于连续光谱模拟与光化学感光/显影模型，完整还原相机 RAW 负片曝光、DIR 发色剂层内/层间抑制扩散、彩色放大机减色法滤色曝光、相纸光化学显影及真实银盐染料云团微粒质感。
+**SpektraDarkroom** 是一款面向 Windows 平台的 35mm 胶片物理显影与放大暗房模拟工作站。本项目最初因个人实际暗房冲印与胶片调色需求而开发，旨在提供一个具备高帧率实时预览、完整物理暗房管线、操作直观且不破坏原始底片的独立桌面生产工具。
+
+软件基于连续光谱模拟与光化学感光/显影模型，完整还原相机 RAW 负片曝光、DIR 发色剂层内/层间抑制扩散、彩色放大机减色法滤色曝光、相纸光化学显影及真实银盐染料云团微粒质感。
 
 ---
 
-## ✨ 核心特性
+## 核心特性
 
 ### 1. 物理暗房连续光谱仿真
 - **81 波段物理光谱测定**：基于真实感光度与吸收率计算，彻底告别普通 3D LUT 的断阶与偏色。
@@ -54,7 +56,7 @@
 
 ---
 
-## 🖥️ 运行环境要求
+## 运行环境要求
 
 * **操作系统**：Windows 10 / Windows 11 (64-bit)
 * **Python 版本**：Python 3.10 - 3.13 (64-bit)
@@ -62,7 +64,7 @@
 
 ---
 
-## 📦 快速开始与源码运行
+## 快速开始与源码运行
 
 ### 1. 克隆代码仓库
 ```bash
@@ -96,7 +98,7 @@ pip install -r requirements.txt
 
 ---
 
-## ⚖️ 开源许可协议 (Licenses)
+## 开源许可协议 (Licenses)
 
 本项目采用规范的开源许可策略：
 
@@ -106,7 +108,7 @@ pip install -r requirements.txt
 
 ---
 
-## 🙏 致谢与开源项目致敬 (Credits & Acknowledgments)
+## 致谢与开源项目致敬 (Credits & Acknowledgments)
 
 - **[Andrea Volpato (spektrafilm)](https://github.com/andreavolpato/spektrafilm)**：衷心感谢 Andrea Volpato 发起的开源项目 `spektrafilm`。其在连续光谱感光乳剂模型、发色剂化学显影反应及中性灰平衡矩阵上的严谨色彩科学研究，为本项目奠定了坚实的光谱算法基石。
 - **[fotufilm-engine](https://github.com/fotufilm/fotufilm-engine)**：衷心感谢 `fotufilm-engine` 项目。本项目深入研究并吸纳了其多层彩色染料云团（Dye Clouds）胶片微粒模型、乳剂层微观物理参数设计，以及多款高精度经典胶卷光谱配置与扩展数据，使 SpektraDarkroom 的微观微粒质感和胶片库生态得到了质的飞跃。

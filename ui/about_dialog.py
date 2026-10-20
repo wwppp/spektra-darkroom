@@ -226,32 +226,32 @@ class AboutDialog(QDialog):
         col_bold = "#e2e8f0" if is_dark else "#1e293b"
 
         about_html = f"""
-        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
-            <p style="margin-top: 0; color: {col_title}; font-weight: 600; font-size: 12px;">
-                专业级物理暗房模拟与胶片显影工作站
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.5;">
+            <p style="margin-top: 0; margin-bottom: 8px; color: {col_title}; font-weight: 600; font-size: 12px;">
+                专业级 35mm 胶片物理显影与放大暗房模拟工作站
             </p>
             <p style="margin-bottom: 12px; color: {col_text};">
-                SpektraDarkroom 基于真实物理化学感光与显影光学模型，还原从相机 RAW 负片曝光、化学显影（DIR抑制层扩散）、彩色放大机滤色曝光到相纸显影定影的完整暗房冲印体验。
+                基于连续光谱模拟与光化学感光/显影模型，完整还原相机 RAW 负片曝光、DIR 发色剂抑制扩散、彩色放大机减色法滤色曝光、相纸光化学显影及真实胶片染料云微粒质感。
             </p>
 
             <p style="margin-bottom: 4px; color: {col_bold}; font-weight: bold;">核心特性：</p>
             <ul style="margin-top: 2px; margin-bottom: 12px; padding-left: 18px; color: {col_text};">
-                <li><b>81 波段全连续光谱模拟</b>：超越传统数码 3D LUT，实现真实的物理感光与显影计算。</li>
-                <li><b>28 款经典物理档案</b>：内置 20 款官方胶卷（负片/电影卷/正片）与 8 款放大相纸/放映片。</li>
-                <li><b>全物理模拟管线</b>：支持减色法放大滤色镜（CMY）、预闪光、相纸显影衰退与银盐微粒。</li>
-                <li><b>GPU 实时加速</b>：基于 Modern OpenGL 与 Vulkan 加速管线，毫秒级实时交互反馈。</li>
-                <li><b>非破坏性暗房侧车</b>：编辑参数独立持久化写入 <code>.sdc</code> 文件，原片无损保留。</li>
+                <li><b>81 波段连续光谱物理模拟</b>：基于真实物理光谱测定，彻底告别普通 3D LUT 断阶。</li>
+                <li><b>61 款经典物理档案</b>：内置 52 款经典负片/电影卷/反转片预设与 9 款相纸/拷贝片档案。</li>
+                <li><b>物理暗房全模拟管线</b>：支持 CMY 减色滤色曝光、预闪光、相纸显影衰退与光晕扩散。</li>
+                <li><b>真实染料云团微粒 (CLT)</b>：视口积分衰减模型，模拟微观 35mm 银盐染料云团真实颗粒。</li>
+                <li><b>Modern OpenGL / Vulkan 硬件加速</b>：4K 实时交互反馈，支持无级缩放与快速对比。</li>
+                <li><b>非破坏性暗房伴侣 (.sdc)</b>：调色冲印参数独立持久化写入，原片素材无损保留。</li>
             </ul>
 
-            <p style="margin-bottom: 4px; color: {col_bold}; font-weight: bold;">开源基石与致谢：</p>
+            <p style="margin-bottom: 4px; color: {col_bold}; font-weight: bold;">致谢与开源基石：</p>
             <p style="margin-top: 2px; margin-bottom: 12px; color: {col_text};">
-                • 本软件物理化学仿真算法与光谱感光/相纸密度数据集基于 <b>Andrea Volpato</b> 发起的开源项目 
-                <a style="color: #f59e0b; text-decoration: none;" href="https://github.com/andreavolpato/spektrafilm">andreavolpato/spektrafilm</a>。<br>
-                • 感谢开源暗房模拟生态及各衍生实现提供的工程灵感与色彩科学研究。
+                • <b><a style="color: #f59e0b; text-decoration: none;" href="https://github.com/andreavolpato/spektrafilm">Andrea Volpato (spektrafilm)</a></b>：光谱感光乳剂模型、发色剂化学显影反应及感光测定数据集基石。<br>
+                • <b><a style="color: #f59e0b; text-decoration: none;" href="https://github.com/fotufilm/fotufilm-engine">fotufilm-engine</a></b>：彩色染料云团（Dye Clouds）微粒算法模型与经典胶卷光谱配置扩展。
             </p>
 
             <p style="margin-bottom: 4px; color: {col_bold}; font-weight: bold;">开源许可协议：</p>
-            <p style="margin-top: 2px; margin-bottom: 4px; color: {col_text};">
+            <p style="margin-top: 2px; margin-bottom: 2px; color: {col_text};">
                 • 代码部分遵循 <b>GNU General Public License v3.0 (GPLv3)</b> 开源协议。<br>
                 • 物理配置文件与测定数据遵循 <b>CC BY-SA 4.0</b> 知识共享协议。
             </p>
