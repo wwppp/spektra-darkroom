@@ -171,11 +171,13 @@ class PreferencesDialog(QDialog):
                     padding: 4px;
                 }}
                 QFrame#sepAssoc {{
-                    background: #252834;
+                    background: rgba(255, 255, 255, 0.08);
+                    height: 1px;
                     max-height: 1px;
+                    min-height: 1px;
                     border: none;
-                    margin-top: 4px;
-                    margin-bottom: 4px;
+                    margin-top: 6px;
+                    margin-bottom: 6px;
                 }}
                 QLabel#lblAssocTitle {{
                     color: #e2e8f0;
@@ -403,11 +405,13 @@ class PreferencesDialog(QDialog):
                     padding: 4px;
                 }}
                 QFrame#sepAssoc {{
-                    background: #cbd5e1;
+                    background: rgba(0, 0, 0, 0.08);
+                    height: 1px;
                     max-height: 1px;
+                    min-height: 1px;
                     border: none;
-                    margin-top: 4px;
-                    margin-bottom: 4px;
+                    margin-top: 6px;
+                    margin-bottom: 6px;
                 }}
                 QLabel#lblAssocTitle {{
                     color: #1e293b;
@@ -627,7 +631,8 @@ class PreferencesDialog(QDialog):
 
         sep_assoc = QFrame()
         sep_assoc.setObjectName("sepAssoc")
-        sep_assoc.setFrameShape(QFrame.Shape.HLine)
+        sep_assoc.setFrameShape(QFrame.Shape.NoFrame)
+        sep_assoc.setFixedHeight(1)
         l_dr.addWidget(sep_assoc)
 
         r_assoc = QHBoxLayout()
@@ -749,9 +754,9 @@ class PreferencesDialog(QDialog):
         idx_intv = self.combo_clean_interval.findData(interval_days)
         self.combo_clean_interval.setCurrentIndex(idx_intv if idx_intv >= 0 else 0)
 
-        theme_mode = config_manager.get_preference("ui_theme", "dark")
+        theme_mode = config_manager.get_preference("ui_theme", "system")
         idx_th = self.combo_ui_theme.findData(theme_mode)
-        self.combo_ui_theme.setCurrentIndex(idx_th if idx_th >= 0 else 1)
+        self.combo_ui_theme.setCurrentIndex(idx_th if idx_th >= 0 else 2)
 
         self._refresh_cache_size()
 

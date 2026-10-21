@@ -241,7 +241,7 @@ class AboutDialog(QDialog):
                 <li><b>物理暗房全模拟管线</b>：支持 CMY 减色滤色曝光、预闪光、相纸显影衰退与光晕扩散。</li>
                 <li><b>真实染料云团微粒 (CLT)</b>：视口积分衰减模型，模拟微观 35mm 银盐染料云团真实颗粒。</li>
                 <li><b>Modern OpenGL / Vulkan 硬件加速</b>：4K 实时交互反馈，支持无级缩放与快速对比。</li>
-                <li><b>非破坏性暗房伴侣 (.sdc)</b>：调色冲印参数独立持久化写入，原片素材无损保留。</li>
+                <li><b>非破坏性暗房伴侣 (.sdc)</b>：调色扫描参数独立持久化写入，原片素材无损保留。</li>
             </ul>
 
             <p style="margin-bottom: 4px; color: {col_bold}; font-weight: bold;">致谢与开源基石：</p>

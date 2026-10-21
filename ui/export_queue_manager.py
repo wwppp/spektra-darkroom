@@ -186,7 +186,7 @@ class _CpuExportWorker(QThread):
             elif res.get("success"):
                 self.finished_export.emit(True, "")
             else:
-                err = str(res.get("error") or "冲印显影失败")
+                err = str(res.get("error") or "扫描显影失败")
                 self.finished_export.emit(False, err)
         except Exception as e:
             self.finished_export.emit(False, str(e))
@@ -387,9 +387,16 @@ class ExportQueueManager(QObject):
                     QCoreApplication.processEvents()
 
                     src_h, src_w = raw_target.shape[:2]
+                    crop_cfg = task.params.get("crop", {})
+                    if isinstance(crop_cfg, dict) and crop_cfg.get("enabled", False):
+                        cw_factor = max(0.05, min(1.0, float(crop_cfg.get("w", 1.0))))
+                        ch_factor = max(0.05, min(1.0, float(crop_cfg.get("h", 1.0))))
+                    else:
+                        cw_factor, ch_factor = 1.0, 1.0
+
                     scale_pct = int(task.params.get("scale_pct", 100))
-                    tgt_w = max(1, int(src_w * scale_pct / 100.0))
-                    tgt_h = max(1, int(src_h * scale_pct / 100.0))
+                    tgt_w = max(1, int(src_w * cw_factor * scale_pct / 100.0))
+                    tgt_h = max(1, int(src_h * ch_factor * scale_pct / 100.0))
                     bit_depth = int(task.params.get("bit_depth", 8))
 
                     eff_lut = lut_arr
@@ -478,7 +485,7 @@ class ExportQueueManager(QObject):
         else:
             if task.status != "cancelled":
                 task.status = "failed"
-                task.error_msg = str(error_msg or "冲印失败")
+                task.error_msg = str(error_msg or "扫描失败")
 
         self.task_progress.emit(task.task_id, task.progress)
         self.queue_changed.emit()
@@ -496,7 +503,7 @@ class ExportQueueManager(QObject):
         if not active:
             finished = [t for t in self.tasks if t.status == "finished"]
             if finished:
-                self.status_updated.emit("所有冲印任务已完成", False)
+                self.status_updated.emit("所有扫描任务已完成", False)
             else:
                 self.status_updated.emit("", False)
             return
@@ -504,9 +511,9 @@ class ExportQueueManager(QObject):
         running = next((t for t in active if t.status == "running"), None)
         total_active = len(active)
         if running:
-            self.status_updated.emit(f"正在冲印: {running.filename} (队列中剩余 {total_active - 1} 张)", True)
+            self.status_updated.emit(f"正在扫描: {running.filename} (队列中剩余 {total_active - 1} 张)", True)
         else:
-            self.status_updated.emit(f"冲印排队中 ({total_active} 项待处理)...", True)
+            self.status_updated.emit(f"扫描排队中 ({total_active} 项待处理)...", True)
 
     def close(self):
         self._is_active = False
@@ -522,7 +529,7 @@ class ExportQueueDialog(QDialog):
     def __init__(self, queue_mgr: ExportQueueManager, parent=None):
         super().__init__(parent)
         self.queue_mgr = queue_mgr
-        self.setWindowTitle("冲印队列管理")
+        self.setWindowTitle("扫描队列管理")
         self.setFixedSize(680, 420)
 
         try:
@@ -685,13 +692,13 @@ class ExportQueueDialog(QDialog):
 
         # Header Bar
         hdr = QHBoxLayout()
-        title = QLabel("冲印队列")
+        title = QLabel("扫描队列")
         title.setStyleSheet("font-size: 14px; font-weight: bold; color: #f59e0b;")
         hdr.addWidget(title)
         hdr.addStretch()
 
         self.btn_cancel_all = QPushButton("全部取消")
-        self.btn_cancel_all.setToolTip("取消所有排队中与正在冲印的任务")
+        self.btn_cancel_all.setToolTip("取消所有排队中与正在扫描的任务")
         if is_dark:
             self.btn_cancel_all.setStyleSheet("""
                 QPushButton {
@@ -810,7 +817,7 @@ class ExportQueueDialog(QDialog):
                 self._cards.clear()
 
                 if not self._empty_label:
-                    self._empty_label = QLabel("当前暂无冲印任务")
+                    self._empty_label = QLabel("当前暂无扫描任务")
                     self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     self._empty_label.setStyleSheet("color: #64748b; font-size: 12px; padding: 40px;")
                     self.item_layout.insertWidget(0, self._empty_label)
@@ -855,7 +862,7 @@ class ExportQueueDialog(QDialog):
 
         status_map = {
             "queued": ("排队中", "#94a3b8"),
-            "running": ("冲印中...", "#f59e0b"),
+            "running": ("扫描中...", "#f59e0b"),
             "finished": ("已完成", "#f59e0b"),
             "cancelled": ("已取消", "#64748b"),
             "failed": (f"失败: {task.error_msg}", "#ef4444"),
@@ -953,7 +960,7 @@ class ExportQueueDialog(QDialog):
         # Status text
         status_map = {
             "queued": ("排队中", "#94a3b8"),
-            "running": ("冲印中...", "#f59e0b"),
+            "running": ("扫描中...", "#f59e0b"),
             "finished": ("已完成", "#f59e0b"),
             "cancelled": ("已取消", "#64748b"),
             "failed": (f"失败: {task.error_msg}", "#ef4444"),
@@ -1026,7 +1033,7 @@ class ExportQueueDialog(QDialog):
         # Cancel Button
         btn_x = QPushButton("✕")
         btn_x.setFixedSize(22, 22)
-        btn_x.setToolTip("取消该冲印任务")
+        btn_x.setToolTip("取消该扫描任务")
         if is_dark:
             btn_x.setStyleSheet("""
                 QPushButton {

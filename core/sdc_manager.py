@@ -41,6 +41,10 @@ def delete_sdc(image_path: str) -> bool:
     return False
 
 
+# Backward compatibility alias
+remove_sdc = delete_sdc
+
+
 import base64
 import numpy as np
 import cv2

@@ -139,9 +139,9 @@ class ThemeManager(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._mode = config_manager.get_preference("ui_theme", "dark")
+        self._mode = config_manager.get_preference("ui_theme", "system")
         if self._mode not in ("dark", "light", "system"):
-            self._mode = "dark"
+            self._mode = "system"
         self._effective_theme = self._resolve_theme(self._mode)
         self._apply_app_palette()
 

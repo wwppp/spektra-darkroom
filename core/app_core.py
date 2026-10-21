@@ -2709,11 +2709,19 @@ class SpektraEngine:
             exp_val = float(params_dict.get("exposure_ev", 0.0))
             temp_val = float(params_dict.get("color_temp", 5500.0))
             tint_val = float(params_dict.get("tint", 1.0))
-            c_val = float(params_dict.get("enlarger_cyan", 0.0))
-            m_val = float(params_dict.get("enlarger_magenta", 0.0))
-            y_val = float(params_dict.get("enlarger_yellow", 0.0))
-            print_exp = float(params_dict.get("print_exposure", 1.0))
-            preflash = float(params_dict.get("pre_flash", 0.0))
+            is_pos = self.is_positive_film(film_stock)
+            if is_pos:
+                c_val = 0.0
+                m_val = 0.0
+                y_val = 0.0
+                print_exp = 1.0
+                preflash = 0.0
+            else:
+                c_val = float(params_dict.get("enlarger_cyan", 0.0))
+                m_val = float(params_dict.get("enlarger_magenta", 0.0))
+                y_val = float(params_dict.get("enlarger_yellow", 0.0))
+                print_exp = float(params_dict.get("print_exposure", 1.0))
+                preflash = float(params_dict.get("pre_flash", 0.0))
             halation = float(params_dict.get("halation_amount", params_dict.get("halation", 1.0)))
             hal_spatial_scale = float(params_dict.get("halation_spatial_scale", 1.0))
             scatter_amount = float(params_dict.get("scatter_amount", 1.0))
@@ -2752,7 +2760,7 @@ class SpektraEngine:
                 save_encoded_image(rendered_float, output_path, enc_params)
 
                 if progress_cb:
-                    progress_cb(100, f"成片冲印完成: {os.path.basename(output_path)}")
+                    progress_cb(100, f"成片扫描完成: {os.path.basename(output_path)}")
                 return {"success": True, "output_path": output_path}
 
             base_temp = float(params_dict.get("base_temp", 5500.0))
@@ -2952,6 +2960,36 @@ class SpektraEngine:
                 fmt_str = str(format_type).lower()
                 ext = ".tif" if "tif" in fmt_str else (".png" if "png" in fmt_str else ".jpg")
                 output_path = os.path.join(output_path, f"{base_name}_developed{ext}")
+
+            # Apply crop and straighten rotation if enabled in CPU export
+            crop_cfg = params_dict.get("crop", {})
+            if isinstance(crop_cfg, dict) and crop_cfg.get("enabled", False):
+                # 1. Flips
+                if crop_cfg.get("flip_h", False):
+                    rendered_float = cv2.flip(rendered_float, 1)
+                if crop_cfg.get("flip_v", False):
+                    rendered_float = cv2.flip(rendered_float, 0)
+
+                # 2. 90-degree step rotation
+                rot_90 = int(crop_cfg.get("rot_90", 0)) % 360
+                if rot_90 == 90:
+                    rendered_float = cv2.rotate(rendered_float, cv2.ROTATE_90_CLOCKWISE)
+                elif rot_90 == 180:
+                    rendered_float = cv2.rotate(rendered_float, cv2.ROTATE_180)
+                elif rot_90 == 270:
+                    rendered_float = cv2.rotate(rendered_float, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+                rH, rW = rendered_float.shape[:2]
+                cx = int(max(0, min(rW - 1, float(crop_cfg.get("x", 0.0)) * rW)))
+                cy = int(max(0, min(rH - 1, float(crop_cfg.get("y", 0.0)) * rH)))
+                cw = int(max(1, min(rW - cx, float(crop_cfg.get("w", 1.0)) * rW)))
+                ch = int(max(1, min(rH - cy, float(crop_cfg.get("h", 1.0)) * rH)))
+                c_angle = float(crop_cfg.get("angle", 0.0))
+                if abs(c_angle) > 0.01:
+                    center_pt = (float(rW * 0.5), float(rH * 0.5))
+                    M = cv2.getRotationMatrix2D(center_pt, -c_angle, 1.0)
+                    rendered_float = cv2.warpAffine(rendered_float, M, (rW, rH), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT)
+                rendered_float = np.ascontiguousarray(rendered_float[cy:cy+ch, cx:cx+cw])
 
             enc_params = dict(params_dict)
             enc_params["format"] = format_type

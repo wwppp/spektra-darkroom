@@ -35,23 +35,26 @@ def apply_post_lut_adjustments_f32(img_f32: np.ndarray, params: dict) -> np.ndar
         out = luma_f[..., None] + chroma * dir_intl
         out = np.power(np.clip(out, 0.0001, 1.0), 1.0 / max(0.2, dir_same))
 
-    # 2. Enlarger Color Timing (CMY filters, print exposure, preflash)
-    c_val = float(params.get("enlarger_cyan", 0.0))
-    m_val = float(params.get("enlarger_magenta", 0.0))
-    y_val = float(params.get("enlarger_yellow", 0.0))
-    print_exp = float(params.get("print_exposure", 1.0))
-    preflash = float(params.get("pre_flash", 0.0))
-    if abs(c_val) > 0.01 or abs(m_val) > 0.01 or abs(y_val) > 0.01 or abs(print_exp - 1.0) > 0.01 or abs(preflash) > 0.001:
-        cmy_factor = 1.0 - np.array([c_val, m_val, y_val], dtype=np.float32) * 0.015
-        out = np.power(np.clip(out, 0.0001, 1.0), cmy_factor) * print_exp + preflash
+    # 2. Enlarger Color Timing (CMY filters, print exposure, preflash) - bypassed only for positive slide film
+    film = str(params.get("film_stock", "")).lower()
+    is_pos = ("positive" in film) or ("reversal" in film) or ("e100" in film) or ("velvia" in film) or ("provia" in film)
+    if not is_pos:
+        c_val = float(params.get("enlarger_cyan", 0.0))
+        m_val = float(params.get("enlarger_magenta", 0.0))
+        y_val = float(params.get("enlarger_yellow", 0.0))
+        print_exp = float(params.get("print_exposure", 1.0))
+        preflash = float(params.get("pre_flash", 0.0))
+        if abs(c_val) > 0.01 or abs(m_val) > 0.01 or abs(y_val) > 0.01 or abs(print_exp - 1.0) > 0.01 or abs(preflash) > 0.001:
+            cmy_factor = 1.0 - np.array([c_val, m_val, y_val], dtype=np.float32) * 0.015
+            out = np.power(np.clip(out, 0.0001, 1.0), cmy_factor) * print_exp + preflash
 
-    # 3. Paper Chemistry Morph & Developer Exhaustion
-    morph_gamma = float(params.get("morph_gamma", 1.0))
-    dev_exh = float(params.get("developer_exhaustion", 0.0))
-    if abs(morph_gamma - 1.0) > 0.01:
-        out = np.power(np.clip(out, 0.0001, 1.0), morph_gamma)
-    if dev_exh > 0.005:
-        out = out * (1.0 - dev_exh * 0.6) + (out * 0.88 + 0.03) * (dev_exh * 0.6)
+        # 3. Paper Chemistry Morph & Developer Exhaustion
+        morph_gamma = float(params.get("morph_gamma", 1.0))
+        dev_exh = float(params.get("developer_exhaustion", 0.0))
+        if abs(morph_gamma - 1.0) > 0.01:
+            out = np.power(np.clip(out, 0.0001, 1.0), morph_gamma)
+        if dev_exh > 0.005:
+            out = out * (1.0 - dev_exh * 0.6) + (out * 0.88 + 0.03) * (dev_exh * 0.6)
 
     return np.clip(out, 0.0, 1.0)
 
@@ -68,8 +71,19 @@ class StockThumbnailWorker(QThread):
         self.engine = engine
         # Store reference without deepcopying large arrays synchronously on GUI thread
         self.linear_thumb = linear_thumb
-        self.film_stocks = list(film_stocks)
-        self.paper_stocks = list(paper_stocks)
+        # Prioritize active stocks first for snappy responsive rendering
+        f_list = list(film_stocks)
+        if current_film in f_list:
+            f_list.remove(current_film)
+            f_list.insert(0, current_film)
+        self.film_stocks = f_list
+
+        p_list = list(paper_stocks)
+        if current_paper in p_list:
+            p_list.remove(current_paper)
+            p_list.insert(0, current_paper)
+        self.paper_stocks = p_list
+
         self.current_film = current_film
         self.current_paper = current_paper
         self.do_films = do_films

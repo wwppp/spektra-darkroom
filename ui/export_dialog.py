@@ -587,7 +587,7 @@ class SingleExportDialog(BaseExportDialog):
 
     def __init__(self, default_file_path: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("单片冲印")
+        self.setWindowTitle("单片扫描")
         self.setFixedSize(660, 360)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
@@ -646,7 +646,7 @@ class SingleExportDialog(BaseExportDialog):
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
 
-        btn_export = QPushButton("开始冲印")
+        btn_export = QPushButton("开始扫描")
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.setStyleSheet("""
             QPushButton {
@@ -721,7 +721,7 @@ class BatchExportDialog(BaseExportDialog):
     def __init__(self, default_dir: str, batch_count: int = 0, parent=None):
         super().__init__(parent)
         self.batch_count = batch_count
-        self.setWindowTitle(f"批量冲印：{self.batch_count}张")
+        self.setWindowTitle(f"批量扫描：{self.batch_count}张")
         self.setFixedSize(660, 420)
 
         # Ensure directory only, never a file
@@ -814,7 +814,7 @@ class BatchExportDialog(BaseExportDialog):
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
 
-        btn_export = QPushButton(f"加入冲印队列 ({self.batch_count})")
+        btn_export = QPushButton(f"加入扫描队列 ({self.batch_count})")
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.setStyleSheet("""
             QPushButton {
@@ -888,7 +888,7 @@ class ExportProgressDialog(QDialog):
     """Modern darkroom responsive export progress dialog with progress bar and cancel button."""
     cancelRequested = Signal()
 
-    def __init__(self, title="冲印照片", parent=None):
+    def __init__(self, title="扫描照片", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setFixedSize(440, 155)
@@ -992,7 +992,7 @@ class ExportProgressDialog(QDialog):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
-        self.lbl_title = QLabel("正在冲印...")
+        self.lbl_title = QLabel("正在扫描...")
         self.lbl_title.setStyleSheet("font-weight: bold; color: #f59e0b; font-size: 13px;")
         layout.addWidget(self.lbl_title)
 
@@ -1002,7 +1002,7 @@ class ExportProgressDialog(QDialog):
         layout.addWidget(self.progress_bar)
 
         b_row = QHBoxLayout()
-        self.lbl_detail = QLabel("准备冲印...")
+        self.lbl_detail = QLabel("准备扫描...")
         self.lbl_detail.setStyleSheet("color: #94a3b8; font-size: 11px;")
         b_row.addWidget(self.lbl_detail, 1)
 
@@ -1018,7 +1018,7 @@ class ExportProgressDialog(QDialog):
         apply_dark_titlebar(self)
 
     def _on_cancel_clicked(self):
-        self.lbl_detail.setText("正在取消冲印...")
+        self.lbl_detail.setText("正在取消扫描...")
         self.btn_cancel.setEnabled(False)
         self.cancelRequested.emit()
         self.reject()
@@ -1028,7 +1028,9 @@ class ExportProgressDialog(QDialog):
         if detail:
             clean_detail = detail.replace("正在载入底片并准备物理色彩管线...", "准备底片与色彩管线...")
             clean_detail = clean_detail.replace("正在准备全分辨率冲印管线...", "准备管线...")
-            clean_detail = clean_detail.replace("正在进行高精度冲印渲染与显影", "高精度冲印中")
+            clean_detail = clean_detail.replace("正在进行高精度冲印渲染与显影", "高精度扫描中")
+            clean_detail = clean_detail.replace("正在准备全分辨率扫描管线...", "准备管线...")
+            clean_detail = clean_detail.replace("正在进行高精度扫描渲染", "高精度扫描中")
             self.lbl_detail.setText(clean_detail)
 
 
@@ -1070,7 +1072,7 @@ class SingleExportWorker(QThread):
                         os.remove(self.out_path)
                     except Exception:
                         pass
-                self.finished.emit({"success": False, "cancelled": True, "error": "用户已取消冲印"})
+                self.finished.emit({"success": False, "cancelled": True, "error": "用户已取消扫描"})
             else:
                 self.finished.emit(res)
         except Exception as e:
@@ -1099,7 +1101,7 @@ class BatchExportWorker(QThread):
                 break
             file_p = task["source_path"]
             fname = os.path.basename(file_p)
-            self.itemProgress.emit(i, total, f"冲印 ({i+1}/{total}): {fname}")
+            self.itemProgress.emit(i, total, f"扫描 ({i+1}/{total}): {fname}")
             try:
                 fmt = task.get("format", "jpeg")
                 r = self.engine.render_full_res(

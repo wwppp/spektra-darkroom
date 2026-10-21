@@ -15,6 +15,19 @@ from ui.theme_manager import theme_manager
 from ui.smooth_scroll import SmoothScrollArea
 
 
+_CROP_BADGE_PM = None
+
+def _get_crop_badge_pixmap() -> QPixmap:
+    global _CROP_BADGE_PM
+    if _CROP_BADGE_PM is None:
+        p = os.path.join(get_resource_dir(), "icons", "crop.png")
+        if os.path.exists(p):
+            _CROP_BADGE_PM = QPixmap(p)
+        else:
+            _CROP_BADGE_PM = QPixmap()
+    return _CROP_BADGE_PM
+
+
 class DuplicateFilesDialog(QDialog):
     """Dialog showing duplicate files that were skipped during import."""
     def __init__(self, duplicate_names, parent=None):
@@ -410,6 +423,21 @@ class FilmstripItemWidget(QFrame):
             painter.setBrush(QBrush(QColor("#f59e0b")))
             painter.drawEllipse(QRectF(margin_y * 0.6, margin_y * 1.1, badge_sz, badge_sz))
 
+        # 6.5. Draw Crop indicator badge at mirrored top-right corner
+        if self.has_crop():
+            c_sz = max(9.0, min(13.0, h * 0.11))
+            cx = w - margin_y * 0.6 - c_sz
+            cy = margin_y * 1.1
+            badge_rect = QRectF(cx, cy, c_sz, c_sz)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(0, 0, 0, 150)))
+            painter.drawRoundedRect(badge_rect.adjusted(-1.5, -1.5, 1.5, 1.5), 2.5, 2.5)
+
+            pm = _get_crop_badge_pixmap()
+            if not pm.isNull():
+                painter.drawPixmap(badge_rect.toRect(), pm)
+
         # 7. Top layer: High-visibility Selection & Active Focus Border
         if self.is_active:
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -419,6 +447,50 @@ class FilmstripItemWidget(QFrame):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor(245, 158, 11, 230), 2.0))
             painter.drawRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 3.5, 3.5)
+
+    def has_crop(self):
+        crop = self.photo_data.get("crop")
+        if not crop:
+            params = self.photo_data.get("params")
+            if isinstance(params, dict):
+                crop = params.get("crop")
+        if isinstance(crop, dict):
+            if crop.get("enabled", False):
+                return True
+            w = float(crop.get("w", 1.0))
+            h = float(crop.get("h", 1.0))
+            x = float(crop.get("x", 0.0))
+            y = float(crop.get("y", 0.0))
+            rot = int(crop.get("rot_90", 0)) % 360
+            angle = float(crop.get("angle", 0.0))
+            return (abs(w - 1.0) > 0.001 or abs(h - 1.0) > 0.001 or
+                    abs(x) > 0.001 or abs(y) > 0.001 or rot != 0 or abs(angle) > 0.01 or
+                    crop.get("flip_h") or crop.get("flip_v"))
+        elif isinstance(crop, bool):
+            return crop
+        return False
+
+    def set_crop(self, crop_data):
+        if isinstance(crop_data, dict):
+            self.photo_data["crop"] = dict(crop_data)
+            if "params" in self.photo_data and isinstance(self.photo_data["params"], dict):
+                self.photo_data["params"]["crop"] = dict(crop_data)
+        elif isinstance(crop_data, bool):
+            if not crop_data:
+                def_c = {
+                    "enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0,
+                    "angle": 0.0, "rot_90": 0, "flip_h": False, "flip_v": False,
+                    "aspect_ratio": "original", "is_portrait": False
+                }
+                self.photo_data["crop"] = def_c
+                if "params" in self.photo_data and isinstance(self.photo_data["params"], dict):
+                    self.photo_data["params"]["crop"] = def_c
+            else:
+                if "crop" not in self.photo_data or not isinstance(self.photo_data["crop"], dict):
+                    self.photo_data["crop"] = {"enabled": True}
+                else:
+                    self.photo_data["crop"]["enabled"] = True
+        self.update()
 
     @property
     def is_dirty(self):
@@ -494,11 +566,13 @@ class FilmstripWidget(QWidget):
     photoSelected = Signal(str)
     photoRemoved = Signal(str)
     photosRemoved = Signal(list)
+    photosDeleted = Signal(list)
     clearRequested = Signal()
     batchExportRequested = Signal(list)
     quickExportRequested = Signal(list)
     addRequested = Signal()
     clearSdcRequested = Signal(list)
+    clearCropRequested = Signal(list)
     copyParamsRequested = Signal(str)
     pasteParamsRequested = Signal()
     selectionChanged = Signal(list)
@@ -929,6 +1003,32 @@ class FilmstripWidget(QWidget):
         if photo_id in self._item_widgets:
             self._item_widgets[photo_id].set_dirty(is_dirty)
 
+    def set_photo_crop(self, photo_id, crop_data):
+        if photo_id in self._item_widgets:
+            self._item_widgets[photo_id].set_crop(crop_data)
+        for p in self._photos_list:
+            if p.get("id") == photo_id:
+                if isinstance(crop_data, dict):
+                    p["crop"] = dict(crop_data)
+                    if "params" in p and isinstance(p["params"], dict):
+                        p["params"]["crop"] = dict(crop_data)
+                elif isinstance(crop_data, bool):
+                    if not crop_data:
+                        def_c = {
+                            "enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0,
+                            "angle": 0.0, "rot_90": 0, "flip_h": False, "flip_v": False,
+                            "aspect_ratio": "original", "is_portrait": False
+                        }
+                        p["crop"] = def_c
+                        if "params" in p and isinstance(p["params"], dict):
+                            p["params"]["crop"] = def_c
+                    else:
+                        if "crop" not in p or not isinstance(p["crop"], dict):
+                            p["crop"] = {"enabled": True}
+                        else:
+                            p["crop"]["enabled"] = True
+                break
+
     def _compute_item_dimensions(self):
         """Computes (item_w, item_h) leaving comfortable vertical padding
         inside the concave film track so selection border doesn't touch the groove rims
@@ -1059,7 +1159,7 @@ class FilmstripWidget(QWidget):
 
         if len(photos) == 0:
             if not hasattr(self, '_empty_lbl') or self._empty_lbl is None:
-                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始冲印")
+                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描")
                 self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
             self.scroll_layout.insertWidget(0, self._empty_lbl, 1, Qt.AlignmentFlag.AlignCenter)
@@ -1137,7 +1237,7 @@ class FilmstripWidget(QWidget):
 
         if len(self._photos_list) == 0:
             if not hasattr(self, '_empty_lbl') or self._empty_lbl is None:
-                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始冲印")
+                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描")
                 self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
             self.scroll_layout.insertWidget(0, self._empty_lbl, 1, Qt.AlignmentFlag.AlignCenter)
@@ -1164,7 +1264,7 @@ class FilmstripWidget(QWidget):
 
         if len(self._photos_list) == 0:
             if not hasattr(self, '_empty_lbl') or self._empty_lbl is None:
-                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始冲印")
+                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描")
                 self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
             self.scroll_layout.insertWidget(0, self._empty_lbl, 1, Qt.AlignmentFlag.AlignCenter)
@@ -1217,7 +1317,7 @@ class FilmstripWidget(QWidget):
 
     def _update_items_selection(self):
         for pid, w in self._item_widgets.items():
-            w.set_active(pid == self._active_id)
+            w.set_active(pid == self._active_id and pid in self._selected_ids)
             w.set_selected(pid in self._selected_ids)
 
     def _on_item_clicked(self, photo_id, event):
@@ -1385,12 +1485,12 @@ class FilmstripWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
-        quick_label = "快速冲印 (上次参数)" if sel_count == 1 else f"快速冲印选中底片 ({sel_count} 张)"
+        quick_label = "快速扫描 (上次参数)" if sel_count == 1 else f"快速扫描选中底片 ({sel_count} 张)"
         act_quick = menu.addAction(quick_label)
         act_quick.setIcon(get_icon("quick_export.png"))
         act_quick.triggered.connect(lambda: self.quickExportRequested.emit(list(self._selected_ids)))
 
-        export_label = f"冲印当前底片..." if sel_count == 1 else f"批量冲印选中底片 ({sel_count} 张)..."
+        export_label = f"扫描当前底片..." if sel_count == 1 else f"批量扫描选中底片 ({sel_count} 张)..."
         act_export = menu.addAction(export_label)
         act_export.setIcon(get_icon("dlg_export.png"))
         act_export.triggered.connect(lambda: self.batchExportRequested.emit(list(self._selected_ids)))
@@ -1404,7 +1504,14 @@ class FilmstripWidget(QWidget):
         remove_label = "从底片库移除" if sel_count == 1 else f"从底片库移除 ({sel_count} 项)"
         act_remove = menu.addAction(remove_label)
         act_remove.setIcon(get_icon("dlg_discard.png"))
+        act_remove.setShortcut(QKeySequence("Delete"))
         act_remove.triggered.connect(lambda: self.photosRemoved.emit(list(self._selected_ids)))
+
+        delete_label = "删除文件" if sel_count == 1 else f"删除文件 ({sel_count} 项)"
+        act_delete = menu.addAction(delete_label)
+        act_delete.setIcon(get_icon("dlg_discard.png"))
+        act_delete.setShortcut(QKeySequence("Shift+Delete"))
+        act_delete.triggered.connect(lambda: self.photosDeleted.emit(list(self._selected_ids)))
 
         menu.addSeparator()
 
@@ -1417,12 +1524,14 @@ class FilmstripWidget(QWidget):
             elif target_photo.get("film_profile", "none") != "none" or target_photo.get("paper_profile", "none") != "none":
                 target_edited = True
 
-        act_copy = menu.addAction("复制暗房配方 (Ctrl+C)")
+        act_copy = menu.addAction("复制暗房配方")
+        act_copy.setShortcut(QKeySequence("Ctrl+C"))
         act_copy.setEnabled(target_edited)
         act_copy.triggered.connect(lambda checked=False, pid=target_id: self.copyParamsRequested.emit(pid))
 
-        paste_label = "粘贴暗房配方 (Ctrl+V)" if sel_count <= 1 else f"粘贴暗房配方至选中底片 ({sel_count} 张) (Ctrl+V)"
+        paste_label = "粘贴暗房配方" if sel_count <= 1 else f"粘贴暗房配方至选中底片 ({sel_count} 张)"
         act_paste = menu.addAction(paste_label)
+        act_paste.setShortcut(QKeySequence("Ctrl+V"))
         can_paste = bool(getattr(self, "_can_paste_params", False))
         act_paste.setEnabled(can_paste)
         act_paste.triggered.connect(self.pasteParamsRequested.emit)
@@ -1444,6 +1553,39 @@ class FilmstripWidget(QWidget):
         act_clear_sdc.setEnabled(can_clear_sdc)
         act_clear_sdc.triggered.connect(lambda: self.clearSdcRequested.emit(list(self._selected_ids)))
 
+        # Check if any selected item has crop enabled
+        can_clear_crop = False
+        for p in selected_photos:
+            c = p.get("crop")
+            if not c:
+                params = p.get("params")
+                if isinstance(params, dict):
+                    c = params.get("crop")
+            if isinstance(c, dict):
+                if c.get("enabled", False):
+                    can_clear_crop = True
+                    break
+                w = float(c.get("w", 1.0))
+                h = float(c.get("h", 1.0))
+                x = float(c.get("x", 0.0))
+                y = float(c.get("y", 0.0))
+                rot = int(c.get("rot_90", 0)) % 360
+                angle = float(c.get("angle", 0.0))
+                if (abs(w - 1.0) > 0.001 or abs(h - 1.0) > 0.001 or
+                    abs(x) > 0.001 or abs(y) > 0.001 or rot != 0 or abs(angle) > 0.01 or
+                    c.get("flip_h") or c.get("flip_v")):
+                    can_clear_crop = True
+                    break
+            elif isinstance(c, bool) and c:
+                can_clear_crop = True
+                break
+
+        crop_label = "清除裁切" if sel_count == 1 else f"清除裁切 ({sel_count} 项)"
+        act_clear_crop = menu.addAction(crop_label)
+        act_clear_crop.setIcon(get_icon("crop.png"))
+        act_clear_crop.setEnabled(can_clear_crop)
+        act_clear_crop.triggered.connect(lambda: self.clearCropRequested.emit(list(self._selected_ids)))
+
         menu.addSeparator()
 
         # Submenu: 整理底片
@@ -1464,7 +1606,8 @@ class FilmstripWidget(QWidget):
 
         menu.addSeparator()
 
-        act_select_all = menu.addAction("全选所有底片 (Ctrl+A)")
+        act_select_all = menu.addAction("全选所有底片")
+        act_select_all.setShortcut(QKeySequence("Ctrl+A"))
         act_select_all.triggered.connect(self.select_all)
 
         act_invert = menu.addAction("反选")
@@ -1514,7 +1657,8 @@ class FilmstripWidget(QWidget):
 
         menu.addSeparator()
 
-        act_select_all = menu.addAction("全选所有底片 (Ctrl+A)")
+        act_select_all = menu.addAction("全选所有底片")
+        act_select_all.setShortcut(QKeySequence("Ctrl+A"))
         act_select_all.triggered.connect(self.select_all)
 
         if self._photos_list:
@@ -1532,6 +1676,15 @@ class FilmstripWidget(QWidget):
     def invert_selection(self):
         all_ids = {p["id"] for p in self._photos_list}
         self._selected_ids = all_ids - self._selected_ids
+        if self._selected_ids:
+            if self._active_id not in self._selected_ids:
+                new_active = next((p["id"] for p in self._photos_list if p["id"] in self._selected_ids), None)
+                if new_active:
+                    self.set_active_photo(new_active, reset_selection=False, new_selected_ids=self._selected_ids)
+                    self._schedule_photo_selected(new_active)
+                    return
+        else:
+            self._active_id = None
         self._update_items_selection()
         self.selectionChanged.emit(list(self._selected_ids))
 

@@ -43,9 +43,11 @@ class ParameterGroupCard(QWidget):
         header_layout.setSpacing(6)
 
         self.title_label = QLabel(self.title_text)
+        self.title_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         header_layout.addWidget(self.title_label, 1)
 
         self.reset_btn = QPushButton("重置")
+        self.reset_btn.setObjectName("accordionResetBtn")
         self.reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.reset_btn.clicked.connect(self.resetClicked.emit)
@@ -79,12 +81,16 @@ class ParameterGroupCard(QWidget):
             """)
             self.title_label.setStyleSheet("""
                 QLabel {
+                    background: transparent;
+                    border: none;
                     color: #f59e0b;
                     font-size: 11px;
                     font-weight: bold;
                     letter-spacing: 0.5px;
                 }
                 QLabel:disabled {
+                    background: transparent;
+                    border: none;
                     color: #52525b;
                 }
             """)
@@ -102,12 +108,16 @@ class ParameterGroupCard(QWidget):
             """)
             self.title_label.setStyleSheet("""
                 QLabel {
+                    background: transparent;
+                    border: none;
                     color: #d97706;
                     font-size: 11px;
                     font-weight: bold;
                     letter-spacing: 0.5px;
                 }
                 QLabel:disabled {
+                    background: transparent;
+                    border: none;
                     color: #94a3b8;
                 }
             """)
@@ -127,21 +137,21 @@ class ParameterGroupCard(QWidget):
         if enabled:
             self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.reset_btn.setStyleSheet("""
-                QPushButton {
+                #accordionResetBtn {
                     background: transparent;
                     border: none;
-                    color: #f59e0b;
+                    color: #f59e0b !important;
                     font-size: 10.5px;
                     font-weight: 600;
                     padding: 2px 5px;
                     border-radius: 3px;
                 }
-                QPushButton:hover {
-                    color: #fde68a;
+                #accordionResetBtn:hover {
+                    color: #fde68a !important;
                     background: rgba(245, 158, 11, 0.15);
                 }
-                QPushButton:pressed {
-                    color: #d97706;
+                #accordionResetBtn:pressed {
+                    color: #d97706 !important;
                     background: rgba(245, 158, 11, 0.25);
                 }
             """)
@@ -149,10 +159,10 @@ class ParameterGroupCard(QWidget):
             self.reset_btn.setCursor(Qt.CursorShape.ArrowCursor)
             dim_color = "#383a48" if is_dark else "#94a3b8"
             self.reset_btn.setStyleSheet(f"""
-                QPushButton {{
+                #accordionResetBtn {{
                     background: transparent;
                     border: none;
-                    color: {dim_color};
+                    color: {dim_color} !important;
                     font-size: 10.5px;
                     font-weight: normal;
                     padding: 2px 5px;

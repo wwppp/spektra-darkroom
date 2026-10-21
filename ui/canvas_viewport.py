@@ -1,4 +1,5 @@
 import os
+import math
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF
 from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QActionGroup, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
@@ -81,10 +82,24 @@ uniform float u_dir_samelayer;
 uniform float u_morph_gamma;
 uniform float u_developer_exhaustion;
 
+// Lens Optical & Geometric Correction
+uniform int u_lens_enabled;
+uniform vec3 u_lens_distort;
+uniform vec2 u_lens_vignette;
+
+// Interactive Crop & Straighten
+uniform int u_crop_enabled;
+uniform vec4 u_crop_rect;
+uniform float u_crop_angle;
+uniform int u_is_crop_editing;
+uniform int u_crop_rot90;
+uniform vec2 u_crop_flip;
+
 uniform float u_split_x;
 uniform int u_view_mode;
 uniform float u_screen_aspect;
 uniform float u_image_aspect;
+uniform float u_native_aspect;
 uniform vec2 u_pan;
 uniform float u_zoom;
 uniform vec2 u_viewport_size;
@@ -275,17 +290,161 @@ void main() {
     
     vec2 img_uv = (centered - u_pan) / (quad_scale * u_zoom);
     img_uv = img_uv * 0.5 + 0.5;
-    
-    // Y-flip for OpenGL texture coordinates (row 0 at top)
-    vec2 sample_uv = vec2(img_uv.x, 1.0 - img_uv.y);
-    
-    // Letterbox background
-    if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+
+    // Uniform derivatives evaluated across 2x2 fragment quads BEFORE any conditional returns
+    vec2 d_img_dx = dFdx(img_uv);
+    vec2 d_img_dy = dFdy(img_uv);
+
+    // Discard any fragment outside the active viewport photo quad
+    if (img_uv.x < 0.0 || img_uv.x > 1.0 || img_uv.y < 0.0 || img_uv.y > 1.0) {
         fragColor = vec4(u_bg_color, 1.0);
         return;
     }
+
+    // Y-flip and Crop & Straighten transform
+    vec2 sample_uv;
+    vec2 d_sample_dx;
+    vec2 d_sample_dy;
+
+    if (u_crop_enabled == 1) {
+        vec2 img_center = vec2(0.5, 0.5);
+        if (u_is_crop_editing == 1) {
+            // Live interactive preview in crop tool: Rotate full image around image center (0.5, 0.5)
+            vec2 raw_uv = vec2(img_uv.x, 1.0 - img_uv.y);
+            d_sample_dx = vec2(d_img_dx.x, -d_img_dx.y);
+            d_sample_dy = vec2(d_img_dy.x, -d_img_dy.y);
+
+            // Apply flip
+            if (u_crop_flip.x > 0.5) {
+                raw_uv.x = 1.0 - raw_uv.x;
+                d_sample_dx.x = -d_sample_dx.x;
+                d_sample_dy.x = -d_sample_dy.x;
+            }
+            if (u_crop_flip.y > 0.5) {
+                raw_uv.y = 1.0 - raw_uv.y;
+                d_sample_dx.y = -d_sample_dy.y;
+                d_sample_dy.y = -d_sample_dy.y;
+            }
+
+            // Apply 90-degree steps
+            vec2 rot_uv = raw_uv;
+            if (u_crop_rot90 == 90) {
+                rot_uv = vec2(raw_uv.y, 1.0 - raw_uv.x);
+                d_sample_dx = vec2(d_sample_dx.y, -d_sample_dx.x);
+                d_sample_dy = vec2(d_sample_dy.y, -d_sample_dy.x);
+            } else if (u_crop_rot90 == 180) {
+                rot_uv = vec2(1.0 - raw_uv.x, 1.0 - raw_uv.y);
+                d_sample_dx = vec2(-d_sample_dx.x, -d_sample_dx.y);
+                d_sample_dy = vec2(-d_sample_dy.x, -d_sample_dy.y);
+            } else if (u_crop_rot90 == 270) {
+                rot_uv = vec2(1.0 - raw_uv.y, raw_uv.x);
+                d_sample_dx = vec2(-d_sample_dx.y, d_sample_dx.x);
+                d_sample_dy = vec2(-d_sample_dy.y, d_sample_dy.x);
+            }
+
+            // Fine straighten angle
+            if (abs(u_crop_angle) > 0.0001) {
+                float eff_aspect = (u_crop_rot90 == 90 || u_crop_rot90 == 270) ? (1.0 / u_native_aspect) : u_native_aspect;
+                vec2 p = (rot_uv - img_center) * vec2(eff_aspect, 1.0);
+                float ca = cos(u_crop_angle);
+                float sa = sin(-u_crop_angle);
+                vec2 p_rot = vec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca);
+                sample_uv = img_center + vec2(p_rot.x / eff_aspect, p_rot.y);
+
+                vec2 px = d_sample_dx * vec2(eff_aspect, 1.0);
+                vec2 py = d_sample_dy * vec2(eff_aspect, 1.0);
+                d_sample_dx = vec2((px.x * ca - px.y * sa) / eff_aspect, px.x * sa + px.y * ca);
+                d_sample_dy = vec2((py.x * ca - py.y * sa) / eff_aspect, py.x * sa + py.y * ca);
+            } else {
+                sample_uv = rot_uv;
+            }
+        } else {
+            // Normal view: Display the cropped area upright, filling the quad seamlessly
+            vec2 crop_center = u_crop_rect.xy + u_crop_rect.zw * 0.5;
+            vec2 delta_p = vec2(img_uv.x - 0.5, (1.0 - img_uv.y) - 0.5) * u_crop_rect.zw;
+            vec2 unrotated_p = crop_center + delta_p;
+            d_sample_dx = vec2(d_img_dx.x, -d_img_dx.y) * u_crop_rect.zw;
+            d_sample_dy = vec2(d_img_dy.x, -d_img_dy.y) * u_crop_rect.zw;
+
+            // Apply flip
+            if (u_crop_flip.x > 0.5) {
+                unrotated_p.x = 1.0 - unrotated_p.x;
+                d_sample_dx.x = -d_sample_dx.x;
+                d_sample_dy.x = -d_sample_dy.x;
+            }
+            if (u_crop_flip.y > 0.5) {
+                unrotated_p.y = 1.0 - unrotated_p.y;
+                d_sample_dx.y = -d_sample_dy.y;
+                d_sample_dy.y = -d_sample_dy.y;
+            }
+
+            // Apply 90-degree steps
+            vec2 rot_p = unrotated_p;
+            if (u_crop_rot90 == 90) {
+                rot_p = vec2(unrotated_p.y, 1.0 - unrotated_p.x);
+                d_sample_dx = vec2(d_sample_dx.y, -d_sample_dx.x);
+                d_sample_dy = vec2(d_sample_dy.y, -d_sample_dy.x);
+            } else if (u_crop_rot90 == 180) {
+                rot_p = vec2(1.0 - unrotated_p.x, 1.0 - unrotated_p.y);
+                d_sample_dx = vec2(-d_sample_dx.x, -d_sample_dx.y);
+                d_sample_dy = vec2(-d_sample_dy.x, -d_sample_dy.y);
+            } else if (u_crop_rot90 == 270) {
+                rot_p = vec2(1.0 - unrotated_p.y, unrotated_p.x);
+                d_sample_dx = vec2(-d_sample_dx.y, d_sample_dx.x);
+                d_sample_dy = vec2(-d_sample_dy.y, d_sample_dy.x);
+            }
+
+            if (abs(u_crop_angle) > 0.0001) {
+                float eff_aspect = (u_crop_rot90 == 90 || u_crop_rot90 == 270) ? (1.0 / u_native_aspect) : u_native_aspect;
+                vec2 p = (rot_p - img_center) * vec2(eff_aspect, 1.0);
+                float ca = cos(u_crop_angle);
+                float sa = sin(-u_crop_angle);
+                vec2 p_rot = vec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca);
+                sample_uv = img_center + vec2(p_rot.x / eff_aspect, p_rot.y);
+
+                vec2 px = d_sample_dx * vec2(eff_aspect, 1.0);
+                vec2 py = d_sample_dy * vec2(eff_aspect, 1.0);
+                d_sample_dx = vec2((px.x * ca - px.y * sa) / eff_aspect, px.x * sa + px.y * ca);
+                d_sample_dy = vec2((py.x * ca - py.y * sa) / eff_aspect, py.x * sa + py.y * ca);
+            } else {
+                sample_uv = rot_p;
+            }
+        }
+    } else {
+        sample_uv = vec2(img_uv.x, 1.0 - img_uv.y);
+        d_sample_dx = vec2(d_img_dx.x, -d_img_dx.y);
+        d_sample_dy = vec2(d_img_dy.x, -d_img_dy.y);
+    }
+
+    // Apply Lens Distortion Warp if enabled
+    if (u_lens_enabled == 1 && (abs(u_lens_distort.x) > 0.00001 || abs(u_lens_distort.y) > 0.00001)) {
+        vec2 lp = (sample_uv - 0.5) * 2.0;
+        float r2 = dot(lp, lp);
+        float r_dist = 1.0 + u_lens_distort.x * r2 + u_lens_distort.y * r2 * r2 + u_lens_distort.z * r2 * r2 * r2;
+        sample_uv = 0.5 + (lp * r_dist) * 0.5;
+    }
     
-    vec3 orig_rgb = texture(u_image, sample_uv).rgb;
+    // Clamping & Letterbox background
+    vec2 tex_dim = max(vec2(1.0), vec2(textureSize(u_image, 0)));
+    vec2 half_texel = 0.5 / tex_dim;
+    if (u_crop_enabled == 1 && u_is_crop_editing == 1) {
+        if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+            fragColor = vec4(u_bg_color, 1.0);
+            return;
+        }
+    } else {
+        sample_uv = clamp(sample_uv, half_texel, vec2(1.0) - half_texel);
+    }
+    
+    vec3 orig_rgb = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).rgb;
+
+    // Apply Lens Vignette compensation if enabled
+    if (u_lens_enabled == 1 && u_lens_vignette.x > 0.001) {
+        float r_norm = length((sample_uv - 0.5) * 2.0) / 1.41421356;
+        float v_exp = mix(1.2, 4.0, 1.0 - clamp(u_lens_vignette.y / 100.0, 0.1, 0.9));
+        float vig_gain = 1.0 + u_lens_vignette.x * pow(clamp(r_norm, 0.0, 1.0), v_exp);
+        orig_rgb *= vig_gain;
+    }
 
     // Accurate untouched base display color (Before / 原片)
     vec3 before_color = (u_is_bypass == 2) ? clamp(orig_rgb, 0.0, 1.0) : clamp(prophoto_to_srgb(orig_rgb), 0.0, 1.0);
@@ -511,8 +670,9 @@ void main() {
         // - At 100%/91% zoom (footprint ~ 1.0): 100% full tactile micro-crystal bite & dye clouds.
         // - At Fit view (15% zoom, footprint ~ 6.7): micro-crystals average down by CLT ~ 1/sqrt(N),
         //   producing smooth, velvety, delicate 35mm negative film texture instead of coarse static!
-        vec2 d_gcoord = fwidth(gcoord);
-        float footprint = max(d_gcoord.x, d_gcoord.y);
+        vec2 g_dx = rot * (d_sample_dx * master_res / scale);
+        vec2 g_dy = rot * (d_sample_dy * master_res / scale);
+        float footprint = max(length(g_dx), length(g_dy));
         float grain_att = 1.0 / sqrt(1.0 + 2.5 * max(0.0, footprint - 1.0));
 
         // Multi-scale organic dye cloud clusters & micro-crystals:
@@ -628,6 +788,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
     requestUndo = Signal()
     requestRedo = Signal()
     requestReset = Signal()
+    requestResetToOpen = Signal()
+    requestClearCrop = Signal()
     requestExport = Signal()
     requestQuickExport = Signal()
     requestToggleSplit = Signal()
@@ -723,6 +885,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         """)
         self.badge_before.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.badge_before.hide()
+
+        # Interactive Crop Overlay
+        from ui.crop_overlay import CropOverlayWidget
+        self.crop_overlay = CropOverlayWidget(self, self)
+        self.is_crop_editing = False
 
         self.badge_after = QLabel("已修改", self)
         self.badge_after.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -907,15 +1074,34 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if loc >= 0:
                 funcs.glUniform3f(loc, float(x), float(y), float(z))
 
+        def u_4f(name, x, y, z, w):
+            loc = self.shader_program.uniformLocation(name)
+            if loc >= 0:
+                funcs.glUniform4f(loc, float(x), float(y), float(z), float(w))
+
         u_3f("u_bg_color", self._bg_color[0], self._bg_color[1], self._bg_color[2])
 
         screen_aspect = float(max(1, self.width())) / float(max(1, self.height()))
         m_w = self._master_width if self._master_width > 0 else self._image_width
         m_h = self._master_height if self._master_height > 0 else self._image_height
-        img_aspect = float(m_w) / float(max(1, m_h))
+        native_aspect = float(m_w) / float(max(1, m_h))
+
+        # Adjust quad aspect ratio if crop is active in normal view
+        crop_cfg = self.params.get("crop", {})
+        crop_enabled = 1 if (isinstance(crop_cfg, dict) and crop_cfg.get("enabled", False)) else 0
+        rot_90 = int(crop_cfg.get("rot_90", 0)) % 360 if isinstance(crop_cfg, dict) else 0
+        cw = float(crop_cfg.get("w", 1.0)) if isinstance(crop_cfg, dict) else 1.0
+        ch = float(crop_cfg.get("h", 1.0)) if isinstance(crop_cfg, dict) else 1.0
+        is_editing = getattr(self, "is_crop_editing", False)
+        eff_native_aspect = (1.0 / native_aspect) if (rot_90 in (90, 270)) else native_aspect
+        if crop_enabled == 1 and not is_editing and cw > 0.01 and ch > 0.01:
+            quad_aspect = eff_native_aspect * (cw / ch)
+        else:
+            quad_aspect = eff_native_aspect
 
         u_1f("u_screen_aspect", screen_aspect)
-        u_1f("u_image_aspect", img_aspect)
+        u_1f("u_image_aspect", quad_aspect)
+        u_1f("u_native_aspect", native_aspect)
         u_2f("u_pan", self.pan_x, self.pan_y)
         u_1f("u_zoom", self.zoom)
 
@@ -935,9 +1121,48 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_base_tint", self.params.get("base_tint", 1.0))
         u_1f("u_highlights", float(self.params.get("highlights", 0.0)))
         u_1f("u_shadows", float(self.params.get("shadows", 0.0)))
-        u_3f("u_cmy", self.params.get("enlarger_cyan", 0.0), self.params.get("enlarger_magenta", 0.0), self.params.get("enlarger_yellow", 0.0))
-        u_1f("u_print_exposure", self.params.get("print_exposure", 1.0))
-        u_1f("u_preflash", self.params.get("pre_flash", 0.0))
+        film_id = self.params.get("film_stock", getattr(self, "current_film_stock", "none"))
+        is_pos = self.engine.is_positive_film(film_id) if hasattr(self.engine, 'is_positive_film') else False
+        if is_pos:
+            u_3f("u_cmy", 0.0, 0.0, 0.0)
+            u_1f("u_print_exposure", 1.0)
+            u_1f("u_preflash", 0.0)
+        else:
+            u_3f("u_cmy", float(self.params.get("enlarger_cyan", 0.0)), float(self.params.get("enlarger_magenta", 0.0)), float(self.params.get("enlarger_yellow", 0.0)))
+            u_1f("u_print_exposure", float(self.params.get("print_exposure", 1.0)))
+            u_1f("u_preflash", float(self.params.get("pre_flash", 0.0)))
+
+        # Lens correction uniforms
+        lens_cfg = self.params.get("lens", {})
+        if isinstance(lens_cfg, dict):
+            lens_en = 1 if lens_cfg.get("enabled", False) else 0
+            u_1i("u_lens_enabled", lens_en)
+            u_3f("u_lens_distort", lens_cfg.get("k1", 0.0), lens_cfg.get("k2", 0.0), lens_cfg.get("k3", 0.0))
+            u_2f("u_lens_vignette", lens_cfg.get("vignette_amount", 0.0), lens_cfg.get("vignette_midpoint", 50.0))
+        else:
+            u_1i("u_lens_enabled", 0)
+            u_3f("u_lens_distort", 0.0, 0.0, 0.0)
+            u_2f("u_lens_vignette", 0.0, 50.0)
+
+        # Crop uniforms
+        is_editing = getattr(self, "is_crop_editing", False)
+        if isinstance(crop_cfg, dict):
+            c_angle_rad = math.radians(float(crop_cfg.get("angle", 0.0)))
+            c_rot90 = int(crop_cfg.get("rot_90", 0)) % 360
+            flip_h = 1.0 if crop_cfg.get("flip_h", False) else 0.0
+            flip_v = 1.0 if crop_cfg.get("flip_v", False) else 0.0
+            u_1i("u_crop_enabled", 1 if (crop_enabled == 1 or is_editing) else 0)
+            u_4f("u_crop_rect", crop_cfg.get("x", 0.0), crop_cfg.get("y", 0.0), cw, ch)
+            u_1f("u_crop_angle", c_angle_rad)
+            u_1i("u_crop_rot90", c_rot90)
+            u_2f("u_crop_flip", flip_h, flip_v)
+        else:
+            u_1i("u_crop_enabled", 1 if is_editing else 0)
+            u_4f("u_crop_rect", 0.0, 0.0, 1.0, 1.0)
+            u_1f("u_crop_angle", 0.0)
+            u_1i("u_crop_rot90", 0)
+            u_2f("u_crop_flip", 0.0, 0.0)
+        u_1i("u_is_crop_editing", 1 if is_editing else 0)
 
         # Halation physics (Official Spektrafilm Model)
         hal_preset = self.params.get("_halation_preset")
@@ -1014,9 +1239,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_dir_interlayer", self.params.get("dir_interlayer", 1.0))
         u_1f("u_dir_samelayer", self.params.get("dir_samelayer", 1.0))
 
-        # Chemistry Morph
-        u_1f("u_morph_gamma", self.params.get("morph_gamma", 1.0))
-        u_1f("u_developer_exhaustion", self.params.get("developer_exhaustion", 0.0))
+        # Chemistry Morph (neutralized for positive slide film)
+        if is_pos:
+            u_1f("u_morph_gamma", 1.0)
+            u_1f("u_developer_exhaustion", 0.0)
+        else:
+            u_1f("u_morph_gamma", float(self.params.get("morph_gamma", 1.0)))
+            u_1f("u_developer_exhaustion", float(self.params.get("developer_exhaustion", 0.0)))
 
         u_1f("u_split_x", self.params.get("split_x", 0.5))
         u_1i("u_view_mode", self.params.get("view_mode", 0))
@@ -1041,11 +1270,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.vbo.release()
         self.shader_program.release()
 
-    def paintEvent(self, event):
-        super().paintEvent(event)
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, 'crop_overlay') and self.crop_overlay.isVisible():
+            self.crop_overlay.setGeometry(self.rect())
         if self.params.get("view_mode") == 1:
             self._clamp_split_to_image()
         self._update_badges()
@@ -1272,9 +1500,46 @@ class DarkroomGLCanvas(QOpenGLWidget):
         mh = getattr(self, "_master_height", 0)
         return mh if mh > 1 else max(1, getattr(self, "_image_height", 1))
 
+    @property
+    def master_width(self):
+        return self._image_w
+
+    @property
+    def master_height(self):
+        return self._image_h
+
     def update_params(self, **kwargs):
         """Update shader uniforms instantly and redraw."""
         self.params.update(kwargs)
+        self.update()
+
+
+    # -------------------------------------------------------------
+    # Crop Mode Methods
+    # -------------------------------------------------------------
+    def start_crop_mode(self, crop_dict=None):
+        if not self._has_image:
+            return
+        self.is_crop_editing = True
+        self._pre_crop_zoom = getattr(self, "zoom", 1.0)
+        self._pre_crop_pan = (getattr(self, "pan_x", 0.0), getattr(self, "pan_y", 0.0))
+        # Inset image by 10% (zoom=0.90) so crop handles are not clipped by viewport edges
+        self.zoom = 0.90
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self.zoomChanged.emit(self.get_actual_zoom_ratio())
+        cur_crop = dict(crop_dict or self.params.get("crop", {}))
+        self.params["crop"] = cur_crop
+        self.update()
+        self.crop_overlay.start_crop_session(cur_crop)
+
+    def exit_crop_mode(self):
+        self.is_crop_editing = False
+        self.crop_overlay.hide()
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self.zoomChanged.emit(self.get_actual_zoom_ratio())
         self.update()
 
     def get_image_bounds_norm(self):
@@ -1290,6 +1555,19 @@ class DarkroomGLCanvas(QOpenGLWidget):
         m_w = self._master_width if getattr(self, "_master_width", 0) > 0 else self._image_width
         m_h = self._master_height if getattr(self, "_master_height", 0) > 0 else self._image_height
         img_aspect = float(m_w) / float(max(1, m_h)) if m_h > 0 else 1.0
+
+        # In normal view with crop applied, aspect ratio is governed by the cropped region
+        crop_cfg = self.params.get("crop", {})
+        crop_enabled = 1 if (isinstance(crop_cfg, dict) and crop_cfg.get("enabled", False)) else 0
+        rot_90 = int(crop_cfg.get("rot_90", 0)) % 360 if isinstance(crop_cfg, dict) else 0
+        cw = float(crop_cfg.get("w", 1.0)) if isinstance(crop_cfg, dict) else 1.0
+        ch = float(crop_cfg.get("h", 1.0)) if isinstance(crop_cfg, dict) else 1.0
+        is_editing = getattr(self, "is_crop_editing", False)
+        eff_native_aspect = (1.0 / img_aspect) if (rot_90 in (90, 270)) else img_aspect
+        if crop_enabled == 1 and not is_editing and cw > 0.01 and ch > 0.01:
+            img_aspect = eff_native_aspect * (cw / ch)
+        else:
+            img_aspect = eff_native_aspect
 
         eff_screen_aspect = screen_aspect * (0.5 if self.params.get("view_mode") == 2 else 1.0)
         if eff_screen_aspect > img_aspect:
@@ -1422,10 +1700,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._zoom_anim.start()
 
     def fit_to_view(self, animate=True):
+        target_z = 0.90 if getattr(self, "is_crop_editing", False) else 1.0
         if animate:
-            self.animate_to(1.0, 0.0, 0.0)
+            self.animate_to(target_z, 0.0, 0.0)
         else:
-            self.zoom = 1.0
+            self.zoom = target_z
             self.pan_x = 0.0
             self.pan_y = 0.0
             if self.params.get("view_mode") == 1:
@@ -1552,6 +1831,25 @@ class DarkroomGLCanvas(QOpenGLWidget):
         act_reset.setShortcut(QKeySequence("Ctrl+R"))
         act_reset.triggered.connect(self.requestReset.emit)
 
+        crop_cfg = self.params.get("crop", {})
+        has_active_crop = False
+        if isinstance(crop_cfg, dict):
+            if crop_cfg.get("enabled", False):
+                has_active_crop = True
+            else:
+                cw = float(crop_cfg.get("w", 1.0))
+                ch = float(crop_cfg.get("h", 1.0))
+                cx = float(crop_cfg.get("x", 0.0))
+                cy = float(crop_cfg.get("y", 0.0))
+                rot = int(crop_cfg.get("rot_90", 0)) % 360
+                ang = float(crop_cfg.get("angle", 0.0))
+                if abs(cw - 1.0) > 0.001 or abs(ch - 1.0) > 0.001 or abs(cx) > 0.001 or abs(cy) > 0.001 or rot != 0 or abs(ang) > 0.01 or crop_cfg.get("flip_h") or crop_cfg.get("flip_v"):
+                    has_active_crop = True
+        act_clear_crop = menu.addAction("清除裁切")
+        act_clear_crop.setIcon(get_icon("crop.png"))
+        act_clear_crop.setEnabled(has_active_crop)
+        act_clear_crop.triggered.connect(self.requestClearCrop.emit)
+
         menu.addSeparator()
 
         menu_bg = menu.addMenu("背景颜色")
@@ -1568,12 +1866,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         menu.addSeparator()
 
-        act_quick = menu.addAction("快速冲印 (上次参数)")
+        act_quick = menu.addAction("快速扫描 (上次参数)")
         act_quick.setIcon(get_icon("quick_export.png"))
         act_quick.setShortcut(QKeySequence("Ctrl+Shift+E"))
         act_quick.triggered.connect(self.requestQuickExport.emit)
 
-        act_export = menu.addAction("冲印照片 (Print)...")
+        act_export = menu.addAction("扫描照片 (Scan)...")
         act_export.setIcon(get_icon("export.png"))
         act_export.setShortcut(QKeySequence("Ctrl+E"))
         act_export.triggered.connect(self.requestExport.emit)
@@ -1737,6 +2035,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 active_tex_id = temp_tex_id
             else:
                 active_tex_id = orig_tex_id
+                src_w = float(getattr(self, "_master_width", 0) or getattr(self, "_image_width", 1) or 1)
+                src_h = float(getattr(self, "_master_height", 0) or getattr(self, "_image_height", 1) or 1)
 
             if not active_tex_id:
                 return None
@@ -1807,6 +2107,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # Full-bleed 1:1 mapping: offscreen target is the image, zero letterboxing / zero black bars!
             u_1f("u_screen_aspect", 1.0)
             u_1f("u_image_aspect", 1.0)
+            u_1f("u_native_aspect", float(src_w) / float(max(1, src_h)))
             u_2f("u_pan", 0.0, 0.0)
             u_1f("u_zoom", 1.0)
 
@@ -1826,9 +2127,47 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_base_tint", eff_params.get("base_tint", 1.0))
             u_1f("u_highlights", float(eff_params.get("highlights", 0.0)))
             u_1f("u_shadows", float(eff_params.get("shadows", 0.0)))
-            u_3f("u_cmy", eff_params.get("enlarger_cyan", 0.0), eff_params.get("enlarger_magenta", 0.0), eff_params.get("enlarger_yellow", 0.0))
-            u_1f("u_print_exposure", eff_params.get("print_exposure", 1.0))
-            u_1f("u_preflash", eff_params.get("pre_flash", 0.0))
+            film_id_off = eff_params.get("film_stock", getattr(self, "current_film_stock", "none"))
+            is_pos_off = self.engine.is_positive_film(film_id_off) if hasattr(self.engine, 'is_positive_film') else False
+            if is_pos_off:
+                u_3f("u_cmy", 0.0, 0.0, 0.0)
+                u_1f("u_print_exposure", 1.0)
+                u_1f("u_preflash", 0.0)
+            else:
+                u_3f("u_cmy", float(eff_params.get("enlarger_cyan", 0.0)), float(eff_params.get("enlarger_magenta", 0.0)), float(eff_params.get("enlarger_yellow", 0.0)))
+                u_1f("u_print_exposure", float(eff_params.get("print_exposure", 1.0)))
+                u_1f("u_preflash", float(eff_params.get("pre_flash", 0.0)))
+
+            def u_4f(name, x, y, z, w):
+                loc = self.shader_program.uniformLocation(name)
+                if loc >= 0: funcs.glUniform4f(loc, float(x), float(y), float(z), float(w))
+
+            # Lens correction in offscreen export
+            off_lens = eff_params.get("lens", {})
+            if isinstance(off_lens, dict) and off_lens.get("enabled", False):
+                u_1i("u_lens_enabled", 1)
+                u_3f("u_lens_distort", off_lens.get("k1", 0.0), off_lens.get("k2", 0.0), off_lens.get("k3", 0.0))
+                u_2f("u_lens_vignette", off_lens.get("vignette_amount", 0.0), off_lens.get("vignette_midpoint", 50.0))
+            else:
+                u_1i("u_lens_enabled", 0)
+                u_3f("u_lens_distort", 0.0, 0.0, 0.0)
+                u_2f("u_lens_vignette", 0.0, 50.0)
+
+            # Crop in offscreen export
+            off_crop = eff_params.get("crop", {})
+            if isinstance(off_crop, dict) and off_crop.get("enabled", False):
+                u_1i("u_crop_enabled", 1)
+                u_4f("u_crop_rect", off_crop.get("x", 0.0), off_crop.get("y", 0.0), off_crop.get("w", 1.0), off_crop.get("h", 1.0))
+                u_1f("u_crop_angle", math.radians(float(off_crop.get("angle", 0.0))))
+                u_1i("u_crop_rot90", int(off_crop.get("rot_90", 0)) % 360)
+                u_2f("u_crop_flip", 1.0 if off_crop.get("flip_h", False) else 0.0, 1.0 if off_crop.get("flip_v", False) else 0.0)
+            else:
+                u_1i("u_crop_enabled", 0)
+                u_4f("u_crop_rect", 0.0, 0.0, 1.0, 1.0)
+                u_1f("u_crop_angle", 0.0)
+                u_1i("u_crop_rot90", 0)
+                u_2f("u_crop_flip", 0.0, 0.0)
+            u_1i("u_is_crop_editing", 0)
 
             # Halation physics (Official Spektrafilm Model)
             hal_preset = eff_params.get("_halation_preset")
@@ -1897,8 +2236,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
             u_1f("u_dir_interlayer", eff_params.get("dir_interlayer", 1.0))
             u_1f("u_dir_samelayer", eff_params.get("dir_samelayer", 1.0))
-            u_1f("u_morph_gamma", eff_params.get("morph_gamma", 1.0))
-            u_1f("u_developer_exhaustion", eff_params.get("developer_exhaustion", 0.0))
+            if is_pos_off:
+                u_1f("u_morph_gamma", 1.0)
+                u_1f("u_developer_exhaustion", 0.0)
+            else:
+                u_1f("u_morph_gamma", float(eff_params.get("morph_gamma", 1.0)))
+                u_1f("u_developer_exhaustion", float(eff_params.get("developer_exhaustion", 0.0)))
 
             view_mode = eff_params.get("view_mode", 0) if (params_override and "view_mode" in params_override) else 0
             split_x = float(eff_params.get("split_x", 0.5))

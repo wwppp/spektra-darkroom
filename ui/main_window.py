@@ -97,6 +97,7 @@ from ui.preferences_dialog import PreferencesDialog
 from ui.about_dialog import AboutDialog
 from ui.canvas_viewport import CanvasViewport, DarkroomGLCanvas
 from ui.accordion import AccordionSection
+from ui.crop_overlay import CropSidebarWidget
 from ui.adobe_scrub_slider import AdobeScrubSlider, ComboBoxRow
 from ui.export_dialog import (
     SingleExportDialog, BatchExportDialog, ExportImageDialog, ExportProgressDialog, SingleExportWorker, BatchExportWorker
@@ -135,7 +136,9 @@ class WindowCaptionButton(QPushButton):
         else:
             bg = QColor(20, 21, 24) if is_dark else QColor(240, 242, 246)
 
-        if not self.is_maximized_state and self.btn_type == "close":
+        win = self.window()
+        is_max = self.is_maximized_state or (win.isMaximized() if win else False)
+        if not is_max and self.btn_type == "close":
             from PySide6.QtGui import QPainterPath
             path = QPainterPath()
             r = 8.0
@@ -392,6 +395,11 @@ class BatchImportWorker(QThread):
                 if entry and entry.get("success"):
                     pid = f"photo_{self.start_idx + idx}_{os.path.basename(file_path)}"
                     entry["id"] = pid
+                    if abs(float(entry.get("base_ev", 0.0))) < 0.0001:
+                        if sdc_manager.has_sdc(file_path):
+                            sdc_data = sdc_manager.load_sdc(file_path)
+                            if sdc_data and sdc_data.get("params", {}).get("base_ev"):
+                                entry["base_ev"] = float(sdc_data["params"]["base_ev"])
                     entry["raw_thumbnail_rgb"] = entry.get("raw_thumbnail_rgb") if entry.get("raw_thumbnail_rgb") is not None else entry.get("thumbnail_rgb")
                     entry["graded_thumbnail_rgb"] = entry.get("graded_thumbnail_rgb")
                     if not is_first:
@@ -601,6 +609,16 @@ class SessionRestoreWorker(QThread):
             graded_th = None
 
         is_uncached = False
+        crop_data = params.get("crop") if (params and isinstance(params, dict)) else None
+        b_ev = 0.0
+        if params and "base_ev" in params and abs(float(params["base_ev"])) > 0.0001:
+            b_ev = float(params["base_ev"])
+        elif cache_item is not None:
+            b_ev = float(cache_item.get("base_ev", 0.0))
+
+        ext_p = os.path.splitext(p)[1].lower()
+        is_raw_p = ext_p in RAW_EXTENSIONS
+
         if cache_item is not None:
             photo_entry = {
                 "id": pid,
@@ -614,18 +632,40 @@ class SessionRestoreWorker(QThread):
                 "graded_thumbnail_rgb": graded_th,
                 "float_img": cache_item.get("float_img") if is_target else None,
                 "exif": cache_item.get("exif", {}),
-                "auto_ev": cache_item.get("auto_ev", 0.0),
-                "base_ev": cache_item.get("base_ev", 0.0),
-                "is_raw": cache_item.get("is_raw", False),
+                "auto_ev": cache_item.get("auto_ev", b_ev),
+                "base_ev": b_ev,
+                "is_raw": cache_item.get("is_raw", is_raw_p),
                 "film_profile": film_profile,
                 "paper_profile": paper_profile,
                 "print_mode": print_mode,
                 "params": params,
+                "crop": crop_data,
                 "is_dirty": is_dirty,
                 "is_edited": is_edited,
             }
         else:
             dw, dh = session_cache_manager.get_image_dimensions(p)
+            if dw > 0 and dh > 0 and session_cache_manager.is_valid_thumbnail(raw_th):
+                try:
+                    session_cache_manager.save_photo_cache(p, {
+                        "path": p,
+                        "filename": os.path.basename(p),
+                        "width": dw,
+                        "height": dh,
+                        "thumbnail_rgb": th_rgb if th_rgb is not None else raw_th,
+                        "raw_thumbnail_rgb": raw_th,
+                        "graded_thumbnail_rgb": graded_th,
+                        "exif": {"filename": os.path.basename(p), "path": p, "width": dw, "height": dh},
+                        "auto_ev": b_ev,
+                        "base_ev": b_ev,
+                        "is_raw": is_raw_p
+                    }, save_preview=False)
+                    is_uncached = False
+                except Exception:
+                    is_uncached = True
+            else:
+                is_uncached = True
+
             photo_entry = {
                 "id": pid,
                 "filename": os.path.basename(p),
@@ -638,17 +678,17 @@ class SessionRestoreWorker(QThread):
                 "graded_thumbnail_rgb": graded_th,
                 "float_img": None,
                 "exif": {"filename": os.path.basename(p), "path": p, "width": dw, "height": dh},
-                "auto_ev": 0.0,
-                "base_ev": 0.0,
-                "is_raw": False,
+                "auto_ev": b_ev,
+                "base_ev": b_ev,
+                "is_raw": is_raw_p,
                 "film_profile": film_profile,
                 "paper_profile": paper_profile,
                 "print_mode": print_mode,
                 "params": params,
+                "crop": crop_data,
                 "is_dirty": is_dirty,
                 "is_edited": is_edited,
             }
-            is_uncached = True
 
         return photo_entry, is_uncached
 
@@ -2082,6 +2122,8 @@ class DarkroomMainWindow(QMainWindow):
             is_max = self.isMaximized()
             if hasattr(self, 'btn_max'):
                 self.btn_max.set_maximized_state(is_max)
+                if hasattr(self, 'btn_close'):
+                    self.btn_close.set_maximized_state(is_max)
             self._update_root_style(is_max)
             self._apply_win11_corners(is_max)
             self._apply_native_window_icon()
@@ -2468,16 +2510,24 @@ class DarkroomMainWindow(QMainWindow):
                 border-color: #f59e0b;
             }}
         """
-        for btn in (getattr(self, 'btn_split', None), getattr(self, 'btn_fit', None), getattr(self, 'btn_100', None)):
+        for btn in (getattr(self, 'btn_split', None), getattr(self, 'btn_crop', None), getattr(self, 'btn_fit', None), getattr(self, 'btn_100', None)):
             if btn:
                 btn.setStyleSheet(btn_style)
 
+        if getattr(self, 'crop_toolbar_sep', None):
+            sep_color = "rgba(255, 255, 255, 0.12)" if is_dark else "rgba(0, 0, 0, 0.12)"
+            self.crop_toolbar_sep.setStyleSheet(f"background-color: {sep_color}; border: none;")
+
         if getattr(self, 'btn_split', None):
             self.btn_split.setIcon(get_icon("compare.png", is_dark=is_dark))
+        if getattr(self, 'btn_crop', None):
+            self.btn_crop.setIcon(get_icon("crop.png", is_dark=is_dark))
         if getattr(self, 'btn_fit', None):
             self.btn_fit.setIcon(get_icon("fit_window.png", is_dark=is_dark))
         if getattr(self, 'btn_100', None):
             self.btn_100.setIcon(get_icon("zoom_100.png", is_dark=is_dark))
+        if getattr(self, 'act_crop', None):
+            self.act_crop.setIcon(get_icon("crop.png", is_dark=is_dark))
 
     def _update_welcome_view_style(self):
         is_dark = theme_manager.is_dark()
@@ -2616,24 +2666,16 @@ class DarkroomMainWindow(QMainWindow):
 
         tb_layout.addStretch(1)
 
-        # Amber Export Button (Item 3)
-        self.btn_title_export = QPushButton("冲印")
+        # Amber Export Button (Scans / Ingestion)
+        self.btn_title_export = QPushButton()
         self.btn_title_export.setFixedHeight(26)
+        self.btn_title_export.setFixedWidth(68)
         self.btn_title_export.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_icon = os.path.join(get_resource_dir(), "icons", "export_dark.png")
-        if os.path.exists(save_icon):
-            self.btn_title_export.setIcon(QIcon(save_icon))
-            self.btn_title_export.setIconSize(QSize(13, 13))
         self.btn_title_export.setStyleSheet("""
             QPushButton {
                 background: #f59e0b;
-                color: #111113;
-                font-weight: bold;
-                font-size: 11.5px;
                 border: none;
                 border-radius: 4px;
-                padding: 3px 14px;
-                margin-right: 6px;
             }
             QPushButton:hover {
                 background: #d97706;
@@ -2642,9 +2684,35 @@ class DarkroomMainWindow(QMainWindow):
                 background: #b45309;
             }
         """)
+
+        btn_export_layout = QHBoxLayout(self.btn_title_export)
+        btn_export_layout.setContentsMargins(0, 0, 0, 0)
+        btn_export_layout.setSpacing(0)
+
+        self.lbl_title_export_icon = QLabel()
+        self.lbl_title_export_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.lbl_title_export_icon.setStyleSheet("background: transparent; border: none; padding-top: 1.5px;")
+        save_icon = os.path.join(get_resource_dir(), "icons", "export_dark.png")
+        if os.path.exists(save_icon):
+            pix = QPixmap(save_icon).scaled(13, 13, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.lbl_title_export_icon.setPixmap(pix)
+        self.lbl_title_export_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.lbl_title_export_text = QLabel("扫描")
+        self.lbl_title_export_text.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.lbl_title_export_text.setStyleSheet("background: transparent; border: none; color: #111113; font-weight: bold; font-size: 11.5px;")
+        self.lbl_title_export_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        btn_export_layout.addStretch(1)
+        btn_export_layout.addWidget(self.lbl_title_export_icon, 0, Qt.AlignmentFlag.AlignCenter)
+        btn_export_layout.addSpacing(4)
+        btn_export_layout.addWidget(self.lbl_title_export_text, 0, Qt.AlignmentFlag.AlignCenter)
+        btn_export_layout.addStretch(1)
+
         self.btn_title_export.clicked.connect(self.action_export_image)
         self.btn_title_export.setVisible(False)
         tb_layout.addWidget(self.btn_title_export, 0, Qt.AlignmentFlag.AlignVCenter)
+        tb_layout.addSpacing(6)
 
         # Caption Buttons (Win11 Vector) contiguous box extending to top of titlebar
         caption_box = QWidget()
@@ -2980,7 +3048,7 @@ class DarkroomMainWindow(QMainWindow):
         self.export_status_container.setObjectName("export_status_container")
         self.export_status_container.setVisible(False)
         self.export_status_container.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.export_status_container.setToolTip("点击查看冲印队列详情 (Ctrl+J)")
+        self.export_status_container.setToolTip("点击查看扫描队列详情 (Ctrl+J)")
         self.export_status_container.mousePressEvent = self._on_export_status_clicked
         export_layout = QHBoxLayout(self.export_status_container)
         export_layout.setContentsMargins(0, 0, 0, 0)
@@ -3034,6 +3102,26 @@ class DarkroomMainWindow(QMainWindow):
             }
         """
 
+        self.btn_crop = QPushButton()
+        self.btn_crop.setFixedSize(28, 22)
+        self.btn_crop.setIcon(get_icon("crop.png"))
+        self.btn_crop.setIconSize(QSize(14, 14))
+        self.btn_crop.setCheckable(True)
+        self.btn_crop.setToolTip("裁切与校平 (快捷键 C)")
+        self.btn_crop.setStyleSheet(btn_style)
+        self.btn_crop.clicked.connect(self.toggle_crop_mode)
+        tb_layout.addWidget(self.btn_crop)
+
+        self.crop_toolbar_sep = QFrame()
+        self.crop_toolbar_sep.setFrameShape(QFrame.Shape.VLine)
+        self.crop_toolbar_sep.setFrameShadow(QFrame.Shadow.Plain)
+        self.crop_toolbar_sep.setFixedWidth(1)
+        self.crop_toolbar_sep.setFixedHeight(14)
+        is_dark_init = theme_manager.is_dark()
+        sep_color = "rgba(255, 255, 255, 0.12)" if is_dark_init else "rgba(0, 0, 0, 0.12)"
+        self.crop_toolbar_sep.setStyleSheet(f"background-color: {sep_color}; border: none;")
+        tb_layout.addWidget(self.crop_toolbar_sep)
+
         self.btn_split = CompareButton(self)
         self.btn_split.setFixedSize(28, 22)
         self.btn_split.setIcon(get_icon("compare.png"))
@@ -3050,18 +3138,20 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_fit.setFixedSize(28, 22)
         self.btn_fit.setIcon(get_icon("fit_window.png"))
         self.btn_fit.setIconSize(QSize(14, 14))
+        self.btn_fit.setCheckable(True)
         self.btn_fit.setToolTip("适应图像全貌 (Ctrl+0)")
         self.btn_fit.setStyleSheet(btn_style)
-        self.btn_fit.clicked.connect(self.canvas.fit_to_view)
+        self.btn_fit.clicked.connect(self._on_btn_fit_clicked)
         tb_layout.addWidget(self.btn_fit)
 
         self.btn_100 = QPushButton()
         self.btn_100.setFixedSize(28, 22)
         self.btn_100.setIcon(get_icon("zoom_100.png"))
         self.btn_100.setIconSize(QSize(14, 14))
+        self.btn_100.setCheckable(True)
         self.btn_100.setToolTip("1:1 实际像素 (Ctrl+1)")
         self.btn_100.setStyleSheet(btn_style)
-        self.btn_100.clicked.connect(self.canvas.set_zoom_100)
+        self.btn_100.clicked.connect(self._on_btn_100_clicked)
         tb_layout.addWidget(self.btn_100)
 
         self.canvas.zoomChanged.connect(self._on_zoom_changed)
@@ -3073,8 +3163,10 @@ class DarkroomMainWindow(QMainWindow):
         self.filmstrip.photoSelected.connect(self.on_switch_photo)
         self.filmstrip.photoRemoved.connect(self.on_remove_photo)
         self.filmstrip.photosRemoved.connect(self.on_remove_multiple_photos)
+        self.filmstrip.photosDeleted.connect(self.on_delete_multiple_photos)
         self.filmstrip.clearRequested.connect(self.action_clear_photos)
         self.filmstrip.clearSdcRequested.connect(self.on_clear_sdc_config)
+        self.filmstrip.clearCropRequested.connect(self.on_clear_crop_photos)
         self.filmstrip.batchExportRequested.connect(self._batch_export_photos)
         self.filmstrip.quickExportRequested.connect(self.action_quick_export)
         self.filmstrip.addRequested.connect(self.action_open_files)
@@ -3133,7 +3225,18 @@ class DarkroomMainWindow(QMainWindow):
         self.sidebar_layout.addStretch(1)
 
         sidebar_scroll.setWidget(self.sidebar_content)
-        sb_outer_layout.addWidget(sidebar_scroll, 1)
+
+        self.sidebar_stack = QStackedWidget()
+        self.sidebar_stack.addWidget(sidebar_scroll)
+        self.crop_sidebar = CropSidebarWidget(self.canvas.crop_overlay, self)
+        self.sidebar_stack.addWidget(self.crop_sidebar)
+        sb_outer_layout.addWidget(self.sidebar_stack, 1)
+
+        if hasattr(self.canvas, 'crop_overlay'):
+            self.canvas.crop_overlay.cropApplied.connect(self._on_crop_applied)
+            self.canvas.crop_overlay.cropCancelled.connect(self._on_crop_cancelled)
+            self.canvas.crop_overlay.cropChanged.connect(self._on_crop_live)
+
         self.main_splitter.addWidget(self.sidebar_container)
         self.main_splitter.setCollapsible(2, False)
 
@@ -3713,21 +3816,21 @@ class DarkroomMainWindow(QMainWindow):
         file_menu.addSeparator()
 
         # Item 4: Quick Export with last settings
-        self.act_quick_export = QAction("快速冲印 (上次参数)", self)
+        self.act_quick_export = QAction("快速扫描 (上次参数)", self)
         self.act_quick_export.setIcon(get_icon("quick_export.png"))
         self.act_quick_export.setShortcut(QKeySequence("Ctrl+Shift+E"))
         self.act_quick_export.triggered.connect(lambda: self.action_quick_export())
         self.act_quick_export.setEnabled(False)
         file_menu.addAction(self.act_quick_export)
 
-        self.act_export = QAction("冲印...", self)
+        self.act_export = QAction("扫描...", self)
         self.act_export.setIcon(get_icon("export.png"))
         self.act_export.setShortcut(QKeySequence("Ctrl+E"))
         self.act_export.triggered.connect(self.action_export_image)
         self.act_export.setEnabled(False)
         file_menu.addAction(self.act_export)
 
-        act_queue = QAction("冲印队列管理...", self)
+        act_queue = QAction("扫描队列管理...", self)
         act_queue.triggered.connect(self.open_export_queue_dialog)
         file_menu.addAction(act_queue)
 
@@ -3754,9 +3857,17 @@ class DarkroomMainWindow(QMainWindow):
 
         self.act_redo = QAction("重做", self)
         self.act_redo.setIcon(get_icon("redo.png"))
-        self.act_redo.setShortcut(QKeySequence("Ctrl+Y"))
+        self.act_redo.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
         self.act_redo.triggered.connect(self.redo)
         edit_menu.addAction(self.act_redo)
+
+        edit_menu.addSeparator()
+
+        self.act_crop = QAction("裁切", self)
+        self.act_crop.setIcon(get_icon("crop.png"))
+        self.act_crop.setShortcut(QKeySequence("C"))
+        self.act_crop.triggered.connect(self.toggle_crop_mode)
+        edit_menu.addAction(self.act_crop)
 
         edit_menu.addSeparator()
 
@@ -3782,6 +3893,11 @@ class DarkroomMainWindow(QMainWindow):
         self.act_reset_all.setShortcut(QKeySequence("Ctrl+R"))
         self.act_reset_all.triggered.connect(self.reset_all_params)
         edit_menu.addAction(self.act_reset_all)
+
+        self.act_clear_sdc = QAction("删除暗房配置 (.sdc)", self)
+        self.act_clear_sdc.setShortcut(QKeySequence("Ctrl+Alt+R"))
+        self.act_clear_sdc.triggered.connect(self.action_clear_sdc_active)
+        edit_menu.addAction(self.act_clear_sdc)
 
         edit_menu.addSeparator()
 
@@ -3868,6 +3984,8 @@ class DarkroomMainWindow(QMainWindow):
         self.canvas.requestUndo.connect(self.undo)
         self.canvas.requestRedo.connect(self.redo)
         self.canvas.requestReset.connect(self.reset_all_params)
+        self.canvas.requestResetToOpen.connect(self.on_reset_to_open)
+        self.canvas.requestClearCrop.connect(self.action_clear_active_crop)
         self.canvas.requestExport.connect(self.action_export_image)
         self.canvas.requestQuickExport.connect(self.action_quick_export)
         self.canvas.requestToggleSplit.connect(self.toggle_split_view)
@@ -4108,6 +4226,53 @@ class DarkroomMainWindow(QMainWindow):
         is_typing = isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox))
 
         if not is_typing:
+            mods = event.modifiers()
+            has_ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+            has_alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+
+            # Zoom shortcuts: Ctrl + Plus / Equal / Minus / Underscore / 0 / 1
+            if has_ctrl and not has_alt:
+                if event.key() in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+                    if hasattr(self, "canvas") and self.canvas._has_image:
+                        self.canvas.zoom_in(animate=True)
+                        event.accept()
+                        return
+                elif event.key() in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+                    if hasattr(self, "canvas") and self.canvas._has_image:
+                        self.canvas.zoom_out(animate=True)
+                        event.accept()
+                        return
+                elif event.key() == Qt.Key.Key_0:
+                    if hasattr(self, "canvas") and self.canvas._has_image:
+                        self.canvas.fit_to_view(animate=True)
+                        event.accept()
+                        return
+                elif event.key() == Qt.Key.Key_1:
+                    if hasattr(self, "canvas") and self.canvas._has_image:
+                        self.canvas.set_zoom_100()
+                        event.accept()
+                        return
+
+            # Reset to open: Ctrl + Alt + R
+            if has_ctrl and has_alt and event.key() == Qt.Key.Key_R:
+                self.on_reset_to_open()
+                event.accept()
+                return
+
+            # Reset crop (in crop mode) or reset params (outside): Ctrl + R
+            if has_ctrl and not has_alt and event.key() == Qt.Key.Key_R:
+                if getattr(self.canvas, "is_crop_editing", False):
+                    self.canvas.crop_overlay.reset_crop()
+                else:
+                    self.reset_all_params()
+                event.accept()
+                return
+
+            if event.key() == Qt.Key.Key_C and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+                self.toggle_crop_mode()
+                event.accept()
+                return
+
             if event.key() == Qt.Key.Key_Left:
                 self._on_step_photo(-1)
                 event.accept()
@@ -4154,7 +4319,8 @@ class DarkroomMainWindow(QMainWindow):
         # Lock status during batch import so auxiliary switch events don't wipe it
         if getattr(self, "_is_importing", False):
             is_import_msg = any(text.startswith(prefix) for prefix in [
-                "正在导入", "导入底片", "正在恢复", "底片库", "会话底片库", "已导入", "已取消"
+                "正在导入", "导入底片", "正在恢复", "底片库", "会话底片库", "已导入", "已取消",
+                "正在载入", "载入会话", "载入底片", "正在加载", "加载会话", "会话已恢复", "会话"
             ])
             if not is_import_msg:
                 return
@@ -4230,17 +4396,17 @@ class DarkroomMainWindow(QMainWindow):
         if state == "busy":
             self.export_spinner.start()
             self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
-            self.export_status_container.setToolTip("正在后台冲印，点击查看冲印队列 (Ctrl+J)")
+            self.export_status_container.setToolTip("正在后台扫描，点击查看扫描队列 (Ctrl+J)")
         elif state == "success":
             self.export_spinner.stop()
             self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
-            self.export_status_container.setToolTip("冲印完成，点击查看冲印队列 (Ctrl+J)")
+            self.export_status_container.setToolTip("扫描完成，点击查看扫描队列 (Ctrl+J)")
             # Permanent display on success as requested by user
             timeout_ms = 0
         elif state == "error":
             self.export_spinner.stop()
             self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #ef4444; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
-            self.export_status_container.setToolTip("冲印发生错误，点击查看冲印队列 (Ctrl+J)")
+            self.export_status_container.setToolTip("扫描发生错误，点击查看扫描队列 (Ctrl+J)")
             if timeout_ms <= 0:
                 timeout_ms = 6000
 
@@ -4272,10 +4438,10 @@ class DarkroomMainWindow(QMainWindow):
         """Item 8: Live status updater for background export queue in right capsule."""
         if active_count > 0:
             done_count = total_count - active_count
-            self._set_export_status(f"冲印中 ({done_count + 1}/{total_count})", state="busy")
+            self._set_export_status(f"扫描中 ({done_count + 1}/{total_count})", state="busy")
         else:
             if total_count > 0:
-                self._set_export_status(f"冲印完成 ({total_count}/{total_count})", state="success", timeout_ms=0)
+                self._set_export_status(f"扫描完成 ({total_count}/{total_count})", state="success", timeout_ms=0)
             else:
                 self._set_export_status("", state="idle")
 
@@ -4441,7 +4607,8 @@ class DarkroomMainWindow(QMainWindow):
             session_photos.append({
                 "path": normalize_path(p["path"]),
                 "rel_path": rel_p,
-                "filename": os.path.basename(p["path"])
+                "filename": os.path.basename(p["path"]),
+                "base_ev": float(p.get("base_ev", 0.0))
             })
 
         active_rel = None
@@ -4766,7 +4933,7 @@ class DarkroomMainWindow(QMainWindow):
         """Item 4: Quick export selected or active photo(s) using remembered last export settings."""
         last_cfg = config_manager.get_last_export_settings()
         if not last_cfg:
-            self.set_app_status("未记录上次冲印参数，请先执行一次常规冲印", timeout_ms=3000)
+            self.set_app_status("未记录上次扫描参数，请先执行一次常规扫描", timeout_ms=3000)
             self.action_export_image()
             return
 
@@ -4843,7 +5010,7 @@ class DarkroomMainWindow(QMainWindow):
             for t in new_tasks:
                 self.export_queue.enqueue(t)
 
-        self._set_export_status(f"已加入冲印队列 ({enqueued_count} 张)", state="busy")
+        self._set_export_status(f"已加入扫描队列 ({enqueued_count} 张)", state="busy")
 
     def push_undo_state(self):
         state = {
@@ -4886,6 +5053,13 @@ class DarkroomMainWindow(QMainWindow):
         self._redo_stack.clear()
 
     def undo(self):
+        if getattr(self.canvas, "is_crop_editing", False):
+            if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay.undo():
+                self.set_app_status("已撤销裁切操作", timeout_ms=1500)
+            else:
+                self.set_app_status("已到最初裁切状态", timeout_ms=1500)
+            return
+
         if len(self._undo_stack) <= 1:
             self.set_app_status("已到最初历史状态", timeout_ms=1500)
             return
@@ -4904,6 +5078,13 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已撤销", timeout_ms=1500)
 
     def redo(self):
+        if getattr(self.canvas, "is_crop_editing", False):
+            if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay.redo():
+                self.set_app_status("已重做裁切操作", timeout_ms=1500)
+            else:
+                self.set_app_status("已到最新裁切状态", timeout_ms=1500)
+            return
+
         if not self._redo_stack:
             self.set_app_status("已到最新历史状态", timeout_ms=1500)
             return
@@ -4973,8 +5154,26 @@ class DarkroomMainWindow(QMainWindow):
             base_tint = float(exif.get("tint", getattr(self, "_active_base_tint", 1.0)))
         defaults = self.get_default_params(base_temp, base_tint)
 
+        # Check crop
+        crop_data = params_dict.get("crop")
+        if isinstance(crop_data, dict):
+            if crop_data.get("enabled", False):
+                return True
+            w = float(crop_data.get("w", 1.0))
+            h = float(crop_data.get("h", 1.0))
+            x = float(crop_data.get("x", 0.0))
+            y = float(crop_data.get("y", 0.0))
+            rot = int(crop_data.get("rot_90", 0)) % 360
+            ang = float(crop_data.get("angle", 0.0))
+            if (abs(w - 1.0) > 0.001 or abs(h - 1.0) > 0.001 or
+                abs(x) > 0.001 or abs(y) > 0.001 or rot != 0 or abs(ang) > 0.01 or
+                crop_data.get("flip_h") or crop_data.get("flip_v")):
+                return True
+        elif isinstance(crop_data, bool) and crop_data:
+            return True
+
         # Ignore internal non-color keys
-        ignored_keys = {"print_mode", "custom_wb", "film_format_mm", "base_temp", "base_tint"}
+        ignored_keys = {"print_mode", "custom_wb", "film_format_mm", "base_temp", "base_tint", "crop"}
         if not params_dict.get("custom_wb", False):
             ignored_keys.add("color_temp")
             ignored_keys.add("tint")
@@ -5171,17 +5370,7 @@ class DarkroomMainWindow(QMainWindow):
                 for pid, card in self.paper_cards.items():
                     card.set_active(pid == "none")
 
-            self.canvas.update_params(**self.current_params)
-            lut_params = dict(self.current_params)
-            lut_params["print_mode"] = self.current_print_mode
-            lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
-            self.canvas.set_lut(lut_3d)
-
-            self._schedule_histogram_update()
-            self._update_diffusion_ui_state()
-            self._update_stock_mode_ui()
-            self._update_active_thumbnails()
-            self._refresh_card_previews()
+            self._sync_full_params_to_pipeline(fit_crop_if_changed=True)
             self._mark_current_photo_dirty()
 
         # 2. Snapshot post-paste state for all affected photos
@@ -5240,17 +5429,7 @@ class DarkroomMainWindow(QMainWindow):
             for pid, card in self.paper_cards.items():
                 card.set_active(pid == "none")
 
-        self.canvas.update_params(**self.current_params)
-        lut_params = dict(self.current_params)
-        lut_params["print_mode"] = self.current_print_mode
-        lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
-        self.canvas.set_lut(lut_3d)
-
-        self._schedule_histogram_update()
-        self._update_diffusion_ui_state()
-        self._update_stock_mode_ui()
-        self._update_active_thumbnails()
-        self._refresh_card_previews()
+        self._sync_full_params_to_pipeline(fit_crop_if_changed=True)
 
         # Update current photo metadata
         if self._current_photo_path:
@@ -5360,16 +5539,7 @@ class DarkroomMainWindow(QMainWindow):
                 for pid_card, card in self.paper_cards.items():
                     card.set_active(pid_card == "none")
 
-            self.canvas.update_params(**self.current_params)
-            lut_params = dict(self.current_params)
-            lut_params["print_mode"] = self.current_print_mode
-            lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
-            self.canvas.set_lut(lut_3d)
-
-            self._schedule_histogram_update()
-            self._update_diffusion_ui_state()
-            self._update_stock_mode_ui()
-            self._update_active_thumbnails()
+            self._sync_full_params_to_pipeline(fit_crop_if_changed=True)
             self._update_reset_buttons_state()
         elif not active_restored and state.get("active_photo_id"):
             target_pid = state.get("active_photo_id")
@@ -5554,6 +5724,7 @@ class DarkroomMainWindow(QMainWindow):
                 curr_p["paper_profile"] = self.current_paper_stock
                 curr_p["print_mode"] = getattr(self, "current_print_mode", "optical")
                 curr_p["params"] = dict(self.current_params)
+                curr_p["crop"] = dict(self.current_params.get("crop", {}))
                 curr_p["is_dirty"] = True
                 curr_p["is_edited"] = True
                 self._photo_is_dirty = True
@@ -5570,6 +5741,11 @@ class DarkroomMainWindow(QMainWindow):
             curr_p["paper_profile"] = "none"
             curr_p["print_mode"] = "scan"
             curr_p["params"] = None
+            curr_p["crop"] = {
+                "enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0,
+                "angle": 0.0, "rot_90": 0, "flip_h": False, "flip_v": False,
+                "aspect_ratio": "original", "is_portrait": False
+            }
             curr_p["is_dirty"] = False
             curr_p["is_edited"] = False
             self._photo_is_dirty = False
@@ -5732,6 +5908,12 @@ class DarkroomMainWindow(QMainWindow):
         self.setFocus()
 
     def reset_all_params(self):
+        if getattr(self.canvas, "is_crop_editing", False):
+            if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
+                self.canvas.crop_overlay.reset_crop()
+                self.set_app_status("已重置裁切", timeout_ms=1500)
+            return
+
         defaults = self._get_track_defaults()
         all_defs = {}
         for d in defaults.values():
@@ -5764,6 +5946,80 @@ class DarkroomMainWindow(QMainWindow):
         self._update_active_thumbnails()
         self._refresh_card_previews()
         self.push_undo_state()
+
+    def on_reset_to_open(self):
+        """Dispatch '重置为打开状态' (Ctrl+Alt+R) according to workspace mode."""
+        if getattr(self.canvas, "is_crop_editing", False):
+            if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
+                self.canvas.crop_overlay.reset_to_initial_state()
+                self.set_app_status("已恢复至打开时裁切状态", timeout_ms=1500)
+        else:
+            self.reset_to_open_state()
+
+    def reset_to_open_state(self):
+        """Fully restore photo to virgin unedited RAW state, completely wiping all parameters AND crop."""
+        import copy
+        default_crop = {
+            "enabled": False,
+            "x": 0.0,
+            "y": 0.0,
+            "w": 1.0,
+            "h": 1.0,
+            "angle": 0.0,
+            "rot_90": 0,
+            "flip_h": False,
+            "flip_v": False,
+            "aspect_ratio": "original",
+            "is_portrait": False
+        }
+        self.current_params["crop"] = default_crop
+        if hasattr(self.canvas, "params") and isinstance(self.canvas.params, dict):
+            self.canvas.params["crop"] = default_crop
+        if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
+            self.canvas.crop_overlay.reset_all_crop()
+
+        # Reset stocks to none (virgin bypass)
+        self.current_film_stock = "none"
+        self.current_paper_stock = "none"
+        self.current_print_mode = "scan"
+
+        defaults = self._get_track_defaults()
+        all_defs = {}
+        for d in defaults.values():
+            all_defs.update(d)
+        for k, v in all_defs.items():
+            self.current_params[k] = v
+            self.canvas.update_params(**{k: v})
+
+        self._refresh_lut()
+        self._update_all_sliders_from_params()
+        self._schedule_histogram_update()
+        self._update_stock_mode_ui()
+        self.canvas.update_params(crop=dict(default_crop))
+        self.canvas.fit_to_view(animate=False)
+        self.canvas.update()
+        self._update_reset_buttons_state()
+        self._update_active_thumbnails()
+        self._refresh_card_previews()
+        self.push_undo_state()
+
+        self._photo_is_dirty = False
+        if self.active_photo_id:
+            photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+            if photo:
+                photo["is_dirty"] = False
+                photo["is_edited"] = False
+                photo["film_profile"] = "none"
+                photo["paper_profile"] = "none"
+                photo["params"] = copy.deepcopy(self.current_params)
+                photo["crop"] = dict(default_crop)
+                p_path = photo.get("path", "")
+                if p_path and sdc_manager.has_sdc(p_path):
+                    sdc_manager.delete_sdc(p_path)
+            self.filmstrip.set_photo_dirty(self.active_photo_id, False)
+            self.filmstrip.set_photo_crop(self.active_photo_id, False)
+
+        self.set_app_status("已恢复至原始底片状态", timeout_ms=1500)
 
     def _update_all_sliders_from_params(self):
         self._is_updating_sliders = True
@@ -5809,6 +6065,135 @@ class DarkroomMainWindow(QMainWindow):
         self._update_reset_buttons_state()
         self._update_diffusion_ui_state()
 
+    def _sync_canvas_params(self, **extra):
+        """Safely forwards current_params and active stock/print_mode state to canvas without keyword duplication."""
+        merged = dict(self.current_params)
+        merged["film_stock"] = getattr(self, "current_film_stock", "none")
+        merged["paper_profile"] = getattr(self, "current_paper_stock", "none")
+        merged["print_mode"] = getattr(self, "current_print_mode", "optical")
+        merged.update(extra)
+        self.canvas.update_params(**merged)
+
+    def _sync_full_params_to_pipeline(self, fit_crop_if_changed: bool = False, refresh_lut: bool = True):
+        """Unified entry point to push self.current_params to canvas shader uniforms, 3D LUT, and UI indicators."""
+        old_crop = getattr(self.canvas, "params", {}).get("crop", {})
+        self._sync_canvas_params()
+        if fit_crop_if_changed:
+            new_crop = self.current_params.get("crop", {})
+            if old_crop != new_crop and hasattr(self, 'canvas') and self.canvas._has_image:
+                self.canvas.fit_to_view(animate=False)
+        if refresh_lut:
+            lut_params = dict(self.current_params)
+            lut_params["print_mode"] = self.current_print_mode
+            eff_paper = self.current_paper_stock if self.current_print_mode == "optical" else "none"
+            lut_3d = self.engine.get_3d_lut(self.current_film_stock, eff_paper, lut_size=33, params_dict=lut_params)
+            self.canvas.set_lut(lut_3d)
+        self._schedule_histogram_update()
+        self._update_diffusion_ui_state()
+        self._update_stock_mode_ui()
+        self._update_active_thumbnails()
+        self._refresh_card_previews()
+
+    def toggle_crop_mode(self):
+        if not hasattr(self, 'canvas') or not self.canvas._has_image:
+            if hasattr(self, 'btn_crop'):
+                self.btn_crop.setChecked(False)
+            return
+
+        is_editing = getattr(self.canvas, "is_crop_editing", False)
+        if is_editing:
+            self.canvas.crop_overlay.apply_crop()
+        else:
+            self._enter_crop_workspace()
+
+    def _enter_crop_workspace(self):
+        if hasattr(self, 'btn_crop'):
+            self.btn_crop.setChecked(True)
+        if hasattr(self, 'act_crop'):
+            self.act_crop.setText("退出裁切")
+        if hasattr(self, 'act_reset_to_open'):
+            self.act_reset_to_open.setText("重置为打开时状态")
+
+        # Mutual exclusion: Exit compare mode and disable compare buttons while in crop mode
+        if self.current_params.get("view_mode", 0) != 0:
+            self.set_view_mode(0)
+        if hasattr(self, 'btn_split'):
+            self.btn_split.setChecked(False)
+            self.btn_split.setEnabled(False)
+        if hasattr(self, 'act_compare'):
+            self.act_compare.setEnabled(False)
+
+        # 1. Switch right sidebar stack to Crop panel (Page 1)
+        if hasattr(self, 'sidebar_stack'):
+            self.sidebar_stack.setCurrentIndex(1)
+
+        # 2. Start crop overlay session & sync controls
+        cur_crop = self.current_params.get("crop", {})
+        self.canvas.start_crop_mode(cur_crop)
+        if hasattr(self, 'crop_sidebar'):
+            self.crop_sidebar.sync_from_overlay(self.canvas.crop_overlay.get_crop_dict())
+
+    def _exit_crop_workspace(self):
+        if hasattr(self, 'btn_crop'):
+            self.btn_crop.setChecked(False)
+        if hasattr(self, 'act_crop'):
+            self.act_crop.setText("裁切")
+        if hasattr(self, 'act_reset_to_open'):
+            self.act_reset_to_open.setText("重置为打开状态")
+
+        # Re-enable compare buttons
+        if hasattr(self, 'btn_split'):
+            self.btn_split.setEnabled(True)
+        if hasattr(self, 'act_compare'):
+            self.act_compare.setEnabled(True)
+
+        # 1. Switch right sidebar stack back to Develop cards (Page 0)
+        if hasattr(self, 'sidebar_stack'):
+            self.sidebar_stack.setCurrentIndex(0)
+
+        # 2. Exit canvas crop mode & refresh
+        self.canvas.exit_crop_mode()
+        self.canvas.update()
+
+    def _on_crop_live(self, crop_dict):
+        self.current_params["crop"] = crop_dict
+        if hasattr(self, 'canvas'):
+            self.canvas.params["crop"] = crop_dict
+            self.canvas.update()
+
+    def _on_crop_applied(self, crop_dict):
+        self._exit_crop_workspace()
+        self.current_params["crop"] = crop_dict
+        self._mark_current_photo_dirty()
+        self.canvas.update_params(crop=crop_dict)
+        self.canvas.fit_to_view(animate=False)
+        self._save_current_photo_sdc()
+        self.push_undo_state()
+        if hasattr(self, "filmstrip") and self.active_photo_id:
+            self.filmstrip.set_photo_crop(self.active_photo_id, crop_dict)
+        target_photo = next((p for p in self.photos if p.get("id") == self.active_photo_id), None)
+        if target_photo:
+            target_photo["crop"] = dict(crop_dict)
+            if "params" in target_photo and isinstance(target_photo["params"], dict):
+                target_photo["params"]["crop"] = dict(crop_dict)
+        self._update_active_thumbnails()
+        if hasattr(self, '_cards_debounce_timer'):
+            self._cards_debounce_timer.start(100)
+        else:
+            self._refresh_card_previews()
+
+    def _on_crop_cancelled(self):
+        self._exit_crop_workspace()
+        self.canvas.fit_to_view(animate=False)
+        if hasattr(self, "filmstrip") and self.active_photo_id:
+            cur_c = self.current_params.get("crop", {})
+            self.filmstrip.set_photo_crop(self.active_photo_id, cur_c)
+        self._update_active_thumbnails()
+        if hasattr(self, '_cards_debounce_timer'):
+            self._cards_debounce_timer.start(100)
+        else:
+            self._refresh_card_previews()
+
     def on_switch_film(self, stock_id, push_undo=True):
         if hasattr(self, "_hover_timer"):
             self._hover_timer.stop()
@@ -5827,8 +6212,16 @@ class DarkroomMainWindow(QMainWindow):
             self.current_paper_stock = "none"
             self.current_print_mode = "scan"
             self.current_params["print_mode"] = "scan"
+            self.current_params["enlarger_cyan"] = 0.0
+            self.current_params["enlarger_magenta"] = 0.0
+            self.current_params["enlarger_yellow"] = 0.0
+            self.current_params["print_exposure"] = 1.0
+            self.current_params["pre_flash"] = 0.0
+            self.current_params["developer_exhaustion"] = 0.0
+            self.current_params["morph_gamma"] = 1.0
             for pid, card in self.paper_cards.items():
                 card.set_active(pid == "none")
+            self._update_all_sliders_from_params()
 
         for sid, card in self.film_cards.items():
             card.set_active(sid == stock_id)
@@ -5849,6 +6242,7 @@ class DarkroomMainWindow(QMainWindow):
         lut_params["print_mode"] = self.current_print_mode
         lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
         self.canvas.set_lut(lut_3d)
+        self.canvas.update_params(paper_profile=stock_id, print_mode=self.current_print_mode)
         hal_preset = self.engine.get_film_halation_preset(stock_id) if hasattr(self.engine, 'get_film_halation_preset') else None
         grain_preset = self.engine.get_film_grain_preset(stock_id) if hasattr(self.engine, 'get_film_grain_preset') else None
         self.canvas.update_params(film_stock=stock_id, _halation_preset=hal_preset, _grain_preset=grain_preset)
@@ -5891,7 +6285,7 @@ class DarkroomMainWindow(QMainWindow):
             self.push_undo_state()
             self._save_current_photo_sdc()
             mode_name = "相纸印相" if mode == "optical" else "数码扫描"
-            self.set_app_status(f"冲印模式: {mode_name}", timeout_ms=2500)
+            self.set_app_status(f"模式: {mode_name}", timeout_ms=2500)
 
     def on_switch_paper(self, stock_id, push_undo=True):
         if hasattr(self, "_hover_timer"):
@@ -5933,6 +6327,7 @@ class DarkroomMainWindow(QMainWindow):
         lut_params["print_mode"] = self.current_print_mode
         lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
         self.canvas.set_lut(lut_3d)
+        self.canvas.update_params(paper_profile=stock_id, print_mode=self.current_print_mode)
         self._schedule_histogram_update()
         if push_undo and self._current_photo_path:
             self._refresh_card_previews(paper_only=False)
@@ -5978,8 +6373,43 @@ class DarkroomMainWindow(QMainWindow):
         new_mode = (curr_mode + 1) % 3
         self.set_view_mode(new_mode)
 
+    def _on_btn_fit_clicked(self):
+        if not hasattr(self, 'canvas') or not getattr(self.canvas, '_has_image', False):
+            if hasattr(self, 'btn_fit'):
+                self.btn_fit.setChecked(False)
+            return
+        self.canvas.fit_to_view(animate=True)
+        self._update_zoom_buttons()
+
+    def _on_btn_100_clicked(self):
+        if not hasattr(self, 'canvas') or not getattr(self.canvas, '_has_image', False):
+            if hasattr(self, 'btn_100'):
+                self.btn_100.setChecked(False)
+            return
+        self.canvas.set_zoom_100(animate=True)
+        self._update_zoom_buttons()
+
+    def _update_zoom_buttons(self):
+        if not hasattr(self, 'btn_fit') or not hasattr(self, 'btn_100') or not hasattr(self, 'canvas'):
+            return
+        if not getattr(self.canvas, '_has_image', False):
+            self.btn_fit.setChecked(False)
+            self.btn_100.setChecked(False)
+            return
+
+        is_fit = abs(self.canvas.zoom - 1.0) < 0.005 and abs(self.canvas.pan_x) < 0.005 and abs(self.canvas.pan_y) < 0.005
+        actual_ratio = self.canvas.get_actual_zoom_ratio()
+        is_100 = abs(actual_ratio - 1.0) < 0.015
+
+        if is_fit and is_100:
+            is_100 = False
+
+        self.btn_fit.setChecked(is_fit)
+        self.btn_100.setChecked(is_100)
+
     def _on_zoom_changed(self, zoom_val):
         self._update_photo_info_display()
+        self._update_zoom_buttons()
 
     def action_open_files(self):
         filt = FILE_DIALOG_IMAGE_FILTER
@@ -6182,6 +6612,8 @@ class DarkroomMainWindow(QMainWindow):
                     photo_entry["paper_profile"] = sdc.get("paper_profile", "none")
                     photo_entry["print_mode"] = sdc.get("print_mode", sdc.get("params", {}).get("print_mode", "optical"))
                     photo_entry["params"] = dict(sdc.get("params") or {})
+                    if "crop" in photo_entry["params"]:
+                        photo_entry["crop"] = dict(photo_entry["params"]["crop"])
                     photo_entry["is_dirty"] = True
                     photo_entry["is_edited"] = True
                     if sdc.get("thumbnail_rgb") is not None:
@@ -6656,7 +7088,18 @@ class DarkroomMainWindow(QMainWindow):
 
             img_w = max(1, int(img_w or 1))
             img_h = max(1, int(img_h or 1))
-            asp = max(0.01, float(img_w) / float(img_h))
+
+            # Determine target resolution maintaining exact photo or cropped aspect ratio without distortion
+            crop_dict = self.current_params.get("crop", {})
+            if isinstance(crop_dict, dict) and crop_dict.get("enabled", False):
+                cw = max(0.01, float(crop_dict.get("w", 1.0))) * img_w
+                ch = max(0.01, float(crop_dict.get("h", 1.0))) * img_h
+                rot_90 = int(crop_dict.get("rot_90", 0)) % 360
+                if rot_90 in (90, 270):
+                    cw, ch = ch, cw
+                asp = max(0.01, cw / ch)
+            else:
+                asp = max(0.01, float(img_w) / float(img_h))
 
             # Determine target resolution maintaining exact photo aspect ratio without any letterbox distortion:
             if asp >= 1.0:
@@ -6686,14 +7129,14 @@ class DarkroomMainWindow(QMainWindow):
                 if self.active_photo_id and is_valid:
                     curr_p = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
                     if curr_p:
-                        if self.current_film_stock == "none":
-                            self.thumb_controller.revert_photo_to_raw(curr_p, self.filmstrip)
+                        is_film = (self.current_film_stock not in ("none", "", None))
+                        is_paper = (self.current_paper_stock not in ("none", "", None))
+                        is_params = self._is_params_modified(self.current_params, curr_p)
+                        has_recipe = is_film or is_paper or is_params or self._photo_is_dirty
+                        if has_recipe:
+                            self.thumb_controller.update_graded_thumbnail(curr_p, rendered_rgb, self.filmstrip)
                         else:
-                            has_recipe = (self.current_film_stock != "none" or self.current_paper_stock != "none" or self._photo_is_dirty)
-                            if has_recipe:
-                                self.thumb_controller.update_graded_thumbnail(curr_p, rendered_rgb, self.filmstrip)
-                            else:
-                                self.filmstrip.update_photo_thumbnail(self.active_photo_id, pix)
+                            self.thumb_controller.revert_photo_to_raw(curr_p, self.filmstrip)
         except Exception as e:
             logger.debug(f"_update_active_thumbnails error: {e}")
 
@@ -6736,13 +7179,12 @@ class DarkroomMainWindow(QMainWindow):
         paper_sliders = [
             getattr(self, 'slider_morph_gamma', None),
             getattr(self, 'slider_exhaustion', None),
-            getattr(self, 'slider_preflash', None),
         ]
         for s in paper_sliders:
             if s is not None:
                 s.setEnabled(not disable_paper_sliders)
                 if disable_paper_sliders:
-                    s.setToolTip("当前选用反转正片或数码扫描模式，相纸印相物理参数已自动禁用")
+                    s.setToolTip("当前选用反转正片或数码扫描模式，相纸显影特性自动旁路")
                 else:
                     s.setToolTip(getattr(s, "default_tooltip", ""))
 
@@ -6751,12 +7193,13 @@ class DarkroomMainWindow(QMainWindow):
             getattr(self, 'slider_magenta', getattr(self, 'slider_enlarger_m', None)),
             getattr(self, 'slider_yellow', getattr(self, 'slider_enlarger_y', None)),
             getattr(self, 'slider_print_exp', None),
+            getattr(self, 'slider_preflash', None),
         ]
         for s in enlarger_sliders:
             if s is not None:
                 s.setEnabled(not is_pos)
                 if is_pos:
-                    s.setToolTip("反转正片无暗房放大机滤镜环节")
+                    s.setToolTip("反转正片无暗房放大机滤镜及曝光预闪环节")
                 else:
                     s.setToolTip(getattr(s, "default_tooltip", ""))
 
@@ -6846,6 +7289,8 @@ class DarkroomMainWindow(QMainWindow):
             self._live_thumb_timer.stop()
         if hasattr(self, '_cards_debounce_timer') and self._cards_debounce_timer.isActive():
             self._cards_debounce_timer.stop()
+        if hasattr(self, 'thumb_controller') and self.thumb_controller:
+            self.thumb_controller.cancel_card_preview_worker()
 
         # If user clicks the currently active photo and it is already fully loaded, avoid redundant reload
         if photo_id == self.active_photo_id:
@@ -6859,11 +7304,22 @@ class DarkroomMainWindow(QMainWindow):
         self.set_view_mode(0)
 
         self._is_switching_photo = True
+        if hasattr(self, 'thumb_controller') and self.thumb_controller:
+            self.thumb_controller.cancel_card_preview_worker()
         try:
             # 1. Update in-memory state and ensure SDC is saved for previous photo ONLY if genuinely dirty
             if self.active_photo_id:
                 prev_photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
                 if prev_photo and getattr(self, "_photo_is_dirty", False):
+                    # If in crop workspace, user has not clicked apply, discard unapplied crop for previous photo
+                    if getattr(self.canvas, "is_crop_editing", False):
+                        old_c = prev_photo.get("crop")
+                        if not old_c and isinstance(prev_photo.get("params"), dict):
+                            old_c = prev_photo["params"].get("crop")
+                        if old_c:
+                            self.current_params["crop"] = dict(old_c)
+                        else:
+                            self.current_params.pop("crop", None)
                     self._save_current_photo_sdc()
 
             # 2. Find photo entry
@@ -6898,6 +7354,20 @@ class DarkroomMainWindow(QMainWindow):
             base_temp = float(exif_data.get("color_temp", 5500.0) if exif_data else 5500.0)
             base_tint = float(exif_data.get("tint", 1.0) if exif_data else 1.0)
             base_ev = float(photo.get("base_ev", 0.0))
+            if abs(base_ev) < 0.0001:
+                if photo.get("params") and "base_ev" in photo["params"] and abs(float(photo["params"]["base_ev"])) > 0.0001:
+                    base_ev = float(photo["params"]["base_ev"])
+                    photo["base_ev"] = base_ev
+                elif sdc_manager.has_sdc(photo["path"]):
+                    sdc_chk = sdc_manager.load_sdc(photo["path"])
+                    if sdc_chk and sdc_chk.get("params", {}).get("base_ev"):
+                        base_ev = float(sdc_chk["params"]["base_ev"])
+                        photo["base_ev"] = base_ev
+                if abs(base_ev) < 0.0001:
+                    c_chk = session_cache_manager.get_photo_cache(photo["path"])
+                    if c_chk and c_chk.get("base_ev"):
+                        base_ev = float(c_chk["base_ev"])
+                        photo["base_ev"] = base_ev
             self._active_base_temp = base_temp
             self._active_base_tint = base_tint
             self._active_base_ev = base_ev
@@ -6919,6 +7389,8 @@ class DarkroomMainWindow(QMainWindow):
                 base_dict["print_mode"] = self.current_print_mode
                 base_dict["base_temp"] = base_temp
                 base_dict["base_tint"] = base_tint
+                if "base_ev" in photo["params"] and abs(float(photo["params"]["base_ev"])) > 0.0001:
+                    base_ev = float(photo["params"]["base_ev"])
                 base_dict["base_ev"] = base_ev
                 self.current_params.clear()
                 self.current_params.update(base_dict)
@@ -6943,6 +7415,8 @@ class DarkroomMainWindow(QMainWindow):
                         base_dict["tint"] = base_tint
                     base_dict["base_temp"] = base_temp
                     base_dict["base_tint"] = base_tint
+                    if "base_ev" in loaded_params and abs(float(loaded_params["base_ev"])) > 0.0001:
+                        base_ev = float(loaded_params["base_ev"])
                     base_dict["base_ev"] = base_ev
                     self.current_params.clear()
                     self.current_params.update(base_dict)
@@ -6967,6 +7441,12 @@ class DarkroomMainWindow(QMainWindow):
                 cached_prev = session_cache_manager.get_photo_preview(photo["path"])
                 if cached_prev is not None:
                     photo["float_img"] = cached_prev
+                    if abs(base_ev) < 0.0001 and photo.get("is_raw", True):
+                        base_ev = SpektraEngine.calculate_auto_exposure_ev(cached_prev)
+                        photo["base_ev"] = base_ev
+                        self._active_base_ev = base_ev
+                        self.current_params["base_ev"] = base_ev
+                        session_cache_manager.save_photo_cache(photo["path"], photo, save_preview=False)
                 else:
                     if os.environ.get("FAST_TEST"):
                         res = self.engine.load_image(photo["path"])
@@ -7021,7 +7501,7 @@ class DarkroomMainWindow(QMainWindow):
                     self.set_app_status(f"底片已就绪: {fn}", spinning=False, timeout_ms=2000)
 
             self._manage_photo_memory_lru(photo_id)
-            self.canvas.update_params(**self.current_params)
+            self._sync_canvas_params()
             self._update_all_sliders_from_params()
 
             # 6. Apply print mode, film & paper LUT in a single unified, instant pass
@@ -7043,6 +7523,7 @@ class DarkroomMainWindow(QMainWindow):
 
             # 7. Update status text with 1:1 image native pixel scale percentage
             self._update_photo_info_display()
+            self._update_zoom_buttons()
 
             # 8. Update live thumbnails on Film & Paper cards and filmstrip
             self._current_photo_thumb = photo.get("thumbnail_rgb")
@@ -7110,6 +7591,32 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, 'engine'):
                 self.engine.current_file_path = photo["path"]
                 self.engine.active_photo_id = photo_id
+
+            # 10. If currently in crop workspace, reset crop box to original ratio full screen for new photo
+            if getattr(self.canvas, "is_crop_editing", False):
+                default_crop = {
+                    "enabled": False,
+                    "x": 0.0,
+                    "y": 0.0,
+                    "w": 1.0,
+                    "h": 1.0,
+                    "angle": 0.0,
+                    "rot_90": 0,
+                    "flip_h": False,
+                    "flip_v": False,
+                    "aspect_ratio": "original",
+                    "is_portrait": False
+                }
+                self.current_params["crop"] = dict(default_crop)
+                self.canvas.params["crop"] = dict(default_crop)
+                if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
+                    self.canvas.crop_overlay.start_crop_session(dict(default_crop))
+                if hasattr(self, "crop_sidebar") and self.crop_sidebar:
+                    self.crop_sidebar.sync_from_overlay(dict(default_crop))
+                self.canvas.zoom = 0.90
+                self.canvas.pan_x = 0.0
+                self.canvas.pan_y = 0.0
+                self.canvas.update()
         finally:
             self._is_switching_photo = False
             self._schedule_session_focus_save(300)
@@ -7166,14 +7673,20 @@ class DarkroomMainWindow(QMainWindow):
                 th_qimg = QImage(th_c.data, th_c.shape[1], th_c.shape[0], th_c.shape[1] * 3, QImage.Format.Format_RGB888).copy()
                 self.filmstrip.update_photo_thumbnail(photo_id, QPixmap.fromImage(th_qimg))
             self.filmstrip.update_photo_data(photo_id, target_photo)
+            try:
+                session_cache_manager.save_photo_cache(photo_path, target_photo, save_preview=False)
+            except Exception:
+                pass
 
         # Only update GUI if this is still the active photo
         if self.active_photo_id == photo_id:
             fn = target_photo.get("filename", os.path.basename(photo_path)) if target_photo else os.path.basename(photo_path)
             try:
                 if "base_ev" in res:
-                    self._active_base_ev = float(res["base_ev"])
-                    self.current_params["base_ev"] = self._active_base_ev
+                    new_bev = float(res["base_ev"])
+                    if "base_ev" not in self.current_params or abs(float(self.current_params.get("base_ev", 0.0))) < 0.0001:
+                        self._active_base_ev = new_bev
+                        self.current_params["base_ev"] = new_bev
                 if res.get("exif"):
                     exif_meta = res["exif"]
                     self._active_base_temp = float(exif_meta.get("color_temp", 5500.0))
@@ -7181,23 +7694,26 @@ class DarkroomMainWindow(QMainWindow):
                     self.current_params["base_temp"] = self._active_base_temp
                     self.current_params["base_tint"] = self._active_base_tint
                     if not self.current_params.get("custom_wb", False):
-                        self.current_params["color_temp"] = self._active_base_temp
-                        self.current_params["tint"] = self._active_base_tint
+                        if "color_temp" not in self.current_params or self.current_params.get("color_temp") == 5500.0:
+                            self.current_params["color_temp"] = self._active_base_temp
+                        if "tint" not in self.current_params or self.current_params.get("tint") == 1.0:
+                            self.current_params["tint"] = self._active_base_tint
                         if hasattr(self, "slider_temp"):
                             self.slider_temp.set_default_value(self._active_base_temp)
                             self._is_updating_sliders = True
                             try:
-                                self.slider_temp.set_value(self._active_base_temp)
+                                self.slider_temp.set_value(self.current_params["color_temp"])
                             finally:
                                 self._is_updating_sliders = False
                         if hasattr(self, "slider_tint"):
                             self.slider_tint.set_default_value(self._active_base_tint)
                             self._is_updating_sliders = True
                             try:
-                                self.slider_tint.set_value(self._active_base_tint)
+                                self.slider_tint.set_value(self.current_params["tint"])
                             finally:
                                 self._is_updating_sliders = False
-                    self.canvas.update_params(**self.current_params)
+
+                self._sync_canvas_params()
 
                 m_w = target_photo.get("width") or (target_photo.get("meta", {}).get("width") if isinstance(target_photo.get("meta"), dict) else None) if target_photo else None
                 m_h = target_photo.get("height") or (target_photo.get("meta", {}).get("height") if isinstance(target_photo.get("meta"), dict) else None) if target_photo else None
@@ -7224,6 +7740,34 @@ class DarkroomMainWindow(QMainWindow):
     def _update_card_live_thumbnails(self, thumb_data, do_films=True, do_papers=True):
         if thumb_data is None:
             return
+
+        # Synchronize candidate card previews with active crop box and rotation
+        crop = self.current_params.get("crop", {})
+        if isinstance(crop, dict) and crop.get("enabled", False) and thumb_data is not None:
+            try:
+                x = max(0.0, min(0.99, float(crop.get("x", 0.0))))
+                y = max(0.0, min(0.99, float(crop.get("y", 0.0))))
+                w = max(0.01, min(1.0 - x, float(crop.get("w", 1.0))))
+                h = max(0.01, min(1.0 - y, float(crop.get("h", 1.0))))
+                ih, iw = thumb_data.shape[:2]
+                x0 = int(round(x * iw))
+                y0 = int(round(y * ih))
+                w0 = max(1, int(round(w * iw)))
+                h0 = max(1, int(round(h * ih)))
+                thumb_data = thumb_data[y0:y0+h0, x0:x0+w0]
+                rot_90 = int(crop.get("rot_90", 0)) % 360
+                if rot_90 == 90:
+                    thumb_data = cv2.rotate(thumb_data, cv2.ROTATE_90_CLOCKWISE)
+                elif rot_90 == 180:
+                    thumb_data = cv2.rotate(thumb_data, cv2.ROTATE_180)
+                elif rot_90 == 270:
+                    thumb_data = cv2.rotate(thumb_data, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                if crop.get("flip_h", False):
+                    thumb_data = cv2.flip(thumb_data, 1)
+                if crop.get("flip_v", False):
+                    thumb_data = cv2.flip(thumb_data, 0)
+            except Exception as e:
+                logger.error(f"Error cropping thumbnail for card previews: {e}")
 
         if do_films:
             # Prioritize filter-matched cards currently visible to user (e.g. 11 cine cards instead of all 51)
@@ -7354,6 +7898,53 @@ class DarkroomMainWindow(QMainWindow):
             self.filmstrip.remove_multiple_photos(photo_ids, next_active_id=next_id)
             self.on_switch_photo(next_id)
 
+    def on_delete_multiple_photos(self, photo_ids):
+        """Prompt user with confirmation warning and delete selected photo files to Recycle Bin."""
+        if not photo_ids:
+            return
+        target_photos = [p for p in self.photos if p and p.get("id") in photo_ids]
+        if not target_photos:
+            return
+
+        target_names = [p.get("filename") or os.path.basename(p.get("path", "")) for p in target_photos]
+
+        from ui.delete_photo_dialog import DeletePhotoConfirmDialog
+        dlg = DeletePhotoConfirmDialog(target_names, self)
+        if dlg.exec() != DeletePhotoConfirmDialog.CONFIRMED:
+            return
+
+        from core.path_utils import send_to_recycle_bin
+        files_to_recycle = []
+        for p in target_photos:
+            fpath = p.get("path")
+            if fpath and os.path.isfile(fpath):
+                files_to_recycle.append(fpath)
+                sdc_path = fpath + ".sdc"
+                if os.path.isfile(sdc_path):
+                    files_to_recycle.append(sdc_path)
+
+        recycled_ok = send_to_recycle_bin(files_to_recycle)
+        if not recycled_ok:
+            self.set_app_status("删除失败：无法将文件移至回收站", timeout_ms=3000)
+            return
+
+        from core import session_cache_manager
+        for p in target_photos:
+            fpath = p.get("path")
+            if fpath:
+                session_cache_manager.invalidate_photo_cache(fpath)
+
+        self.on_remove_multiple_photos(photo_ids)
+        self.set_app_status(f"已将 {count} 个底片文件移至回收站", timeout_ms=3000)
+
+    def action_clear_sdc_active(self):
+        """Action handler for menu bar: Delete SDC sidecar recipe and revert photo(s) to pristine RAW."""
+        sel_ids = self.filmstrip.get_selected_photo_ids() if hasattr(self, 'filmstrip') else []
+        if not sel_ids and self.active_photo_id:
+            sel_ids = [self.active_photo_id]
+        if sel_ids:
+            self.on_clear_sdc_config(sel_ids)
+
     def on_clear_sdc_config(self, photo_ids):
         """Delete .sdc configuration sidecar, revert filmstrip thumbnails to raw base,
         and thoroughly reset sidebar cards to clean brand color pills.
@@ -7409,6 +8000,19 @@ class DarkroomMainWindow(QMainWindow):
         self._push_raw_state(pre_state)
 
         # 2. Clear .sdc and reset state for all target photos
+        default_crop = {
+            "enabled": False,
+            "x": 0.0,
+            "y": 0.0,
+            "w": 1.0,
+            "h": 1.0,
+            "angle": 0.0,
+            "rot_90": 0,
+            "flip_h": False,
+            "flip_v": False,
+            "aspect_ratio": "original",
+            "is_portrait": False
+        }
         active_cleared = False
         post_photos = {}
         for p in target_photos:
@@ -7420,6 +8024,7 @@ class DarkroomMainWindow(QMainWindow):
             p["film_profile"] = "none"
             p["paper_profile"] = "none"
             p["print_mode"] = "scan"
+            p["crop"] = dict(default_crop)
             p["is_dirty"] = False
             p["is_edited"] = False
 
@@ -7428,6 +8033,7 @@ class DarkroomMainWindow(QMainWindow):
                 self.thumb_controller.revert_photo_to_raw(p, self.filmstrip)
             if hasattr(self, 'filmstrip'):
                 self.filmstrip.set_photo_dirty(pid, False)
+                self.filmstrip.set_photo_crop(pid, False)
 
             if pid == self.active_photo_id:
                 active_cleared = True
@@ -7446,6 +8052,9 @@ class DarkroomMainWindow(QMainWindow):
 
         # 3. If active photo was cleared, reset live controls, canvas, and cards
         if active_cleared and self.active_photo_id:
+            if getattr(self.canvas, "is_crop_editing", False):
+                self._exit_crop_workspace()
+
             self._photo_is_dirty = False
             self.current_film_stock = "none"
             self.current_paper_stock = "none"
@@ -7457,6 +8066,7 @@ class DarkroomMainWindow(QMainWindow):
             self.current_params.clear()
             self.current_params.update(defaults)
             self.current_params["print_mode"] = "scan"
+            self.current_params["crop"] = dict(default_crop)
 
             active_p = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
             if active_p:
@@ -7464,20 +8074,22 @@ class DarkroomMainWindow(QMainWindow):
                 active_p["film_profile"] = "none"
                 active_p["paper_profile"] = "none"
                 active_p["print_mode"] = "scan"
+                active_p["crop"] = dict(default_crop)
                 active_p["is_dirty"] = False
                 active_p["is_edited"] = False
+
+            if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
+                self.canvas.crop_overlay.reset_all_crop()
+
+            self.canvas.update_params(crop=dict(default_crop))
+            self.canvas.fit_to_view(animate=False)
 
             if self.active_photo_id in post_photos:
                 post_photos[self.active_photo_id]["params"] = None
 
             self._update_all_sliders_from_params()
             self._update_reset_buttons_state()
-            self._update_diffusion_ui_state()
-
-            self.canvas.update_params(**self.current_params)
-            lut_3d = self.engine.get_3d_lut("none", "none", lut_size=33, params_dict=self.current_params)
-            self.canvas.set_lut(lut_3d)
-            self._schedule_histogram_update()
+            self._sync_full_params_to_pipeline(fit_crop_if_changed=True)
             self._update_window_title()
 
             for sid, card in self.film_cards.items():
@@ -7504,6 +8116,120 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已清除暗房配置并重置为原生底片", timeout_ms=3000)
         else:
             self.set_app_status(f"已清除 {len(id_set)} 项底片配置并重置为原生底片", timeout_ms=3000)
+
+    def action_clear_active_crop(self):
+        """Clear crop on the currently active photo (from canvas context menu)."""
+        if not self.active_photo_id:
+            return
+        self.on_clear_crop_photos([self.active_photo_id])
+
+    def on_clear_crop_photos(self, photo_ids):
+        """Clear crop configuration for target photo(s) without altering develop parameters."""
+        id_set = set(photo_ids)
+        target_photos = [p for p in self.photos if p.get("id") in id_set]
+        if not target_photos:
+            return
+
+        default_crop = {
+            "enabled": False,
+            "x": 0.0,
+            "y": 0.0,
+            "w": 1.0,
+            "h": 1.0,
+            "angle": 0.0,
+            "rot_90": 0,
+            "flip_h": False,
+            "flip_v": False,
+            "aspect_ratio": "original",
+            "is_portrait": False
+        }
+
+        active_cleared = False
+        for p in target_photos:
+            pid = p["id"]
+            if "params" not in p or not isinstance(p["params"], dict):
+                p["params"] = {}
+            p["params"]["crop"] = dict(default_crop)
+            p["crop"] = dict(default_crop)
+
+            is_film = p.get("film_profile", "none") not in ("none", "", None)
+            is_paper = p.get("paper_profile", "none") not in ("none", "", None)
+            is_params = self._is_params_modified(p["params"], p)
+            has_other_edits = is_film or is_paper or is_params
+
+            p_path = p.get("path", "")
+            if has_other_edits:
+                p["is_dirty"] = True
+                p["is_edited"] = True
+                if p_path:
+                    try:
+                        cur_thumb = p.get("graded_thumbnail_rgb")
+                        if cur_thumb is None:
+                            cur_thumb = p.get("thumbnail_rgb")
+                        sdc_manager.save_sdc(
+                            p_path,
+                            p.get("film_profile", "none"),
+                            p.get("paper_profile", "none"),
+                            p["params"],
+                            thumbnail_rgb=cur_thumb,
+                            print_mode=p.get("print_mode", "optical")
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to save SDC for {p_path}: {e}")
+            else:
+                p["is_dirty"] = False
+                p["is_edited"] = False
+                if p_path and sdc_manager.has_sdc(p_path):
+                    try:
+                        sdc_manager.delete_sdc(p_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete SDC for {p_path}: {e}")
+
+            if hasattr(self, "filmstrip"):
+                self.filmstrip.set_photo_crop(pid, dict(default_crop))
+                self.filmstrip.set_photo_dirty(pid, p["is_dirty"])
+
+            if pid == self.active_photo_id:
+                active_cleared = True
+            else:
+                if hasattr(self, "thumb_controller"):
+                    if not has_other_edits:
+                        self.thumb_controller.revert_photo_to_raw(p, self.filmstrip)
+                    else:
+                        raw_thumb = self.thumb_controller.get_raw_thumbnail(p)
+                        if raw_thumb is not None and raw_thumb.size > 0:
+                            graded = self.thumb_controller.grade_thumbnail_fast(
+                                raw_thumb,
+                                film=p.get("film_profile", "none"),
+                                paper=p.get("paper_profile", "none"),
+                                params=p.get("params", {})
+                            )
+                            self.thumb_controller.update_graded_thumbnail(p, graded, self.filmstrip)
+
+        if active_cleared:
+            if getattr(self.canvas, "is_crop_editing", False):
+                self._exit_crop_workspace()
+
+            self.current_params["crop"] = dict(default_crop)
+            if hasattr(self.canvas, "params") and isinstance(self.canvas.params, dict):
+                self.canvas.params["crop"] = dict(default_crop)
+            if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
+                self.canvas.crop_overlay.reset_all_crop()
+
+            self.canvas.update_params(crop=dict(default_crop))
+            self.canvas.fit_to_view(animate=False)
+            self._mark_current_photo_dirty()
+            self._save_current_photo_sdc()
+            self.push_undo_state()
+            self._update_active_thumbnails()
+            if hasattr(self, '_cards_debounce_timer'):
+                self._cards_debounce_timer.start(100)
+            else:
+                self._refresh_card_previews()
+
+        count = len(target_photos)
+        msg = "已清除裁切" if count == 1 else f"已清除 {count} 项底片裁切"
+        self.set_app_status(msg, timeout_ms=1500)
 
     def action_clear_photos(self):
         """Completely flush bottom filmstrip, engine session, and canvas without exiting to start screen."""
@@ -7647,7 +8373,7 @@ class DarkroomMainWindow(QMainWindow):
         task = ExportTask(tid, os.path.basename(out_path),
                           self._current_photo_path, out_path, export_params, thumbnail=pix)
         self.export_queue.enqueue(task)
-        self._set_export_status("已加入冲印队列，正在后台冲印...", state="busy")
+        self._set_export_status("已加入扫描队列，正在后台扫描...", state="busy")
 
     def action_export_darkroom_lut(self):
         """Export full darkroom physical color profile into standard 3D .cube LUT."""
@@ -7819,7 +8545,7 @@ class DarkroomMainWindow(QMainWindow):
             for t in new_tasks:
                 self.export_queue.enqueue(t)
 
-        self._set_export_status(f"已将 {enqueued_count} 张底片加入冲印队列", state="busy")
+        self._set_export_status(f"已将 {enqueued_count} 张底片加入扫描队列", state="busy")
 
     def _create_dark_message_box(self, title, text, icon=QMessageBox.Icon.Information):
         mb = QMessageBox(self)
@@ -8077,7 +8803,10 @@ class DarkroomMainWindow(QMainWindow):
             self._saved_normal_geo = self.geometry()
             self.showMaximized()
         if hasattr(self, 'btn_max'):
-            self.btn_max.set_maximized_state(self.isMaximized())
+            is_max = self.isMaximized()
+            self.btn_max.set_maximized_state(is_max)
+            if hasattr(self, 'btn_close'):
+                self.btn_close.set_maximized_state(is_max)
 
     def showMinimized(self):
         # Native DWM minimize animation

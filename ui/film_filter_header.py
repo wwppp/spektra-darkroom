@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 from core.path_utils import get_icon_path
 from ui.theme_manager import theme_manager
+from ui.window_utils import get_icon
 
 
 class FlowLayout(QLayout):
@@ -146,13 +147,9 @@ class FilmFilterHeader(QWidget):
         self.search_box.setClearButtonEnabled(True)
         self.search_box.setFixedHeight(22)
 
-        icon_path = get_icon_path("search.png")
-        if os.path.exists(icon_path):
-            pix = QPixmap(icon_path)
-            scaled_pix = pix.scaled(13, 13, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            search_icon = QIcon(scaled_pix)
-            self.search_action = QAction(search_icon, "", self.search_box)
-            self.search_box.addAction(self.search_action, QLineEdit.ActionPosition.LeadingPosition)
+        search_icon = get_icon("search.png", target_size=(13, 13))
+        self.search_action = QAction(search_icon, "", self.search_box)
+        self.search_box.addAction(self.search_action, QLineEdit.ActionPosition.LeadingPosition)
 
         self.search_box.setStyleSheet("""
             QLineEdit {
@@ -247,6 +244,8 @@ class FilmFilterHeader(QWidget):
     def apply_theme(self):
         """Update header search and category pill styles according to active theme."""
         is_dark = theme_manager.is_dark()
+        if hasattr(self, "search_action"):
+            self.search_action.setIcon(get_icon("search.png", target_size=(13, 13), is_dark=is_dark))
         if is_dark:
             self.lbl_title.setStyleSheet("color: #f59e0b; font-size: 11.5px; font-weight: bold;")
             self.search_box.setStyleSheet("""

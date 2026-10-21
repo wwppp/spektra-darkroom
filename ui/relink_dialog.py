@@ -294,10 +294,10 @@ class RelinkMediaDialog(QDialog):
             self.table.setItem(row, 1, item_path)
 
             if resolved and os.path.exists(resolved):
-                item_st = QTableWidgetItem("✓ 已重新关联")
+                item_st = QTableWidgetItem("已重新关联")
                 item_st.setForeground(QColor("#10b981"))
             else:
-                item_st = QTableWidgetItem("✕ 未找到")
+                item_st = QTableWidgetItem("未找到")
                 item_st.setForeground(QColor("#ef4444"))
             item_st.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 2, item_st)
@@ -347,7 +347,7 @@ class RelinkMediaDialog(QDialog):
 
         total_missing = len(self.missing_entries)
         if relinked_count == total_missing:
-            self.lbl_status.setText(f"✓ 全部 {relinked_count} 张底片已成功重新关联！")
+            self.lbl_status.setText(f"全部 {relinked_count} 张底片已成功重新关联！")
             self.btn_browse.setText("确定载入")
             self.btn_browse.clicked.disconnect()
             self.btn_browse.clicked.connect(self._on_confirm_relink)

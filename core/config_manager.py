@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     "preferences": {
         "gpu_acceleration": True,
         "theme": "adobe_dark",
-        "ui_theme": "dark",
+        "ui_theme": "system",
         "canvas_background": "dark_gray",
         "default_export_dir": "",
         "export_format": "jpeg",

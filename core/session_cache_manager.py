@@ -82,14 +82,15 @@ def get_cache_dir() -> str:
     return cache_dir
 
 
-def get_cache_key(file_path: str) -> str:
+def get_cache_key(file_path: str, normcase: bool = True) -> str:
     """Generates a stable cache key based on absolute path, file modification time, and size.
     Notice: SDC sidecar mtime is intentionally excluded because RAW sensor demosaicing data
     (float_img / raw_preview) is strictly invariant to SDC grading parameter changes.
     """
-    norm_path = os.path.abspath(file_path)
+    abs_p = os.path.abspath(file_path)
+    norm_path = os.path.normcase(abs_p) if normcase else abs_p
     try:
-        st = os.stat(norm_path)
+        st = os.stat(abs_p)
         mtime = st.st_mtime
         size = st.st_size
     except OSError:
@@ -152,7 +153,7 @@ def _get_entry_path_with_fallback(file_path: str) -> tuple[str | None, str | Non
     """Returns (entry_path, key) for a file, supporting seamless fallback to legacy/alternate keys."""
     if not file_path or not os.path.isfile(file_path):
         return None, None
-    key = get_cache_key(file_path)
+    key = get_cache_key(file_path, normcase=True)
     cache_dir = get_cache_dir()
     primary_entry = os.path.join(cache_dir, f"{key}_entry.npz")
     primary_prev = os.path.join(cache_dir, f"{key}_preview.npy")
@@ -162,6 +163,20 @@ def _get_entry_path_with_fallback(file_path: str) -> tuple[str | None, str | Non
         if not os.path.isfile(primary_prev):
             _migrate_preview_from_index(norm_path, primary_prev, cache_dir)
         return primary_entry, key
+
+    # Check un-normcased legacy key if case differed on Windows
+    legacy_key = get_cache_key(file_path, normcase=False)
+    if legacy_key != key:
+        legacy_entry = os.path.join(cache_dir, f"{legacy_key}_entry.npz")
+        if os.path.isfile(legacy_entry):
+            try:
+                shutil.copy2(legacy_entry, primary_entry)
+                legacy_prev = os.path.join(cache_dir, f"{legacy_key}_preview.npy")
+                if os.path.isfile(legacy_prev) and not os.path.isfile(primary_prev):
+                    shutil.copy2(legacy_prev, primary_prev)
+            except Exception:
+                pass
+            return primary_entry, key
 
     # Check fallback index for existing cached entry matching path
     _ensure_path_cache_index()
