@@ -695,7 +695,7 @@ class FilmstripWidget(QWidget):
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(10, 6, 10, 6)
+        main_layout.setContentsMargins(10, 2, 10, 4)
         main_layout.setSpacing(8)
         self.setStyleSheet("background: #0d0e12; border: none;")
 
@@ -704,7 +704,7 @@ class FilmstripWidget(QWidget):
         self.track_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.track_container.customContextMenuRequested.connect(self._on_blank_context_menu)
         track_layout = QVBoxLayout(self.track_container)
-        track_layout.setContentsMargins(6, 4, 6, 4)
+        track_layout.setContentsMargins(6, 2, 6, 3)
         track_layout.setSpacing(0)
 
         # Scroll area for items (Smooth non-linear scrolling within the concave track)

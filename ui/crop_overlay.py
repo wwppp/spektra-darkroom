@@ -676,6 +676,8 @@ class CropOverlayWidget(QWidget):
     def set_aspect_ratio_mode(self, mode: str):
         self.aspect_ratio_mode = mode
         if mode == "free":
+            if abs(self.crop_angle) > 0.01:
+                self._clamp_to_rotated_bounds()
             if hasattr(self.canvas, "params") and isinstance(self.canvas.params, dict):
                 self.canvas.params["crop"] = self.get_crop_dict()
                 self.canvas.update()
@@ -975,6 +977,8 @@ class CropOverlayWidget(QWidget):
             if handle:
                 self._active_handle = handle
                 self._drag_start_pos = pos
+                self._drag_last_pos = pos
+                self._drag_accum_angle = float(self.crop_angle)
                 self._drag_start_rect = (self.crop_x, self.crop_y, self.crop_w, self.crop_h)
                 self._drag_start_angle = self.crop_angle
                 self._drag_start_pan = (self.canvas.pan_x, self.canvas.pan_y)
@@ -993,7 +997,7 @@ class CropOverlayWidget(QWidget):
         """Mathematical fixed-anchor resize for corners and edges.
         When dragging any corner, the opposite corner remains strictly stationary.
         Automatically switches orientation (landscape/portrait) only when dragging corners past threshold.
-        Stretches stop cleanly when any boundary [0.0, 1.0] is reached without breaking the aspect ratio.
+        Stretches stop cleanly when any boundary is reached without breaking aspect ratio or protruding outside rotated quad.
         """
         sx, sy, sw, sh = self._drag_start_rect
         img_w, img_h = self._get_effective_image_size()
@@ -1008,15 +1012,8 @@ class CropOverlayWidget(QWidget):
         sa = math.sin(-rad)
 
         def get_anchor_w_max(ax, ay, sign_x, sign_y, k_ratio):
-            uc0 = ax - 0.5
-            vc0 = ay - 0.5
-            u_p0 = uc0 * ca - vc0 * (sa / A)
-            v_p0 = uc0 * A * sa + vc0 * ca
-
-            Du = 0.5 * (sign_x * ca - sign_y * sa / (A * k_ratio))
-            Dv = 0.5 * (sign_x * A * sa + sign_y * ca / k_ratio)
-            Eu = 0.5 * (abs(ca) + abs(sa) / (A * k_ratio))
-            Ev = 0.5 * (A * abs(sa) + abs(ca) / k_ratio)
+            u_0 = 0.5 + (ax - 0.5) * ca - (ay - 0.5) * (sa / A)
+            v_0 = 0.5 + (ax - 0.5) * A * sa + (ay - 0.5) * ca
 
             bounds = [1.0]
             if sign_x > 0:
@@ -1028,26 +1025,29 @@ class CropOverlayWidget(QWidget):
             else:
                 bounds.append(ay * k_ratio)
 
-            if Du + Eu > 1e-6:
-                bounds.append((0.5 - u_p0) / (Du + Eu))
-            if Eu - Du > 1e-6:
-                bounds.append((0.5 + u_p0) / (Eu - Du))
-            if Dv + Ev > 1e-6:
-                bounds.append((0.5 - v_p0) / (Dv + Ev))
-            if Ev - Dv > 1e-6:
-                bounds.append((0.5 + v_p0) / (Ev - Dv))
+            if abs(self.crop_angle) > 0.01:
+                corner_coeffs = [
+                    (0.0, 0.0),
+                    (float(sign_x), 0.0),
+                    (0.0, float(sign_y)),
+                    (float(sign_x), float(sign_y))
+                ]
+                for cx_i, cy_i in corner_coeffs:
+                    Mu = cx_i * ca - cy_i * sa / (A * k_ratio)
+                    Mv = cx_i * A * sa + cy_i * ca / k_ratio
+                    if Mu > 1e-7:
+                        bounds.append((1.0 - u_0) / Mu)
+                    elif Mu < -1e-7:
+                        bounds.append(-u_0 / Mu)
+                    if Mv > 1e-7:
+                        bounds.append((1.0 - v_0) / Mv)
+                    elif Mv < -1e-7:
+                        bounds.append(-v_0 / Mv)
             return max(0.05, min(bounds))
 
         def get_edge_h_max(cx, ay, sign_y, k_ratio):
-            uc0 = cx - 0.5
-            vc0 = ay - 0.5
-            u_p0 = uc0 * ca - vc0 * (sa / A)
-            v_p0 = uc0 * A * sa + vc0 * ca
-
-            Du = -0.5 * sign_y * sa / A
-            Dv = 0.5 * sign_y * ca
-            Eu = 0.5 * (k_ratio * abs(ca) + abs(sa) / A)
-            Ev = 0.5 * (k_ratio * A * abs(sa) + abs(ca))
+            u_0 = 0.5 + (cx - 0.5) * ca - (ay - 0.5) * (sa / A)
+            v_0 = 0.5 + (cx - 0.5) * A * sa + (ay - 0.5) * ca
 
             bounds = [1.0]
             if sign_y > 0:
@@ -1057,26 +1057,29 @@ class CropOverlayWidget(QWidget):
             max_w_sym = 2.0 * min(cx, 1.0 - cx)
             bounds.append(max_w_sym / k_ratio)
 
-            if Du + Eu > 1e-6:
-                bounds.append((0.5 - u_p0) / (Du + Eu))
-            if Eu - Du > 1e-6:
-                bounds.append((0.5 + u_p0) / (Eu - Du))
-            if Dv + Ev > 1e-6:
-                bounds.append((0.5 - v_p0) / (Dv + Ev))
-            if Ev - Dv > 1e-6:
-                bounds.append((0.5 + v_p0) / (Ev - Dv))
+            if abs(self.crop_angle) > 0.01:
+                corner_coeffs = [
+                    (-0.5 * k_ratio, 0.0),
+                    (0.5 * k_ratio, 0.0),
+                    (-0.5 * k_ratio, float(sign_y)),
+                    (0.5 * k_ratio, float(sign_y))
+                ]
+                for cx_i, cy_i in corner_coeffs:
+                    Mu = cx_i * ca - cy_i * sa / A
+                    Mv = cx_i * A * sa + cy_i * ca
+                    if Mu > 1e-7:
+                        bounds.append((1.0 - u_0) / Mu)
+                    elif Mu < -1e-7:
+                        bounds.append(-u_0 / Mu)
+                    if Mv > 1e-7:
+                        bounds.append((1.0 - v_0) / Mv)
+                    elif Mv < -1e-7:
+                        bounds.append(-v_0 / Mv)
             return max(0.05, min(bounds))
 
         def get_edge_w_max(ax, cy, sign_x, k_ratio):
-            uc0 = ax - 0.5
-            vc0 = cy - 0.5
-            u_p0 = uc0 * ca - vc0 * (sa / A)
-            v_p0 = uc0 * A * sa + vc0 * ca
-
-            Du = 0.5 * sign_x * ca
-            Dv = 0.5 * sign_x * A * sa
-            Eu = 0.5 * (abs(ca) + abs(sa) / (A * k_ratio))
-            Ev = 0.5 * (A * abs(sa) + abs(ca) / k_ratio)
+            u_0 = 0.5 + (ax - 0.5) * ca - (cy - 0.5) * (sa / A)
+            v_0 = 0.5 + (ax - 0.5) * A * sa + (cy - 0.5) * ca
 
             bounds = [1.0]
             if sign_x > 0:
@@ -1086,23 +1089,67 @@ class CropOverlayWidget(QWidget):
             max_h_sym = 2.0 * min(cy, 1.0 - cy)
             bounds.append(max_h_sym * k_ratio)
 
-            if Du + Eu > 1e-6:
-                bounds.append((0.5 - u_p0) / (Du + Eu))
-            if Eu - Du > 1e-6:
-                bounds.append((0.5 + u_p0) / (Eu - Du))
-            if Dv + Ev > 1e-6:
-                bounds.append((0.5 - v_p0) / (Dv + Ev))
-            if Ev - Dv > 1e-6:
-                bounds.append((0.5 + v_p0) / (Ev - Dv))
+            if abs(self.crop_angle) > 0.01:
+                corner_coeffs = [
+                    (0.0, -0.5 / k_ratio),
+                    (0.0, 0.5 / k_ratio),
+                    (float(sign_x), -0.5 / k_ratio),
+                    (float(sign_x), 0.5 / k_ratio)
+                ]
+                for cx_i, cy_i in corner_coeffs:
+                    Mu = cx_i * ca - cy_i * sa / A
+                    Mv = cx_i * A * sa + cy_i * ca
+                    if Mu > 1e-7:
+                        bounds.append((1.0 - u_0) / Mu)
+                    elif Mu < -1e-7:
+                        bounds.append(-u_0 / Mu)
+                    if Mv > 1e-7:
+                        bounds.append((1.0 - v_0) / Mv)
+                    elif Mv < -1e-7:
+                        bounds.append(-v_0 / Mv)
             return max(0.05, min(bounds))
+
+        def clamp_free_corner(ax, ay, raw_tx, raw_ty, sign_x, sign_y):
+            if sign_x < 0:
+                tx_c = max(0.0, min(ax - 0.05, raw_tx))
+            else:
+                tx_c = min(1.0, max(ax + 0.05, raw_tx))
+            if sign_y < 0:
+                ty_c = max(0.0, min(ay - 0.05, raw_ty))
+            else:
+                ty_c = min(1.0, max(ay + 0.05, raw_ty))
+
+            if abs(self.crop_angle) < 0.01:
+                return tx_c, ty_c
+
+            dx_c = tx_c - ax
+            dy_c = ty_c - ay
+            u_0 = 0.5 + (ax - 0.5) * ca - (ay - 0.5) * (sa / A)
+            v_0 = 0.5 + (ax - 0.5) * A * sa + (ay - 0.5) * ca
+
+            coeffs = [(1.0, 1.0), (0.0, 1.0), (1.0, 0.0)]
+            t_max = 1.0
+            for cx_i, cy_i in coeffs:
+                Mu = cx_i * dx_c * ca - cy_i * dy_c * (sa / A)
+                Mv = cx_i * dx_c * A * sa + cy_i * dy_c * ca
+                if Mu > 1e-7:
+                    t_max = min(t_max, (1.0 - u_0) / Mu)
+                elif Mu < -1e-7:
+                    t_max = min(t_max, -u_0 / Mu)
+                if Mv > 1e-7:
+                    t_max = min(t_max, (1.0 - v_0) / Mv)
+                elif Mv < -1e-7:
+                    t_max = min(t_max, -v_0 / Mv)
+
+            t_max = max(0.01, min(1.0, t_max))
+            return ax + t_max * dx_c, ay + t_max * dy_c
 
         if handle == "tl":
             # Anchor is bottom-right (sx + sw, sy + sh)
             ax, ay = sx + sw, sy + sh
             tx, ty = sx + dx, sy + dy
             if K is None:
-                new_x = max(0.0, min(ax - 0.05, tx))
-                new_y = max(0.0, min(ay - 0.05, ty))
+                new_x, new_y = clamp_free_corner(ax, ay, tx, ty, -1, -1)
                 new_w = ax - new_x
                 new_h = ay - new_y
             else:
@@ -1122,8 +1169,10 @@ class CropOverlayWidget(QWidget):
             ax, ay = sx, sy
             tx, ty = sx + sw + dx, sy + sh + dy
             if K is None:
-                new_w = max(0.05, min(1.0 - ax, tx - ax))
-                new_h = max(0.05, min(1.0 - ay, ty - ay))
+                new_tx, new_ty = clamp_free_corner(ax, ay, tx, ty, 1, 1)
+                new_w = new_tx - ax
+                new_h = new_ty - ay
+                new_x, new_y = ax, ay
             else:
                 w_max = get_anchor_w_max(ax, ay, 1, 1, K)
                 rw = tx - ax
@@ -1132,15 +1181,19 @@ class CropOverlayWidget(QWidget):
                 w = min(raw_w, w_max)
                 new_w = max(0.05, w)
                 new_h = max(0.05, w / K)
-            self.crop_x, self.crop_y, self.crop_w, self.crop_h = ax, ay, new_w, new_h
+                new_x, new_y = ax, ay
+            self.crop_x, self.crop_y, self.crop_w, self.crop_h = new_x, new_y, new_w, new_h
 
         elif handle == "tr":
             # Anchor is bottom-left (sx, sy + sh)
             ax, ay = sx, sy + sh
             tx, ty = sx + sw + dx, sy + dy
             if K is None:
-                new_w = max(0.05, min(1.0 - ax, tx - ax))
-                new_h = max(0.05, min(ay, ay - ty))
+                new_tx, new_ty = clamp_free_corner(ax, ay, tx, ty, 1, -1)
+                new_w = new_tx - ax
+                new_h = ay - new_ty
+                new_x = ax
+                new_y = new_ty
             else:
                 w_max = get_anchor_w_max(ax, ay, 1, -1, K)
                 rw = tx - ax
@@ -1149,8 +1202,8 @@ class CropOverlayWidget(QWidget):
                 w = min(raw_w, w_max)
                 new_w = max(0.05, w)
                 new_h = max(0.05, w / K)
-            new_x = ax
-            new_y = ay - new_h
+                new_x = ax
+                new_y = ay - new_h
             self.crop_x, self.crop_y, self.crop_w, self.crop_h = new_x, new_y, new_w, new_h
 
         elif handle == "bl":
@@ -1158,8 +1211,11 @@ class CropOverlayWidget(QWidget):
             ax, ay = sx + sw, sy
             tx, ty = sx + dx, sy + sh + dy
             if K is None:
-                new_w = max(0.05, min(ax, ax - tx))
-                new_h = max(0.05, min(1.0 - ay, ty - ay))
+                new_tx, new_ty = clamp_free_corner(ax, ay, tx, ty, -1, 1)
+                new_w = ax - new_tx
+                new_h = new_ty - ay
+                new_x = new_tx
+                new_y = ay
             else:
                 w_max = get_anchor_w_max(ax, ay, -1, 1, K)
                 rw = ax - tx
@@ -1168,14 +1224,30 @@ class CropOverlayWidget(QWidget):
                 w = min(raw_w, w_max)
                 new_w = max(0.05, w)
                 new_h = max(0.05, w / K)
-            new_x = ax - new_w
-            new_y = ay
+                new_x = ax - new_w
+                new_y = ay
             self.crop_x, self.crop_y, self.crop_w, self.crop_h = new_x, new_y, new_w, new_h
 
         elif handle == "t":
             ay = sy + sh
             if K is None:
-                new_h = max(0.05, min(ay, ay - (sy + dy)))
+                raw_h = ay - (sy + dy)
+                bounds = [ay]
+                if abs(self.crop_angle) > 0.01:
+                    for x_c in (sx, sx + sw):
+                        u_0 = 0.5 + (x_c - 0.5) * ca - (ay - 0.5) * (sa / A)
+                        v_0 = 0.5 + (x_c - 0.5) * A * sa + (ay - 0.5) * ca
+                        Mu = sa / A
+                        Mv = -ca
+                        if Mu > 1e-7:
+                            bounds.append((1.0 - u_0) / Mu)
+                        elif Mu < -1e-7:
+                            bounds.append(-u_0 / Mu)
+                        if Mv > 1e-7:
+                            bounds.append((1.0 - v_0) / Mv)
+                        elif Mv < -1e-7:
+                            bounds.append(-v_0 / Mv)
+                new_h = max(0.05, min(raw_h, min(bounds)))
                 new_y = ay - new_h
                 new_x, new_w = sx, sw
             else:
@@ -1191,7 +1263,23 @@ class CropOverlayWidget(QWidget):
         elif handle == "b":
             ay = sy
             if K is None:
-                new_h = max(0.05, min(1.0 - ay, sy + sh + dy - ay))
+                raw_h = sy + sh + dy - ay
+                bounds = [1.0 - ay]
+                if abs(self.crop_angle) > 0.01:
+                    for x_c in (sx, sx + sw):
+                        u_0 = 0.5 + (x_c - 0.5) * ca - (ay - 0.5) * (sa / A)
+                        v_0 = 0.5 + (x_c - 0.5) * A * sa + (ay - 0.5) * ca
+                        Mu = -sa / A
+                        Mv = ca
+                        if Mu > 1e-7:
+                            bounds.append((1.0 - u_0) / Mu)
+                        elif Mu < -1e-7:
+                            bounds.append(-u_0 / Mu)
+                        if Mv > 1e-7:
+                            bounds.append((1.0 - v_0) / Mv)
+                        elif Mv < -1e-7:
+                            bounds.append(-v_0 / Mv)
+                new_h = max(0.05, min(raw_h, min(bounds)))
                 new_y = ay
                 new_x, new_w = sx, sw
             else:
@@ -1207,7 +1295,23 @@ class CropOverlayWidget(QWidget):
         elif handle == "l":
             ax = sx + sw
             if K is None:
-                new_w = max(0.05, min(ax, ax - (sx + dx)))
+                raw_w = ax - (sx + dx)
+                bounds = [ax]
+                if abs(self.crop_angle) > 0.01:
+                    for y_c in (sy, sy + sh):
+                        u_0 = 0.5 + (ax - 0.5) * ca - (y_c - 0.5) * (sa / A)
+                        v_0 = 0.5 + (ax - 0.5) * A * sa + (y_c - 0.5) * ca
+                        Mu = -ca
+                        Mv = -A * sa
+                        if Mu > 1e-7:
+                            bounds.append((1.0 - u_0) / Mu)
+                        elif Mu < -1e-7:
+                            bounds.append(-u_0 / Mu)
+                        if Mv > 1e-7:
+                            bounds.append((1.0 - v_0) / Mv)
+                        elif Mv < -1e-7:
+                            bounds.append(-v_0 / Mv)
+                new_w = max(0.05, min(raw_w, min(bounds)))
                 new_x = ax - new_w
                 new_y, new_h = sy, sh
             else:
@@ -1223,7 +1327,23 @@ class CropOverlayWidget(QWidget):
         elif handle == "r":
             ax = sx
             if K is None:
-                new_w = max(0.05, min(1.0 - ax, sx + sw + dx - ax))
+                raw_w = sx + sw + dx - ax
+                bounds = [1.0 - ax]
+                if abs(self.crop_angle) > 0.01:
+                    for y_c in (sy, sy + sh):
+                        u_0 = 0.5 + (ax - 0.5) * ca - (y_c - 0.5) * (sa / A)
+                        v_0 = 0.5 + (ax - 0.5) * A * sa + (y_c - 0.5) * ca
+                        Mu = ca
+                        Mv = A * sa
+                        if Mu > 1e-7:
+                            bounds.append((1.0 - u_0) / Mu)
+                        elif Mu < -1e-7:
+                            bounds.append(-u_0 / Mu)
+                        if Mv > 1e-7:
+                            bounds.append((1.0 - v_0) / Mv)
+                        elif Mv < -1e-7:
+                            bounds.append(-v_0 / Mv)
+                new_w = max(0.05, min(raw_w, min(bounds)))
                 new_x = ax
                 new_y, new_h = sy, sh
             else:
@@ -1401,12 +1521,16 @@ class CropOverlayWidget(QWidget):
                 # Rotate around center: Clockwise mouse drag produces positive angle, rotating image clockwise!
                 bx, by, bw, bh = self._get_screen_bounds()
                 img_center = QPointF(bx + bw * 0.5, by + bh * 0.5)
-                v1 = self._drag_start_pos - img_center
-                v2 = pos - img_center
-                ang1 = math.degrees(math.atan2(v1.y(), v1.x()))
-                ang2 = math.degrees(math.atan2(v2.y(), v2.x()))
-                delta_deg = ang2 - ang1
-                new_angle = max(-45.0, min(45.0, round(self._drag_start_angle + delta_deg, 1)))
+                v_prev = getattr(self, "_drag_last_pos", self._drag_start_pos) - img_center
+                v_curr = pos - img_center
+                ang_prev = math.degrees(math.atan2(v_prev.y(), v_prev.x()))
+                ang_curr = math.degrees(math.atan2(v_curr.y(), v_curr.x()))
+                d_ang = (ang_curr - ang_prev + 180.0) % 360.0 - 180.0
+                if not hasattr(self, "_drag_accum_angle"):
+                    self._drag_accum_angle = float(self.crop_angle)
+                self._drag_accum_angle += d_ang
+                self._drag_last_pos = pos
+                new_angle = max(-45.0, min(45.0, round(self._drag_accum_angle, 1)))
                 self.crop_angle = new_angle
                 self._clamp_to_rotated_bounds()
                 self.setCursor(self._get_rotate_cursor_for_pos(pos))

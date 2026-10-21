@@ -245,3 +245,15 @@ def get_darkroom_menu_style():
     from ui.theme_manager import theme_manager
     return theme_manager.get_menu_stylesheet()
 
+
+def setup_solid_combobox(combo):
+    """Enforces completely opaque solid background on QComboBox popup window, preventing layered transparent bleedthrough."""
+    from PySide6.QtWidgets import QListView
+    from PySide6.QtCore import Qt
+    view = QListView()
+    combo.setView(view)
+    view.setAutoFillBackground(True)
+    if hasattr(view, "window"):
+        view.window().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        view.window().setAutoFillBackground(True)
+

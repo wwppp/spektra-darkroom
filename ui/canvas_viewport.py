@@ -295,8 +295,8 @@ void main() {
     vec2 d_img_dx = dFdx(img_uv);
     vec2 d_img_dy = dFdy(img_uv);
 
-    // Discard any fragment outside the active viewport photo quad
-    if (img_uv.x < 0.0 || img_uv.x > 1.0 || img_uv.y < 0.0 || img_uv.y > 1.0) {
+    // Discard any fragment outside the active viewport photo quad (only in normal non-crop-editing view)
+    if (u_is_crop_editing != 1 && (img_uv.x < 0.0 || img_uv.x > 1.0 || img_uv.y < 0.0 || img_uv.y > 1.0)) {
         fragColor = vec4(u_bg_color, 1.0);
         return;
     }
@@ -1517,19 +1517,40 @@ class DarkroomGLCanvas(QOpenGLWidget):
     # -------------------------------------------------------------
     # Crop Mode Methods
     # -------------------------------------------------------------
+    def _get_crop_fit_zoom(self, base_margin=0.90):
+        """Calculate zoom so rotated photo bounding box fits comfortably inside the viewport."""
+        crop_cfg = self.params.get("crop", {})
+        if not isinstance(crop_cfg, dict):
+            return base_margin
+        angle = abs(float(crop_cfg.get("angle", 0.0)))
+        rot_90 = int(crop_cfg.get("rot_90", 0)) % 360
+        if angle <= 0.05:
+            return base_margin
+        rad = math.radians(angle)
+        m_w = self._master_width if getattr(self, "_master_width", 0) > 0 else self._image_width
+        m_h = self._master_height if getattr(self, "_master_height", 0) > 0 else self._image_height
+        base_aspect = float(m_w) / float(max(1, m_h)) if m_h > 0 else 1.0
+        eff_aspect = (1.0 / base_aspect) if (rot_90 in (90, 270)) else base_aspect
+        ca = math.cos(rad)
+        sa = math.sin(rad)
+        s_x = ca + sa / eff_aspect
+        s_y = ca + sa * eff_aspect
+        scale_factor = max(1.0, max(s_x, s_y))
+        return base_margin / scale_factor
+
     def start_crop_mode(self, crop_dict=None):
         if not self._has_image:
             return
         self.is_crop_editing = True
         self._pre_crop_zoom = getattr(self, "zoom", 1.0)
         self._pre_crop_pan = (getattr(self, "pan_x", 0.0), getattr(self, "pan_y", 0.0))
-        # Inset image by 10% (zoom=0.90) so crop handles are not clipped by viewport edges
-        self.zoom = 0.90
+        cur_crop = dict(crop_dict or self.params.get("crop", {}))
+        self.params["crop"] = cur_crop
+        # Inset image so rotated bounding box and crop handles are not clipped by viewport edges
+        self.zoom = self._get_crop_fit_zoom()
         self.pan_x = 0.0
         self.pan_y = 0.0
         self.zoomChanged.emit(self.get_actual_zoom_ratio())
-        cur_crop = dict(crop_dict or self.params.get("crop", {}))
-        self.params["crop"] = cur_crop
         self.update()
         self.crop_overlay.start_crop_session(cur_crop)
 
@@ -1700,7 +1721,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._zoom_anim.start()
 
     def fit_to_view(self, animate=True):
-        target_z = 0.90 if getattr(self, "is_crop_editing", False) else 1.0
+        target_z = self._get_crop_fit_zoom() if getattr(self, "is_crop_editing", False) else 1.0
         if animate:
             self.animate_to(target_z, 0.0, 0.0)
         else:

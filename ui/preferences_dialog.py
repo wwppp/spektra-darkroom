@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.path_utils import get_resource_dir, get_icon_path
-from ui.window_utils import apply_dark_titlebar, show_dark_message_box, get_icon
+from ui.window_utils import apply_dark_titlebar, show_dark_message_box, get_icon, setup_solid_combobox
 from ui.theme_manager import theme_manager
 from core import config_manager
 from core import session_cache_manager
@@ -558,6 +558,7 @@ class PreferencesDialog(QDialog):
         lbl_hw.setFixedWidth(100)
         r_hw.addWidget(lbl_hw)
         self.combo_hw_accel = QComboBox()
+        setup_solid_combobox(self.combo_hw_accel)
         self.combo_hw_accel.addItem("关闭", "off")
         self.combo_hw_accel.addItem("视口与缩略图", "preview_only")
         self.combo_hw_accel.addItem("全局", "global")
@@ -569,6 +570,7 @@ class PreferencesDialog(QDialog):
         lbl_res.setFixedWidth(100)
         r_res.addWidget(lbl_res)
         self.combo_preview_res = QComboBox()
+        setup_solid_combobox(self.combo_preview_res)
         self.combo_preview_res.addItem("1080P", 1440)
         self.combo_preview_res.addItem("2K", 2048)
         self.combo_preview_res.addItem("4K", 3840)
@@ -585,6 +587,7 @@ class PreferencesDialog(QDialog):
         lbl_cs.setFixedWidth(100)
         r_cs.addWidget(lbl_cs)
         self.combo_default_cs = QComboBox()
+        setup_solid_combobox(self.combo_default_cs)
         self.combo_default_cs.addItems(["sRGB", "Display P3", "Adobe RGB"])
         r_cs.addWidget(self.combo_default_cs, 1)
         l_ren.addLayout(r_cs)
@@ -603,6 +606,7 @@ class PreferencesDialog(QDialog):
         lbl_theme.setFixedWidth(100)
         r_theme.addWidget(lbl_theme)
         self.combo_ui_theme = QComboBox()
+        setup_solid_combobox(self.combo_ui_theme)
         self.combo_ui_theme.addItem("浅色", "light")
         self.combo_ui_theme.addItem("深色", "dark")
         self.combo_ui_theme.addItem("跟随系统", "system")
@@ -614,6 +618,7 @@ class PreferencesDialog(QDialog):
         lbl_fmt.setFixedWidth(100)
         r_fmt.addWidget(lbl_fmt)
         self.combo_default_fmt = QComboBox()
+        setup_solid_combobox(self.combo_default_fmt)
         self.combo_default_fmt.addItem("35mm", 35.0)
         self.combo_default_fmt.addItem("16mm", 16.0)
         self.combo_default_fmt.addItem("120 (6x6)", 60.0)
@@ -661,6 +666,7 @@ class PreferencesDialog(QDialog):
         lbl_max_size.setFixedWidth(100)
         r_max_size.addWidget(lbl_max_size)
         self.combo_cache_max_size = QComboBox()
+        setup_solid_combobox(self.combo_cache_max_size)
         self.combo_cache_max_size.addItem("500 MB", 0.5)
         self.combo_cache_max_size.addItem("1 GB", 1.0)
         self.combo_cache_max_size.addItem("2 GB", 2.0)
@@ -675,6 +681,7 @@ class PreferencesDialog(QDialog):
         lbl_interval.setFixedWidth(100)
         r_interval.addWidget(lbl_interval)
         self.combo_clean_interval = QComboBox()
+        setup_solid_combobox(self.combo_clean_interval)
         self.combo_clean_interval.addItem("7 天", 7)
         self.combo_clean_interval.addItem("10 天", 10)
         self.combo_clean_interval.addItem("15 天", 15)
@@ -686,17 +693,17 @@ class PreferencesDialog(QDialog):
         r_cache = QHBoxLayout()
         self.lbl_cache_size = QLabel("LUT 缓存: 计算中...")
         r_cache.addWidget(self.lbl_cache_size, 1)
-        btn_clean_cache = QPushButton("清理")
-        btn_clean_cache.clicked.connect(self._clean_lut_cache)
-        r_cache.addWidget(btn_clean_cache)
+        self.btn_clean_cache = QPushButton("清理")
+        self.btn_clean_cache.clicked.connect(self._clean_lut_cache)
+        r_cache.addWidget(self.btn_clean_cache)
         l_ca.addLayout(r_cache)
 
         r_sess = QHBoxLayout()
         self.lbl_sess_cache_size = QLabel("底片缓存: 计算中...")
         r_sess.addWidget(self.lbl_sess_cache_size, 1)
-        btn_clean_sess = QPushButton("清理")
-        btn_clean_sess.clicked.connect(self._clean_sess_cache)
-        r_sess.addWidget(btn_clean_sess)
+        self.btn_clean_sess = QPushButton("清理")
+        self.btn_clean_sess.clicked.connect(self._clean_sess_cache)
+        r_sess.addWidget(self.btn_clean_sess)
         l_ca.addLayout(r_sess)
 
         l_ca.addStretch()
@@ -758,6 +765,10 @@ class PreferencesDialog(QDialog):
         idx_th = self.combo_ui_theme.findData(theme_mode)
         self.combo_ui_theme.setCurrentIndex(idx_th if idx_th >= 0 else 2)
 
+        self.btn_clean_cache.setEnabled(True)
+        self.btn_clean_cache.setText("清理")
+        self.btn_clean_sess.setEnabled(True)
+        self.btn_clean_sess.setText("清理")
         self._refresh_cache_size()
 
     def _update_assoc_button(self):
@@ -852,17 +863,19 @@ class PreferencesDialog(QDialog):
                 shutil.rmtree(cache_dir, ignore_errors=True)
                 os.makedirs(cache_dir, exist_ok=True)
             self._refresh_cache_size()
-            show_dark_message_box(self, "完成", "LUT 缓存已清空。")
-        except Exception as e:
-            show_dark_message_box(self, "错误", f"清理失败: {e}", icon=QMessageBox.Icon.Warning)
+            self.btn_clean_cache.setEnabled(False)
+            self.btn_clean_cache.setText("已清理")
+        except Exception:
+            pass
 
     def _clean_sess_cache(self):
         try:
             session_cache_manager.clear_cache()
             self._refresh_cache_size()
-            show_dark_message_box(self, "完成", "底片缓存已清空。")
-        except Exception as e:
-            show_dark_message_box(self, "错误", f"清理失败: {e}", icon=QMessageBox.Icon.Warning)
+            self.btn_clean_sess.setEnabled(False)
+            self.btn_clean_sess.setText("已清理")
+        except Exception:
+            pass
 
     def _save_preferences(self):
         cfg = config_manager.load_config()

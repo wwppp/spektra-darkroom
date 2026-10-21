@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.path_utils import get_icon_path, get_resource_dir, normalize_path
-from ui.window_utils import apply_dark_titlebar
+from ui.window_utils import setup_solid_combobox, apply_dark_titlebar
 from ui.theme_manager import theme_manager
 from core import config_manager
 
@@ -28,14 +28,14 @@ class BaseExportDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setModal(True)
-        from ui.window_utils import get_icon
+        from ui.window_utils import setup_solid_combobox, get_icon
         self.setWindowIcon(get_icon("dlg_export.png", is_dark=theme_manager.is_dark()))
 
     def showEvent(self, event):
         super().showEvent(event)
         is_dark = theme_manager.is_dark()
         apply_dark_titlebar(self, is_dark=is_dark)
-        from ui.window_utils import get_icon
+        from ui.window_utils import setup_solid_combobox, get_icon
         self.setWindowIcon(get_icon("dlg_export.png", is_dark=is_dark))
 
     def _init_settings_card(self) -> tuple[QFrame, QVBoxLayout]:
@@ -61,6 +61,7 @@ class BaseExportDialog(QDialog):
         grid_top.addWidget(lbl_fmt, 0, 0)
 
         self.combo_format = QComboBox()
+        setup_solid_combobox(self.combo_format)
         self.combo_format.addItem("JPEG (*.jpg)", "jpeg")
         self.combo_format.addItem("TIFF (*.tif)", "tiff")
         self.combo_format.addItem("PNG (*.png)", "png")
@@ -71,6 +72,7 @@ class BaseExportDialog(QDialog):
         grid_top.addWidget(lbl_cs, 0, 2)
 
         self.combo_colorspace = QComboBox()
+        setup_solid_combobox(self.combo_colorspace)
         self.combo_colorspace.addItem("sRGB", "sRGB")
         self.combo_colorspace.addItem("Display P3", "Display P3")
         self.combo_colorspace.addItem("Adobe RGB (1998)", "Adobe RGB (1998)")
@@ -83,6 +85,7 @@ class BaseExportDialog(QDialog):
         grid_top.addWidget(lbl_dpi, 1, 0)
 
         self.combo_dpi = QComboBox()
+        setup_solid_combobox(self.combo_dpi)
         self.combo_dpi.addItem("72 DPI", 72)
         self.combo_dpi.addItem("300 DPI", 300)
         self.combo_dpi.addItem("600 DPI", 600)
@@ -94,6 +97,7 @@ class BaseExportDialog(QDialog):
         grid_top.addWidget(lbl_bit, 1, 2)
 
         self.combo_depth = QComboBox()
+        setup_solid_combobox(self.combo_depth)
         grid_top.addWidget(self.combo_depth, 1, 3)
 
         card_layout.addLayout(grid_top)
@@ -119,6 +123,7 @@ class BaseExportDialog(QDialog):
         grid_jpeg.addWidget(lbl_scale, 0, 0)
 
         self.combo_scale = QComboBox()
+        setup_solid_combobox(self.combo_scale)
         self.combo_scale.addItem("100% (原始尺寸)", 100)
         self.combo_scale.addItem("80%", 80)
         self.combo_scale.addItem("60%", 60)
@@ -133,6 +138,7 @@ class BaseExportDialog(QDialog):
         grid_jpeg.addWidget(lbl_sub, 0, 2)
 
         self.combo_subsampling = QComboBox()
+        setup_solid_combobox(self.combo_subsampling)
         self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
         self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
         self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
@@ -184,6 +190,7 @@ class BaseExportDialog(QDialog):
         grid_tiff.addWidget(lbl_t_comp, 0, 0)
 
         self.combo_tiff_comp = QComboBox()
+        setup_solid_combobox(self.combo_tiff_comp)
         self.combo_tiff_comp.addItem("LZW 压缩 (无损推荐)", "lzw")
         self.combo_tiff_comp.addItem("Zip / Deflate 压缩 (小体积)", "deflate")
         self.combo_tiff_comp.addItem("无压缩 (Raw TIFF)", "none")
@@ -211,6 +218,7 @@ class BaseExportDialog(QDialog):
         grid_png.addWidget(lbl_p_comp, 0, 0)
 
         self.combo_png_level = QComboBox()
+        setup_solid_combobox(self.combo_png_level)
         self.combo_png_level.addItem("标准压缩 (Level 6)", 6)
         self.combo_png_level.addItem("极限压缩 (Level 9)", 9)
         self.combo_png_level.addItem("快速存储 (Level 1)", 1)
@@ -895,7 +903,7 @@ class ExportProgressDialog(QDialog):
         self.setModal(True)
 
         is_dark = theme_manager.is_dark()
-        from ui.window_utils import get_icon
+        from ui.window_utils import setup_solid_combobox, get_icon
         self.setWindowIcon(get_icon("dlg_export.png", is_dark=is_dark))
         if is_dark:
             self.setStyleSheet("""

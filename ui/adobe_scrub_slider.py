@@ -3,7 +3,7 @@ import os
 from PySide6.QtCore import Qt, Signal, QPoint, QSize
 from PySide6.QtGui import QCursor, QFont, QIcon
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication
+    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication, QListView
 )
 
 from core.path_utils import get_icon_path
@@ -683,6 +683,12 @@ class ComboBoxRow(QWidget):
         layout.addStretch()
 
         self.combo = QComboBox()
+        self.combo_view = QListView()
+        self.combo.setView(self.combo_view)
+        self.combo_view.setAutoFillBackground(True)
+        if hasattr(self.combo_view, "window"):
+            self.combo_view.window().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+            self.combo_view.window().setAutoFillBackground(True)
         if self.default_tooltip:
             self.combo.setToolTip(self.default_tooltip)
         self.combo.wheelEvent = lambda ev: ev.ignore()
@@ -774,11 +780,24 @@ class ComboBoxRow(QWidget):
                 margin-right: 2px;
             }}
             QComboBox QAbstractItemView {{
+                background-color: {popup_bg};
                 background: {popup_bg};
                 color: {popup_fg};
                 selection-background-color: #f59e0b;
                 selection-color: {sel_fg};
                 border: 1px solid {popup_border};
+                border-radius: 4px;
+                padding: 3px;
+                outline: 0px;
+            }}
+            QComboBox QAbstractItemView::item {{
+                min-height: 22px;
+                padding: 2px 6px;
+                border-radius: 3px;
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: #f59e0b;
+                color: {sel_fg};
             }}
         """)
 

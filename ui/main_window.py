@@ -15,6 +15,7 @@ Provides:
 
 import os
 import sys
+import copy
 import ctypes
 from ctypes import c_int, byref
 from datetime import datetime
@@ -1539,7 +1540,7 @@ class FadingSplitterHandle(QSplitterHandle):
 class FadingSplitter(QSplitter):
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
-        self.setHandleWidth(7)
+        self.setHandleWidth(4 if orientation == Qt.Orientation.Vertical else 5)
         self.setChildrenCollapsible(False)
         self.setStyleSheet("QSplitter { background: transparent; }")
 
@@ -2686,12 +2687,12 @@ class DarkroomMainWindow(QMainWindow):
         """)
 
         btn_export_layout = QHBoxLayout(self.btn_title_export)
-        btn_export_layout.setContentsMargins(0, 0, 0, 0)
+        btn_export_layout.setContentsMargins(0, 0, 1, 0)
         btn_export_layout.setSpacing(0)
 
         self.lbl_title_export_icon = QLabel()
         self.lbl_title_export_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.lbl_title_export_icon.setStyleSheet("background: transparent; border: none; padding-top: 1.5px;")
+        self.lbl_title_export_icon.setStyleSheet("background: transparent; border: none;")
         save_icon = os.path.join(get_resource_dir(), "icons", "export_dark.png")
         if os.path.exists(save_icon):
             pix = QPixmap(save_icon).scaled(13, 13, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -3181,7 +3182,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.center_splitter.setStretchFactor(0, 1)
         self.center_splitter.setStretchFactor(1, 0)
-        self.center_splitter.setSizes([600, 106])
+        self.center_splitter.setSizes([600, 100])
 
         self.main_splitter.addWidget(self.center_splitter)
 
@@ -3971,7 +3972,7 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, "left_splitter"):
             self.left_splitter.setSizes([300, 180, 200])
         if hasattr(self, "center_splitter"):
-            self.center_splitter.setSizes([600, 106])
+            self.center_splitter.setSizes([600, 100])
         config_manager.save_window_config({
             "splitter_main": [320, 800, 320],
             "splitter_left": [300, 180, 200],
@@ -6129,6 +6130,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # 2. Start crop overlay session & sync controls
         cur_crop = self.current_params.get("crop", {})
+        self._pre_crop_backup = copy.deepcopy(cur_crop) if isinstance(cur_crop, dict) else {}
         self.canvas.start_crop_mode(cur_crop)
         if hasattr(self, 'crop_sidebar'):
             self.crop_sidebar.sync_from_overlay(self.canvas.crop_overlay.get_crop_dict())
@@ -6184,10 +6186,14 @@ class DarkroomMainWindow(QMainWindow):
 
     def _on_crop_cancelled(self):
         self._exit_crop_workspace()
+        reverted_crop = getattr(self, "_pre_crop_backup", {})
+        self.current_params["crop"] = copy.deepcopy(reverted_crop)
+        if hasattr(self, 'canvas') and isinstance(self.canvas.params, dict):
+            self.canvas.params["crop"] = copy.deepcopy(reverted_crop)
+            self.canvas.update()
         self.canvas.fit_to_view(animate=False)
         if hasattr(self, "filmstrip") and self.active_photo_id:
-            cur_c = self.current_params.get("crop", {})
-            self.filmstrip.set_photo_crop(self.active_photo_id, cur_c)
+            self.filmstrip.set_photo_crop(self.active_photo_id, reverted_crop)
         self._update_active_thumbnails()
         if hasattr(self, '_cards_debounce_timer'):
             self._cards_debounce_timer.start(100)

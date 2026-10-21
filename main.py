@@ -224,6 +224,12 @@ def main():
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
     app.setPalette(palette)
 
+    # Disable OS layered fade animations on comboboxes and menus to eliminate transparent background flickering
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, False)
+    app.setEffectEnabled(Qt.UIEffect.UI_FadeMenu, False)
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateMenu, False)
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateTooltip, False)
+
     # Set modern sans-serif UI font globally
     font = QFont()
     font.setFamilies([

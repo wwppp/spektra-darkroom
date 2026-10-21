@@ -282,7 +282,7 @@ class ThemeManager(QObject):
                 QMenu::item:selected {
                     background: #f59e0b;
                     color: #111113;
-                    font-weight: bold;
+                    font-weight: normal;
                 }
                 QMenu::item:disabled {
                     color: #4b5563;
@@ -343,7 +343,7 @@ class ThemeManager(QObject):
                 QMenu::item:selected {
                     background: #f59e0b;
                     color: #111113;
-                    font-weight: bold;
+                    font-weight: normal;
                 }
                 QMenu::item:disabled {
                     color: #94a3b8;
