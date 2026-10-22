@@ -4869,11 +4869,37 @@ class DarkroomMainWindow(QMainWindow):
                 rel_p = normalize_path(os.path.relpath(p_abs, session_dir))
             except Exception:
                 rel_p = None
+
+            is_active = (self.active_photo_id and p.get("id") == self.active_photo_id)
+            if is_active:
+                p_film = getattr(self, "current_film_stock", "none")
+                p_paper = getattr(self, "current_paper_stock", "none")
+                p_pmode = getattr(self, "current_print_mode", "optical")
+                p_params = copy.deepcopy(self.current_params)
+                p_base_ev = float(self.current_params.get("base_ev", p.get("base_ev", 0.0)))
+            else:
+                p_film = p.get("film_profile", "none")
+                p_paper = p.get("paper_profile", "none")
+                p_pmode = p.get("print_mode", "optical")
+                p_params = copy.deepcopy(p.get("params") or {})
+                if not p_params and p.get("path"):
+                    sdc = sdc_manager.load_sdc(p["path"])
+                    if sdc:
+                        p_film = sdc.get("film_profile", p_film)
+                        p_paper = sdc.get("paper_profile", p_paper)
+                        p_pmode = sdc.get("print_mode", p_pmode)
+                        p_params = copy.deepcopy(sdc.get("params", {}))
+                p_base_ev = float(p.get("base_ev", 0.0))
+
             session_photos.append({
                 "path": normalize_path(p["path"]),
                 "rel_path": rel_p,
                 "filename": os.path.basename(p["path"]),
-                "base_ev": float(p.get("base_ev", 0.0))
+                "base_ev": p_base_ev,
+                "film_profile": p_film,
+                "paper_profile": p_paper,
+                "print_mode": p_pmode,
+                "params": p_params
             })
 
         active_rel = None

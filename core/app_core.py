@@ -3,6 +3,7 @@ import json
 import base64
 import time
 import io
+import collections
 import threading
 import uuid
 import numpy as np
@@ -904,7 +905,8 @@ class SpektraEngine:
         self.original_meta = {}
 
         # Performance caches
-        self._lut_cache = {}      # (film, paper, size) -> np.ndarray [N, N, N, 3] float32
+        self._lut_cache = collections.OrderedDict()  # (film, paper, size, ...) -> np.ndarray [N, N, N, 3] float32
+        self._max_lut_cache_size = 64
         self._profile_cache = {}
         self._cached_sim = None
         self._cached_config = None
@@ -1606,8 +1608,10 @@ class SpektraEngine:
 
         eff_paper = "none" if self.is_positive_film(film_stock) else ("scan" if print_mode == "scan" else paper_stock)
         cache_key = (film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same, morph_gamma, dev_exh)
-        if cache_key in self._lut_cache:
-            return self._lut_cache[cache_key]
+        with self._render_lock:
+            if cache_key in self._lut_cache:
+                self._lut_cache.move_to_end(cache_key)
+                return self._lut_cache[cache_key]
 
         # 1. Shaper lattice coordinates t in [0.0, 1.0] -> Scene-linear HDR ProPhoto [0.0, 8.0]
         lin_t = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
@@ -1618,7 +1622,11 @@ class SpektraEngine:
         # 2. Bypass mode: 胶卷为 "none" 时，生成从 Linear ProPhoto RGB [0.0, 8.0] -> Display sRGB 的平滑高光胶片色调转换表
         if film_stock == "none":
             identity_lut = prophoto_to_srgb_filmic(lattice)
-            self._lut_cache[cache_key] = identity_lut
+            with self._render_lock:
+                self._lut_cache[cache_key] = identity_lut
+                self._lut_cache.move_to_end(cache_key)
+                if len(self._lut_cache) > self._max_lut_cache_size:
+                    self._lut_cache.popitem(last=False)
             return identity_lut
 
         cache_dir = os.path.join(self.resources_dir, ".lut_cache")
@@ -1627,7 +1635,11 @@ class SpektraEngine:
             if os.path.exists(cache_file):
                 try:
                     lut_3d = np.load(cache_file)
-                    self._lut_cache[cache_key] = lut_3d
+                    with self._render_lock:
+                        self._lut_cache[cache_key] = lut_3d
+                        self._lut_cache.move_to_end(cache_key)
+                        if len(self._lut_cache) > self._max_lut_cache_size:
+                            self._lut_cache.popitem(last=False)
                     return lut_3d
                 except Exception:
                     pass
@@ -1739,7 +1751,11 @@ class SpektraEngine:
         elif is_pos:
             lut_3d = self._postprocess_positive_lut(lut_3d, film_stock)
 
-        self._lut_cache[cache_key] = lut_3d
+        with self._render_lock:
+            self._lut_cache[cache_key] = lut_3d
+            self._lut_cache.move_to_end(cache_key)
+            if len(self._lut_cache) > self._max_lut_cache_size:
+                self._lut_cache.popitem(last=False)
         if is_default_params:
             try:
                 os.makedirs(cache_dir, exist_ok=True)
@@ -1748,6 +1764,85 @@ class SpektraEngine:
                 pass
         print(f"[SpektraEngine] 3D LUT 生成完毕，耗时: {round((time.time() - t0)*1000, 1)}ms")
         return lut_3d
+
+    @classmethod
+    def _extract_cr3_exif(cls, file_path: str) -> dict:
+        """Lightweight ISOBMFF extractor for Canon CR3 raw files.
+        Extracts CMT1 (IFD0: Make, Model) and CMT2 (ExifIFD: Lens, Exposure, ISO).
+        """
+        meta_tags = {}
+        try:
+            import tifffile
+            import io
+            with open(file_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                file_len = f.tell()
+                f.seek(0)
+
+                hdr = f.read(8)
+                if len(hdr) < 8 or hdr[4:8] != b'ftyp':
+                    return meta_tags
+                f.seek(0)
+
+                curr = 0
+                moov_bytes = None
+                while curr + 8 <= file_len:
+                    f.seek(curr)
+                    hdr = f.read(8)
+                    if len(hdr) < 8:
+                        break
+                    box_sz = int.from_bytes(hdr[:4], "big")
+                    box_type = hdr[4:8]
+                    hlen = 8
+                    if box_sz == 1:
+                        hdr16 = f.read(8)
+                        if len(hdr16) < 8:
+                            break
+                        box_sz = int.from_bytes(hdr16, "big")
+                        hlen = 16
+                    elif box_sz == 0:
+                        box_sz = file_len - curr
+
+                    if box_sz < hlen:
+                        break
+
+                    if box_type == b'moov':
+                        read_sz = min(box_sz - hlen, 8 * 1024 * 1024)
+                        f.seek(curr + hlen)
+                        moov_bytes = f.read(read_sz)
+                        break
+
+                    curr += box_sz
+
+                if not moov_bytes:
+                    f.seek(0)
+                    moov_bytes = f.read(min(file_len, 6 * 1024 * 1024))
+
+                for tag_box in (b'CMT1', b'CMT2', b'CMT3', b'CMT4'):
+                    pos = 0
+                    while True:
+                        idx = moov_bytes.find(tag_box, pos)
+                        if idx == -1:
+                            break
+                        if idx >= 4:
+                            box_len = int.from_bytes(moov_bytes[idx - 4:idx], "big")
+                            if 8 <= box_len <= len(moov_bytes) - (idx - 4):
+                                payload = moov_bytes[idx + 4: idx - 4 + box_len]
+                                if len(payload) >= 4 and payload[:4] in (b'II*\x00', b'MM\x00*'):
+                                    try:
+                                        with tifffile.TiffFile(io.BytesIO(payload)) as tif:
+                                            for page in tif.pages:
+                                                for tag in page.tags:
+                                                    meta_tags[tag.name] = tag.value
+                                                    if tag.name == 'ExifTag' and isinstance(tag.value, dict):
+                                                        for sk, sv in tag.value.items():
+                                                            meta_tags[sk] = sv
+                                    except Exception:
+                                        pass
+                        pos = idx + 4
+        except Exception:
+            pass
+        return meta_tags
 
     RAW_EXTS = RAW_EXTENSIONS
 
@@ -1996,6 +2091,57 @@ class SpektraEngine:
         except Exception:
             pass
 
+        # 2.5. Extract Canon CR3 ISOBMFF metadata (CMT1, CMT2, CMT3, CMT4)
+        if ext == ".cr3" or meta["camera_make"] == "-":
+            cr3_tags = cls._extract_cr3_exif(file_path)
+            if cr3_tags:
+                if meta["camera_make"] == "-" and "Make" in cr3_tags:
+                    meta["camera_make"] = str(cr3_tags["Make"]).strip().strip("\x00")
+                if meta["camera_model"] == "-" and "Model" in cr3_tags:
+                    meta["camera_model"] = str(cr3_tags["Model"]).strip().strip("\x00")
+                if meta["capture_time"] == "-" and ("DateTimeOriginal" in cr3_tags or "DateTime" in cr3_tags):
+                    meta["capture_time"] = str(cr3_tags.get("DateTimeOriginal") or cr3_tags.get("DateTime")).strip()
+                if meta["artist"] == "-" and "Artist" in cr3_tags:
+                    meta["artist"] = str(cr3_tags["Artist"]).strip()
+                if meta["copyright"] == "-" and "Copyright" in cr3_tags:
+                    meta["copyright"] = str(cr3_tags["Copyright"]).strip()
+                if meta["lens_model"] == "-" and "LensModel" in cr3_tags:
+                    meta["lens_model"] = str(cr3_tags["LensModel"]).strip().strip("\x00")
+                if meta["lens_make"] == "-" and "LensMake" in cr3_tags:
+                    meta["lens_make"] = str(cr3_tags["LensMake"]).strip().strip("\x00")
+                if meta["serial_number"] == "-" and ("BodySerialNumber" in cr3_tags or "SerialNumber" in cr3_tags):
+                    meta["serial_number"] = str(cr3_tags.get("BodySerialNumber") or cr3_tags.get("SerialNumber")).strip().strip("\x00")
+                if meta["focal_length_35mm"] == "-" and "FocalLengthIn35mmFilm" in cr3_tags:
+                    meta["focal_length_35mm"] = f"{cr3_tags['FocalLengthIn35mmFilm']} 毫米"
+                if meta["aperture"] == "-" and "FNumber" in cr3_tags:
+                    v = cr3_tags["FNumber"]
+                    num = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else v
+                    meta["aperture"] = f"f/{num:.1f}" if isinstance(num, (int, float)) else str(num)
+                if meta["shutter_speed"] == "-" and "ExposureTime" in cr3_tags:
+                    v = cr3_tags["ExposureTime"]
+                    if isinstance(v, tuple) and len(v) == 2 and v[1] != 0:
+                        meta["shutter_speed"] = f"1/{int(v[1]/v[0])} 秒" if v[0] <= 1 else f"{v[0]/float(v[1]):.2f} 秒"
+                    else:
+                        meta["shutter_speed"] = f"{v} 秒"
+                if meta["iso"] == "-" and ("ISOSpeedRatings" in cr3_tags or "PhotographicSensitivity" in cr3_tags):
+                    iso_v = cr3_tags.get("ISOSpeedRatings") or cr3_tags.get("PhotographicSensitivity")
+                    meta["iso"] = f"ISO-{iso_v}"
+                if meta["focal_length"] == "-" and "FocalLength" in cr3_tags:
+                    v = cr3_tags["FocalLength"]
+                    num = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else v
+                    meta["focal_length"] = f"{int(round(num))} 毫米" if isinstance(num, (int, float)) else str(num)
+                if meta["exposure_bias"] == "-" and "ExposureBiasValue" in cr3_tags:
+                    v = cr3_tags["ExposureBiasValue"]
+                    bias = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else float(v)
+                    meta["exposure_bias"] = f"{bias:+.1f} 档光圈" if bias != 0 else "0 档光圈"
+                if meta["exposure_program"] == "-" and "ExposureProgram" in cr3_tags:
+                    meta["exposure_program"] = prog_map.get(int(cr3_tags["ExposureProgram"]), str(cr3_tags["ExposureProgram"]))
+                if meta["metering_mode"] == "-" and "MeteringMode" in cr3_tags:
+                    meta["metering_mode"] = meter_map.get(int(cr3_tags["MeteringMode"]), str(cr3_tags["MeteringMode"]))
+                if meta["flash"] == "-" and "Flash" in cr3_tags:
+                    fst = int(cr3_tags["Flash"])
+                    meta["flash"] = "开启闪光" if (fst & 1) else ("无闪光，强制" if (fst & 16) else "无闪光")
+
         # 3. Try PIL Image for standard JPEG / PNG / TIFF fallback
         try:
             from PIL import Image, ExifTags
@@ -2072,6 +2218,35 @@ class SpektraEngine:
                             if getattr(raw.sizes, "flip", 0) in (4, 5, 6, 7):
                                 rw, rh = rh, rw
                             meta["resolution"] = f"{rw} × {rh}"
+
+                        try:
+                            if hasattr(raw, "other") and raw.other:
+                                o = raw.other
+                                if getattr(o, "iso_speed", None) and meta["iso"] == "-":
+                                    meta["iso"] = f"ISO-{int(o.iso_speed)}"
+                                if getattr(o, "aperture", None) and meta["aperture"] == "-":
+                                    meta["aperture"] = f"f/{o.aperture:.1f}"
+                                if getattr(o, "shutter_speed", None) and meta["shutter_speed"] == "-":
+                                    ss = float(o.shutter_speed)
+                                    if ss > 0:
+                                        meta["shutter_speed"] = f"1/{int(round(1.0/ss))} 秒" if ss < 1.0 else f"{ss:.1f} 秒"
+                                if getattr(o, "focal_length", None) and meta["focal_length"] == "-":
+                                    meta["focal_length"] = f"{int(round(o.focal_length))} 毫米"
+                                if getattr(o, "artist", None) and meta["artist"] == "-":
+                                    meta["artist"] = str(o.artist).strip()
+                                if getattr(o, "timestamp", None) and meta["capture_time"] == "-":
+                                    try:
+                                        meta["capture_time"] = time.strftime("%Y:%m:%d %H:%M:%S", time.localtime(o.timestamp))
+                                    except Exception:
+                                        pass
+                            if hasattr(raw, "lens") and raw.lens:
+                                l = raw.lens
+                                if getattr(l, "model", None) and meta["lens_model"] == "-":
+                                    meta["lens_model"] = str(l.model).strip().strip("\x00")
+                                if getattr(l, "make", None) and meta["lens_make"] == "-":
+                                    meta["lens_make"] = str(l.make).strip().strip("\x00")
+                        except Exception:
+                            pass
 
                         wb = getattr(raw, "camera_whitebalance", None)
                         mat = getattr(raw, "rgb_xyz_matrix", None)
@@ -3199,7 +3374,8 @@ class SpektraEngine:
             import shutil
             shutil.copy2(src_path, dest_path)
 
-        self._lut_cache.clear()
+        with self._render_lock:
+            self._lut_cache.clear()
         self._profile_cache.clear()
         return dest_path
 
@@ -3213,7 +3389,8 @@ class SpektraEngine:
                     os.remove(fp)
                 except Exception:
                     pass
-        self._lut_cache.clear()
+        with self._render_lock:
+            self._lut_cache.clear()
         self._profile_cache.clear()
         return True
 

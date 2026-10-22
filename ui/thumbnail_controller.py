@@ -173,6 +173,9 @@ class StockThumbnailWorker(QThread):
         ref_paper = self.current_paper
         ref_film = self.current_film if self.current_film != "none" else "kodak_portra_400"
 
+        if self._stopped:
+            return
+
         # 4. Process Film stocks (paired with current paper or reference paper)
         if self.do_films:
             for sid in self.film_stocks:
@@ -204,6 +207,9 @@ class StockThumbnailWorker(QThread):
                 # Cooperatively yield GIL to GUI thread so mouse, scroll, and clicks stay at 60 FPS
                 if not self._stopped:
                     QThread.msleep(4)
+
+        if self._stopped:
+            return
 
         # 5. Process Paper stocks (paired with current film or reference film)
         if self.do_papers:
@@ -519,17 +525,35 @@ class ThumbnailController(QObject):
 
     def cancel_card_preview_worker(self):
         """Safely stops any active background candidate preview generator without blocking GUI thread."""
-        if self._card_worker and self._card_worker.isRunning():
-            self._card_worker.stop()
-            try:
-                self._card_worker.film_ready.disconnect()
-            except Exception:
-                pass
-            try:
-                self._card_worker.paper_ready.disconnect()
-            except Exception:
-                pass
+        if self._card_worker:
+            worker = self._card_worker
             self._card_worker = None
+            try:
+                worker.film_ready.disconnect()
+            except Exception:
+                pass
+            try:
+                worker.paper_ready.disconnect()
+            except Exception:
+                pass
+            if hasattr(worker, "isRunning") and worker.isRunning():
+                worker.stop()
+                worker.wait(100)
+                if worker.isRunning():
+                    if not hasattr(self, "_retained_workers"):
+                        self._retained_workers = []
+                    self._retained_workers.append(worker)
+                    try:
+                        worker.finished.connect(lambda w=worker: self._cleanup_worker(w))
+                    except Exception:
+                        pass
+
+    def _cleanup_worker(self, worker):
+        if hasattr(self, "_retained_workers") and worker in self._retained_workers:
+            try:
+                self._retained_workers.remove(worker)
+            except Exception:
+                pass
 
     def update_active_card_wysiwyg(self, film_cards: dict, paper_cards: dict,
                                    active_film: str, active_paper: str, pixmap: QPixmap):

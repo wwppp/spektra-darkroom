@@ -224,6 +224,16 @@ def has_valid_cache(file_path: str) -> bool:
     return entry_path is not None and os.path.isfile(entry_path)
 
 
+def has_cached_preview(file_path: str) -> bool:
+    """Checks whether float preview (.npy) exists on disk."""
+    if not file_path:
+        return False
+    key = get_cache_key(file_path)
+    cache_dir = get_cache_dir()
+    preview_path = os.path.join(cache_dir, f"{key}_preview.npy")
+    return os.path.isfile(preview_path)
+
+
 def save_photo_cache(file_path: str, photo_data: dict, preview_array: np.ndarray = None, save_preview: bool = True) -> bool:
     """Saves photo metadata, thumbnail, and optional float preview to disk cache incrementally."""
     if not file_path or not os.path.isfile(file_path):
@@ -446,6 +456,10 @@ def get_photo_cache(file_path: str, load_preview: bool = False) -> dict | None:
         return None
 
     try:
+        try:
+            os.utime(entry_path, None)
+        except Exception:
+            pass
         with np.load(entry_path, allow_pickle=False) as npz:
             meta = json.loads(str(npz["meta"]))
             thumb = np.copy(npz["thumb"])
@@ -555,6 +569,10 @@ def get_photo_preview(file_path: str) -> np.ndarray | None:
 
     try:
         arr16 = np.load(preview_path, allow_pickle=False)
+        try:
+            os.utime(preview_path, None)
+        except Exception:
+            pass
         return arr16.astype(np.float32)
     except Exception as e:
         logger.warning(f"Failed to load preview cache for {file_path}: {e}")
@@ -806,6 +824,20 @@ def save_session_file(file_path: str, session_data: dict) -> bool:
                 }
                 if "rel_path" in item and item["rel_path"]:
                     entry["rel_path"] = item["rel_path"]
+                if "film_profile" in item:
+                    entry["film_profile"] = item["film_profile"]
+                elif "film_stock" in item:
+                    entry["film_profile"] = item["film_stock"]
+                if "paper_profile" in item:
+                    entry["paper_profile"] = item["paper_profile"]
+                elif "paper_stock" in item:
+                    entry["paper_profile"] = item["paper_stock"]
+                if "print_mode" in item:
+                    entry["print_mode"] = item["print_mode"]
+                if "base_ev" in item:
+                    entry["base_ev"] = float(item["base_ev"])
+                if "params" in item and isinstance(item["params"], dict):
+                    entry["params"] = item["params"]
                 clean_photos.append(entry)
 
         clean_data = {
@@ -856,13 +888,15 @@ def load_session_file(file_path: str) -> dict | None:
                 })
             elif isinstance(item, dict) and "path" in item:
                 photo_path = os.path.abspath(item["path"])
-                # Legacy migration: If old session has params and .sdc does not exist, save sidecar
+                # Migration: If session has recipe params and .sdc does not exist, save sidecar
                 params = item.get("params")
-                film = item.get("film_stock", "none")
-                paper = item.get("paper_stock", "none")
+                film = item.get("film_profile") or item.get("film_stock", "none")
+                paper = item.get("paper_profile") or item.get("paper_stock", "none")
+                pmode = item.get("print_mode", "optical")
+                base_ev = item.get("base_ev", 0.0)
                 if (params or film != "none" or paper != "none") and not sdc_manager.has_sdc(photo_path):
                     try:
-                        sdc_manager.save_sdc(photo_path, film, paper, params or {})
+                        sdc_manager.save_sdc(photo_path, film, paper, params or {}, print_mode=pmode)
                     except Exception:
                         pass
                 entry = {
@@ -871,6 +905,16 @@ def load_session_file(file_path: str) -> dict | None:
                 }
                 if "rel_path" in item and item["rel_path"]:
                     entry["rel_path"] = item["rel_path"]
+                if film:
+                    entry["film_profile"] = film
+                if paper:
+                    entry["paper_profile"] = paper
+                if pmode:
+                    entry["print_mode"] = pmode
+                if params:
+                    entry["params"] = params
+                if base_ev:
+                    entry["base_ev"] = float(base_ev)
                 norm_photos.append(entry)
 
         data["photos"] = norm_photos
