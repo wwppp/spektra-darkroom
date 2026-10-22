@@ -63,6 +63,7 @@ class BaseExportDialog(QDialog):
         self.combo_format = QComboBox()
         setup_solid_combobox(self.combo_format)
         self.combo_format.addItem("JPEG (*.jpg)", "jpeg")
+        self.combo_format.addItem("JPEG XL (*.jxl)", "jxl")
         self.combo_format.addItem("TIFF (*.tif)", "tiff")
         self.combo_format.addItem("PNG (*.png)", "png")
         grid_top.addWidget(self.combo_format, 0, 1)
@@ -76,6 +77,7 @@ class BaseExportDialog(QDialog):
         self.combo_colorspace.addItem("sRGB", "sRGB")
         self.combo_colorspace.addItem("Display P3", "Display P3")
         self.combo_colorspace.addItem("Adobe RGB (1998)", "Adobe RGB (1998)")
+        self.combo_colorspace.addItem("Rec. 2020", "Rec. 2020")
         self.combo_colorspace.addItem("ProPhoto RGB", "ProPhoto RGB")
         grid_top.addWidget(self.combo_colorspace, 0, 3)
 
@@ -99,6 +101,12 @@ class BaseExportDialog(QDialog):
         self.combo_depth = QComboBox()
         setup_solid_combobox(self.combo_depth)
         grid_top.addWidget(self.combo_depth, 1, 3)
+
+        # Row 2: GPS Privacy Checkbox (Strictly Protects Photographer Location)
+        self.chk_strip_gps = QCheckBox("去除 GPS 位置隐私 (保护个人安全)")
+        self.chk_strip_gps.setChecked(True)
+        self.chk_strip_gps.setToolTip("开启后将从导出文件的 EXIF 元数据中完全抹除 GPS 经纬度与海拔坐标，保留相机、镜头、光圈、快门与拍摄时间等专业参数。")
+        grid_top.addWidget(self.chk_strip_gps, 2, 0, 1, 4)
 
         card_layout.addLayout(grid_top)
 
@@ -230,6 +238,46 @@ class BaseExportDialog(QDialog):
 
         self.stack_settings.addWidget(page_png)
 
+        # --- Stack Page 3: JPEG XL Options ---
+        page_jxl = QWidget()
+        grid_jxl = QGridLayout(page_jxl)
+        grid_jxl.setContentsMargins(0, 0, 0, 0)
+        grid_jxl.setHorizontalSpacing(12)
+        grid_jxl.setVerticalSpacing(10)
+        grid_jxl.setColumnStretch(0, 0)
+        grid_jxl.setColumnStretch(1, 1)
+        grid_jxl.setColumnStretch(2, 0)
+        grid_jxl.setColumnStretch(3, 1)
+
+        lbl_jxl_mode = QLabel("压缩模式:")
+        lbl_jxl_mode.setFixedWidth(72)
+        grid_jxl.addWidget(lbl_jxl_mode, 0, 0)
+
+        self.combo_jxl_mode = QComboBox()
+        setup_solid_combobox(self.combo_jxl_mode)
+        self.combo_jxl_mode.addItem("视觉无损 (16位推荐 / 距离1.0)", "visual_10")
+        self.combo_jxl_mode.addItem("超高保真 (距离0.5)", "visual_05")
+        self.combo_jxl_mode.addItem("高质量平衡 (距离1.5)", "visual_15")
+        self.combo_jxl_mode.addItem("数学完全无损 (Lossless 1:1)", "lossless")
+        grid_jxl.addWidget(self.combo_jxl_mode, 0, 1)
+
+        lbl_jxl_effort = QLabel("编码精度:")
+        lbl_jxl_effort.setFixedWidth(65)
+        grid_jxl.addWidget(lbl_jxl_effort, 0, 2)
+
+        self.combo_jxl_effort = QComboBox()
+        setup_solid_combobox(self.combo_jxl_effort)
+        self.combo_jxl_effort.addItem("标准精度 (Effort 7)", 7)
+        self.combo_jxl_effort.addItem("极限压缩 (Effort 9)", 9)
+        self.combo_jxl_effort.addItem("极速导出 (Effort 5)", 5)
+        grid_jxl.addWidget(self.combo_jxl_effort, 0, 3)
+
+        lbl_jxl_hint = QLabel("JPEG XL (.jxl) 是新一代高保真格式，兼具超高压缩率与 16/32 位浮点广色域存储。")
+        lbl_jxl_hint.setStyleSheet("color: #888; font-size: 11px;")
+        grid_jxl.addWidget(lbl_jxl_hint, 1, 0, 1, 4)
+
+        self.stack_settings.addWidget(page_jxl)
+
         card_layout.addWidget(self.stack_settings)
         self.combo_format.currentIndexChanged.connect(self._on_format_changed)
 
@@ -243,6 +291,12 @@ class BaseExportDialog(QDialog):
             self.combo_depth.addItem("8 位 (8-bit)", 8)
         elif fmt == "tiff":
             self.stack_settings.setCurrentIndex(1)
+            self.combo_depth.addItem("8 位 (8-bit)", 8)
+            self.combo_depth.addItem("16 位 (16-bit)", 16)
+            self.combo_depth.addItem("32 位浮点 (32-bit Float)", 32)
+            self.combo_depth.setCurrentIndex(1)
+        elif fmt == "jxl":
+            self.stack_settings.setCurrentIndex(3)
             self.combo_depth.addItem("8 位 (8-bit)", 8)
             self.combo_depth.addItem("16 位 (16-bit)", 16)
             self.combo_depth.addItem("32 位浮点 (32-bit Float)", 32)
@@ -313,6 +367,19 @@ class BaseExportDialog(QDialog):
                 idx_dpi = self.combo_dpi.findData(dpi_val)
                 if idx_dpi >= 0:
                     self.combo_dpi.setCurrentIndex(idx_dpi)
+
+            if hasattr(self, "chk_strip_gps"):
+                self.chk_strip_gps.setChecked(bool(last.get("strip_gps", True)))
+
+            if hasattr(self, "combo_jxl_mode"):
+                idx_jm = self.combo_jxl_mode.findData(last.get("jxl_mode", "visual_10"))
+                if idx_jm >= 0:
+                    self.combo_jxl_mode.setCurrentIndex(idx_jm)
+
+            if hasattr(self, "combo_jxl_effort"):
+                idx_je = self.combo_jxl_effort.findData(last.get("jxl_effort", 7))
+                if idx_je >= 0:
+                    self.combo_jxl_effort.setCurrentIndex(idx_je)
         except Exception:
             pass
 
@@ -322,18 +389,29 @@ class BaseExportDialog(QDialog):
         except Exception:
             dpi_val = 300
 
+        mode_val = self.combo_jxl_mode.currentData() if hasattr(self, "combo_jxl_mode") else "visual_10"
+        is_lossless = (mode_val == "lossless")
+        dist_map = {"visual_05": 0.5, "visual_10": 1.0, "visual_15": 1.5, "lossless": 0.0}
+        dist_val = dist_map.get(mode_val, 1.0)
+        effort_val = int(self.combo_jxl_effort.currentData()) if hasattr(self, "combo_jxl_effort") else 7
+
         return {
             "engine": "wysiwyg",
             "format": self.combo_format.currentData(),
             "colorspace": self.combo_colorspace.currentData(),
             "bit_depth": self.combo_depth.currentData(),
             "dpi": dpi_val,
+            "strip_gps": self.chk_strip_gps.isChecked() if hasattr(self, "chk_strip_gps") else True,
             "quality": self.slider_quality.value(),
             "subsampling": self.combo_subsampling.currentData(),
             "progressive": self.chk_progressive.isChecked(),
             "tiff_compression": self.combo_tiff_comp.currentData(),
             "png_level": self.combo_png_level.currentData(),
-            "scale_pct": int(self.combo_scale.currentData()) if hasattr(self, "combo_scale") and self.combo_format.currentData() == "jpeg" else 100,
+            "jxl_mode": mode_val,
+            "jxl_lossless": is_lossless,
+            "jxl_distance": dist_val,
+            "jxl_effort": effort_val,
+            "scale_pct": int(self.combo_scale.currentData()) if hasattr(self, "combo_scale") and self.combo_format.currentData() in ("jpeg", "jxl") else 100,
         }
 
     def _apply_style(self):
@@ -546,7 +624,7 @@ class SingleExportDialog(BaseExportDialog):
     def __init__(self, default_file_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("单片扫描")
-        self.setFixedSize(660, 360)
+        self.setFixedSize(660, 390)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         self._init_ui()
@@ -586,11 +664,16 @@ class SingleExportDialog(BaseExportDialog):
         # Initial format extension setup
         ext = os.path.splitext(self._default_file_path)[1].lower()
         if ext in (".jpg", ".jpeg"):
-            self.combo_format.setCurrentIndex(0)
+            init_fmt = "jpeg"
+        elif ext == ".jxl":
+            init_fmt = "jxl"
         elif ext in (".tif", ".tiff"):
-            self.combo_format.setCurrentIndex(1)
+            init_fmt = "tiff"
         else:
-            self.combo_format.setCurrentIndex(2)
+            init_fmt = "png"
+        idx_f = self.combo_format.findData(init_fmt)
+        if idx_f >= 0:
+            self.combo_format.setCurrentIndex(idx_f)
         self._on_format_changed(self.combo_format.currentIndex())
 
         main_layout.addStretch(1)
@@ -635,24 +718,26 @@ class SingleExportDialog(BaseExportDialog):
         cur_path = self.edit_path.text()
         if cur_path:
             base, _ = os.path.splitext(cur_path)
-            new_ext = ".tif" if fmt == "tiff" else (".png" if fmt == "png" else ".jpg")
+            new_ext = ".tif" if fmt == "tiff" else (".jxl" if fmt == "jxl" else (".png" if fmt == "png" else ".jpg"))
             self.edit_path.setText(base + new_ext)
 
     def _browse_save_path(self):
         fmt = self.combo_format.currentData()
         if fmt == "tiff":
             filt = "专业 TIFF (*.tif *.tiff)"
-        elif fmt == "jpeg":
-            filt = "高质量 JPEG (*.jpg *.jpeg)"
-        else:
+        elif fmt == "jxl":
+            filt = "新一代 JPEG XL (*.jxl)"
+        elif fmt == "png":
             filt = "便携 PNG (*.png)"
+        else:
+            filt = "高质量 JPEG (*.jpg *.jpeg)"
 
         start_path = self.edit_path.text().strip()
         path, _ = QFileDialog.getSaveFileName(self, "选择保存路径", start_path, filt)
         if path:
             base, ext = os.path.splitext(path)
-            valid_exts = {'jpeg': ('.jpg', '.jpeg'), 'tiff': ('.tif', '.tiff'), 'png': ('.png',)}.get(fmt, ())
-            canonical_ext = {'jpeg': '.jpg', 'tiff': '.tif', 'png': '.png'}.get(fmt, '.jpg')
+            valid_exts = {'jpeg': ('.jpg', '.jpeg'), 'jxl': ('.jxl',), 'tiff': ('.tif', '.tiff'), 'png': ('.png',)}.get(fmt, ())
+            canonical_ext = {'jpeg': '.jpg', 'jxl': '.jxl', 'tiff': '.tif', 'png': '.png'}.get(fmt, '.jpg')
             if ext.lower() not in valid_exts:
                 path = base + canonical_ext
             self.edit_path.setText(normalize_path(path))
@@ -669,11 +754,13 @@ class SingleExportDialog(BaseExportDialog):
             base, ext = os.path.splitext(raw_path)
             valid_exts = {
                 "jpeg": (".jpg", ".jpeg"),
+                "jxl": (".jxl",),
                 "tiff": (".tif", ".tiff"),
                 "png": (".png",),
             }.get(fmt, ())
             canonical_ext = {
                 "jpeg": ".jpg",
+                "jxl": ".jxl",
                 "tiff": ".tif",
                 "png": ".png",
             }.get(fmt, ".jpg")
@@ -703,7 +790,7 @@ class BatchExportDialog(BaseExportDialog):
         super().__init__(parent)
         self.batch_count = batch_count
         self.setWindowTitle(f"批量扫描：{self.batch_count}张")
-        self.setFixedSize(660, 420)
+        self.setFixedSize(660, 450)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""

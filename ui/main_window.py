@@ -9171,7 +9171,7 @@ class DarkroomMainWindow(QMainWindow):
 
         last_cfg = config_manager.get_last_export_settings()
         fmt = str(last_cfg.get("format", "jpeg")).lower() if last_cfg else "jpeg"
-        ext = ".tif" if "tif" in fmt else (".png" if "png" in fmt else ".jpg")
+        ext = ".tif" if "tif" in fmt else (".jxl" if "jxl" in fmt else (".png" if "png" in fmt else ".jpg"))
 
         base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0]
         default_out = os.path.join(last_dir, f"{base_name}{ext}")
@@ -9280,7 +9280,7 @@ class DarkroomMainWindow(QMainWindow):
                     last_dir = os.path.dirname(self._current_photo_path) if self._current_photo_path else os.path.expanduser("~")
                 last_cfg = config_manager.get_last_export_settings()
                 fmt = str(last_cfg.get("format", "jpeg")).lower() if last_cfg else "jpeg"
-                ext = ".tif" if "tif" in fmt else (".png" if "png" in fmt else ".jpg")
+                ext = ".tif" if "tif" in fmt else (".jxl" if "jxl" in fmt else (".png" if "png" in fmt else ".jpg"))
                 base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0]
                 default_out = os.path.join(last_dir, f"{base_name}{ext}")
                 dlg = SingleExportDialog(default_out, parent=self)
@@ -9318,6 +9318,8 @@ class DarkroomMainWindow(QMainWindow):
         fmt = cfg.get("format", "jpeg")
         if fmt == "tiff":
             ext = ".tif"
+        elif fmt == "jxl":
+            ext = ".jxl"
         elif fmt == "png":
             ext = ".png"
         else:

@@ -218,11 +218,19 @@ def convert_image_colorspace(img_rgb_float, target_colorspace="sRGB"):
         import colour
         t_low = target.lower()
         if "p3" in t_low:
-            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'Display P3')
+            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'Display P3', apply_cctf_decoding=True, apply_cctf_encoding=True)
         elif "adobe" in t_low:
-            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'Adobe RGB (1998)')
+            lin = colour.models.eotf_sRGB(np.clip(img_rgb_float, 0.0, 1.0))
+            xyz = colour.RGB_to_XYZ(lin, 'sRGB', apply_cctf_decoding=False)
+            lin_adobe = colour.XYZ_to_RGB(xyz, 'Adobe RGB (1998)', apply_cctf_encoding=False)
+            out = colour.RGB_COLOURSPACES['Adobe RGB (1998)'].cctf_encoding(np.clip(lin_adobe, 0.0, 1.0))
+        elif "2020" in t_low or "rec2020" in t_low or "bt2020" in t_low:
+            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'ITU-R BT.2020', apply_cctf_decoding=True, apply_cctf_encoding=True)
         elif "prophoto" in t_low:
-            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'ProPhoto RGB')
+            lin = colour.models.eotf_sRGB(np.clip(img_rgb_float, 0.0, 1.0))
+            xyz = colour.RGB_to_XYZ(lin, 'sRGB', apply_cctf_decoding=False)
+            lin_pro = colour.XYZ_to_RGB(xyz, 'ProPhoto RGB', apply_cctf_encoding=False)
+            out = colour.RGB_COLOURSPACES['ProPhoto RGB'].cctf_encoding(np.clip(lin_pro, 0.0, 1.0))
         else:
             out = img_rgb_float
         return np.clip(out.astype(np.float32), 0.0, 1.0)
@@ -242,6 +250,8 @@ def get_icc_profile_bytes(target_colorspace="sRGB"):
         cand_file = os.path.join(icc_dir, "DisplayP3.icc")
     elif "adobe" in target:
         cand_file = os.path.join(icc_dir, "AdobeRGB1998.icc")
+    elif "2020" in target or "rec2020" in target or "bt2020" in target:
+        cand_file = os.path.join(icc_dir, "Rec2020.icc")
     elif "prophoto" in target:
         cand_file = os.path.join(icc_dir, "ProPhotoRGB.icc")
     else:
@@ -732,6 +742,44 @@ def save_encoded_image(rendered_data, output_path, params_dict):
     icc_bytes = get_icc_profile_bytes(colorspace)
     pil_exif, exif_bytes, tiff_tags = extract_exif_bundle(source_path)
 
+    # 2.0 Optional GPS privacy stripping (defaults to True for photographer location security)
+    strip_gps = bool(params_dict.get("strip_gps", True))
+    if strip_gps:
+        if pil_exif is not None:
+            try:
+                g = pil_exif.get_ifd(0x8825)
+                g.clear()
+            except Exception:
+                pass
+            if 0x8825 in pil_exif:
+                try:
+                    del pil_exif[0x8825]
+                except Exception:
+                    pass
+            if 34853 in pil_exif:
+                try:
+                    del pil_exif[34853]
+                except Exception:
+                    pass
+        if tiff_tags:
+            tiff_tags = [t for t in tiff_tags if t[0] not in (0x8825, 34853)]
+        if exif_bytes and pil_exif is None:
+            try:
+                temp_exif = Image.Exif()
+                temp_exif.load(exif_bytes)
+                if 0x8825 in temp_exif or 34853 in temp_exif:
+                    try:
+                        temp_exif.get_ifd(0x8825).clear()
+                    except Exception:
+                        pass
+                    if 0x8825 in temp_exif:
+                        del temp_exif[0x8825]
+                    if 34853 in temp_exif:
+                        del temp_exif[34853]
+                    exif_bytes = temp_exif.tobytes()
+            except Exception:
+                pass
+
     # 2.1 Synchronize resolution DPI and ColorSpace into EXIF
     if pil_exif is not None:
         try:
@@ -851,6 +899,82 @@ def save_encoded_image(rendered_data, output_path, params_dict):
             if exif_bytes:
                 save_kw['exif'] = exif_bytes
             im.save(output_path, 'PNG', **save_kw)
+
+    elif "jxl" in fmt_lower:
+        import imagecodecs
+        jxl_mode = str(params_dict.get("jxl_mode", "visual_10")).lower()
+        is_lossless = (jxl_mode == "lossless") or bool(params_dict.get("jxl_lossless", False))
+        effort_val = int(params_dict.get("jxl_effort", 7))
+        dist_val = float(params_dict.get("jxl_distance", 1.0))
+        if is_lossless:
+            lossless_arg = True
+            distance_arg = 0.0
+        else:
+            lossless_arg = False
+            distance_arg = max(0.0, dist_val)
+
+        # Map color spaces to standard CICP Primaries & Transfer characteristics
+        cs_low = str(colorspace).lower()
+        if "p3" in cs_low:
+            prim_arg = 11  # Display P3
+            tr_arg = 13    # sRGB transfer
+        elif "2020" in cs_low or "rec2020" in cs_low or "bt2020" in cs_low:
+            prim_arg = 9   # BT.2100 / BT.2020
+            tr_arg = 1     # BT.709 OETF
+        elif "adobe" in cs_low:
+            prim_arg = 1
+            tr_arg = 13
+        else:
+            prim_arg = 1   # sRGB
+            tr_arg = 13    # sRGB transfer
+
+        scale_pct = int(params_dict.get("scale_pct", 100))
+
+        if bit_depth == 32:
+            out_data = rendered_float.astype(np.float32)
+            if 0 < scale_pct < 100:
+                tw = max(1, int(out_data.shape[1] * scale_pct / 100.0))
+                th = max(1, int(out_data.shape[0] * scale_pct / 100.0))
+                out_data = cv2.resize(out_data, (tw, th), interpolation=cv2.INTER_AREA)
+        elif bit_depth == 16:
+            out_data = (np.clip(rendered_float, 0.0, 1.0) * 65535.0).astype(np.uint16)
+            if 0 < scale_pct < 100:
+                tw = max(1, int(out_data.shape[1] * scale_pct / 100.0))
+                th = max(1, int(out_data.shape[0] * scale_pct / 100.0))
+                out_data = cv2.resize(out_data, (tw, th), interpolation=cv2.INTER_AREA)
+        else:
+            out_data = (np.clip(rendered_float, 0.0, 1.0) * 255.0).astype(np.uint8)
+            if 0 < scale_pct < 100:
+                tw = max(1, int(out_data.shape[1] * scale_pct / 100.0))
+                th = max(1, int(out_data.shape[0] * scale_pct / 100.0))
+                out_data = cv2.resize(out_data, (tw, th), interpolation=cv2.INTER_AREA)
+
+        enc_bytes = imagecodecs.jpegxl_encode(
+            out_data,
+            effort=effort_val,
+            distance=distance_arg,
+            lossless=lossless_arg,
+            primaries=prim_arg,
+            transfer=tr_arg,
+            photometric='rgb',
+            usecontainer=True
+        )
+
+        if exif_bytes and enc_bytes.startswith(b'\x00\x00\x00\x0cJXL \r\n\x87\n'):
+            try:
+                import struct
+                clean_exif = exif_bytes[6:] if exif_bytes.startswith(b'Exif\x00\x00') else exif_bytes
+                exif_payload = b'\x00\x00\x00\x00' + clean_exif
+                exif_box = struct.pack('>I', len(exif_payload) + 8) + b'Exif' + exif_payload
+                idx = 12
+                ftyp_len = struct.unpack('>I', enc_bytes[idx:idx+4])[0]
+                insert_pos = idx + ftyp_len
+                enc_bytes = enc_bytes[:insert_pos] + exif_box + enc_bytes[insert_pos:]
+            except Exception as ex_jxl_meta:
+                logger.debug(f"JXL Exif box injection: {ex_jxl_meta}")
+
+        with open(output_path, 'wb') as jf:
+            jf.write(enc_bytes)
 
     else:  # JPEG
         q_scale = int(params_dict.get("quality", 9))
@@ -2941,7 +3065,7 @@ class SpektraEngine:
                     src = source_path or params_dict.get("source_path") or self.current_file_path or "developed"
                     base_name = os.path.splitext(os.path.basename(src))[0]
                     fmt_str = str(format_type).lower()
-                    ext = ".tif" if "tif" in fmt_str else (".png" if "png" in fmt_str else ".jpg")
+                    ext = ".tif" if "tif" in fmt_str else (".jxl" if "jxl" in fmt_str else (".png" if "png" in fmt_str else ".jpg"))
                     output_path = os.path.join(output_path, f"{base_name}_developed{ext}")
 
                 enc_params = dict(params_dict)
