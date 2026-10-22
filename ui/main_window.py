@@ -1998,18 +1998,12 @@ class DarkroomMainWindow(QMainWindow):
         else:
             worker.start()
 
-    def _apply_win11_corners(self, is_max=False):
+    def _setup_native_window_frame(self):
+        """Configure Win32 window styles, DWM client frame extension, and Aero Snap once on show."""
         if sys.platform != "win32":
             return
         try:
             hwnd = int(self.winId())
-            DWMWA_WINDOW_CORNER_PREFERENCE = 33
-            # When maximized, disable rounding to eliminate edge and corner gaps completely
-            corner_pref = c_int(1 if is_max else 2)  # 1 = DONOTROUND, 2 = ROUND
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, byref(corner_pref), ctypes.sizeof(corner_pref)
-            )
-            # Enable Windows native Aero Snap, edge snapping, system menu and native minimize/maximize animations
             GWL_STYLE = -16
             style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
             WS_CAPTION = 0x00C00000
@@ -2020,17 +2014,43 @@ class DarkroomMainWindow(QMainWindow):
             ctypes.windll.user32.SetWindowLongW(
                 hwnd, GWL_STYLE, style | WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU
             )
-            # Ensure window is registered as top-level app window in taskbar
             GWL_EXSTYLE = -20
             WS_EX_APPWINDOW = 0x00040000
             ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_APPWINDOW)
+
+            # Extend DWM frame into client area so DWM composites entire window smoothly during
+            # maximize/restore animation without black borders and provides native drop shadow
+            class MARGINS(ctypes.Structure):
+                _fields_ = [
+                    ("cxLeftWidth", ctypes.c_int),
+                    ("cxRightWidth", ctypes.c_int),
+                    ("cyTopHeight", ctypes.c_int),
+                    ("cyBottomHeight", ctypes.c_int),
+                ]
+            margins = MARGINS(1, 1, 1, 1)
+            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(hwnd, byref(margins))
 
             SWP_NOZORDER = 0x0004
             SWP_NOMOVE = 0x0002
             SWP_NOSIZE = 0x0001
             SWP_FRAMECHANGED = 0x0020
             ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+        except Exception:
+            pass
+
+    def _apply_win11_corners(self, is_max=False):
+        """Update Windows 11 rounded corner preference (ROUND when normal, DONOTROUND when maximized).
+        Never issues SWP_FRAMECHANGED here to avoid interrupting the DWM maximize/restore animation."""
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())
+            DWMWA_WINDOW_CORNER_PREFERENCE = 33
+            corner_pref = c_int(1 if is_max else 2)  # 1 = DONOTROUND, 2 = ROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, byref(corner_pref), ctypes.sizeof(corner_pref)
+            )
         except Exception:
             pass
 
@@ -2093,6 +2113,7 @@ class DarkroomMainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._setup_native_window_frame()
         self._apply_win11_corners(self.isMaximized())
         self._apply_native_window_icon()
         if self._saved_normal_geo is None and not self.isMaximized():
@@ -2112,12 +2133,16 @@ class DarkroomMainWindow(QMainWindow):
                 self.btn_max.set_maximized_state(is_max)
                 if hasattr(self, 'btn_close'):
                     self.btn_close.set_maximized_state(is_max)
-            self._update_root_style(is_max)
             self._apply_win11_corners(is_max)
-            self._apply_native_window_icon()
+            # Defer root style update and icon recheck to avoid blocking the GUI thread during DWM maximize animation
+            QTimer.singleShot(0, lambda: self._on_window_state_changed_deferred(is_max))
         elif event.type() == QEvent.Type.ActivationChange:
             self._apply_native_window_icon()
         super().changeEvent(event)
+
+    def _on_window_state_changed_deferred(self, is_max):
+        self._update_root_style(is_max)
+        self._apply_native_window_icon()
 
     def nativeEvent(self, eventType, message):
         """Win32 native event handling for frameless window:
@@ -2138,6 +2163,10 @@ class DarkroomMainWindow(QMainWindow):
                     ]
                 msg = MSG.from_address(int(message))
 
+                # Suppress GDI background erase to prevent black flash during window resizing/animation
+                if msg.message == 0x0014:  # WM_ERASEBKGND
+                    return True, 1
+
                 # 0. WM_GETMINMAXINFO (0x0024): Constrain maximized window strictly to work area (excluding taskbar)
                 if msg.message == 0x0024:
                     h_mon = ctypes.windll.user32.MonitorFromWindow(msg.hwnd, 2)  # MONITOR_DEFAULTTONEAREST
@@ -2157,17 +2186,16 @@ class DarkroomMainWindow(QMainWindow):
 
                 # 1. WM_NCCALCSIZE (0x0083): Remove standard title bar and frame while keeping DWM animations
                 if msg.message == 0x0083:
-                    if msg.wParam and ctypes.windll.user32.IsZoomed(msg.hwnd):
-                        h_mon = ctypes.windll.user32.MonitorFromWindow(msg.hwnd, 2)
-                        mi = MONITORINFO()
-                        mi.cbSize = ctypes.sizeof(MONITORINFO)
-                        if ctypes.windll.user32.GetMonitorInfoW(h_mon, ctypes.byref(mi)):
+                    if msg.wParam:
+                        if ctypes.windll.user32.IsZoomed(msg.hwnd):
+                            bx = ctypes.windll.user32.GetSystemMetrics(32) + ctypes.windll.user32.GetSystemMetrics(92)
+                            by = ctypes.windll.user32.GetSystemMetrics(33) + ctypes.windll.user32.GetSystemMetrics(92)
                             params = NCCALCSIZE_PARAMS.from_address(msg.lParam)
-                            params.rgrc[0].left = mi.rcWork.left
-                            params.rgrc[0].top = mi.rcWork.top
-                            params.rgrc[0].right = mi.rcWork.right
-                            params.rgrc[0].bottom = mi.rcWork.bottom
-                            return True, 0
+                            params.rgrc[0].left += bx
+                            params.rgrc[0].top += by
+                            params.rgrc[0].right -= bx
+                            params.rgrc[0].bottom -= by
+                        return True, 0x0300  # WVR_REDRAW
                     return True, 0
 
                 # 2. WM_NCHITTEST (0x0084): Handle border resize hover and dragging with physical coords
