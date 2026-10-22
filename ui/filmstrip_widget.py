@@ -663,6 +663,16 @@ class FilmstripWidget(QWidget):
         self._can_paste_params = bool(can_paste)
 
     def keyPressEvent(self, event):
+        mods = event.modifiers()
+        if (mods & Qt.KeyboardModifier.ControlModifier) and (mods & Qt.KeyboardModifier.ShiftModifier) and event.key() == Qt.Key.Key_I:
+            self.invert_selection()
+            event.accept()
+            return
+        elif (mods & Qt.KeyboardModifier.ControlModifier) and event.key() == Qt.Key.Key_A:
+            self.select_all()
+            event.accept()
+            return
+
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             if self._selected_ids:
                 self.photosRemoved.emit(list(self._selected_ids))
@@ -1149,6 +1159,7 @@ class FilmstripWidget(QWidget):
             self._selected_ids = {active_id}
         else:
             self._selected_ids = set()
+        self._base_selection = set(self._selected_ids)
 
         # Clear existing
         for w in self._item_widgets.values():
@@ -1287,24 +1298,7 @@ class FilmstripWidget(QWidget):
         elif reset_selection or (active_id and active_id not in self._selected_ids):
             self._selected_ids = {active_id} if active_id else set()
 
-        affected = {old_active, active_id} | (old_selected ^ self._selected_ids)
-        affected.discard(None)
-        if len(affected) <= 20:
-            for pid in affected:
-                if pid in self._item_widgets:
-                    w = self._item_widgets[pid]
-                    w.set_active(pid == self._active_id)
-                    w.set_selected(pid in self._selected_ids)
-                    try:
-                        w.repaint()
-                    except Exception:
-                        pass
-        else:
-            self._update_items_selection()
-            try:
-                self.scroll_content.repaint()
-            except Exception:
-                pass
+        self._update_items_selection()
 
         self.selectionChanged.emit(list(self._selected_ids))
         if scroll_to_visible and active_id:
@@ -1321,10 +1315,33 @@ class FilmstripWidget(QWidget):
         for pid, w in self._item_widgets.items():
             w.set_active(pid == self._active_id and pid in self._selected_ids)
             w.set_selected(pid in self._selected_ids)
+            w.update()
 
     def _on_item_clicked(self, photo_id, event):
         mods = event.modifiers()
-        if mods & Qt.KeyboardModifier.ControlModifier:
+        is_ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        is_shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+        if is_shift and self._item_widgets:
+            # Shift+Click or Ctrl+Shift+Click: Range selection preserving previous Ctrl selections
+            pids = [p["id"] for p in self._photos_list if p and "id" in p]
+            anchor = self._selection_anchor_id if (self._selection_anchor_id in pids) else self._active_id
+            if not anchor or anchor not in pids:
+                anchor = photo_id
+                self._selection_anchor_id = anchor
+            if anchor in pids and photo_id in pids:
+                i1 = pids.index(anchor)
+                i2 = pids.index(photo_id)
+                start, end = min(i1, i2), max(i1, i2)
+                range_ids = set(pids[start:end+1])
+                base_sel = getattr(self, "_base_selection", None)
+                if base_sel is None:
+                    base_sel = set(self._selected_ids)
+                new_selection = set(base_sel) | range_ids
+                # Activate clicked photo and set range selection without moving the anchor
+                self.set_active_photo(photo_id, reset_selection=False, new_selected_ids=new_selection)
+                self._schedule_photo_selected(photo_id)
+        elif is_ctrl:
             # Ctrl+Click: Toggle selection WITHOUT switching active canvas photo
             if photo_id in self._selected_ids:
                 if len(self._selected_ids) > 1:
@@ -1338,29 +1355,15 @@ class FilmstripWidget(QWidget):
                 if not self._active_id:
                     self._active_id = photo_id
             self._selection_anchor_id = photo_id
+            self._base_selection = set(self._selected_ids)
 
             self._update_items_selection()
             self.selectionChanged.emit(list(self._selected_ids))
             return
-        elif mods & Qt.KeyboardModifier.ShiftModifier and self._item_widgets:
-            # Shift+Click: Range selection using persistent selection anchor
-            pids = [p["id"] for p in self._photos_list]
-            anchor = self._selection_anchor_id if (self._selection_anchor_id in pids) else self._active_id
-            if not anchor or anchor not in pids:
-                anchor = photo_id
-                self._selection_anchor_id = anchor
-            if anchor in pids and photo_id in pids:
-                i1 = pids.index(anchor)
-                i2 = pids.index(photo_id)
-                start, end = min(i1, i2), max(i1, i2)
-                range_ids = set(pids[start:end+1])
-                # Activate clicked photo and set range selection without moving the anchor
-                self.set_active_photo(photo_id, reset_selection=False, new_selected_ids=range_ids)
-                self._schedule_photo_selected(photo_id)
         else:
-            # Normal single click: cancels multi-selection, sets new selection anchor
-            # Instant 0ms visual update: selection border jumps over immediately
+            # Normal single click: cancels multi-selection, establishes new selection anchor and base selection
             self._selection_anchor_id = photo_id
+            self._base_selection = {photo_id}
             self.set_active_photo(photo_id, reset_selection=True)
             self._schedule_photo_selected(photo_id)
 
@@ -1620,6 +1623,7 @@ class FilmstripWidget(QWidget):
         act_select_all.triggered.connect(self.select_all)
 
         act_invert = menu.addAction("反选")
+        act_invert.setShortcut(QKeySequence("Ctrl+Shift+I"))
         act_invert.triggered.connect(self.invert_selection)
 
         menu.exec(global_pos)
@@ -1670,6 +1674,10 @@ class FilmstripWidget(QWidget):
         act_select_all.setShortcut(QKeySequence("Ctrl+A"))
         act_select_all.triggered.connect(self.select_all)
 
+        act_invert = menu.addAction("反选")
+        act_invert.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        act_invert.triggered.connect(self.invert_selection)
+
         if self._photos_list:
             act_clear = menu.addAction("清空底片库")
             act_clear.setIcon(get_icon("dlg_discard.png"))
@@ -1678,24 +1686,26 @@ class FilmstripWidget(QWidget):
         menu.exec(global_pos)
 
     def select_all(self):
-        self._selected_ids = {p["id"] for p in self._photos_list}
+        self._selected_ids = {p["id"] for p in self._photos_list if p and "id" in p}
+        self._base_selection = set(self._selected_ids)
         self._update_items_selection()
         self.selectionChanged.emit(list(self._selected_ids))
 
     def invert_selection(self):
-        all_ids = {p["id"] for p in self._photos_list}
-        self._selected_ids = all_ids - self._selected_ids
-        if self._selected_ids:
-            if self._active_id not in self._selected_ids:
-                new_active = next((p["id"] for p in self._photos_list if p["id"] in self._selected_ids), None)
-                if new_active:
-                    self.set_active_photo(new_active, reset_selection=False, new_selected_ids=self._selected_ids)
-                    self._schedule_photo_selected(new_active)
-                    return
+        all_ids = {p["id"] for p in self._photos_list if p and "id" in p}
+        new_selected = all_ids - self._selected_ids
+        new_active = self._active_id
+        if new_selected:
+            if self._active_id not in new_selected:
+                new_active = next((p["id"] for p in self._photos_list if p and p.get("id") in new_selected), None)
         else:
-            self._active_id = None
-        self._update_items_selection()
-        self.selectionChanged.emit(list(self._selected_ids))
+            new_active = None
+
+        self._selection_anchor_id = new_active
+        self._base_selection = set(new_selected)
+        self.set_active_photo(new_active, reset_selection=False, new_selected_ids=new_selected)
+        if new_active:
+            self._schedule_photo_selected(new_active)
 
     def get_selected_ids(self) -> list[str]:
         """Returns a list of currently selected photo IDs in the filmstrip."""

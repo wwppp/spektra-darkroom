@@ -4192,6 +4192,11 @@ class DarkroomMainWindow(QMainWindow):
         act_select_all.triggered.connect(self.action_select_all_photos)
         edit_menu.addAction(act_select_all)
 
+        act_invert_selection = QAction("反选底片", self)
+        act_invert_selection.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        act_invert_selection.triggered.connect(self.action_invert_selection)
+        edit_menu.addAction(act_invert_selection)
+
         edit_menu.addSeparator()
 
         self.act_reset_all = QAction("重置所有参数", self)
@@ -5571,13 +5576,25 @@ class DarkroomMainWindow(QMainWindow):
                 self._is_multi_selecting = False
                 self.restore_default_status()
 
+    def action_invert_selection(self):
+        """Ctrl+Shift+I handler: Invert selection in the filmstrip."""
+        if hasattr(self, 'filmstrip'):
+            self.filmstrip.invert_selection()
+            sel_count = len(self.filmstrip.get_selected_photo_ids())
+            if sel_count > 1:
+                self._is_multi_selecting = True
+                self.set_app_status(f"已选择 {sel_count} 张底片", timeout_ms=0)
+            elif sel_count == 1:
+                self._is_multi_selecting = False
+                self.restore_default_status()
+
     def action_copy_params(self, photo_id=None):
         """Ctrl+C handler: Copy all physical darkroom parameters from the currently viewed or specified photo."""
         target_id = photo_id if (photo_id and isinstance(photo_id, str)) else self.active_photo_id
         if not target_id:
             return
 
-        target_p = next((p for p in self.photos if p.get("id") == target_id), None)
+        target_p = next((p for p in self.photos if p and p.get("id") == target_id), None)
         if not target_p or not self._is_photo_edited(target_p):
             self.set_app_status("当前底片为原生底片（未做任何暗房修改），无暗房配方可复制", timeout_ms=2500)
             return
@@ -6236,7 +6253,7 @@ class DarkroomMainWindow(QMainWindow):
         """Reset exposure compensation to the calibrated 18% middle-gray baseline (0.00 EV)."""
         if not self._current_photo_path:
             return
-        photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+        photo = next((p for p in self.photos if p and p.get("path") == self._current_photo_path), None)
         if not photo:
             return
         ev_val = 0.0
@@ -6679,7 +6696,7 @@ class DarkroomMainWindow(QMainWindow):
         self.push_undo_state()
         if hasattr(self, "filmstrip") and self.active_photo_id:
             self.filmstrip.set_photo_crop(self.active_photo_id, crop_dict)
-        target_photo = next((p for p in self.photos if p.get("id") == self.active_photo_id), None)
+        target_photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
         if target_photo:
             target_photo["crop"] = dict(crop_dict)
             if "params" in target_photo and isinstance(target_photo["params"], dict):
@@ -6740,7 +6757,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # Save to current photo
         if self._current_photo_path:
-            photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+            photo = next((p for p in self.photos if p and p.get("path") == self._current_photo_path), None)
             if photo:
                 photo["film_profile"] = stock_id
                 if stock_id == "none" or is_pos:
@@ -6780,7 +6797,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # Save to current photo
         if push_undo and self._current_photo_path:
-            photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+            photo = next((p for p in self.photos if p and p.get("path") == self._current_photo_path), None)
             if photo:
                 photo["print_mode"] = mode
 
@@ -6830,7 +6847,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # Save to current photo
         if push_undo and self._current_photo_path:
-            photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+            photo = next((p for p in self.photos if p and p.get("path") == self._current_photo_path), None)
             if photo:
                 photo["paper_profile"] = stock_id
                 photo["print_mode"] = self.current_print_mode
@@ -7941,7 +7958,7 @@ class DarkroomMainWindow(QMainWindow):
         fl = None
         ap = None
         if self.active_photo_id:
-            photo = next((p for p in self.photos if p.get("id") == self.active_photo_id), None)
+            photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
             if photo:
                 exif = photo.get("exif", {})
                 fl = exif.get("focal_length")
@@ -7961,7 +7978,7 @@ class DarkroomMainWindow(QMainWindow):
         fl = None
         ap = None
         if self.active_photo_id:
-            photo = next((p for p in self.photos if p.get("id") == self.active_photo_id), None)
+            photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
             if photo:
                 exif = photo.get("exif", {})
                 fl = exif.get("focal_length")
@@ -8014,7 +8031,7 @@ class DarkroomMainWindow(QMainWindow):
         """Auto-detect camera/lens from photo EXIF metadata and match Adobe LCP profile."""
         if not self.active_photo_id:
             return
-        photo = next((p for p in self.photos if p.get("id") == self.active_photo_id), None)
+        photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
         if not photo:
             return
 
@@ -9239,7 +9256,7 @@ class DarkroomMainWindow(QMainWindow):
         if not self._current_photo_path:
             return
 
-        curr_p = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+        curr_p = next((p for p in self.photos if p and p.get("path") == self._current_photo_path), None)
         base_ev = float(curr_p.get("base_ev", 0.0)) if curr_p else 0.0
         if abs(base_ev) < 0.0001:
             base_ev = float(getattr(self, "_active_base_ev", 0.0))
@@ -9644,7 +9661,7 @@ class DarkroomMainWindow(QMainWindow):
                         p["float_img"] = None
                 session_cache_manager.clear_cache()
                 if self._current_photo_path:
-                    photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)
+                    photo = next((p for p in self.photos if p and p.get("path") == self._current_photo_path), None)
                     if photo:
                         res = self.engine.load_image(photo["path"])
                         if res.get("success"):
