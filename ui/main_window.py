@@ -3777,10 +3777,10 @@ class DarkroomMainWindow(QMainWindow):
             "柔光镜型号",
             [
                 ("无柔光滤镜", "none"),
-                ("Black Pro-Mist (黑柔)", "black_pro_mist"),
-                ("Glimmerglass (微光)", "glimmerglass"),
-                ("Pro-Mist (经典白柔)", "pro_mist"),
-                ("CineBloom (电影漫射)", "cinebloom"),
+                ("黑柔", "black_pro_mist"),
+                ("白柔", "pro_mist"),
+                ("微光", "glimmerglass"),
+                ("电影漫射", "cinebloom"),
             ],
             default_val="none",
             tooltip="经典电影柔光滤镜仿真，在高光周围形成漫射晕开质感"
