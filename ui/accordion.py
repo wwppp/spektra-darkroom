@@ -134,10 +134,11 @@ class ParameterGroupCard(QWidget):
         self._is_reset_enabled = enabled
         self.reset_btn.setEnabled(enabled)
         is_dark = theme_manager.is_dark()
+        tt_ss = theme_manager.get_tooltip_stylesheet()
         if enabled:
             self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.reset_btn.setStyleSheet("""
-                #accordionResetBtn {
+            self.reset_btn.setStyleSheet(f"""
+                #accordionResetBtn {{
                     background: transparent;
                     border: none;
                     color: #f59e0b !important;
@@ -145,15 +146,16 @@ class ParameterGroupCard(QWidget):
                     font-weight: 600;
                     padding: 2px 5px;
                     border-radius: 3px;
-                }
-                #accordionResetBtn:hover {
+                }}
+                #accordionResetBtn:hover {{
                     color: #fde68a !important;
                     background: rgba(245, 158, 11, 0.15);
-                }
-                #accordionResetBtn:pressed {
+                }}
+                #accordionResetBtn:pressed {{
                     color: #d97706 !important;
                     background: rgba(245, 158, 11, 0.25);
-                }
+                }}
+                {tt_ss}
             """)
         else:
             self.reset_btn.setCursor(Qt.CursorShape.ArrowCursor)
@@ -167,6 +169,7 @@ class ParameterGroupCard(QWidget):
                     font-weight: normal;
                     padding: 2px 5px;
                 }}
+                {tt_ss}
             """)
 
     def set_expanded(self, expanded: bool, animate: bool = False):

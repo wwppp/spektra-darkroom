@@ -415,6 +415,8 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
 
     from core.path_utils import get_resource_dir
     chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_amber.png").replace("\\", "/")
+    from ui.theme_manager import theme_manager
+    tt_ss = theme_manager.get_tooltip_stylesheet()
 
     if is_dark:
         return f"""
@@ -455,6 +457,7 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 border: 1px solid #282a36;
                 background: #0f1013;
             }}
+            {tt_ss}
         """
     else:
         return f"""
@@ -495,5 +498,6 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 border: 1px solid #cbd5e1;
                 background: #f1f5f9;
             }}
+            {tt_ss}
         """
 

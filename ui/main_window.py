@@ -2513,6 +2513,7 @@ class DarkroomMainWindow(QMainWindow):
         btn_border = colors['view_toolbar_btn_border']
         btn_hover = colors['view_toolbar_btn_hover']
         btn_pressed = "#14151a" if is_dark else "#cbd5e1"
+        tt_ss = theme_manager.get_tooltip_stylesheet()
         btn_style = f"""
             QPushButton {{
                 background: {btn_bg};
@@ -2531,6 +2532,7 @@ class DarkroomMainWindow(QMainWindow):
                 background: #f59e0b;
                 border-color: #f59e0b;
             }}
+            {tt_ss}
         """
         for btn in (getattr(self, 'btn_split', None), getattr(self, 'btn_crop', None), getattr(self, 'btn_fit', None), getattr(self, 'btn_100', None)):
             if btn:
@@ -2553,6 +2555,7 @@ class DarkroomMainWindow(QMainWindow):
 
     def _update_optics_ui_style(self):
         is_dark = theme_manager.is_dark()
+        tt_ss = theme_manager.get_tooltip_stylesheet()
         chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_amber.png").replace("\\", "/")
 
         chk_ss = get_standard_checkbox_style(is_dark)
@@ -2595,6 +2598,7 @@ class DarkroomMainWindow(QMainWindow):
                 color: {tab_checked_fg};
                 font-weight: bold;
             }}
+            {tt_ss}
         """
         for btn in (getattr(self, 'btn_lens_tab_profile', None), getattr(self, 'btn_lens_tab_manual', None)):
             if btn:
@@ -2602,7 +2606,7 @@ class DarkroomMainWindow(QMainWindow):
 
         if getattr(self, 'lens_tab_frame', None):
             line_col = "#282a36" if is_dark else "#cbd5e1"
-            self.lens_tab_frame.setStyleSheet(f"QFrame#lensTabFrame {{ border: none; border-bottom: 1px solid {line_col}; background: transparent; }}")
+            self.lens_tab_frame.setStyleSheet(f"QFrame#lensTabFrame {{ border: none; border-bottom: 1px solid {line_col}; background: transparent; }}\n{tt_ss}")
 
         # Sub-header labels
         header_color = "#71717a" if is_dark else "#64748b"
@@ -2616,10 +2620,17 @@ class DarkroomMainWindow(QMainWindow):
                 border: none;
                 background: transparent;
             }}
+            {tt_ss}
         """
         for lbl in (getattr(self, 'lbl_profile_header', None), getattr(self, 'lbl_amount_header', None), getattr(self, 'lbl_vignette_header', None), getattr(self, 'lbl_diff_header', None)):
             if lbl:
                 lbl.setStyleSheet(header_ss)
+
+        # Container panels for profile and manual
+        if getattr(self, 'panel_lens_profile', None):
+            self.panel_lens_profile.setStyleSheet(f"background: transparent; border: none;\n{tt_ss}")
+        if getattr(self, 'panel_lens_manual', None):
+            self.panel_lens_manual.setStyleSheet(f"background: transparent; border: none;\n{tt_ss}")
 
         # Divider line
         div_col = "#262834" if is_dark else "#e2e8f0"
@@ -3663,7 +3674,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # 3. Profile Panel Container
         self.panel_lens_profile = QWidget()
-        self.panel_lens_profile.setStyleSheet("background: transparent; border: none;")
+        self.panel_lens_profile.setStyleSheet(f"background: transparent; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
         self.panel_lens_profile.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         profile_layout = QVBoxLayout(self.panel_lens_profile)
         profile_layout.setContentsMargins(0, 2, 0, 0)
@@ -3753,7 +3764,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # 4. Manual Panel Container
         self.panel_lens_manual = QWidget()
-        self.panel_lens_manual.setStyleSheet("background: transparent; border: none;")
+        self.panel_lens_manual.setStyleSheet(f"background: transparent; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
         self.panel_lens_manual.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.panel_lens_manual.setVisible(False)
         manual_layout = QVBoxLayout(self.panel_lens_manual)

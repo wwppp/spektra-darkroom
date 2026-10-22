@@ -104,6 +104,7 @@ class HistogramExifBar(QWidget):
         is_dark = theme_manager.is_dark()
         fg_exp = "#cbd5e1" if is_dark else "#1e293b"
         fg_lens = "#94a3b8" if is_dark else "#64748b"
+        tt_ss = theme_manager.get_tooltip_stylesheet()
 
         exp_style = f"""
             QLabel {{
@@ -114,6 +115,7 @@ class HistogramExifBar(QWidget):
                 background: transparent;
                 border: none;
             }}
+            {tt_ss}
         """
         self.lbl_shutter.setStyleSheet(exp_style)
         self.lbl_iso.setStyleSheet(exp_style)
@@ -128,6 +130,7 @@ class HistogramExifBar(QWidget):
                 background: transparent;
                 border: none;
             }}
+            {tt_ss}
         """)
 
     def set_exif_data(self, data: dict):

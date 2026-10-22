@@ -698,7 +698,7 @@ class FilmstripWidget(QWidget):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 2, 10, 4)
         main_layout.setSpacing(8)
-        self.setStyleSheet("background: #0d0e12; border: none;")
+        self.setStyleSheet(f"background: #0d0e12; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
 
         # 1. Long Concave Film Track Channel (长条凹形胶片条槽路)
         self.track_container = FilmTrackContainer(self)
@@ -850,7 +850,7 @@ class FilmstripWidget(QWidget):
         """Re-render filmstrip and track colors to match active UI theme (light / dark)."""
         is_dark = theme_manager.is_dark()
         if is_dark:
-            self.setStyleSheet("background: #0d0e12; border: none;")
+            self.setStyleSheet(f"background: #0d0e12; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
             self.scroll_area.setStyleSheet("""
                 QScrollArea {
                     background: transparent;
@@ -922,7 +922,7 @@ class FilmstripWidget(QWidget):
                     }
                 """)
         else:
-            self.setStyleSheet("background: #e0e3ea; border: none;")
+            self.setStyleSheet(f"background: #e0e3ea; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
             self.scroll_area.setStyleSheet("""
                 QScrollArea {
                     background: transparent;

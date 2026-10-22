@@ -36,6 +36,7 @@ class ScrubLabel(QLabel):
         is_dark = theme_manager.is_dark()
         text_color = "#c8c8c8" if is_dark else "#334155"
         disabled_color = "#4b5563" if is_dark else "#94a3b8"
+        tt_ss = theme_manager.get_tooltip_stylesheet()
         self.setStyleSheet(f"""
             QLabel {{
                 background: transparent;
@@ -54,6 +55,7 @@ class ScrubLabel(QLabel):
                 color: {disabled_color};
                 background: transparent;
             }}
+            {tt_ss}
         """)
 
     def minimumSizeHint(self):
@@ -381,7 +383,7 @@ class ParamScrubSlider(QWidget):
         self._init_ui(label_text)
 
     def _init_ui(self, label_text):
-        self.setStyleSheet("ParamScrubSlider, AdobeScrubSlider { background: transparent; border: none; }")
+        self.setStyleSheet(f"ParamScrubSlider, AdobeScrubSlider {{ background: transparent; border: none; }}\n{theme_manager.get_tooltip_stylesheet()}")
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 3, 0, 4)
         main_layout.setSpacing(2)
@@ -465,6 +467,9 @@ class ParamScrubSlider(QWidget):
         input_dis_border = "#20222a" if is_dark else "#e2e8f0"
         btn_hover = "#282a36" if is_dark else "#e2e8f0"
         btn_pressed = "#1e202a" if is_dark else "#cbd5e1"
+        tt_ss = theme_manager.get_tooltip_stylesheet()
+
+        self.setStyleSheet(f"ParamScrubSlider, AdobeScrubSlider {{ background: transparent; border: none; }}\n{tt_ss}")
 
         if hasattr(self, 'value_edit') and self.value_edit:
             self.value_edit.setStyleSheet(f"""
@@ -486,6 +491,7 @@ class ParamScrubSlider(QWidget):
                     color: {input_dis_fg};
                     border: 1px solid {input_dis_border};
                 }}
+                {tt_ss}
             """)
         if hasattr(self, 'reset_btn') and self.reset_btn:
             self.reset_btn.setStyleSheet(f"""
@@ -504,10 +510,12 @@ class ParamScrubSlider(QWidget):
                 QPushButton:disabled {{
                     opacity: 0.25;
                 }}
+                {tt_ss}
             """)
         if hasattr(self, 'label') and self.label:
             self.label.apply_theme()
         if hasattr(self, 'slider') and self.slider:
+            self.slider.setStyleSheet(f"QSlider {{ background: transparent; border: none; }}\n{tt_ss}")
             self.slider.update()
 
     def setToolTip(self, text):
@@ -821,22 +829,9 @@ class DarkroomComboBox(QComboBox):
         theme_manager.themeChanged.connect(self.apply_theme)
 
     def apply_theme(self, theme_name=None):
-        is_dark = theme_manager.is_dark()
-        tooltip_bg = "#ffffff" if not is_dark else "rgba(22, 24, 30, 0.95)"
-        tooltip_fg = "#1e293b" if not is_dark else "#f1f5f9"
-        tooltip_border = "#cbd5e1" if not is_dark else "#333644"
+        tt_ss = theme_manager.get_tooltip_stylesheet()
         if hasattr(self, "combo_view") and self.combo_view:
-            self.combo_view.setStyleSheet(f"""
-                QToolTip {{
-                    background-color: {tooltip_bg};
-                    color: {tooltip_fg};
-                    border: 1px solid {tooltip_border};
-                    border-radius: 6px;
-                    padding: 6px 10px;
-                    font-size: 11px;
-                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
-                }}
-            """)
+            self.combo_view.setStyleSheet(tt_ss)
 
     def showPopup(self):
         if self.count() == 0:
@@ -985,6 +980,8 @@ class ComboBoxRow(QWidget):
         is_dark = theme_manager.is_dark()
         label_fg = "#c8c8c8" if is_dark else "#334155"
         label_dis_fg = "#4b5563" if is_dark else "#94a3b8"
+        tt_ss = theme_manager.get_tooltip_stylesheet()
+        self.setStyleSheet(f"ComboBoxRow {{ background: transparent; border: none; }}\n{tt_ss}")
         self.label.setStyleSheet(f"""
             QLabel {{
                 background: transparent;
@@ -999,6 +996,7 @@ class ComboBoxRow(QWidget):
                 color: {label_dis_fg};
                 background: transparent;
             }}
+            {tt_ss}
         """)
 
         arrow_icon = get_icon_path("arrow_down.png").replace("\\", "/")
@@ -1072,28 +1070,10 @@ class ComboBoxRow(QWidget):
                 padding: 2px 0px;
                 outline: 0px;
             }}
-            QToolTip {{
-                background-color: {tooltip_bg};
-                color: {tooltip_fg};
-                border: 1px solid {tooltip_border};
-                border-radius: 6px;
-                padding: 6px 10px;
-                font-size: 11px;
-                font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
-            }}
+            {tt_ss}
         """)
         if hasattr(self.combo, "view") and self.combo.view():
-            self.combo.view().setStyleSheet(f"""
-                QToolTip {{
-                    background-color: {tooltip_bg};
-                    color: {tooltip_fg};
-                    border: 1px solid {tooltip_border};
-                    border-radius: 6px;
-                    padding: 6px 10px;
-                    font-size: 11px;
-                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
-                }}
-            """)
+            self.combo.view().setStyleSheet(tt_ss)
 
     def setToolTip(self, text):
         super().setToolTip(text)
