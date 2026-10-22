@@ -102,13 +102,13 @@ class BaseExportDialog(QDialog):
         setup_solid_combobox(self.combo_depth)
         grid_top.addWidget(self.combo_depth, 1, 3)
 
-        # Row 2: GPS Privacy Checkbox (Strictly Protects Photographer Location)
+        card_layout.addLayout(grid_top)
+
+        # Shared GPS Privacy Checkbox (Placed cleanly below path input in specific dialogs)
         self.chk_strip_gps = QCheckBox("去除 GPS 位置隐私 (保护个人安全)")
+        self.chk_strip_gps.setObjectName("chkStripGps")
         self.chk_strip_gps.setChecked(True)
         self.chk_strip_gps.setToolTip("开启后将从导出文件的 EXIF 元数据中完全抹除 GPS 经纬度与海拔坐标，保留相机、镜头、光圈、快门与拍摄时间等专业参数。")
-        grid_top.addWidget(self.chk_strip_gps, 2, 0, 1, 4)
-
-        card_layout.addLayout(grid_top)
 
         # Row 3: Format-Specific Settings Stack
         self.stack_settings = QStackedWidget()
@@ -500,6 +500,13 @@ class BaseExportDialog(QDialog):
                     background: #f59e0b;
                 }}
 {get_standard_checkbox_style(is_dark=True)}
+                QCheckBox#chkStripGps {{
+                    color: #c4c4cc;
+                    font-size: 12px;
+                    font-weight: normal;
+                    spacing: 7px;
+                    background: transparent;
+                }}
                 QPushButton {{
                     background: #25262c;
                     color: #bbb;
@@ -598,6 +605,13 @@ class BaseExportDialog(QDialog):
                     background: #f59e0b;
                 }}
 {get_standard_checkbox_style(is_dark=False)}
+                QCheckBox#chkStripGps {{
+                    color: #334155;
+                    font-size: 12px;
+                    font-weight: normal;
+                    spacing: 7px;
+                    background: transparent;
+                }}
                 QPushButton {{
                     background: #ffffff;
                     color: #1e293b;
@@ -624,7 +638,7 @@ class SingleExportDialog(BaseExportDialog):
     def __init__(self, default_file_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("单片扫描")
-        self.setFixedSize(660, 390)
+        self.setFixedSize(660, 395)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         self._init_ui()
@@ -659,6 +673,14 @@ class SingleExportDialog(BaseExportDialog):
 
         row_path.addLayout(path_box)
         card_layout.addLayout(row_path)
+
+        # Row 5: GPS Privacy Checkbox directly below path input box inside the card
+        row_gps = QHBoxLayout()
+        row_gps.setContentsMargins(0, 4, 0, 0)
+        row_gps.addWidget(self.chk_strip_gps)
+        row_gps.addStretch()
+        card_layout.addLayout(row_gps)
+
         main_layout.addWidget(card)
 
         # Initial format extension setup
@@ -678,8 +700,9 @@ class SingleExportDialog(BaseExportDialog):
 
         main_layout.addStretch(1)
 
-        # Buttons row
+        # Buttons row (shifted leftward away from far-right border)
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
         btn_row.addStretch()
 
         btn_cancel = QPushButton("取消")
@@ -709,6 +732,7 @@ class SingleExportDialog(BaseExportDialog):
         """)
         btn_export.clicked.connect(self.accept)
         btn_row.addWidget(btn_export)
+        btn_row.addSpacing(24)
 
         main_layout.addLayout(btn_row)
 
@@ -790,7 +814,7 @@ class BatchExportDialog(BaseExportDialog):
         super().__init__(parent)
         self.batch_count = batch_count
         self.setWindowTitle(f"批量扫描：{self.batch_count}张")
-        self.setFixedSize(660, 450)
+        self.setFixedSize(660, 470)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
@@ -866,6 +890,14 @@ class BatchExportDialog(BaseExportDialog):
 
         row_path.addLayout(path_box)
         card_layout.addLayout(row_path)
+
+        # Row 6: GPS Privacy Checkbox directly below destination path inside the card
+        row_gps = QHBoxLayout()
+        row_gps.setContentsMargins(0, 4, 0, 0)
+        row_gps.addWidget(self.chk_strip_gps)
+        row_gps.addStretch()
+        card_layout.addLayout(row_gps)
+
         main_layout.addWidget(card)
 
         # Initial format setup
@@ -904,6 +936,7 @@ class BatchExportDialog(BaseExportDialog):
         """)
         btn_export.clicked.connect(self.accept)
         btn_row.addWidget(btn_export)
+        btn_row.addSpacing(24)
 
         main_layout.addLayout(btn_row)
 
