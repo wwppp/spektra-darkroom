@@ -1,12 +1,145 @@
 """
 histogram_widget.py - Professional Adobe/Lightroom-style Real-time RGB & Luma Histogram
+and Compact EXIF Summary Bar.
 """
 
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QSizePolicy
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QLinearGradient, QPainterPath, QFont
 from PySide6.QtCore import Qt, QRectF
 import numpy as np
 from ui.theme_manager import theme_manager
+
+
+class ElidedLabel(QLabel):
+    """QLabel that automatically truncates overflowing text with ellipsis ('...')
+    and maintains tooltip with the full string for hover inspection."""
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._full_text = text or ""
+        self.setMinimumWidth(10)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.setText(self._full_text)
+
+    def setText(self, text):
+        self._full_text = str(text or "")
+        self.setToolTip(self._full_text if self._full_text else "")
+        self._update_text()
+
+    def full_text(self):
+        return self._full_text
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_text()
+
+    def _update_text(self):
+        if not self._full_text:
+            if super().text() != "":
+                super().setText("")
+            return
+        fm = self.fontMetrics()
+        avail_w = max(10, self.width())
+        elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideRight, avail_w)
+        if elided != super().text():
+            super().setText(elided)
+
+
+class HistogramExifBar(QWidget):
+    """Compact EXIF summary bar placed between the histogram card and parameter cards:
+    - Left-aligned: 快门 (Shutter speed), ISO, 光圈 (Aperture)
+    - Right-aligned: 镜头型号 (Lens model) with ellipsis truncation and full model tooltip
+    - Vertically centered and horizontally flush with the cards
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(20)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._init_ui()
+        self.apply_theme()
+        theme_manager.themeChanged.connect(lambda _: self.apply_theme())
+
+    def _init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self.lbl_exposure = QLabel("--   ISO --   ƒ/--")
+        self.lbl_exposure.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.lbl_exposure.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.lbl_exposure, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        self.lbl_lens = ElidedLabel("")
+        self.lbl_lens.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        layout.addWidget(self.lbl_lens, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+    def apply_theme(self):
+        is_dark = theme_manager.is_dark()
+        fg_exp = "#cbd5e1" if is_dark else "#334155"
+        fg_lens = "#94a3b8" if is_dark else "#64748b"
+
+        self.lbl_exposure.setStyleSheet(f"""
+            QLabel {{
+                color: {fg_exp};
+                font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+                font-size: 11px;
+                font-weight: 600;
+                background: transparent;
+                border: none;
+            }}
+        """)
+        self.lbl_lens.setStyleSheet(f"""
+            QLabel {{
+                color: {fg_lens};
+                font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+                font-size: 11px;
+                font-weight: 500;
+                background: transparent;
+                border: none;
+            }}
+        """)
+
+    def set_exif_data(self, data: dict):
+        if not data:
+            self.lbl_exposure.setText("--   ISO --   ƒ/--")
+            self.lbl_exposure.setToolTip("")
+            self.lbl_lens.setText("")
+            return
+
+        # 1. Shutter Speed (快门)
+        raw_shutter = str(data.get("shutter_speed") or "-").strip()
+        if raw_shutter in ("-", "", "None"):
+            shutter = "--"
+        else:
+            s = raw_shutter.replace(" 秒", "s").replace("秒", "s").strip()
+            if not s.endswith("s") and not s.endswith('"'):
+                s += "s"
+            shutter = s
+
+        # 2. ISO
+        raw_iso = str(data.get("iso") or "-").strip()
+        if raw_iso in ("-", "", "None"):
+            iso = "ISO --"
+        else:
+            cleaned_iso = raw_iso.replace("ISO-", "").replace("ISO", "").strip()
+            iso = f"ISO {cleaned_iso}" if cleaned_iso else "ISO --"
+
+        # 3. Aperture (光圈)
+        raw_ap = str(data.get("aperture") or "-").strip()
+        if raw_ap in ("-", "", "None"):
+            ap = "ƒ/--"
+        else:
+            cleaned_ap = raw_ap.replace("f/", "").replace("F", "").replace("ƒ/", "").strip()
+            ap = f"ƒ/{cleaned_ap}" if cleaned_ap else "ƒ/--"
+
+        self.lbl_exposure.setText(f"{shutter}   {iso}   {ap}")
+        self.lbl_exposure.setToolTip(f"快门: {shutter} | 感光度: {iso} | 光圈: {ap}")
+
+        # 4. Lens Model (镜头型号)
+        raw_lens = str(data.get("lens_model") or "").strip()
+        if raw_lens in ("-", "None"):
+            raw_lens = ""
+        self.lbl_lens.setText(raw_lens)
 
 
 class HistogramWidget(QWidget):
@@ -15,12 +148,12 @@ class HistogramWidget(QWidget):
     - Antialiased overlapping Red, Green, Blue, and Luma paths
     - Additive/semi-transparent gradients
     - Highlight & Shadow clipping indicators (over/under exposure)
-    - Darkroom theme styling with IRE reference grid lines
+    - Darkroom theme styling with IRE reference grid lines flush with sidebar parameter cards
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(88)
+        self.setFixedHeight(84)
         self.setMinimumWidth(220)
         self.setStyleSheet("background: transparent;")
         theme_manager.themeChanged.connect(lambda _: self.update())
@@ -143,26 +276,37 @@ class HistogramWidget(QWidget):
 
         w = float(self.width())
         h = float(self.height())
-        pad_x = 8.0
-        pad_y = 6.0
-        plot_w = w - pad_x * 2.0
-        plot_h = h - pad_y * 2.0
+
+        # Outer card aligns flush with parameter cards (x: 0.5 to w - 0.5, y: 0.5 to h - 0.5)
+        card_x = 0.5
+        card_y = 0.5
+        card_w = max(10.0, w - 1.0)
+        card_h = max(10.0, h - 1.0)
+        card_radius = 6.0  # Matches paramGroupCard border-radius exactly
 
         is_dark = theme_manager.is_dark()
 
-        # Background card
-        card_border = QColor("#262832") if is_dark else QColor("#d8dce6")
-        card_bg = QColor("#131417") if is_dark else QColor("#ffffff")
+        # Background card matching paramGroupCard styling exactly
+        card_border = QColor("#262834") if is_dark else QColor("#d8dce6")
+        card_bg = QColor("#17181e") if is_dark else QColor("#ffffff")
         painter.setPen(QPen(card_border, 1.0))
         painter.setBrush(QBrush(card_bg))
-        painter.drawRoundedRect(QRectF(pad_x, pad_y, plot_w, plot_h), 4.0, 4.0)
+        painter.drawRoundedRect(QRectF(card_x, card_y, card_w, card_h), card_radius, card_radius)
+
+        # Plot curves inside the card
+        inner_pad_x = 4.0
+        inner_pad_y = 4.0
+        plot_w = card_w - inner_pad_x * 2.0
+        plot_h = card_h - inner_pad_y * 2.0
+        base_x = card_x + inner_pad_x
+        base_y = card_y + card_h - inner_pad_y
 
         # Reference grid lines (25%, 50%, 75% Exposure Zones)
-        grid_pen = QColor(255, 255, 255, 18) if is_dark else QColor(0, 0, 0, 30)
+        grid_pen = QColor(255, 255, 255, 18) if is_dark else QColor(0, 0, 0, 24)
         painter.setPen(QPen(grid_pen, 1.0, Qt.PenStyle.DashLine))
         for frac in (0.25, 0.50, 0.75):
-            gx = pad_x + plot_w * frac
-            painter.drawLine(gx, pad_y + 2, gx, pad_y + plot_h - 2)
+            gx = base_x + plot_w * frac
+            painter.drawLine(gx, card_y + 3, gx, base_y - 1)
 
         if not self._has_data:
             return
@@ -170,23 +314,21 @@ class HistogramWidget(QWidget):
         # Helper to construct QPainterPath
         def make_path(data):
             path = QPainterPath()
-            base_y = pad_y + plot_h
-            path.moveTo(pad_x, base_y)
+            path.moveTo(base_x, base_y)
             for i in range(256):
-                x = pad_x + (float(i) / 255.0) * plot_w
-                y = base_y - float(data[i]) * (plot_h - 4.0)
+                x = base_x + (float(i) / 255.0) * plot_w
+                y = base_y - float(data[i]) * (plot_h - 2.0)
                 path.lineTo(x, y)
-            path.lineTo(pad_x + plot_w, base_y)
+            path.lineTo(base_x + plot_w, base_y)
             path.closeSubpath()
             return path
 
         def make_stroke_path(data):
             path = QPainterPath()
-            base_y = pad_y + plot_h
-            path.moveTo(pad_x, base_y - float(data[0]) * (plot_h - 4.0))
+            path.moveTo(base_x, base_y - float(data[0]) * (plot_h - 2.0))
             for i in range(1, 256):
-                x = pad_x + (float(i) / 255.0) * plot_w
-                y = base_y - float(data[i]) * (plot_h - 4.0)
+                x = base_x + (float(i) / 255.0) * plot_w
+                y = base_y - float(data[i]) * (plot_h - 2.0)
                 path.lineTo(x, y)
             return path
 
@@ -218,17 +360,16 @@ class HistogramWidget(QWidget):
         if self._shadow_clip:
             painter.setBrush(QBrush(QColor("#38bdf8")))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QRectF(pad_x + 5.0, pad_y + 5.0, 5.0, 5.0))
+            painter.drawEllipse(QRectF(card_x + 6.0, card_y + 6.0, 5.0, 5.0))
 
         if self._highlight_clip:
             painter.setBrush(QBrush(QColor("#ef4444")))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QRectF(pad_x + plot_w - 10.0, pad_y + 5.0, 5.0, 5.0))
+            painter.drawEllipse(QRectF(card_x + card_w - 11.0, card_y + 6.0, 5.0, 5.0))
 
         # 4. Mode badge (LOG / LIN)
         badge_text = "LOG" if self._scale_mode == "log" else "LIN"
         badge_color = QColor(255, 255, 255, 100) if is_dark else QColor(30, 41, 59, 120)
         painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         painter.setPen(QPen(badge_color))
-        painter.drawText(QRectF(pad_x + plot_w - 32.0, pad_y + 4.0, 26.0, 14.0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, badge_text)
-
+        painter.drawText(QRectF(card_x + card_w - 34.0, card_y + 4.0, 26.0, 14.0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, badge_text)

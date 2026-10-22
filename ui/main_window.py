@@ -106,7 +106,7 @@ from ui.export_dialog import (
 )
 from ui.filmstrip_widget import FilmstripWidget, DuplicateFilesDialog
 from ui.spinner_widget import SpinnerWidget
-from ui.histogram_widget import HistogramWidget
+from ui.histogram_widget import HistogramWidget, HistogramExifBar
 from ui.fading_stacked_widget import FadingStackedWidget
 from ui.theme_manager import theme_manager
 
@@ -3301,6 +3301,10 @@ class DarkroomMainWindow(QMainWindow):
         self._hist_timer.setInterval(40)
         self._hist_timer.timeout.connect(self._compute_and_update_histogram)
 
+        # Compact EXIF Summary Bar (上下居中，左右对齐)
+        self.histogram_exif_bar = HistogramExifBar(self)
+        sb_outer_layout.addWidget(self.histogram_exif_bar)
+
         sidebar_scroll = SmoothScrollArea()
         sidebar_scroll.setWidgetResizable(True)
         sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -3309,7 +3313,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.sidebar_content = QWidget()
         self.sidebar_layout = QVBoxLayout(self.sidebar_content)
-        self.sidebar_layout.setContentsMargins(0, 4, 0, 0)
+        self.sidebar_layout.setContentsMargins(0, 0, 0, 0)
         self.sidebar_layout.setSpacing(6)
 
         # Sections (Comprehensive Physical Analog Pipeline)
@@ -5054,6 +5058,8 @@ class DarkroomMainWindow(QMainWindow):
 
         if hasattr(self, 'exif_widget'):
             self.exif_widget.set_exif_data({})
+        if hasattr(self, 'histogram_exif_bar'):
+            self.histogram_exif_bar.set_exif_data({})
         if hasattr(self, 'histogram_widget'):
             self.histogram_widget.clear()
         elif hasattr(self, 'histogram'):
@@ -7379,6 +7385,8 @@ class DarkroomMainWindow(QMainWindow):
                 self._update_photo_info_display()
                 if hasattr(self, 'exif_widget'):
                     self.exif_widget.set_exif_data(photo.get("exif") or {})
+                if hasattr(self, 'histogram_exif_bar'):
+                    self.histogram_exif_bar.set_exif_data(photo.get("exif") or {})
 
     def _on_slot_decode_progress(self, curr, total):
         if getattr(self, "_is_importing", False):
@@ -8138,6 +8146,8 @@ class DarkroomMainWindow(QMainWindow):
                 except Exception:
                     pass
             self.exif_widget.set_exif_data(exif_data or {})
+            if hasattr(self, 'histogram_exif_bar'):
+                self.histogram_exif_bar.set_exif_data(exif_data or {})
 
             base_temp = float(exif_data.get("color_temp", 5500.0) if exif_data else 5500.0)
             base_tint = float(exif_data.get("tint", 1.0) if exif_data else 1.0)
@@ -9167,6 +9177,8 @@ class DarkroomMainWindow(QMainWindow):
         self._update_window_title()
         if hasattr(self, 'exif_widget'):
             self.exif_widget.set_exif_data({})
+        if hasattr(self, 'histogram_exif_bar'):
+            self.histogram_exif_bar.set_exif_data({})
         if hasattr(self, 'histogram_widget'):
             self.histogram_widget.clear()
         elif hasattr(self, 'histogram'):
