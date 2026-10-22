@@ -77,14 +77,22 @@ def load_sdc(image_path: str) -> dict | None:
         return None
 
 
-def save_sdc(image_path: str, film_profile: str, paper_profile: str, params: dict, thumbnail_rgb: np.ndarray = None, print_mode: str = "optical") -> bool:
+def save_sdc(image_path: str, film_profile: str, paper_profile: str, params: dict, thumbnail_rgb: np.ndarray = None, print_mode: str = None) -> bool:
     """Save sidecar editing configuration next to the image file, optionally caching thumbnail."""
     sdc_path = get_sdc_path(image_path)
     if not sdc_path:
         return False
 
     try:
-        resolved_pm = print_mode or (params.get("print_mode", "optical") if params else "optical")
+        resolved_pm = print_mode
+        if not resolved_pm and params and isinstance(params, dict):
+            resolved_pm = params.get("print_mode")
+        if not resolved_pm:
+            existing = load_sdc(image_path)
+            if existing and existing.get("print_mode"):
+                resolved_pm = existing.get("print_mode")
+        if not resolved_pm:
+            resolved_pm = "optical" 
         data = {
             "format": "SpektraDarkroom Sidecar",
             "version": "1.0",
@@ -109,13 +117,11 @@ def save_sdc(image_path: str, film_profile: str, paper_profile: str, params: dic
             except Exception as ex:
                 logger.debug(f"Failed encoding thumbnail for SDC {sdc_path}: {ex}")
 
-        # Atomic write
+        # Atomic write with os.replace
         tmp_path = sdc_path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        if os.path.exists(sdc_path):
-            os.remove(sdc_path)
-        os.rename(tmp_path, sdc_path)
+        os.replace(tmp_path, sdc_path)
         return True
     except Exception as e:
         logger.warning(f"Failed to write SDC sidecar {sdc_path}: {e}")

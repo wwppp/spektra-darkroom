@@ -589,6 +589,7 @@ class FilmstripWidget(QWidget):
         self._item_widgets = {}
         self._photos_list = []
         self._active_id = None
+        self._selection_anchor_id = None
         self._selected_ids = set()
         self._can_paste_params = False
         self._pending_scroll_timers = []
@@ -1143,6 +1144,7 @@ class FilmstripWidget(QWidget):
     def set_photos(self, photos, active_id):
         self._photos_list = photos
         self._active_id = active_id
+        self._selection_anchor_id = active_id
         if active_id:
             self._selected_ids = {active_id}
         else:
@@ -1335,23 +1337,30 @@ class FilmstripWidget(QWidget):
                 # Keep active photo intact so canvas never switches
                 if not self._active_id:
                     self._active_id = photo_id
+            self._selection_anchor_id = photo_id
 
             self._update_items_selection()
             self.selectionChanged.emit(list(self._selected_ids))
             return
-        elif mods & Qt.KeyboardModifier.ShiftModifier and self._active_id in self._item_widgets:
-            # Shift+Click: Range selection
+        elif mods & Qt.KeyboardModifier.ShiftModifier and self._item_widgets:
+            # Shift+Click: Range selection using persistent selection anchor
             pids = [p["id"] for p in self._photos_list]
-            if self._active_id in pids and photo_id in pids:
-                i1 = pids.index(self._active_id)
+            anchor = self._selection_anchor_id if (self._selection_anchor_id in pids) else self._active_id
+            if not anchor or anchor not in pids:
+                anchor = photo_id
+                self._selection_anchor_id = anchor
+            if anchor in pids and photo_id in pids:
+                i1 = pids.index(anchor)
                 i2 = pids.index(photo_id)
                 start, end = min(i1, i2), max(i1, i2)
                 range_ids = set(pids[start:end+1])
+                # Activate clicked photo and set range selection without moving the anchor
                 self.set_active_photo(photo_id, reset_selection=False, new_selected_ids=range_ids)
                 self._schedule_photo_selected(photo_id)
         else:
-            # Normal single click: cancels multi-selection, selecting ONLY this clicked photo
+            # Normal single click: cancels multi-selection, sets new selection anchor
             # Instant 0ms visual update: selection border jumps over immediately
+            self._selection_anchor_id = photo_id
             self.set_active_photo(photo_id, reset_selection=True)
             self._schedule_photo_selected(photo_id)
 

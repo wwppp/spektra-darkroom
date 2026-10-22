@@ -365,7 +365,7 @@ class BaseExportDialog(QDialog):
                     border: 1px solid #323542;
                     border-radius: 4px;
                     padding: 4px 26px 4px 8px;
-                    font-size: 11.5px;
+                    font-size: 11px;
                 }}
                 QComboBox:hover {{
                     border-color: #f59e0b;
@@ -463,7 +463,7 @@ class BaseExportDialog(QDialog):
                     border: 1px solid #cbd5e1;
                     border-radius: 4px;
                     padding: 4px 26px 4px 8px;
-                    font-size: 11.5px;
+                    font-size: 11px;
                 }}
                 QComboBox:hover {{
                     border-color: #f59e0b;
@@ -650,14 +650,37 @@ class SingleExportDialog(BaseExportDialog):
         start_path = self.edit_path.text().strip()
         path, _ = QFileDialog.getSaveFileName(self, "选择保存路径", start_path, filt)
         if path:
+            base, ext = os.path.splitext(path)
+            valid_exts = {'jpeg': ('.jpg', '.jpeg'), 'tiff': ('.tif', '.tiff'), 'png': ('.png',)}.get(fmt, ())
+            canonical_ext = {'jpeg': '.jpg', 'tiff': '.tif', 'png': '.png'}.get(fmt, '.jpg')
+            if ext.lower() not in valid_exts:
+                path = base + canonical_ext
             self.edit_path.setText(normalize_path(path))
 
     def get_export_config(self) -> dict:
         cfg = self.get_common_export_config()
         raw_path = normalize_path(self.edit_path.text().strip())
+        fmt = str(cfg.get("format", "jpeg")).lower()
         if raw_path and (os.path.isdir(raw_path) or raw_path.endswith(("/", "\\"))):
             cur_name = os.path.basename(self._default_file_path) or "developed.jpg"
             raw_path = os.path.join(raw_path, cur_name)
+
+        if raw_path:
+            base, ext = os.path.splitext(raw_path)
+            valid_exts = {
+                "jpeg": (".jpg", ".jpeg"),
+                "tiff": (".tif", ".tiff"),
+                "png": (".png",),
+            }.get(fmt, ())
+            canonical_ext = {
+                "jpeg": ".jpg",
+                "tiff": ".tif",
+                "png": ".png",
+            }.get(fmt, ".jpg")
+            if ext.lower() not in valid_exts:
+                raw_path = base + canonical_ext
+                self.edit_path.setText(normalize_path(raw_path))
+
         cfg["path"] = normalize_path(raw_path)
         cfg["is_batch"] = False
         return cfg
@@ -886,7 +909,7 @@ class ExportProgressDialog(QDialog):
                     color: #cbd5e1;
                     border: 1px solid #353846;
                     border-radius: 4px;
-                    font-size: 11.5px;
+                    font-size: 11px;
                     padding: 4px 16px;
                 }
                 QPushButton:hover {
@@ -931,7 +954,7 @@ class ExportProgressDialog(QDialog):
                     color: #1e293b;
                     border: 1px solid #cbd5e1;
                     border-radius: 4px;
-                    font-size: 11.5px;
+                    font-size: 11px;
                     padding: 4px 16px;
                 }
                 QPushButton:hover {

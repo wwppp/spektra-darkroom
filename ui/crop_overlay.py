@@ -1611,11 +1611,8 @@ class CropOverlayWidget(QWidget):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            rect = self._get_crop_screen_rect()
-            if rect.contains(event.position()):
-                self.apply_crop()
-                return
+        # Prevent accidental crop commits on double-clicking inside the crop box;
+        # user explicitly confirms via Enter key or Apply button.
         super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event):

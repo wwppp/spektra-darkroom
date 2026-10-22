@@ -4393,7 +4393,8 @@ class DarkroomMainWindow(QMainWindow):
                 self._current_photo_path,
                 self.current_film_stock,
                 self.current_paper_stock,
-                self.current_params
+                self.current_params,
+                print_mode=getattr(self, "current_print_mode", "optical")
             )
             self._photo_is_dirty = False
             if self.active_photo_id:
@@ -4847,7 +4848,8 @@ class DarkroomMainWindow(QMainWindow):
                 self._current_photo_path,
                 self.current_film_stock,
                 self.current_paper_stock,
-                self.current_params
+                self.current_params,
+                print_mode=getattr(self, "current_print_mode", "optical")
             )
             self._photo_is_dirty = False
             if self.active_photo_id:
@@ -4942,7 +4944,8 @@ class DarkroomMainWindow(QMainWindow):
                     self._current_photo_path,
                     self.current_film_stock,
                     self.current_paper_stock,
-                    self.current_params
+                    self.current_params,
+                    print_mode=getattr(self, "current_print_mode", "optical")
                 )
                 self._photo_is_dirty = False
             for p in self.photos:
@@ -4951,7 +4954,8 @@ class DarkroomMainWindow(QMainWindow):
                         p["path"],
                         p.get("film_profile", self.current_film_stock),
                         p.get("paper_profile", self.current_paper_stock),
-                        p.get("params", self.current_params)
+                        p.get("params", self.current_params),
+                        print_mode=p.get("print_mode", getattr(self, "current_print_mode", "optical"))
                     )
                     p["is_dirty"] = False
         except Exception as e:
@@ -5225,17 +5229,40 @@ class DarkroomMainWindow(QMainWindow):
         enqueued_count = 0
         new_tasks = []
         import uuid
+        used_targets = set()
         for p in photos_to_export:
             src = p["path"]
             base_name = os.path.splitext(os.path.basename(src))[0]
-            out_file = os.path.join(out_dir, f"{base_name}{ext}")
+            out_fn = f"{base_name}{ext}"
+            out_file = os.path.join(out_dir, out_fn)
+
+            norm_src = os.path.abspath(src).lower()
+            counter = 1
+            while (out_file.lower() in used_targets) or (
+                os.path.exists(out_file) and os.path.abspath(out_file).lower() != norm_src
+            ):
+                out_fn = f"{base_name}_{counter}{ext}"
+                out_file = os.path.join(out_dir, out_fn)
+                counter += 1
+            used_targets.add(out_file.lower())
 
             task_params = dict(self.current_params)
             sdc = sdc_manager.load_sdc(src)
-            film = sdc.get("film_profile", self.current_film_stock) if sdc else self.current_film_stock
-            paper = sdc.get("paper_profile", self.current_paper_stock) if sdc else self.current_paper_stock
-            if sdc and "params" in sdc:
-                task_params.update(sdc["params"])
+            if p.get("film_profile"):
+                film = p.get("film_profile")
+                paper = p.get("paper_profile", "none")
+                task_params.update(p.get("params") or {})
+            elif sdc:
+                film = sdc.get("film_profile", "none")
+                paper = sdc.get("paper_profile", "none")
+                if "params" in sdc and isinstance(sdc["params"], dict):
+                    task_params.update(sdc["params"])
+            elif src == self._current_photo_path:
+                film = self.current_film_stock
+                paper = self.current_paper_stock
+            else:
+                film = "none"
+                paper = "none" 
 
             task_params.update(last_cfg)
             task_params["source_path"] = src
@@ -9048,7 +9075,8 @@ class DarkroomMainWindow(QMainWindow):
                 self._current_photo_path,
                 self.current_film_stock,
                 self.current_paper_stock,
-                self.current_params
+                self.current_params,
+                print_mode=getattr(self, "current_print_mode", "optical")
             )
         self._photo_is_dirty = False
         if hasattr(self, 'engine'):
@@ -9269,6 +9297,7 @@ class DarkroomMainWindow(QMainWindow):
         import uuid
         enqueued_count = 0
         new_tasks = []
+        used_targets = set()
         for i, pid in enumerate(photo_ids):
             photo = next((p for p in self.photos if p["id"] == pid), None)
             if not photo:
@@ -9276,9 +9305,22 @@ class DarkroomMainWindow(QMainWindow):
 
             file_p = photo["path"]
             sdc = sdc_manager.load_sdc(file_p)
-            film = sdc.get("film_profile", "kodak_portra_400") if sdc else "kodak_portra_400"
-            paper = sdc.get("paper_profile", "kodak_2383") if sdc else "kodak_2383"
-            params = sdc.get("params", {}) if sdc else {}
+            if photo.get("film_profile"):
+                film = photo.get("film_profile")
+                paper = photo.get("paper_profile", "none")
+                params = photo.get("params") or {}
+            elif sdc:
+                film = sdc.get("film_profile", "none")
+                paper = sdc.get("paper_profile", "none")
+                params = sdc.get("params") or {}
+            elif file_p == self._current_photo_path:
+                film = self.current_film_stock
+                paper = self.current_paper_stock
+                params = dict(self.current_params)
+            else:
+                film = "none"
+                paper = "none"
+                params = {}
 
             exif_d = photo.get("exif", {})
             b_temp = float(exif_d.get("color_temp", 5500.0) if exif_d else 5500.0)
@@ -9332,8 +9374,19 @@ class DarkroomMainWindow(QMainWindow):
             }
 
             stem = os.path.splitext(os.path.basename(file_p))[0]
-            out_fn = f"{prefix}{stem}{suffix}{ext}"
+            base_fn = f"{prefix}{stem}{suffix}"
+            out_fn = f"{base_fn}{ext}"
             out_target = os.path.join(out_dir, out_fn)
+
+            norm_src = os.path.abspath(file_p).lower()
+            counter = 1
+            while (out_target.lower() in used_targets) or (
+                os.path.exists(out_target) and os.path.abspath(out_target).lower() != norm_src
+            ):
+                out_fn = f"{base_fn}_{counter}{ext}"
+                out_target = os.path.join(out_dir, out_fn)
+                counter += 1
+            used_targets.add(out_target.lower())
 
             pix = None
             if photo.get("thumbnail_rgb") is not None:
@@ -9636,7 +9689,8 @@ class DarkroomMainWindow(QMainWindow):
                     self.current_film_stock,
                     self.current_paper_stock,
                     self.current_params,
-                    thumbnail_rgb=cur_thumb
+                    thumbnail_rgb=cur_thumb,
+                    print_mode=getattr(self, "current_print_mode", "optical")
                 )
                 self._photo_is_dirty = False
             for p in self.photos:
@@ -9646,7 +9700,8 @@ class DarkroomMainWindow(QMainWindow):
                         p.get("film_profile", self.current_film_stock),
                         p.get("paper_profile", self.current_paper_stock),
                         p.get("params", self.current_params),
-                        thumbnail_rgb=p.get("thumbnail_rgb")
+                        thumbnail_rgb=p.get("thumbnail_rgb"),
+                        print_mode=p.get("print_mode", getattr(self, "current_print_mode", "optical"))
                     )
                     p["is_dirty"] = False
         except Exception as e:
@@ -9739,7 +9794,8 @@ class DarkroomMainWindow(QMainWindow):
                 self._current_photo_path,
                 self.current_film_stock,
                 self.current_paper_stock,
-                self.current_params
+                self.current_params,
+                print_mode=getattr(self, "current_print_mode", "optical")
             )
         self._photo_is_dirty = False
         event.accept()

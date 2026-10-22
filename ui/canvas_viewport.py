@@ -1777,8 +1777,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
         else:
             target_zoom = 1.0
 
-        if target_zoom < 1.25:
-            target_zoom = max(2.0, target_zoom)
 
         if mouse_pos is not None:
             mx = mouse_pos.x() if hasattr(mouse_pos, 'x') else float(mouse_pos[0])
@@ -2113,9 +2111,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if params_override:
                 eff_params.update(params_override)
 
-            # Create FBO (16-bit float buffer for high dynamic range precision when bit_depth >= 16)
-            is_16bit = (int(bit_depth) >= 16)
-            if is_16bit:
+            # Create FBO (32-bit float for bit_depth==32, 16-bit float for bit_depth==16)
+            is_32bit = (int(bit_depth) == 32)
+            is_16bit = (int(bit_depth) == 16)
+            if is_32bit:
+                from PySide6.QtOpenGL import QOpenGLFramebufferObjectFormat
+                fbo_fmt = QOpenGLFramebufferObjectFormat()
+                fbo_fmt.setInternalTextureFormat(GL.GL_RGBA32F)
+                fbo = QOpenGLFramebufferObject(target_w, target_h, fbo_fmt)
+            elif is_16bit:
                 from PySide6.QtOpenGL import QOpenGLFramebufferObjectFormat
                 fbo_fmt = QOpenGLFramebufferObjectFormat()
                 fbo_fmt.setInternalTextureFormat(GL.GL_RGBA16F)
@@ -2320,7 +2324,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
             # Read pixels from FBO (target_w, target_h)
             GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 1)
-            if is_16bit:
+            if is_32bit:
+                raw_bytes = GL.glReadPixels(0, 0, target_w, target_h, GL.GL_RGBA, GL.GL_FLOAT)
+                fbo.release()
+                rgba = np.frombuffer(raw_bytes, dtype=np.float32).reshape((target_h, target_w, 4))
+                try:
+                    import cv2
+                    img_arr = cv2.flip(cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB), 0)
+                except Exception:
+                    img_arr = np.ascontiguousarray(np.flipud(rgba[..., :3]))
+            elif is_16bit:
                 raw_bytes = GL.glReadPixels(0, 0, target_w, target_h, GL.GL_RGBA, GL.GL_UNSIGNED_SHORT)
                 fbo.release()
                 rgba = np.frombuffer(raw_bytes, dtype=np.uint16).reshape((target_h, target_w, 4))
