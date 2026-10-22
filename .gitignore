@@ -57,6 +57,7 @@ spektrafilm-repo/
 .lut_cache/
 .session_cache/
 *.npy
+!spektrafilm/data/luts/spectral_upsampling/*.npy
 
 # IDE & Editor files
 .vscode/

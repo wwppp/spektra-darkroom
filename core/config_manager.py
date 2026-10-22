@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import copy
+import ctypes
 import logging
 
 logger = logging.getLogger("SpektraDarkroom.Config")

@@ -1,7 +1,7 @@
 import os
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QRectF, QPoint, QEvent, QTimer
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QFontMetrics, QKeySequence, QIcon, QLinearGradient
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QFontMetrics, QKeySequence, QIcon, QLinearGradient, QCursor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QScrollArea, QFrame,
     QMenu, QDialog, QTextEdit, QSizePolicy

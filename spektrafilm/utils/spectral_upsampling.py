@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import struct
 import colour
@@ -103,10 +104,19 @@ def compute_lut_spectra(lut_size=128, smooth_steps=1, lut_coeffs_filename='hanat
     return lut_spectra
 
 def _load_hanatos2025_spectra_lut(filename='irradiance_xy_tc.npy'):
-    data_path = importlib.resources.files('spektrafilm.data.luts.spectral_upsampling').joinpath(filename)
-    with data_path.open('rb') as file:
-        spectra_lut = np.double(np.load(file))
-    return spectra_lut
+    try:
+        data_path = importlib.resources.files('spektrafilm.data.luts.spectral_upsampling').joinpath(filename)
+        with data_path.open('rb') as file:
+            spectra_lut = np.double(np.load(file))
+        return spectra_lut
+    except Exception as e:
+        alt_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'luts', 'spectral_upsampling', filename)
+        if os.path.exists(alt_path):
+            with open(alt_path, 'rb') as file:
+                return np.double(np.load(file))
+        raise FileNotFoundError(
+            f"Required LUT file '{filename}' not found. Please ensure spektrafilm/data/luts/spectral_upsampling/{filename} exists. Original error: {e}"
+        ) from e
 
 def _illuminant_to_xy(illuminant_label):
     illu = standard_illuminant(illuminant_label)

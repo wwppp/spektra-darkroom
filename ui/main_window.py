@@ -48,6 +48,7 @@ from core.format_constants import (
     FILE_DIALOG_IMAGE_FILTER
 )
 from core.version import get_app_title, get_full_version_info
+from core.app_core import SpektraEngine
 from core import sdc_manager
 from core import config_manager
 from core import session_cache_manager
@@ -8645,6 +8646,7 @@ class DarkroomMainWindow(QMainWindow):
             if fpath:
                 session_cache_manager.invalidate_photo_cache(fpath)
 
+        count = len(target_photos)
         self.on_remove_multiple_photos(photo_ids)
         self.set_app_status(f"已将 {count} 个底片文件移至回收站", timeout_ms=3000)
 

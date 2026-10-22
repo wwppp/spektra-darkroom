@@ -2,7 +2,6 @@ import numpy as np
 import scipy
 import colour
 import scipy.interpolate
-import matplotlib.pyplot as plt
 from spektrafilm.config import SPECTRAL_SHAPE
 from spektrafilm.utils.io import load_dichroic_filters, load_filter
 
@@ -34,6 +33,7 @@ class DichroicFilters():
             self.filters = load_dichroic_filters(self.wavelengths, brand)
             
     def plot(self):
+        import matplotlib.pyplot as plt
         colors = ['tab:cyan', 'tab:pink', 'gold']
         _, ax = plt.subplots()
         for i in range(3):
@@ -131,6 +131,7 @@ def color_enlarger(light_source, filter_cc_values=(0,65,55),
     return filtered_illuminant
 
 if __name__=="__main__":
+    import matplotlib.pyplot as plt
     from spektrafilm.model.illuminants import standard_illuminant
     from spektrafilm.profiles.io import load_profile
     

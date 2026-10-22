@@ -1,4 +1,5 @@
 import numpy as np
+import scipy.stats
 from numba import njit, prange
 from math import sqrt, exp
 
