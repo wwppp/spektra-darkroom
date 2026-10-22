@@ -1910,7 +1910,7 @@ class DarkroomMainWindow(QMainWindow):
                 try:
                     self.on_switch_photo(target_id)
                 except Exception as e:
-                    logger.debug(f"Immediate active photo activation: {e}")
+                    logger.error(f"Immediate active photo activation failed: {e}", exc_info=True)
             self._update_window_title()
 
         def _on_progress(current, total):
@@ -1943,6 +1943,11 @@ class DarkroomMainWindow(QMainWindow):
                     self.on_switch_photo(target_id)
                 except Exception as e:
                     logger.error(f"Error activating photo on session restore: {e}")
+            else:
+                # Target photo is already active in viewport; ensure card previews and histogram are triggered
+                if hasattr(self, '_cards_debounce_timer'):
+                    self._cards_debounce_timer.start(100)
+                self._schedule_histogram_update()
 
             # Ensure filmstrip jumps smoothly to the focus photo upon session restore
             if target_id and hasattr(self.filmstrip, 'scroll_to_photo'):
@@ -4327,7 +4332,7 @@ class DarkroomMainWindow(QMainWindow):
             return
         self._photo_is_dirty = True
         if self.active_photo_id:
-            photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+            photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
             if photo:
                 photo["is_dirty"] = True
                 photo["film_profile"] = self.current_film_stock
@@ -4441,7 +4446,7 @@ class DarkroomMainWindow(QMainWindow):
             )
             self._photo_is_dirty = False
             if self.active_photo_id:
-                photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+                photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
                 if photo:
                     photo["is_dirty"] = False
                 self.filmstrip.set_photo_dirty(self.active_photo_id, False)
@@ -4840,32 +4845,31 @@ class DarkroomMainWindow(QMainWindow):
         try:
             from core.path_utils import normalize_path
             if self.active_photo_id:
-                photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+                photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
                 if photo:
                     if photo.get("is_edited", False) or getattr(self, "_photo_is_dirty", False) or self._is_photo_edited(photo):
                         photo["params"] = dict(self.current_params)
                         photo["film_profile"] = self.current_film_stock
                         photo["paper_profile"] = self.current_paper_stock
                         photo["print_mode"] = getattr(self, "current_print_mode", "optical")
-                    else:
-                        photo["params"] = None
-                        photo["film_profile"] = "none"
-                        photo["paper_profile"] = "none"
-                        photo["print_mode"] = "scan"
+                        if getattr(self, "_photo_is_dirty", False) and photo.get("path"):
+                            sdc_manager.save_sdc(
+                                photo["path"],
+                                self.current_film_stock,
+                                self.current_paper_stock,
+                                self.current_params,
+                                print_mode=getattr(self, "current_print_mode", "optical")
+                            )
+                            self._photo_is_dirty = False
 
             session_photos = []
             for p in self.photos:
+                if not p or not p.get("path"):
+                    continue
+                p_path = normalize_path(p["path"])
                 session_photos.append({
-                    "id": p["id"],
-                    "path": normalize_path(p["path"]),
-                    "filename": os.path.basename(p["path"]),
-                    "film_stock": p.get("film_profile", "none"),
-                    "paper_stock": p.get("paper_profile", "none"),
-                    "print_mode": p.get("print_mode", "optical"),
-                    "base_ev": p.get("base_ev", 0.0),
-                    "params": p.get("params", {}),
-                    "is_dirty": p.get("is_dirty", False),
-                    "is_edited": p.get("is_edited", False)
+                    "path": p_path,
+                    "filename": os.path.basename(p_path)
                 })
 
             from core.version import VERSION_STRING
@@ -4896,16 +4900,33 @@ class DarkroomMainWindow(QMainWindow):
             )
             self._photo_is_dirty = False
             if self.active_photo_id:
-                p = next((x for x in self.photos if x["id"] == self.active_photo_id), None)
+                p = next((x for x in self.photos if x and x.get("id") == self.active_photo_id), None)
                 if p:
                     p["is_dirty"] = False
                     p["is_edited"] = True
             self.filmstrip.set_photo_dirty(self.active_photo_id, True)
 
+        # Flush any other dirty photos in session to their respective .sdc sidecars
+        for p in self.photos:
+            if not p or not p.get("path"):
+                continue
+            if p.get("is_dirty"):
+                sdc_manager.save_sdc(
+                    p["path"],
+                    p.get("film_profile", "none"),
+                    p.get("paper_profile", "none"),
+                    p.get("params", {}),
+                    print_mode=p.get("print_mode", "optical")
+                )
+                p["is_dirty"] = False
+                p["is_edited"] = True
+
         from core.path_utils import normalize_path
         session_dir = os.path.dirname(os.path.abspath(file_path))
         session_photos = []
         for p in self.photos:
+            if not p or not p.get("path"):
+                continue
             p_abs = os.path.abspath(p["path"])
             rel_p = None
             try:
@@ -4913,36 +4934,10 @@ class DarkroomMainWindow(QMainWindow):
             except Exception:
                 rel_p = None
 
-            is_active = (self.active_photo_id and p.get("id") == self.active_photo_id)
-            if is_active:
-                p_film = getattr(self, "current_film_stock", "none")
-                p_paper = getattr(self, "current_paper_stock", "none")
-                p_pmode = getattr(self, "current_print_mode", "optical")
-                p_params = copy.deepcopy(self.current_params)
-                p_base_ev = float(self.current_params.get("base_ev", p.get("base_ev", 0.0)))
-            else:
-                p_film = p.get("film_profile", "none")
-                p_paper = p.get("paper_profile", "none")
-                p_pmode = p.get("print_mode", "optical")
-                p_params = copy.deepcopy(p.get("params") or {})
-                if not p_params and p.get("path"):
-                    sdc = sdc_manager.load_sdc(p["path"])
-                    if sdc:
-                        p_film = sdc.get("film_profile", p_film)
-                        p_paper = sdc.get("paper_profile", p_paper)
-                        p_pmode = sdc.get("print_mode", p_pmode)
-                        p_params = copy.deepcopy(sdc.get("params", {}))
-                p_base_ev = float(p.get("base_ev", 0.0))
-
             session_photos.append({
                 "path": normalize_path(p["path"]),
                 "rel_path": rel_p,
-                "filename": os.path.basename(p["path"]),
-                "base_ev": p_base_ev,
-                "film_profile": p_film,
-                "paper_profile": p_paper,
-                "print_mode": p_pmode,
-                "params": p_params
+                "filename": os.path.basename(p["path"])
             })
 
         active_rel = None
@@ -5018,6 +5013,8 @@ class DarkroomMainWindow(QMainWindow):
                 )
                 self._photo_is_dirty = False
             for p in self.photos:
+                if not p:
+                    continue
                 if p.get("is_dirty") and p.get("path"):
                     sdc_manager.save_sdc(
                         p["path"],
@@ -5284,7 +5281,7 @@ class DarkroomMainWindow(QMainWindow):
         else:
             return
 
-        photos_to_export = [p for p in self.photos if p["id"] in pids]
+        photos_to_export = [p for p in self.photos if p and p.get("id") in pids]
         if not photos_to_export:
             return
 
@@ -5680,7 +5677,7 @@ class DarkroomMainWindow(QMainWindow):
 
         affected_count = 0
         for pid in selected_ids:
-            photo = next((p for p in self.photos if p["id"] == pid), None)
+            photo = next((p for p in self.photos if p and p.get("id") == pid), None)
             if not photo:
                 continue
 
@@ -5748,7 +5745,7 @@ class DarkroomMainWindow(QMainWindow):
         # 2. Snapshot post-paste state for all affected photos
         post_photos = {}
         for pid in selected_ids:
-            photo = next((p for p in self.photos if p["id"] == pid), None)
+            photo = next((p for p in self.photos if p and p.get("id") == pid), None)
             if not photo:
                 continue
             post_photos[pid] = {
@@ -6367,7 +6364,7 @@ class DarkroomMainWindow(QMainWindow):
             if all_default and self.current_film_stock == "none" and self.current_paper_stock == "none":
                 self._photo_is_dirty = False
                 if self.active_photo_id:
-                    photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+                    photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
                     if photo:
                         photo["is_dirty"] = False
                     self.filmstrip.set_photo_dirty(self.active_photo_id, False)
@@ -6408,7 +6405,7 @@ class DarkroomMainWindow(QMainWindow):
             if self.current_film_stock == "none" and self.current_paper_stock == "none":
                 self._photo_is_dirty = False
                 if self.active_photo_id:
-                    photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+                    photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
                     if photo:
                         photo["is_dirty"] = False
                     self.filmstrip.set_photo_dirty(self.active_photo_id, False)
@@ -6478,7 +6475,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self._photo_is_dirty = False
         if self.active_photo_id:
-            photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+            photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
             if photo:
                 photo["is_dirty"] = False
                 photo["is_edited"] = False
@@ -7236,7 +7233,7 @@ class DarkroomMainWindow(QMainWindow):
         target_path = getattr(self, "_target_initial_active_path", None)
         if target_path:
             self._target_initial_active_path = None
-            target_entry = next((p for p in self.photos if p.get("path") == target_path), None)
+            target_entry = next((p for p in self.photos if p and p.get("path") == target_path), None)
             if target_entry:
                 self.on_switch_photo(target_entry["id"])
 
@@ -7527,7 +7524,9 @@ class DarkroomMainWindow(QMainWindow):
         curr_active_id = self.active_photo_id
         self.filmstrip.set_photos(self.photos, curr_active_id)
         for p in self.photos:
-            if p and (p.get("is_dirty") or p.get("is_edited")):
+            if not p:
+                continue
+            if p.get("is_dirty") or p.get("is_edited"):
                 self.filmstrip.set_photo_dirty(p["id"], True)
         self.filmstrip.scroll_to_active()
         self._session_is_dirty = True
@@ -8064,7 +8063,7 @@ class DarkroomMainWindow(QMainWindow):
         while len(self._loaded_photos_lru) > 2:
             old_pid = self._loaded_photos_lru.pop(0)
             if old_pid != active_photo_id:
-                old_p = next((p for p in self.photos if p.get("id") == old_pid), None)
+                old_p = next((p for p in self.photos if p and p.get("id") == old_pid), None)
                 if old_p and old_p.get("float_img") is not None:
                     old_p["float_img"] = None
                     evicted = True
@@ -8077,11 +8076,15 @@ class DarkroomMainWindow(QMainWindow):
         # Safety sweep: Purge any non-LRU photos that inadvertently hold float_img
         lru_set = set(self._loaded_photos_lru)
         for p in self.photos:
+            if not p:
+                continue
             if p.get("id") not in lru_set and p.get("float_img") is not None:
                 p["float_img"] = None
                 evicted = True
         if hasattr(self, 'engine') and hasattr(self.engine, 'session_photos'):
             for ep in self.engine.session_photos:
+                if not ep:
+                    continue
                 if ep.get("id") not in lru_set and ep.get("raw_preview") is not None:
                     ep["raw_preview"] = None
                     evicted = True
@@ -8101,7 +8104,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # If user clicks the currently active photo and it is already fully loaded, avoid redundant reload
         if photo_id == self.active_photo_id:
-            curr_photo = next((p for p in self.photos if p.get("id") == photo_id), None)
+            curr_photo = next((p for p in self.photos if p and p.get("id") == photo_id), None)
             if curr_photo and curr_photo.get("float_img") is not None:
                 return
             if self._single_photo_loader and self._single_photo_loader.isRunning():
@@ -8116,7 +8119,7 @@ class DarkroomMainWindow(QMainWindow):
         try:
             # 1. Update in-memory state and ensure SDC is saved for previous photo ONLY if genuinely dirty
             if self.active_photo_id:
-                prev_photo = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+                prev_photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
                 if prev_photo and getattr(self, "_photo_is_dirty", False):
                     # If in crop workspace, user has not clicked apply, discard unapplied crop for previous photo
                     if getattr(self.canvas, "is_crop_editing", False):
@@ -8130,7 +8133,7 @@ class DarkroomMainWindow(QMainWindow):
                     self._save_current_photo_sdc()
 
             # 2. Find photo entry
-            photo = next((p for p in self.photos if p["id"] == photo_id), None)
+            photo = next((p for p in self.photos if p and p.get("id") == photo_id), None)
             if not photo:
                 return
 
@@ -8443,7 +8446,7 @@ class DarkroomMainWindow(QMainWindow):
 
     def _on_single_photo_preview_ready(self, photo_id, photo_path, preview_rgb):
         if self.active_photo_id == photo_id and preview_rgb is not None:
-            target_photo = next((p for p in self.photos if p["id"] == photo_id), None)
+            target_photo = next((p for p in self.photos if p and p.get("id") == photo_id), None)
             if target_photo and target_photo.get("float_img") is None:
                 # Only upgrade to 1080p embedded preview if photo is unedited (film stock is "none")
                 # so that raw visual clarity progresses smoothly: 0ms thumbnail -> 15ms 1080p -> 300ms float master
@@ -8471,7 +8474,7 @@ class DarkroomMainWindow(QMainWindow):
 
 
 
-        target_photo = next((p for p in self.photos if p["id"] == photo_id), None)
+        target_photo = next((p for p in self.photos if p and p.get("id") == photo_id), None)
         if target_photo:
             if self.active_photo_id == photo_id:
                 target_photo["float_img"] = float_img
@@ -8644,7 +8647,7 @@ class DarkroomMainWindow(QMainWindow):
         card.set_thumbnail(pixmap)
 
     def on_remove_photo(self, photo_id):
-        idx = next((i for i, p in enumerate(self.photos) if p["id"] == photo_id), -1)
+        idx = next((i for i, p in enumerate(self.photos) if p and p.get("id") == photo_id), -1)
         if idx == -1:
             return
 
@@ -8653,12 +8656,12 @@ class DarkroomMainWindow(QMainWindow):
         # If the deleted photo was the last one, switch to the new last photo (idx - 1).
         next_id = None
         if len(self.photos) > 1:
-            if idx + 1 < len(self.photos):
+            if idx + 1 < len(self.photos) and self.photos[idx + 1]:
                 next_id = self.photos[idx + 1]["id"]
-            else:
+            elif idx > 0 and self.photos[idx - 1]:
                 next_id = self.photos[idx - 1]["id"]
 
-        self.photos = [p for p in self.photos if p["id"] != photo_id]
+        self.photos = [p for p in self.photos if p and p.get("id") != photo_id]
         if hasattr(self, 'engine'):
             self.engine.remove_photo(photo_id)
         self._session_is_dirty = True
@@ -8681,29 +8684,29 @@ class DarkroomMainWindow(QMainWindow):
         #    Anchor at active photo index (or the last deleted photo index) and search forward
         #    for the first surviving photo following it.
         # 3. If no surviving photo follows the anchor, search backward for the closest surviving photo.
-        active_idx = next((i for i, p in enumerate(self.photos) if p["id"] == self.active_photo_id), -1)
+        active_idx = next((i for i, p in enumerate(self.photos) if p and p.get("id") == self.active_photo_id), -1)
 
         next_id = None
         if self.active_photo_id and self.active_photo_id not in id_set:
             next_id = self.active_photo_id
         else:
-            del_indices = [i for i, p in enumerate(self.photos) if p["id"] in id_set]
+            del_indices = [i for i, p in enumerate(self.photos) if p and p.get("id") in id_set]
             anchor_idx = active_idx if active_idx != -1 else (max(del_indices) if del_indices else -1)
 
             if anchor_idx != -1:
                 # Search forward for the first photo not being deleted
                 for p in self.photos[anchor_idx + 1:]:
-                    if p["id"] not in id_set:
+                    if p and p.get("id") not in id_set:
                         next_id = p["id"]
                         break
                 # If no photo after anchor survives, search backward
                 if not next_id:
                     for p in reversed(self.photos[:anchor_idx]):
-                        if p["id"] not in id_set:
+                        if p and p.get("id") not in id_set:
                             next_id = p["id"]
                             break
 
-        self.photos = [p for p in self.photos if p["id"] not in id_set]
+        self.photos = [p for p in self.photos if p and p.get("id") not in id_set]
         if hasattr(self, 'engine'):
             for pid in photo_ids:
                 self.engine.remove_photo(pid)
@@ -8713,7 +8716,7 @@ class DarkroomMainWindow(QMainWindow):
         if not self.photos:
             self.action_clear_photos()
         else:
-            if not next_id and self.photos:
+            if not next_id and self.photos and self.photos[0]:
                 next_id = self.photos[0]["id"]
             self.filmstrip.remove_multiple_photos(photo_ids, next_active_id=next_id)
             self.on_switch_photo(next_id)
@@ -8889,7 +8892,7 @@ class DarkroomMainWindow(QMainWindow):
             self.current_params["print_mode"] = "scan"
             self.current_params["crop"] = dict(default_crop)
 
-            active_p = next((p for p in self.photos if p["id"] == self.active_photo_id), None)
+            active_p = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
             if active_p:
                 active_p["params"] = None
                 active_p["film_profile"] = "none"
@@ -9323,7 +9326,7 @@ class DarkroomMainWindow(QMainWindow):
         # If only 1 photo was passed, route to single photo export
         if len(photo_ids) == 1:
             pid = photo_ids[0]
-            photo = next((p for p in self.photos if p["id"] == pid), None)
+            photo = next((p for p in self.photos if p and p.get("id") == pid), None)
             if photo and photo.get("path"):
                 self._current_photo_path = photo["path"]
                 last_dir = config_manager.get_last_export_dir()
@@ -9342,7 +9345,7 @@ class DarkroomMainWindow(QMainWindow):
 
         last_dir = config_manager.get_last_export_dir()
         if not last_dir or not os.path.exists(last_dir):
-            first_photo = next((p for p in self.photos if p["id"] in photo_ids), None)
+            first_photo = next((p for p in self.photos if p and p.get("id") in photo_ids), None)
             last_dir = os.path.dirname(first_photo["path"]) if first_photo else os.path.expanduser("~")
 
         dialog = BatchExportDialog(last_dir, batch_count=len(photo_ids), parent=self)
@@ -9384,7 +9387,7 @@ class DarkroomMainWindow(QMainWindow):
         new_tasks = []
         used_targets = set()
         for i, pid in enumerate(photo_ids):
-            photo = next((p for p in self.photos if p["id"] == pid), None)
+            photo = next((p for p in self.photos if p and p.get("id") == pid), None)
             if not photo:
                 continue
 
@@ -9637,7 +9640,8 @@ class DarkroomMainWindow(QMainWindow):
             new_res = config_manager.get_preferences().get("preview_max_edge", 2048)
             if old_res != new_res:
                 for p in self.photos:
-                    p["float_img"] = None
+                    if p:
+                        p["float_img"] = None
                 session_cache_manager.clear_cache()
                 if self._current_photo_path:
                     photo = next((p for p in self.photos if p.get("path") == self._current_photo_path), None)

@@ -824,20 +824,6 @@ def save_session_file(file_path: str, session_data: dict) -> bool:
                 }
                 if "rel_path" in item and item["rel_path"]:
                     entry["rel_path"] = item["rel_path"]
-                if "film_profile" in item:
-                    entry["film_profile"] = item["film_profile"]
-                elif "film_stock" in item:
-                    entry["film_profile"] = item["film_stock"]
-                if "paper_profile" in item:
-                    entry["paper_profile"] = item["paper_profile"]
-                elif "paper_stock" in item:
-                    entry["paper_profile"] = item["paper_stock"]
-                if "print_mode" in item:
-                    entry["print_mode"] = item["print_mode"]
-                if "base_ev" in item:
-                    entry["base_ev"] = float(item["base_ev"])
-                if "params" in item and isinstance(item["params"], dict):
-                    entry["params"] = item["params"]
                 clean_photos.append(entry)
 
         clean_data = {
@@ -905,16 +891,6 @@ def load_session_file(file_path: str) -> dict | None:
                 }
                 if "rel_path" in item and item["rel_path"]:
                     entry["rel_path"] = item["rel_path"]
-                if film:
-                    entry["film_profile"] = film
-                if paper:
-                    entry["paper_profile"] = paper
-                if pmode:
-                    entry["print_mode"] = pmode
-                if params:
-                    entry["params"] = params
-                if base_ev:
-                    entry["base_ev"] = float(base_ev)
                 norm_photos.append(entry)
 
         data["photos"] = norm_photos
