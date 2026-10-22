@@ -247,13 +247,253 @@ def get_darkroom_menu_style():
 
 
 def setup_solid_combobox(combo):
-    """Enforces completely opaque solid background on QComboBox popup window, preventing layered transparent bleedthrough."""
+    """Enforces modern Darkroom popup styling on QComboBox:
+    - Opaque background preventing layered transparent bleedthrough
+    - Smooth inertial mouse-wheel scrolling (DarkroomComboListView with ScrollPerPixel)
+    - Custom item delegate with hover feedback & left amber accent bar (DarkroomComboItemDelegate)
+    - Adaptive popup width based on content text length
+    - Smart screen-edge upward/downward direction detection
+    - Smooth opening expansion & opacity fade animation
+    """
     from PySide6.QtWidgets import QListView
-    from PySide6.QtCore import Qt
-    view = QListView()
-    combo.setView(view)
-    view.setAutoFillBackground(True)
-    if hasattr(view, "window"):
-        view.window().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        view.window().setAutoFillBackground(True)
+    from PySide6.QtCore import Qt, QPoint, QRect, QVariantAnimation, QEasingCurve
+    from PySide6.QtGui import QGuiApplication
+    from ui.adobe_scrub_slider import DarkroomComboListView, DarkroomComboItemDelegate, DarkroomComboBox
+
+    if not isinstance(combo.view(), DarkroomComboListView):
+        view = DarkroomComboListView()
+        delegate = DarkroomComboItemDelegate(combo)
+        view.delegate = delegate
+        combo.setView(view)
+        combo.setItemDelegate(delegate)
+        view.setAutoFillBackground(True)
+        if hasattr(view, "window"):
+            view.window().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+            view.window().setAutoFillBackground(True)
+        combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        combo.wheelEvent = lambda ev: ev.ignore()
+
+    def _apply_solid_combo_tooltip():
+        try:
+            from ui.theme_manager import theme_manager
+            is_dark = theme_manager.is_dark()
+        except Exception:
+            is_dark = True
+        t_bg = "#ffffff" if not is_dark else "rgba(22, 24, 30, 0.95)"
+        t_fg = "#1e293b" if not is_dark else "#f1f5f9"
+        t_border = "#cbd5e1" if not is_dark else "#333644"
+        if combo.view():
+            combo.view().setStyleSheet(f"""
+                QToolTip {{
+                    background-color: {t_bg};
+                    color: {t_fg};
+                    border: 1px solid {t_border};
+                    border-radius: 6px;
+                    padding: 6px 10px;
+                    font-size: 11px;
+                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+                }}
+            """)
+
+    _apply_solid_combo_tooltip()
+    try:
+        from ui.theme_manager import theme_manager
+        theme_manager.themeChanged.connect(lambda _: _apply_solid_combo_tooltip())
+    except Exception:
+        pass
+
+    if not isinstance(combo, DarkroomComboBox) and not getattr(combo, "_setup_solid_hooked", False):
+        combo._setup_solid_hooked = True
+        orig_show_popup = combo.showPopup
+        orig_hide_popup = combo.hidePopup
+
+        def _hooked_show_popup():
+            if combo.count() == 0:
+                orig_show_popup()
+                return
+
+            fm = combo.fontMetrics()
+            max_text_w = 0
+            for i in range(combo.count()):
+                w = fm.horizontalAdvance(combo.itemText(i))
+                if w > max_text_w:
+                    max_text_w = w
+            target_width = max(combo.width(), max_text_w + 36)
+
+            screen = combo.screen() or QGuiApplication.primaryScreen()
+            avail = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+            p_global = combo.mapToGlobal(QPoint(0, 0))
+
+            # Clamp width to maximum screen width
+            max_allowed_w = max(combo.width(), avail.width() - 24)
+            target_width = min(target_width, max_allowed_w)
+
+            # Adaptive horizontal positioning: if expanding rightwards overflows screen edge, expand to the left!
+            target_x = p_global.x()
+            if target_x + target_width + 12 > avail.right():
+                right_edge = min(avail.right() - 8, p_global.x() + combo.width())
+                target_x = max(avail.left() + 8, right_edge - target_width)
+
+            combo.view().setMinimumWidth(target_width)
+            combo.view().setMaximumWidth(target_width)
+
+            item_h = 24
+            space_below = avail.bottom() - (p_global.y() + combo.height())
+            space_above = p_global.y() - avail.top()
+            max_space = max(space_below, space_above)
+            fit_items = max(6, min(24, int((max_space - 20) / item_h)))
+            combo.setMaxVisibleItems(min(combo.count(), fit_items))
+
+            # Zero opacity before orig_show_popup() to completely eliminate initial-frame flash
+            container = combo.view().window() if combo.view() else None
+            if container:
+                container.setWindowOpacity(0.0)
+
+            combo._orig_sb_policy = combo.view().verticalScrollBarPolicy()
+            combo.view().setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+            orig_show_popup()
+
+            if container:
+                orig_geo = container.geometry()
+                is_upward = orig_geo.y() < p_global.y()
+                if hasattr(combo, '_popup_anim') and combo._popup_anim:
+                    combo._popup_anim.stop()
+
+                # Ensure final dest_geo uses adaptive target_x and target_width!
+                dest_geo = QRect(target_x, orig_geo.y(), target_width, orig_geo.height())
+
+                if is_upward:
+                    start_geo = QRect(target_x, dest_geo.bottom(), target_width, 1)
+                else:
+                    start_geo = QRect(target_x, dest_geo.y(), target_width, 1)
+                container.setGeometry(start_geo)
+
+                combo._popup_anim = QVariantAnimation(combo)
+                combo._popup_anim.setDuration(120)
+                combo._popup_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                combo._popup_anim.setStartValue(start_geo)
+                combo._popup_anim.setEndValue(dest_geo)
+
+                def _on_step(r):
+                    container.setGeometry(r)
+                    prog = combo._popup_anim.currentTime() / max(1, combo._popup_anim.duration())
+                    container.setWindowOpacity(min(1.0, 0.1 + 0.9 * prog))
+
+                def _on_finished():
+                    container.setGeometry(dest_geo)
+                    container.setWindowOpacity(1.0)
+                    if hasattr(combo, '_orig_sb_policy') and combo._orig_sb_policy is not None:
+                        combo.view().setVerticalScrollBarPolicy(combo._orig_sb_policy)
+
+                combo._popup_anim.valueChanged.connect(_on_step)
+                combo._popup_anim.finished.connect(_on_finished)
+                combo._popup_anim.start()
+
+        def _hooked_hide_popup():
+            if hasattr(combo, '_popup_anim') and combo._popup_anim:
+                combo._popup_anim.stop()
+            if hasattr(combo, '_orig_sb_policy') and combo._orig_sb_policy is not None:
+                combo.view().setVerticalScrollBarPolicy(combo._orig_sb_policy)
+            container = combo.view().window() if combo.view() else None
+            if container:
+                container.setWindowOpacity(0.0)
+            orig_hide_popup()
+
+        combo.showPopup = _hooked_show_popup
+        combo.hidePopup = _hooked_hide_popup
+
+
+def get_standard_checkbox_style(is_dark: bool = None) -> str:
+    """Universal standard QCheckBox stylesheet aligned with Export Dialog design."""
+    if is_dark is None:
+        try:
+            from ui.theme_manager import theme_manager
+            is_dark = theme_manager.is_dark()
+        except Exception:
+            is_dark = True
+
+    from core.path_utils import get_resource_dir
+    chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_amber.png").replace("\\", "/")
+
+    if is_dark:
+        return f"""
+            QCheckBox {{
+                color: #c4c4cc;
+                spacing: 8px;
+                font-size: 11.5px;
+                font-weight: 500;
+                outline: none;
+                background: transparent;
+            }}
+            QCheckBox:hover {{
+                color: #ffffff;
+            }}
+            QCheckBox:focus {{
+                outline: none;
+            }}
+            QCheckBox::indicator {{
+                width: 12px;
+                height: 12px;
+                border: 1px solid #8b92a5;
+                border-radius: 2px;
+                background: transparent;
+                outline: none;
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: #f59e0b;
+            }}
+            QCheckBox::indicator:checked {{
+                border: 1px solid #f59e0b;
+                background: #14151a;
+                image: url("{chk_amber}");
+            }}
+            QCheckBox:disabled {{
+                color: #4b5563;
+            }}
+            QCheckBox::indicator:disabled {{
+                border: 1px solid #282a36;
+                background: #0f1013;
+            }}
+        """
+    else:
+        return f"""
+            QCheckBox {{
+                color: #334155;
+                spacing: 8px;
+                font-size: 11.5px;
+                font-weight: 500;
+                outline: none;
+                background: transparent;
+            }}
+            QCheckBox:hover {{
+                color: #0f172a;
+            }}
+            QCheckBox:focus {{
+                outline: none;
+            }}
+            QCheckBox::indicator {{
+                width: 12px;
+                height: 12px;
+                border: 1px solid #94a3b8;
+                border-radius: 2px;
+                background: #ffffff;
+                outline: none;
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: #f59e0b;
+            }}
+            QCheckBox::indicator:checked {{
+                border: 1px solid #f59e0b;
+                background: #ffffff;
+                image: url("{chk_amber}");
+            }}
+            QCheckBox:disabled {{
+                color: #94a3b8;
+            }}
+            QCheckBox::indicator:disabled {{
+                border: 1px solid #cbd5e1;
+                background: #f1f5f9;
+            }}
+        """
 

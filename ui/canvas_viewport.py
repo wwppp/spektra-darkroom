@@ -86,6 +86,8 @@ uniform float u_developer_exhaustion;
 uniform int u_lens_enabled;
 uniform vec3 u_lens_distort;
 uniform vec2 u_lens_vignette;
+uniform int u_lens_ca_enabled;
+uniform vec2 u_lens_ca_params;
 
 // Interactive Crop & Straighten
 uniform int u_crop_enabled;
@@ -417,11 +419,21 @@ void main() {
     }
 
     // Apply Lens Distortion Warp if enabled
-    if (u_lens_enabled == 1 && (abs(u_lens_distort.x) > 0.00001 || abs(u_lens_distort.y) > 0.00001)) {
-        vec2 lp = (sample_uv - 0.5) * 2.0;
-        float r2 = dot(lp, lp);
-        float r_dist = 1.0 + u_lens_distort.x * r2 + u_lens_distort.y * r2 * r2 + u_lens_distort.z * r2 * r2 * r2;
-        sample_uv = 0.5 + (lp * r_dist) * 0.5;
+    if (u_lens_enabled == 1 && (abs(u_lens_distort.x) > 0.00001 || abs(u_lens_distort.y) > 0.00001 || abs(u_lens_distort.z) > 0.00001)) {
+        vec2 tex_dim = max(vec2(1.0), vec2(textureSize(u_image, 0)));
+        float aspect = tex_dim.x / tex_dim.y;
+        vec2 delta = sample_uv - 0.5;
+        // Radial distance normalized by semi-diagonal so r=1.0 at image corners (Adobe ACM standard)
+        float max_r2 = 0.25 * (aspect * aspect + 1.0);
+        float r2 = (delta.x * aspect * delta.x * aspect + delta.y * delta.y) / max_r2;
+        float r4 = r2 * r2;
+        float r6 = r4 * r2;
+        float r_dist = 1.0 + u_lens_distort.x * r2 + u_lens_distort.y * r4 + u_lens_distort.z * r6;
+        
+        // Auto-scale factor to prevent edge clamping / black borders
+        float corner_k = u_lens_distort.x + u_lens_distort.y + u_lens_distort.z;
+        float scale = (corner_k > 0.0) ? (1.0 / (1.0 + corner_k)) : 1.0;
+        sample_uv = 0.5 + (delta * r_dist) * scale;
     }
     
     // Clamping & Letterbox background
@@ -436,13 +448,25 @@ void main() {
         sample_uv = clamp(sample_uv, half_texel, vec2(1.0) - half_texel);
     }
     
-    vec3 orig_rgb = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).rgb;
+    vec3 orig_rgb;
+    if (u_lens_ca_enabled == 1) {
+        vec2 lp_ca = (sample_uv - 0.5);
+        float r2_ca = dot(lp_ca, lp_ca);
+        vec2 uv_r = clamp(sample_uv + lp_ca * (u_lens_ca_params.x * r2_ca), half_texel, vec2(1.0) - half_texel);
+        vec2 uv_b = clamp(sample_uv + lp_ca * (u_lens_ca_params.y * r2_ca), half_texel, vec2(1.0) - half_texel);
+        float r_val = textureGrad(u_image, uv_r, d_sample_dx, d_sample_dy).r;
+        float g_val = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).g;
+        float b_val = textureGrad(u_image, uv_b, d_sample_dx, d_sample_dy).b;
+        orig_rgb = vec3(r_val, g_val, b_val);
+    } else {
+        orig_rgb = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).rgb;
+    }
 
-    // Apply Lens Vignette compensation if enabled
-    if (u_lens_enabled == 1 && u_lens_vignette.x > 0.001) {
+    // Apply Lens Vignette compensation/darkening if enabled
+    if (u_lens_enabled == 1 && abs(u_lens_vignette.x) > 0.001) {
         float r_norm = length((sample_uv - 0.5) * 2.0) / 1.41421356;
         float v_exp = mix(1.2, 4.0, 1.0 - clamp(u_lens_vignette.y / 100.0, 0.1, 0.9));
-        float vig_gain = 1.0 + u_lens_vignette.x * pow(clamp(r_norm, 0.0, 1.0), v_exp);
+        float vig_gain = max(0.0, 1.0 + u_lens_vignette.x * pow(clamp(r_norm, 0.0, 1.0), v_exp));
         orig_rgb *= vig_gain;
     }
 
@@ -1139,10 +1163,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1i("u_lens_enabled", lens_en)
             u_3f("u_lens_distort", lens_cfg.get("k1", 0.0), lens_cfg.get("k2", 0.0), lens_cfg.get("k3", 0.0))
             u_2f("u_lens_vignette", lens_cfg.get("vignette_amount", 0.0), lens_cfg.get("vignette_midpoint", 50.0))
+            ca_en = 1 if lens_cfg.get("remove_ca", False) else 0
+            u_1i("u_lens_ca_enabled", ca_en)
+            u_2f("u_lens_ca_params", 0.0012, -0.0010)
         else:
             u_1i("u_lens_enabled", 0)
             u_3f("u_lens_distort", 0.0, 0.0, 0.0)
             u_2f("u_lens_vignette", 0.0, 50.0)
+            u_1i("u_lens_ca_enabled", 0)
+            u_2f("u_lens_ca_params", 0.0, 0.0)
 
         # Crop uniforms
         is_editing = getattr(self, "is_crop_editing", False)
@@ -2173,6 +2202,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 u_1i("u_lens_enabled", 0)
                 u_3f("u_lens_distort", 0.0, 0.0, 0.0)
                 u_2f("u_lens_vignette", 0.0, 50.0)
+            off_ca = 1 if (isinstance(off_lens, dict) and off_lens.get("remove_ca", False)) else 0
+            u_1i("u_lens_ca_enabled", off_ca)
+            u_2f("u_lens_ca_params", 0.0012, -0.0010)
 
             # Crop in offscreen export
             off_crop = eff_params.get("crop", {})

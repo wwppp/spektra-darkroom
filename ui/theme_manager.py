@@ -184,6 +184,28 @@ class ThemeManager(QObject):
             palette.setColor(QPalette.ColorRole.Highlight, QColor(245, 158, 11))
             palette.setColor(QPalette.ColorRole.HighlightedText, QColor(17, 17, 17))
         app.setPalette(palette)
+        if hasattr(app, "setStyleSheet"):
+            app.setStyleSheet(self.get_tooltip_stylesheet())
+
+    def get_tooltip_stylesheet(self) -> str:
+        """Universal floating tooltip bubble stylesheet matching active theme."""
+        is_dark = self.is_dark()
+        tooltip_bg = "rgba(22, 24, 30, 0.95)" if is_dark else "#ffffff"
+        tooltip_fg = "#f1f5f9" if is_dark else "#1e293b"
+        tooltip_border = "1px solid #333644" if is_dark else "1px solid #cbd5e1"
+        return f"""
+            QToolTip {{
+                background-color: {tooltip_bg};
+                color: {tooltip_fg};
+                border: {tooltip_border};
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 11px;
+                font-weight: 400;
+                line-height: 1.4;
+                font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+            }}
+        """
 
     def _on_system_scheme_changed(self):
         if self._mode == "system":

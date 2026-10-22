@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QMenuBar, QMenu, QFileDialog,
     QMessageBox, QScrollArea, QFrame, QSplitter, QSplitterHandle, QGridLayout, QSizePolicy, QApplication,
-    QDialog, QLineEdit, QTextEdit
+    QDialog, QLineEdit, QTextEdit, QCheckBox, QButtonGroup
 )
 
 from core.path_utils import get_icon_path, get_resource_dir, normalize_path
@@ -91,7 +91,7 @@ if sys.platform == "win32":
             ("lppos", ctypes.c_void_p)
         ]
 
-from ui.window_utils import apply_dark_titlebar, get_darkroom_menu_style, get_icon
+from ui.window_utils import apply_dark_titlebar, get_darkroom_menu_style, get_icon, get_standard_checkbox_style
 from ui.smooth_scroll import SmoothScrollArea
 from ui.stock_manager_dialog import StockManagerDialog, export_stock_lut
 from ui.preferences_dialog import PreferencesDialog
@@ -1117,22 +1117,7 @@ class FilmGridCard(QFrame):
 
     def _update_appearance(self):
         is_dark = theme_manager.is_dark()
-        tooltip_bg = "rgba(22, 24, 30, 0.88)" if is_dark else "rgba(255, 255, 255, 0.95)"
-        tooltip_fg = "#ffffff" if is_dark else "#1e293b"
-        tooltip_border = "none" if is_dark else "1px solid #cbd5e1"
-        tooltip_bubble_style = f"""
-            QToolTip {{
-                background-color: {tooltip_bg};
-                color: {tooltip_fg};
-                border: {tooltip_border};
-                border-radius: 8px;
-                padding: 7px 11px;
-                font-size: 11px;
-                font-weight: 400;
-                line-height: 1.4;
-                font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
-            }}
-        """
+        tooltip_bubble_style = theme_manager.get_tooltip_stylesheet()
         thumb_bg = "#18191f" if is_dark else "#e6eaf0"
 
         if not self.isEnabled():
@@ -1694,6 +1679,7 @@ class DarkroomMainWindow(QMainWindow):
             "grain_size": 1.0,
             "grain_cloud_blur": 1.0,
             "grain_colour": 1.0,
+            "lens": self._get_default_lens_params(),
             "split_x": 0.5,
             "view_mode": 0
         }
@@ -2319,9 +2305,9 @@ class DarkroomMainWindow(QMainWindow):
         tb_bg = "#141518" if is_dark else "#f0f2f6"
         scroll_handle = "#3f4350" if is_dark else "#94a3b8"
         scroll_hover = "#cbd5e1" if is_dark else "#64748b"
-        tooltip_bg = "rgba(22, 24, 30, 0.88)" if is_dark else "rgba(255, 255, 255, 0.95)"
-        tooltip_fg = "#ffffff" if is_dark else "#1e293b"
-        tooltip_border = "none" if is_dark else "1px solid #cbd5e1"
+        tooltip_bg = "rgba(22, 24, 30, 0.95)" if is_dark else "#ffffff"
+        tooltip_fg = "#f1f5f9" if is_dark else "#1e293b"
+        tooltip_border = "1px solid #333644" if is_dark else "1px solid #cbd5e1"
 
         radius = "0px" if is_max else "8px"
         border = "none" if is_max else f"1px solid {root_border_color}"
@@ -2400,8 +2386,8 @@ class DarkroomMainWindow(QMainWindow):
                     background-color: {tooltip_bg};
                     color: {tooltip_fg};
                     border: {tooltip_border};
-                    border-radius: 8px;
-                    padding: 7px 11px;
+                    border-radius: 6px;
+                    padding: 6px 10px;
                     font-size: 11px;
                     font-weight: 400;
                     line-height: 1.4;
@@ -2463,7 +2449,10 @@ class DarkroomMainWindow(QMainWindow):
             ('act_export', "export.png"),
             ('act_undo', "undo.png"),
             ('act_redo', "redo.png"),
+            ('act_crop', "crop.png"),
             ('act_reset_all', "reset.png"),
+            ('act_clear_crop', "crop.png"),
+            ('act_clear_sdc', "reset.png"),
             ('act_prefs', "preferences.png"),
             ('act_fit_img', "fit_window.png"),
             ('act_compare', "compare.png"),
@@ -2475,7 +2464,10 @@ class DarkroomMainWindow(QMainWindow):
             if act:
                 act.setIcon(get_icon(icon_name, is_dark=is_dark))
 
-        # 11. Force update
+        # 11. Optics section styling
+        self._update_optics_ui_style()
+
+        # 12. Force update
         self.update()
 
     def _update_view_toolbar_style(self):
@@ -2529,6 +2521,81 @@ class DarkroomMainWindow(QMainWindow):
             self.btn_100.setIcon(get_icon("zoom_100.png", is_dark=is_dark))
         if getattr(self, 'act_crop', None):
             self.act_crop.setIcon(get_icon("crop.png", is_dark=is_dark))
+
+    def _update_optics_ui_style(self):
+        is_dark = theme_manager.is_dark()
+        chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_amber.png").replace("\\", "/")
+
+        chk_ss = get_standard_checkbox_style(is_dark)
+
+        for chk in (getattr(self, 'chk_remove_ca', None), getattr(self, 'chk_lens_profile_enabled', None)):
+            if chk:
+                chk.setStyleSheet(chk_ss)
+
+        # Tab button stylesheet matching Preferences Dialog tabs style
+        tab_bg = "#121317" if is_dark else "#f1f5f9"
+        tab_normal = "#94a3b8" if is_dark else "#64748b"
+        tab_hover = "#ffffff" if is_dark else "#1e293b"
+        tab_hover_bg = "#1c1d25" if is_dark else "#e2e8f0"
+        tab_checked_bg = "#181920" if is_dark else "#ffffff"
+        tab_checked_fg = "#f59e0b"
+
+        tab_ss = f"""
+            QPushButton#lensTabBtn {{
+                background: {tab_bg};
+                border: none;
+                border-bottom: 2px solid transparent;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+                color: {tab_normal};
+                font-size: 11.5px;
+                font-weight: 500;
+                padding: 4px 12px;
+            }}
+            QPushButton#lensTabBtn:hover:!checked {{
+                color: {tab_hover};
+                background: {tab_hover_bg};
+                border-bottom: 2px solid transparent;
+            }}
+            QPushButton#lensTabBtn:checked {{
+                background: {tab_checked_bg};
+                border: none;
+                border-bottom: 2px solid #f59e0b;
+                color: {tab_checked_fg};
+                font-weight: bold;
+            }}
+        """
+        for btn in (getattr(self, 'btn_lens_tab_profile', None), getattr(self, 'btn_lens_tab_manual', None)):
+            if btn:
+                btn.setStyleSheet(tab_ss)
+
+        if getattr(self, 'lens_tab_frame', None):
+            line_col = "#282a36" if is_dark else "#cbd5e1"
+            self.lens_tab_frame.setStyleSheet(f"QFrame#lensTabFrame {{ border: none; border-bottom: 1px solid {line_col}; background: transparent; }}")
+
+        # Sub-header labels
+        header_color = "#71717a" if is_dark else "#64748b"
+        header_ss = f"""
+            QLabel#subSectionHeader {{
+                color: {header_color};
+                font-size: 11px;
+                font-weight: 600;
+                font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+                padding: 6px 0px 2px 0px;
+                border: none;
+                background: transparent;
+            }}
+        """
+        for lbl in (getattr(self, 'lbl_profile_header', None), getattr(self, 'lbl_amount_header', None), getattr(self, 'lbl_vignette_header', None), getattr(self, 'lbl_diff_header', None)):
+            if lbl:
+                lbl.setStyleSheet(header_ss)
+
+        # Divider line
+        div_col = "#262834" if is_dark else "#e2e8f0"
+        if getattr(self, 'optics_section_divider', None):
+            self.optics_section_divider.setStyleSheet(f"background-color: {div_col}; border: none;")
 
     def _update_welcome_view_style(self):
         is_dark = theme_manager.is_dark()
@@ -3517,8 +3584,193 @@ class DarkroomMainWindow(QMainWindow):
         self.sidebar_layout.addWidget(self.sec_exposure)
 
     def _init_optics_section(self):
-        self.sec_optics = AccordionSection("镜头光学与柔光")
+        self.sec_optics = AccordionSection("光学")
         self.sec_optics.resetClicked.connect(lambda: self.reset_track("optics"))
+
+        # 1. Segmented Tabs: [ 配置文件 ] [ 手动 ]
+        self.lens_tab_frame = QFrame()
+        self.lens_tab_frame.setObjectName("lensTabFrame")
+        tab_layout = QHBoxLayout(self.lens_tab_frame)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.setSpacing(4)
+
+        self.btn_lens_tab_profile = QPushButton("配置文件")
+        self.btn_lens_tab_profile.setObjectName("lensTabBtn")
+        self.btn_lens_tab_profile.setCheckable(True)
+        self.btn_lens_tab_profile.setChecked(True)
+        self.btn_lens_tab_profile.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_lens_tab_profile.setFixedHeight(26)
+
+        self.btn_lens_tab_manual = QPushButton("手动")
+        self.btn_lens_tab_manual.setObjectName("lensTabBtn")
+        self.btn_lens_tab_manual.setCheckable(True)
+        self.btn_lens_tab_manual.setChecked(False)
+        self.btn_lens_tab_manual.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_lens_tab_manual.setFixedHeight(26)
+
+        self.lens_tab_group = QButtonGroup(self)
+        self.lens_tab_group.setExclusive(True)
+        self.lens_tab_group.addButton(self.btn_lens_tab_profile, 0)
+        self.lens_tab_group.addButton(self.btn_lens_tab_manual, 1)
+        self.lens_tab_group.idClicked.connect(self._on_lens_tab_changed)
+
+        tab_layout.addWidget(self.btn_lens_tab_profile, 1)
+        tab_layout.addWidget(self.btn_lens_tab_manual, 1)
+        self.sec_optics.addWidget(self.lens_tab_frame)
+
+        # 2. Checkbox: 删除色差
+        chk_layout = QHBoxLayout()
+        chk_layout.setContentsMargins(0, 2, 0, 2)
+        self.chk_remove_ca = QCheckBox("删除色差")
+        self.chk_remove_ca.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_remove_ca.setToolTip("通过反向色差径向位移算法校正横向色差（紫边/绿边）")
+        self.chk_remove_ca.toggled.connect(self._on_lens_remove_ca_toggled)
+        chk_layout.addWidget(self.chk_remove_ca)
+        self.sec_optics.addLayout(chk_layout)
+
+        # 3. Profile Panel Container
+        self.panel_lens_profile = QWidget()
+        self.panel_lens_profile.setStyleSheet("background: transparent; border: none;")
+        self.panel_lens_profile.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        profile_layout = QVBoxLayout(self.panel_lens_profile)
+        profile_layout.setContentsMargins(0, 2, 0, 0)
+        profile_layout.setSpacing(4)
+
+        chk_prof_layout = QHBoxLayout()
+        chk_prof_layout.setContentsMargins(0, 2, 0, 2)
+        self.chk_lens_profile_enabled = QCheckBox("使用配置文件校正")
+        self.chk_lens_profile_enabled.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_lens_profile_enabled.toggled.connect(self._on_lens_profile_enabled_toggled)
+        chk_prof_layout.addWidget(self.chk_lens_profile_enabled)
+        profile_layout.addLayout(chk_prof_layout)
+
+        self.combo_lens_setup = ComboBoxRow(
+            "设置",
+            [
+                ("默认 (自动读取 EXIF)", "auto"),
+                ("自定", "custom"),
+            ],
+            default_val="auto",
+            tooltip="镜头校正配置文件设置来源：自动读取 EXIF 或自定义手动选取"
+        )
+        self.combo_lens_setup.valueChanged.connect(self._on_lens_setup_changed)
+        profile_layout.addWidget(self.combo_lens_setup)
+
+        self.lbl_profile_header = QLabel("镜头配置文件")
+        self.lbl_profile_header.setObjectName("subSectionHeader")
+        profile_layout.addWidget(self.lbl_profile_header)
+
+        # Pre-populate available makes from Adobe LCP database
+        from core.lens_correction import LCPDatabase
+        db = LCPDatabase.get_instance()
+        db.index_installed_profiles()
+        makes = db.get_available_makes()
+        make_items = [("无", "")] + [(m, m) for m in makes]
+
+        self.combo_lens_make = ComboBoxRow(
+            "品牌",
+            make_items,
+            default_val="",
+            tooltip="镜头制造商品牌"
+        )
+        self.combo_lens_make.valueChanged.connect(self._on_lens_make_changed)
+        profile_layout.addWidget(self.combo_lens_make)
+
+        self.combo_lens_model = ComboBoxRow(
+            "机型",
+            [("无", "")],
+            default_val="",
+            tooltip="具体镜头型号"
+        )
+        self.combo_lens_model.valueChanged.connect(self._on_lens_model_changed)
+        profile_layout.addWidget(self.combo_lens_model)
+
+        self.combo_lens_profile = ComboBoxRow(
+            "配置文件",
+            [("无", "")],
+            default_val="",
+            tooltip="匹配的标准镜头校正配置文件 (.lcp)"
+        )
+        self.combo_lens_profile.valueChanged.connect(self._on_lens_profile_changed)
+        profile_layout.addWidget(self.combo_lens_profile)
+
+        self.lbl_amount_header = QLabel("校正量")
+        self.lbl_amount_header.setObjectName("subSectionHeader")
+        profile_layout.addWidget(self.lbl_amount_header)
+
+        self.slider_lens_distortion = AdobeScrubSlider(
+            "扭曲度", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            has_center_detent=True,
+            tooltip="配置文件几何畸变校正量 (0 为标准出厂值，向左减弱，向右增强)"
+        )
+        self.slider_lens_distortion.valueChanged.connect(lambda v: self._on_lens_amount_changed("profile_distortion", v))
+        self.slider_lens_distortion.sliderReleased.connect(self._on_slider_committed)
+        profile_layout.addWidget(self.slider_lens_distortion)
+
+        self.slider_lens_vignette = AdobeScrubSlider(
+            "晕影", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            has_center_detent=True,
+            tooltip="配置文件暗角光学补偿量 (0 为标准出厂值，负值加深暗角，正值增亮消除暗角)"
+        )
+        self.slider_lens_vignette.valueChanged.connect(lambda v: self._on_lens_amount_changed("profile_vignette", v))
+        self.slider_lens_vignette.sliderReleased.connect(self._on_slider_committed)
+        profile_layout.addWidget(self.slider_lens_vignette)
+
+        self.sec_optics.addWidget(self.panel_lens_profile)
+
+        # 4. Manual Panel Container
+        self.panel_lens_manual = QWidget()
+        self.panel_lens_manual.setStyleSheet("background: transparent; border: none;")
+        self.panel_lens_manual.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.panel_lens_manual.setVisible(False)
+        manual_layout = QVBoxLayout(self.panel_lens_manual)
+        manual_layout.setContentsMargins(0, 2, 0, 0)
+        manual_layout.setSpacing(4)
+
+        self.slider_manual_distortion = AdobeScrubSlider(
+            "扭曲度", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            has_center_detent=True,
+            tooltip="手动几何畸变校正：负值校正枕形畸变，正值校正桶形畸变"
+        )
+        self.slider_manual_distortion.valueChanged.connect(lambda v: self._on_lens_amount_changed("manual_distortion", v))
+        self.slider_manual_distortion.sliderReleased.connect(self._on_slider_committed)
+        manual_layout.addWidget(self.slider_manual_distortion)
+
+        self.lbl_vignette_header = QLabel("晕影")
+        self.lbl_vignette_header.setObjectName("subSectionHeader")
+        manual_layout.addWidget(self.lbl_vignette_header)
+
+        self.slider_manual_vignette_amount = AdobeScrubSlider(
+            "数量", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            has_center_detent=True,
+            tooltip="暗角补偿强度：0 为无调整，负值加深暗角，正值增亮边缘"
+        )
+        self.slider_manual_vignette_amount.valueChanged.connect(lambda v: self._on_lens_amount_changed("manual_vignette_amount", v))
+        self.slider_manual_vignette_amount.sliderReleased.connect(self._on_slider_committed)
+        manual_layout.addWidget(self.slider_manual_vignette_amount)
+
+        self.slider_manual_vignette_midpoint = AdobeScrubSlider(
+            "中点", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            has_center_detent=True,
+            tooltip="暗角羽化过渡中点：0 为标准中点，负值向中心收缩，正值向边缘扩展"
+        )
+        self.slider_manual_vignette_midpoint.valueChanged.connect(lambda v: self._on_lens_amount_changed("manual_vignette_midpoint", v))
+        self.slider_manual_vignette_midpoint.sliderReleased.connect(self._on_slider_committed)
+        manual_layout.addWidget(self.slider_manual_vignette_midpoint)
+
+        self.sec_optics.addWidget(self.panel_lens_manual)
+
+        # 5. Divider & Diffusion Section (Moved to Bottom)
+        self.optics_section_divider = QFrame()
+        self.optics_section_divider.setObjectName("opticsSectionDivider")
+        self.optics_section_divider.setFrameShape(QFrame.Shape.HLine)
+        self.optics_section_divider.setFrameShadow(QFrame.Shadow.Plain)
+        self.optics_section_divider.setFixedHeight(1)
+        self.sec_optics.addWidget(self.optics_section_divider)
+
+        self.lbl_diff_header = QLabel("柔光滤镜仿真")
+        self.lbl_diff_header.setObjectName("subSectionHeader")
+        self.sec_optics.addWidget(self.lbl_diff_header)
 
         self.combo_diffusion = ComboBoxRow(
             "柔光镜型号",
@@ -3561,6 +3813,10 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_diff_warmth.valueChanged.connect(lambda v: self._on_slider_live("diffusion_warmth", v))
         self.slider_diff_warmth.sliderReleased.connect(self._on_slider_committed)
         self.sec_optics.addWidget(self.slider_diff_warmth)
+
+        # 6. Apply themes & states
+        self._update_optics_ui_style()
+        self._update_lens_ui_state()
         self._update_diffusion_ui_state()
 
         self.sidebar_layout.addWidget(self.sec_optics)
@@ -3894,6 +4150,11 @@ class DarkroomMainWindow(QMainWindow):
         self.act_reset_all.setShortcut(QKeySequence("Ctrl+R"))
         self.act_reset_all.triggered.connect(self.reset_all_params)
         edit_menu.addAction(self.act_reset_all)
+
+        self.act_clear_crop = QAction("清除裁切", self)
+        self.act_clear_crop.setIcon(get_icon("crop.png"))
+        self.act_clear_crop.triggered.connect(self.action_clear_active_crop)
+        edit_menu.addAction(self.act_clear_crop)
 
         self.act_clear_sdc = QAction("删除暗房配置 (.sdc)", self)
         self.act_clear_sdc.setShortcut(QKeySequence("Ctrl+Alt+R"))
@@ -5075,6 +5336,8 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已撤销删除暗房配置", timeout_ms=2000)
         elif act == "paste_params":
             self.set_app_status("已撤销粘贴暗房配方", timeout_ms=2000)
+        elif act == "clear_crop":
+            self.set_app_status("已撤销清除裁切", timeout_ms=2000)
         else:
             self.set_app_status("已撤销", timeout_ms=1500)
 
@@ -5099,6 +5362,8 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已重做删除暗房配置", timeout_ms=2000)
         elif act == "paste_params":
             self.set_app_status("已重做粘贴暗房配方", timeout_ms=2000)
+        elif act == "clear_crop":
+            self.set_app_status("已重做清除裁切", timeout_ms=2000)
         else:
             self.set_app_status("已重做", timeout_ms=1500)
 
@@ -5143,20 +5408,10 @@ class DarkroomMainWindow(QMainWindow):
 
         return False
 
-    def _is_params_modified(self, params_dict: dict, photo_entry=None) -> bool:
-        """Checks if a parameter dictionary has any non-default values."""
-        if not params_dict:
+    def _is_crop_modified(self, crop_data) -> bool:
+        """Helper to determine whether crop settings deviate from the default uncropped rectangle."""
+        if not crop_data:
             return False
-        base_temp = 5500.0
-        base_tint = 1.0
-        if photo_entry:
-            exif = photo_entry.get("meta") or photo_entry.get("exif") or {}
-            base_temp = float(exif.get("color_temp", getattr(self, "_active_base_temp", 5500.0)))
-            base_tint = float(exif.get("tint", getattr(self, "_active_base_tint", 1.0)))
-        defaults = self.get_default_params(base_temp, base_tint)
-
-        # Check crop
-        crop_data = params_dict.get("crop")
         if isinstance(crop_data, dict):
             if crop_data.get("enabled", False):
                 return True
@@ -5170,7 +5425,24 @@ class DarkroomMainWindow(QMainWindow):
                 abs(x) > 0.001 or abs(y) > 0.001 or rot != 0 or abs(ang) > 0.01 or
                 crop_data.get("flip_h") or crop_data.get("flip_v")):
                 return True
-        elif isinstance(crop_data, bool) and crop_data:
+        elif isinstance(crop_data, bool):
+            return crop_data
+        return False
+
+    def _is_params_modified(self, params_dict: dict, photo_entry=None) -> bool:
+        """Checks if a parameter dictionary has any non-default values."""
+        if not params_dict:
+            return False
+        base_temp = 5500.0
+        base_tint = 1.0
+        if photo_entry:
+            exif = photo_entry.get("meta") or photo_entry.get("exif") or {}
+            base_temp = float(exif.get("color_temp", getattr(self, "_active_base_temp", 5500.0)))
+            base_tint = float(exif.get("tint", getattr(self, "_active_base_tint", 1.0)))
+        defaults = self.get_default_params(base_temp, base_tint)
+
+        # Check crop
+        if self._is_crop_modified(params_dict.get("crop")):
             return True
 
         # Ignore internal non-color keys
@@ -5421,6 +5693,16 @@ class DarkroomMainWindow(QMainWindow):
         self.current_params = dict(state.get("params") or {})
         self.current_params["print_mode"] = self.current_print_mode
 
+        default_crop = {
+            "enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0,
+            "angle": 0.0, "rot_90": 0, "flip_h": False, "flip_v": False,
+            "aspect_ratio": "original", "is_portrait": False
+        }
+        crop_data = self.current_params.get("crop")
+        if not isinstance(crop_data, dict):
+            crop_data = dict(default_crop)
+            self.current_params["crop"] = dict(default_crop)
+
         self._update_all_sliders_from_params()
         self.on_switch_print_mode(self.current_print_mode, push_undo=False)
         self.on_switch_film(self.current_film_stock, push_undo=False)
@@ -5429,6 +5711,18 @@ class DarkroomMainWindow(QMainWindow):
         else:
             for pid, card in self.paper_cards.items():
                 card.set_active(pid == "none")
+
+        if getattr(self.canvas, "is_crop_editing", False):
+            self._exit_crop_workspace()
+
+        if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
+            if not self._is_crop_modified(crop_data):
+                self.canvas.crop_overlay.reset_all_crop()
+            elif self.canvas.crop_overlay.isVisible():
+                self.canvas.crop_overlay.start_crop_session(dict(crop_data))
+
+        if hasattr(self, "crop_sidebar") and self.crop_sidebar:
+            self.crop_sidebar.sync_from_overlay(dict(crop_data))
 
         self._sync_full_params_to_pipeline(fit_crop_if_changed=True)
 
@@ -5440,21 +5734,35 @@ class DarkroomMainWindow(QMainWindow):
                 curr_p["paper_profile"] = self.current_paper_stock
                 curr_p["print_mode"] = self.current_print_mode
                 curr_p["params"] = dict(self.current_params)
+                curr_p["crop"] = dict(crop_data)
                 is_reverted_to_raw = (self.current_film_stock == "none" and self.current_paper_stock == "none" and not self._is_params_modified(self.current_params, curr_p))
                 curr_p["is_dirty"] = not is_reverted_to_raw
                 curr_p["is_edited"] = not is_reverted_to_raw
                 self._photo_is_dirty = not is_reverted_to_raw
-                self.filmstrip.set_photo_dirty(self.active_photo_id, not is_reverted_to_raw)
+                if hasattr(self, 'filmstrip'):
+                    self.filmstrip.set_photo_dirty(self.active_photo_id, not is_reverted_to_raw)
+                    self.filmstrip.set_photo_crop(self.active_photo_id, dict(crop_data))
             self._save_current_photo_sdc()
+            self._update_active_thumbnails()
+            if hasattr(self, '_cards_debounce_timer'):
+                self._cards_debounce_timer.start(100)
+            else:
+                self._refresh_card_previews()
 
     def _apply_batch_history_state(self, state: dict):
-        """Restores a batch operation snapshot across multiple photos (e.g. Select All -> Delete SDC or Paste)."""
+        """Restores a batch operation snapshot across multiple photos (e.g. Select All -> Delete SDC, Clear Crop, or Paste)."""
         if not state or not isinstance(state, dict):
             return
 
         photos_data = state.get("photos", {})
         if not photos_data:
             return
+
+        default_crop = {
+            "enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0,
+            "angle": 0.0, "rot_90": 0, "flip_h": False, "flip_v": False,
+            "aspect_ratio": "original", "is_portrait": False
+        }
 
         active_restored = False
         for pid, pdata in photos_data.items():
@@ -5466,6 +5774,15 @@ class DarkroomMainWindow(QMainWindow):
             paper = pdata.get("paper", "none")
             print_mode = pdata.get("print_mode", "optical")
             params = dict(pdata.get("params") or {})
+
+            crop_data = pdata.get("crop")
+            if crop_data is None and isinstance(params.get("crop"), dict):
+                crop_data = dict(params["crop"])
+            elif crop_data is None:
+                crop_data = dict(default_crop)
+            else:
+                crop_data = dict(crop_data)
+
             is_dirty = bool(pdata.get("is_dirty", False))
             is_edited = bool(pdata.get("is_edited", False))
             p_path = p.get("path")
@@ -5473,6 +5790,10 @@ class DarkroomMainWindow(QMainWindow):
             p["film_profile"] = film
             p["paper_profile"] = paper
             p["print_mode"] = print_mode
+            p["crop"] = dict(crop_data)
+            if params:
+                params["crop"] = dict(crop_data)
+
             p["params"] = dict(params) if (is_edited or film not in ("none", "", None) or paper not in ("none", "", None) or self._is_params_modified(params, p)) else None
             p["is_dirty"] = is_dirty
             p["is_edited"] = is_edited
@@ -5481,12 +5802,15 @@ class DarkroomMainWindow(QMainWindow):
             if p_path:
                 if is_edited or film not in ("none", "", None) or paper not in ("none", "", None) or self._is_params_modified(params, p):
                     try:
+                        cur_thumb = p.get("graded_thumbnail_rgb")
+                        if cur_thumb is None:
+                            cur_thumb = p.get("thumbnail_rgb")
                         sdc_manager.save_sdc(
                             p_path,
                             film,
                             paper,
-                            params,
-                            thumbnail_rgb=p.get("thumbnail_rgb"),
+                            p["params"] or params,
+                            thumbnail_rgb=cur_thumb,
                             print_mode=print_mode
                         )
                     except Exception:
@@ -5502,13 +5826,14 @@ class DarkroomMainWindow(QMainWindow):
                 if hasattr(self, 'thumb_controller'):
                     raw_thumb = self.thumb_controller.get_raw_thumbnail(p)
                     if raw_thumb is not None:
-                        graded = self.thumb_controller.grade_thumbnail_fast(raw_thumb, film, paper, params)
+                        graded = self.thumb_controller.grade_thumbnail_fast(raw_thumb, film, paper, p["params"] or params)
                         self.thumb_controller.update_graded_thumbnail(p, graded, self.filmstrip)
             else:
                 if hasattr(self, 'thumb_controller'):
                     self.thumb_controller.revert_photo_to_raw(p, self.filmstrip)
 
             if hasattr(self, 'filmstrip'):
+                self.filmstrip.set_photo_crop(pid, dict(crop_data))
                 self.filmstrip.set_photo_dirty(pid, is_dirty)
 
             if pid == self.active_photo_id:
@@ -5527,9 +5852,31 @@ class DarkroomMainWindow(QMainWindow):
                 base_temp = float(getattr(self, "_active_base_temp", 5500.0))
                 base_tint = float(getattr(self, "_active_base_tint", 1.0))
                 act_params = self.get_default_params(base_temp, base_tint)
+
+            act_crop = act_data.get("crop")
+            if act_crop is None and isinstance(act_params.get("crop"), dict):
+                act_crop = dict(act_params["crop"])
+            elif act_crop is None:
+                act_crop = dict(default_crop)
+            else:
+                act_crop = dict(act_crop)
+
+            act_params["crop"] = dict(act_crop)
             self.current_params = act_params
             self.current_params["print_mode"] = self.current_print_mode
             self._photo_is_dirty = bool(act_data.get("is_dirty", False))
+
+            if getattr(self.canvas, "is_crop_editing", False):
+                self._exit_crop_workspace()
+
+            if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
+                if not self._is_crop_modified(act_crop):
+                    self.canvas.crop_overlay.reset_all_crop()
+                elif self.canvas.crop_overlay.isVisible():
+                    self.canvas.crop_overlay.start_crop_session(dict(act_crop))
+
+            if hasattr(self, "crop_sidebar") and self.crop_sidebar:
+                self.crop_sidebar.sync_from_overlay(dict(act_crop))
 
             self._update_all_sliders_from_params()
             self.on_switch_print_mode(self.current_print_mode, push_undo=False)
@@ -5542,6 +5889,11 @@ class DarkroomMainWindow(QMainWindow):
 
             self._sync_full_params_to_pipeline(fit_crop_if_changed=True)
             self._update_reset_buttons_state()
+            self._update_active_thumbnails()
+            if hasattr(self, '_cards_debounce_timer'):
+                self._cards_debounce_timer.start(100)
+            else:
+                self._refresh_card_previews()
         elif not active_restored and state.get("active_photo_id"):
             target_pid = state.get("active_photo_id")
             if target_pid in photos_data and target_pid != self.active_photo_id:
@@ -5625,6 +5977,7 @@ class DarkroomMainWindow(QMainWindow):
             "grain_size": 1.0,
             "grain_cloud_blur": 1.0,
             "grain_colour": 1.0,
+            "lens": self._get_default_lens_params(),
             "split_x": 0.5,
             "view_mode": 0
         }
@@ -5857,6 +6210,20 @@ class DarkroomMainWindow(QMainWindow):
                 for k, def_v in track_defs.items()
                 if k != "custom_wb"
             )
+            if track_name == "optics":
+                lens_cfg = self.current_params.get("lens", {})
+                if isinstance(lens_cfg, dict):
+                    is_lens_modified = (
+                        bool(lens_cfg.get("profile_enabled", False)) or
+                        bool(lens_cfg.get("remove_ca", False)) or
+                        abs(float(lens_cfg.get("profile_distortion", 0.0))) > 0.01 or
+                        abs(float(lens_cfg.get("profile_vignette", 0.0))) > 0.01 or
+                        abs(float(lens_cfg.get("manual_distortion", 0.0))) > 0.01 or
+                        abs(float(lens_cfg.get("manual_vignette_amount", 0.0))) > 0.01 or
+                        abs(float(lens_cfg.get("manual_vignette_midpoint", 0.0))) > 0.01
+                    )
+                    if is_lens_modified:
+                        is_default = False
             sec.set_reset_enabled(not is_default)
 
     def reset_track(self, track_name):
@@ -5866,6 +6233,12 @@ class DarkroomMainWindow(QMainWindow):
         if track_name not in defaults:
             return
         changed = False
+        if track_name == "optics":
+            self.current_params["lens"] = self._get_default_lens_params()
+            if hasattr(self, 'combo_lens_setup'):
+                self._auto_detect_lens_profile()
+            self._apply_lens_to_canvas()
+            changed = True
         for k, v in defaults[track_name].items():
             cur_v = self.current_params.get(k)
             if cur_v != v and (not isinstance(v, float) or abs(float(cur_v or 0) - v) >= 1e-4):
@@ -6061,10 +6434,47 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, 'slider_grain_size'): self.slider_grain_size.set_value(p.get("grain_size", 1.0))
             if hasattr(self, 'slider_grain_cloud'): self.slider_grain_cloud.set_value(p.get("grain_cloud_blur", 1.0))
             if hasattr(self, 'slider_grain_colour'): self.slider_grain_colour.set_value(p.get("grain_colour", 1.0))
+
+            # Lens correction controls
+            lens_cfg = p.get("lens")
+            if not isinstance(lens_cfg, dict):
+                lens_cfg = self._get_default_lens_params()
+                p["lens"] = lens_cfg
+
+            act_tab = lens_cfg.get("active_tab", "profile")
+            if hasattr(self, 'btn_lens_tab_profile') and hasattr(self, 'btn_lens_tab_manual'):
+                self.btn_lens_tab_profile.setChecked(act_tab != "manual")
+                self.btn_lens_tab_manual.setChecked(act_tab == "manual")
+            if hasattr(self, 'panel_lens_profile') and hasattr(self, 'panel_lens_manual'):
+                self.panel_lens_profile.setVisible(act_tab != "manual")
+                self.panel_lens_manual.setVisible(act_tab == "manual")
+
+            if hasattr(self, 'chk_remove_ca'):
+                self.chk_remove_ca.setChecked(bool(lens_cfg.get("remove_ca", False)))
+            if hasattr(self, 'chk_lens_profile_enabled'):
+                self.chk_lens_profile_enabled.setChecked(bool(lens_cfg.get("profile_enabled", False)))
+            if hasattr(self, 'combo_lens_setup'):
+                self.combo_lens_setup.set_value(lens_cfg.get("setup", "auto"))
+
+            if hasattr(self, 'combo_lens_make'):
+                self._sync_lens_combos_from_cfg(lens_cfg)
+
+            if hasattr(self, 'slider_lens_distortion'):
+                self.slider_lens_distortion.set_value(lens_cfg.get("profile_distortion", 0.0))
+            if hasattr(self, 'slider_lens_vignette'):
+                self.slider_lens_vignette.set_value(lens_cfg.get("profile_vignette", 0.0))
+
+            if hasattr(self, 'slider_manual_distortion'):
+                self.slider_manual_distortion.set_value(lens_cfg.get("manual_distortion", 0.0))
+            if hasattr(self, 'slider_manual_vignette_amount'):
+                self.slider_manual_vignette_amount.set_value(lens_cfg.get("manual_vignette_amount", 0.0))
+            if hasattr(self, 'slider_manual_vignette_midpoint'):
+                self.slider_manual_vignette_midpoint.set_value(lens_cfg.get("manual_vignette_midpoint", 0.0))
         finally:
             self._is_updating_sliders = False
         self._update_reset_buttons_state()
         self._update_diffusion_ui_state()
+        self._update_lens_ui_state()
 
     def _sync_canvas_params(self, **extra):
         """Safely forwards current_params and active stock/print_mode state to canvas without keyword duplication."""
@@ -7247,6 +7657,290 @@ class DarkroomMainWindow(QMainWindow):
             else:
                 self.slider_diff_warmth.setToolTip(getattr(self.slider_diff_warmth, "default_tooltip", "柔光光晕波长能量再分配，正值偏复古暖金，负值偏清冷晨光"))
 
+    def _get_default_lens_params(self):
+        return {
+            "profile_enabled": False,
+            "setup": "auto",
+            "make": "",
+            "model": "",
+            "profile_name": "",
+            "profile_path": "",
+            "profile_distortion": 0.0,
+            "profile_vignette": 0.0,
+            "remove_ca": False,
+            "active_tab": "profile",
+            "manual_enabled": True,
+            "manual_distortion": 0.0,
+            "manual_vignette_amount": 0.0,
+            "manual_vignette_midpoint": 0.0,
+            "enabled": False,
+            "k1": 0.0,
+            "k2": 0.0,
+            "k3": 0.0,
+            "vignette_amount": 0.0,
+            "vignette_midpoint": 50.0,
+        }
+
+    def _update_lens_ui_state(self):
+        """Enable or gray out profile controls depending on whether profile correction is enabled."""
+        lens_cfg = self.current_params.get("lens", {})
+        prof_en = bool(lens_cfg.get("profile_enabled", False))
+        if hasattr(self, 'combo_lens_setup'):
+            self.combo_lens_setup.setEnabled(prof_en)
+        if hasattr(self, 'combo_lens_make'):
+            self.combo_lens_make.setEnabled(prof_en)
+        if hasattr(self, 'combo_lens_model'):
+            self.combo_lens_model.setEnabled(prof_en)
+        if hasattr(self, 'combo_lens_profile'):
+            self.combo_lens_profile.setEnabled(prof_en)
+        if hasattr(self, 'slider_lens_distortion'):
+            self.slider_lens_distortion.setEnabled(prof_en)
+        if hasattr(self, 'slider_lens_vignette'):
+            self.slider_lens_vignette.setEnabled(prof_en)
+
+    def _on_lens_tab_changed(self, tab_id):
+        active_tab = "profile" if tab_id == 0 else "manual"
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        lens_cfg["active_tab"] = active_tab
+        if hasattr(self, 'panel_lens_profile'):
+            self.panel_lens_profile.setVisible(tab_id == 0)
+        if hasattr(self, 'panel_lens_manual'):
+            self.panel_lens_manual.setVisible(tab_id == 1)
+        self._apply_lens_to_canvas()
+
+    def _on_lens_remove_ca_toggled(self, checked):
+        if getattr(self, "_is_updating_sliders", False):
+            return
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        lens_cfg["remove_ca"] = checked
+        self._apply_lens_to_canvas()
+        self._mark_current_photo_dirty()
+        self._save_current_photo_sdc()
+        self.push_undo_state()
+
+    def _on_lens_profile_enabled_toggled(self, checked):
+        if getattr(self, "_is_updating_sliders", False):
+            return
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        lens_cfg["profile_enabled"] = checked
+        self._update_lens_ui_state()
+        self._apply_lens_to_canvas()
+        self._mark_current_photo_dirty()
+        self._save_current_photo_sdc()
+        self.push_undo_state()
+
+    def _on_lens_setup_changed(self, setup_mode):
+        if getattr(self, "_is_updating_sliders", False):
+            return
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        lens_cfg["setup"] = setup_mode
+        if setup_mode == "auto":
+            self._auto_detect_lens_profile()
+        self._apply_lens_to_canvas()
+        self._mark_current_photo_dirty()
+        self._save_current_photo_sdc()
+        self.push_undo_state()
+
+    def _on_lens_make_changed(self, make):
+        if getattr(self, "_is_updating_sliders", False):
+            return
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        lens_cfg["make"] = make
+        # If user manually selects a make while in auto mode, switch setup to custom
+        if lens_cfg.get("setup") == "auto":
+            lens_cfg["setup"] = "custom"
+            if hasattr(self, 'combo_lens_setup'):
+                self._is_updating_sliders = True
+                self.combo_lens_setup.set_value("custom")
+                self._is_updating_sliders = False
+
+        from core.lens_correction import LCPDatabase
+        db = LCPDatabase.get_instance()
+        models = db.get_models_for_make(make) if make else []
+        model_items = [("无", "")] + [(m_name, m_name) for m_name, _, _ in models]
+
+        self._is_updating_sliders = True
+        try:
+            self.combo_lens_model.set_items(model_items, default_val="")
+            self.combo_lens_profile.set_items([("无", "")], default_val="")
+        finally:
+            self._is_updating_sliders = False
+
+        lens_cfg["model"] = ""
+        lens_cfg["profile_name"] = ""
+        lens_cfg["profile_path"] = ""
+        self._apply_lens_to_canvas()
+        self._mark_current_photo_dirty()
+        self._save_current_photo_sdc()
+        self.push_undo_state()
+
+    def _on_lens_model_changed(self, model_name):
+        if getattr(self, "_is_updating_sliders", False):
+            return
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        lens_cfg["model"] = model_name
+        if lens_cfg.get("setup") == "auto":
+            lens_cfg["setup"] = "custom"
+            if hasattr(self, 'combo_lens_setup'):
+                self._is_updating_sliders = True
+                self.combo_lens_setup.set_value("custom")
+                self._is_updating_sliders = False
+
+        make = lens_cfg.get("make", "")
+        from core.lens_correction import LCPDatabase
+        db = LCPDatabase.get_instance()
+        models = db.get_models_for_make(make) if make else []
+        prof_items = [("无", "")]
+        matching_paths = []
+        for m_name, p_display, p_path in models:
+            if m_name == model_name:
+                prof_items.append((p_display, p_path))
+                matching_paths.append((p_display, p_path))
+
+        self._is_updating_sliders = True
+        try:
+            def_path = matching_paths[0][1] if matching_paths else ""
+            self.combo_lens_profile.set_items(prof_items, default_val=def_path)
+        finally:
+            self._is_updating_sliders = False
+
+        if matching_paths:
+            lens_cfg["profile_name"] = matching_paths[0][0]
+            lens_cfg["profile_path"] = matching_paths[0][1]
+        else:
+            lens_cfg["profile_name"] = ""
+            lens_cfg["profile_path"] = ""
+        self._apply_lens_to_canvas()
+        self._mark_current_photo_dirty()
+        self._save_current_photo_sdc()
+        self.push_undo_state()
+
+    def _on_lens_profile_changed(self, profile_path):
+        if getattr(self, "_is_updating_sliders", False):
+            return
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        lens_cfg["profile_path"] = profile_path
+        if hasattr(self, 'combo_lens_profile') and hasattr(self.combo_lens_profile, 'combo'):
+            lens_cfg["profile_name"] = self.combo_lens_profile.combo.currentText()
+        self._apply_lens_to_canvas()
+        self._mark_current_photo_dirty()
+        self._save_current_photo_sdc()
+        self.push_undo_state()
+
+    def _on_lens_amount_changed(self, key, val):
+        if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
+            return
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        lens_cfg[key] = val
+        fl = None
+        ap = None
+        if self.active_photo_id:
+            photo = next((p for p in self.photos if p.get("id") == self.active_photo_id), None)
+            if photo:
+                exif = photo.get("exif", {})
+                fl = exif.get("focal_length")
+                ap = exif.get("aperture")
+        from core.lens_correction import compute_effective_lens_params
+        try:
+            eff = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap)
+            lens_cfg.update(eff)
+            self.canvas.update_params(lens=eff)
+        except Exception as e:
+            logger.error(f"Error in _on_lens_amount_changed: {e}", exc_info=True)
+        self._update_reset_buttons_state()
+
+    def _apply_lens_to_canvas(self):
+        """Compute effective shader coefficients and forward to canvas."""
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        fl = None
+        ap = None
+        if self.active_photo_id:
+            photo = next((p for p in self.photos if p.get("id") == self.active_photo_id), None)
+            if photo:
+                exif = photo.get("exif", {})
+                fl = exif.get("focal_length")
+                ap = exif.get("aperture")
+        from core.lens_correction import compute_effective_lens_params
+        try:
+            eff = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap)
+            lens_cfg.update(eff)
+            self.canvas.update_params(lens=eff)
+        except Exception as e:
+            logger.error(f"Error in _apply_lens_to_canvas: {e}", exc_info=True)
+        self._update_reset_buttons_state()
+
+    def _sync_lens_combos_from_cfg(self, lens_cfg):
+        self._is_updating_sliders = True
+        try:
+            from core.lens_correction import LCPDatabase
+            db = LCPDatabase.get_instance()
+            make = lens_cfg.get("make", "")
+            model = lens_cfg.get("model", "")
+            prof_path = lens_cfg.get("profile_path", "")
+
+            # 1. Populate makes
+            makes = db.get_available_makes()
+            make_items = [("无", "")] + [(m, m) for m in makes]
+            if make and make not in [m for _, m in make_items]:
+                make_items.append((make, make))
+            self.combo_lens_make.set_items(make_items, default_val=make)
+
+            # 2. Populate models
+            models = db.get_models_for_make(make) if make else []
+            model_items = [("无", "")] + [(m_name, m_name) for m_name, _, _ in models]
+            if model and model not in [m for _, m in model_items]:
+                model_items.append((model, model))
+            self.combo_lens_model.set_items(model_items, default_val=model)
+
+            # 3. Populate profiles
+            prof_items = [("无", "")]
+            for m_name, p_name, p_p in models:
+                if m_name == model:
+                    prof_items.append((p_name, p_p))
+            if prof_path and prof_path not in [p for _, p in prof_items]:
+                p_display = lens_cfg.get("profile_name") or "已加载配置文件"
+                prof_items.append((p_display, prof_path))
+            self.combo_lens_profile.set_items(prof_items, default_val=prof_path)
+        finally:
+            self._is_updating_sliders = False
+
+    def _auto_detect_lens_profile(self):
+        """Auto-detect camera/lens from photo EXIF metadata and match Adobe LCP profile."""
+        if not self.active_photo_id:
+            return
+        photo = next((p for p in self.photos if p.get("id") == self.active_photo_id), None)
+        if not photo:
+            return
+
+        from core.lens_correction import LCPDatabase, read_lens_metadata
+        exif = photo.get("exif", {})
+        meta = read_lens_metadata(photo["path"])
+
+        # Prioritize rich EXIF from SpektraEngine._extract_exif stored in photo['exif']
+        cam_make = (exif.get("camera_make") if exif.get("camera_make") != "-" else "") or meta.get("camera_make", "")
+        cam_model = (exif.get("camera_model") if exif.get("camera_model") != "-" else "") or meta.get("camera_model", "")
+        lens_model = (exif.get("lens_model") if exif.get("lens_model") != "-" else "") or meta.get("lens_model", "")
+        fl = exif.get("focal_length") or meta.get("focal_length")
+
+        db = LCPDatabase.get_instance()
+        match = db.match_lens_from_exif(cam_make, cam_model, lens_model, fl)
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+
+        if match:
+            m, mod_name, prof_name, p_path = match
+            lens_cfg["make"] = m
+            lens_cfg["model"] = mod_name
+            lens_cfg["profile_name"] = prof_name
+            lens_cfg["profile_path"] = p_path
+        else:
+            lens_cfg["make"] = cam_make or ""
+            lens_cfg["model"] = lens_model or cam_model or "未找到匹配镜头"
+            lens_cfg["profile_name"] = "无配置文件"
+            lens_cfg["profile_path"] = ""
+
+        if hasattr(self, 'combo_lens_make'):
+            self._sync_lens_combos_from_cfg(lens_cfg)
+
     def _manage_photo_memory_lru(self, active_photo_id: str):
         """Strict LRU memory management: Keeps at most 2 photos' float_img in RAM
         (active photo + most recent previous photo, ~580MB max).
@@ -7507,6 +8201,17 @@ class DarkroomMainWindow(QMainWindow):
                     self.set_app_status(f"底片已就绪: {fn}", spinning=False, timeout_ms=2000)
 
             self._manage_photo_memory_lru(photo_id)
+
+            # Ensure lens configuration is present and auto-detected if in auto mode
+            lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+            if lens_cfg.get("setup", "auto") == "auto":
+                self._auto_detect_lens_profile()
+            fl = exif_data.get("focal_length") if exif_data else None
+            ap = exif_data.get("aperture") if exif_data else None
+            from core.lens_correction import compute_effective_lens_params
+            eff_lens = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap)
+            lens_cfg.update(eff_lens)
+
             self._sync_canvas_params()
             self._update_all_sliders_from_params()
 
@@ -8124,10 +8829,12 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status(f"已清除 {len(id_set)} 项底片配置并重置为原生底片", timeout_ms=3000)
 
     def action_clear_active_crop(self):
-        """Clear crop on the currently active photo (from canvas context menu)."""
-        if not self.active_photo_id:
-            return
-        self.on_clear_crop_photos([self.active_photo_id])
+        """Clear crop on the currently active photo or selected photo(s)."""
+        sel_ids = self.filmstrip.get_selected_photo_ids() if hasattr(self, 'filmstrip') else []
+        if not sel_ids and self.active_photo_id:
+            sel_ids = [self.active_photo_id]
+        if sel_ids:
+            self.on_clear_crop_photos(sel_ids)
 
     def on_clear_crop_photos(self, photo_ids):
         """Clear crop configuration for target photo(s) without altering develop parameters."""
@@ -8150,7 +8857,72 @@ class DarkroomMainWindow(QMainWindow):
             "is_portrait": False
         }
 
+        # Check if at least one photo has an active/non-default crop
+        has_any_crop = False
+        for p in target_photos:
+            c = p.get("crop")
+            if not c and isinstance(p.get("params"), dict):
+                c = p["params"].get("crop")
+            if not c and p.get("id") == self.active_photo_id:
+                c = self.current_params.get("crop")
+            if self._is_crop_modified(c):
+                has_any_crop = True
+                break
+        if not has_any_crop:
+            return
+
+        # 1. Capture comprehensive pre-clear state snapshot for all target photos
+        pre_photos = {}
+        for p in target_photos:
+            pid = p["id"]
+            if pid == self.active_photo_id:
+                p_film = getattr(self, "current_film_stock", "none")
+                p_paper = getattr(self, "current_paper_stock", "none")
+                p_pmode = getattr(self, "current_print_mode", "optical")
+                p_params = dict(self.current_params)
+                p_crop = dict(self.current_params.get("crop") or p.get("crop") or default_crop)
+                p_params["crop"] = dict(p_crop)
+                p_dirty = bool(getattr(self, "_photo_is_dirty", False) or p.get("is_dirty", False))
+                p_edited = bool(self._is_photo_edited(p))
+            else:
+                p_film = p.get("film_profile", "none")
+                p_paper = p.get("paper_profile", "none")
+                p_pmode = p.get("print_mode", "optical")
+                p_params = dict(p.get("params") or {})
+                if not p_params and p.get("path"):
+                    sdc = sdc_manager.load_sdc(p["path"])
+                    if sdc:
+                        p_film = sdc.get("film_profile", p_film)
+                        p_paper = sdc.get("paper_profile", p_paper)
+                        p_pmode = sdc.get("print_mode", p_pmode)
+                        p_params = dict(sdc.get("params") or {})
+                p_crop = dict(p_params.get("crop") or p.get("crop") or default_crop)
+                p_params["crop"] = dict(p_crop)
+                p_dirty = bool(p.get("is_dirty", False))
+                p_edited = bool(self._is_photo_edited(p))
+
+            pre_photos[pid] = {
+                "film": p_film,
+                "paper": p_paper,
+                "print_mode": p_pmode,
+                "params": p_params,
+                "crop": p_crop,
+                "is_dirty": p_dirty,
+                "is_edited": p_edited,
+                "path": p.get("path"),
+            }
+
+        pre_state = {
+            "type": "batch_photos_state",
+            "action": "clear_crop",
+            "active_photo_id": self.active_photo_id,
+            "photos": pre_photos,
+        }
+        self._push_raw_state(pre_state)
+
+        # 2. Clear crop for all target photos
         active_cleared = False
+        post_photos = {}
         for p in target_photos:
             pid = p["id"]
             if "params" not in p or not isinstance(p["params"], dict):
@@ -8212,6 +8984,18 @@ class DarkroomMainWindow(QMainWindow):
                             )
                             self.thumb_controller.update_graded_thumbnail(p, graded, self.filmstrip)
 
+            post_photos[pid] = {
+                "film": p.get("film_profile", "none"),
+                "paper": p.get("paper_profile", "none"),
+                "print_mode": p.get("print_mode", "optical"),
+                "params": dict(p.get("params") or {}),
+                "crop": dict(default_crop),
+                "is_dirty": p.get("is_dirty", False),
+                "is_edited": p.get("is_edited", False),
+                "path": p_path,
+            }
+
+        # 3. If active photo was cleared, synchronize live controls, canvas, and cards
         if active_cleared:
             if getattr(self.canvas, "is_crop_editing", False):
                 self._exit_crop_workspace()
@@ -8224,14 +9008,30 @@ class DarkroomMainWindow(QMainWindow):
 
             self.canvas.update_params(crop=dict(default_crop))
             self.canvas.fit_to_view(animate=False)
-            self._mark_current_photo_dirty()
+
+            active_p = next((p for p in self.photos if p.get("id") == self.active_photo_id), None)
+            if active_p:
+                self._photo_is_dirty = active_p.get("is_dirty", False)
+                if self.active_photo_id in post_photos:
+                    post_photos[self.active_photo_id]["is_dirty"] = self._photo_is_dirty
+                    post_photos[self.active_photo_id]["is_edited"] = active_p.get("is_edited", False)
+                    post_photos[self.active_photo_id]["params"] = dict(self.current_params)
+
             self._save_current_photo_sdc()
-            self.push_undo_state()
             self._update_active_thumbnails()
             if hasattr(self, '_cards_debounce_timer'):
                 self._cards_debounce_timer.start(100)
             else:
                 self._refresh_card_previews()
+
+        # 4. Push post-clear state snapshot
+        post_state = {
+            "type": "batch_photos_state",
+            "action": "clear_crop",
+            "active_photo_id": self.active_photo_id,
+            "photos": post_photos,
+        }
+        self._push_raw_state(post_state)
 
         count = len(target_photos)
         msg = "已清除裁切" if count == 1 else f"已清除 {count} 项底片裁切"

@@ -39,7 +39,7 @@ class ParameterGroupCard(QWidget):
 
         # Header bar
         header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(2, 0, 2, 2)
+        header_layout.setContentsMargins(0, 0, 0, 2)
         header_layout.setSpacing(6)
 
         self.title_label = QLabel(self.title_text)

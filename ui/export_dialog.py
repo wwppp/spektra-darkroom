@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.path_utils import get_icon_path, get_resource_dir, normalize_path
-from ui.window_utils import setup_solid_combobox, apply_dark_titlebar
+from ui.window_utils import setup_solid_combobox, apply_dark_titlebar, get_standard_checkbox_style
 from ui.theme_manager import theme_manager
 from core import config_manager
 
@@ -368,7 +368,7 @@ class BaseExportDialog(QDialog):
                     font-size: 11.5px;
                 }}
                 QComboBox:hover {{
-                    border-color: #4b5168;
+                    border-color: #f59e0b;
                 }}
                 QComboBox:focus {{
                     border-color: #f59e0b;
@@ -390,10 +390,10 @@ class BaseExportDialog(QDialog):
                 QComboBox QAbstractItemView {{
                     background: #181920;
                     color: #e2e8f0;
-                    selection-background-color: #f59e0b;
-                    selection-color: #111;
                     border: 1px solid #333644;
-                    padding: 4px;
+                    border-radius: 4px;
+                    padding: 2px 0px;
+                    outline: 0px;
                 }}
                 QLineEdit {{
                     background: #121215;
@@ -421,32 +421,7 @@ class BaseExportDialog(QDialog):
                 QSlider::handle:horizontal:hover {{
                     background: #f59e0b;
                 }}
-                QCheckBox {{
-                    color: #c4c4cc;
-                    spacing: 8px;
-                    font-size: 11.5px;
-                    outline: none;
-                    background: transparent;
-                }}
-                QCheckBox:focus {{
-                    outline: none;
-                }}
-                QCheckBox::indicator {{
-                    width: 12px;
-                    height: 12px;
-                    border: 1px solid #8b92a5;
-                    border-radius: 2px;
-                    background: transparent;
-                    outline: none;
-                }}
-                QCheckBox::indicator:hover {{
-                    border-color: #f59e0b;
-                }}
-                QCheckBox::indicator:checked {{
-                    border: 1px solid #f59e0b;
-                    background: #14151a;
-                    image: url("{chk_amber}");
-                }}
+{get_standard_checkbox_style(is_dark=True)}
                 QPushButton {{
                     background: #25262c;
                     color: #bbb;
@@ -513,10 +488,10 @@ class BaseExportDialog(QDialog):
                 QComboBox QAbstractItemView {{
                     background: #ffffff;
                     color: #1e293b;
-                    selection-background-color: #f59e0b;
-                    selection-color: #111;
                     border: 1px solid #cbd5e1;
-                    padding: 4px;
+                    border-radius: 4px;
+                    padding: 2px 0px;
+                    outline: 0px;
                 }}
                 QLineEdit {{
                     background: #ffffff;
@@ -544,32 +519,7 @@ class BaseExportDialog(QDialog):
                 QSlider::handle:horizontal:hover {{
                     background: #f59e0b;
                 }}
-                QCheckBox {{
-                    color: #334155;
-                    spacing: 8px;
-                    font-size: 11.5px;
-                    outline: none;
-                    background: transparent;
-                }}
-                QCheckBox:focus {{
-                    outline: none;
-                }}
-                QCheckBox::indicator {{
-                    width: 12px;
-                    height: 12px;
-                    border: 1px solid #94a3b8;
-                    border-radius: 2px;
-                    background: #ffffff;
-                    outline: none;
-                }}
-                QCheckBox::indicator:hover {{
-                    border-color: #f59e0b;
-                }}
-                QCheckBox::indicator:checked {{
-                    border: 1px solid #f59e0b;
-                    background: #ffffff;
-                    image: url("{chk_amber}");
-                }}
+{get_standard_checkbox_style(is_dark=False)}
                 QPushButton {{
                     background: #ffffff;
                     color: #1e293b;

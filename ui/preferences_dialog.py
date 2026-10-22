@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.path_utils import get_resource_dir, get_icon_path
-from ui.window_utils import apply_dark_titlebar, show_dark_message_box, get_icon, setup_solid_combobox
+from ui.window_utils import apply_dark_titlebar, show_dark_message_box, get_icon, setup_solid_combobox, get_standard_checkbox_style
 from ui.theme_manager import theme_manager
 from core import config_manager
 from core import session_cache_manager
@@ -109,31 +109,7 @@ class PreferencesDialog(QDialog):
                     color: #cbd5e1;
                     font-size: 12px;
                 }}
-                QCheckBox {{
-                    color: #e2e8f0;
-                    font-size: 12px;
-                    spacing: 8px;
-                    outline: none;
-                }}
-                QCheckBox:focus {{
-                    outline: none;
-                }}
-                QCheckBox::indicator {{
-                    width: 12px;
-                    height: 12px;
-                    border: 1px solid #8b92a5;
-                    border-radius: 2px;
-                    background: transparent;
-                    outline: none;
-                }}
-                QCheckBox::indicator:hover {{
-                    border-color: #f59e0b;
-                }}
-                QCheckBox::indicator:checked {{
-                    border: 1px solid #f59e0b;
-                    background: #14151a;
-                    image: url("{chk_amber}");
-                }}
+{get_standard_checkbox_style(is_dark=True)}
                 QComboBox {{
                     background: #14151a;
                     color: #e2e8f0;
@@ -143,7 +119,7 @@ class PreferencesDialog(QDialog):
                     font-size: 11.5px;
                 }}
                 QComboBox:hover {{
-                    border-color: #4b5168;
+                    border-color: #f59e0b;
                 }}
                 QComboBox:focus {{
                     border-color: #f59e0b;
@@ -165,10 +141,10 @@ class PreferencesDialog(QDialog):
                 QComboBox QAbstractItemView {{
                     background: #181920;
                     color: #e2e8f0;
-                    selection-background-color: #f59e0b;
-                    selection-color: #111;
                     border: 1px solid #333644;
-                    padding: 4px;
+                    border-radius: 4px;
+                    padding: 2px 0px;
+                    outline: 0px;
                 }}
                 QFrame#sepAssoc {{
                     background: rgba(255, 255, 255, 0.08);
@@ -343,31 +319,7 @@ class PreferencesDialog(QDialog):
                     color: #334155;
                     font-size: 12px;
                 }}
-                QCheckBox {{
-                    color: #1e293b;
-                    font-size: 12px;
-                    spacing: 8px;
-                    outline: none;
-                }}
-                QCheckBox:focus {{
-                    outline: none;
-                }}
-                QCheckBox::indicator {{
-                    width: 12px;
-                    height: 12px;
-                    border: 1px solid #94a3b8;
-                    border-radius: 2px;
-                    background: #ffffff;
-                    outline: none;
-                }}
-                QCheckBox::indicator:hover {{
-                    border-color: #f59e0b;
-                }}
-                QCheckBox::indicator:checked {{
-                    border: 1px solid #f59e0b;
-                    background: #ffffff;
-                    image: url("{chk_amber}");
-                }}
+{get_standard_checkbox_style(is_dark=False)}
                 QComboBox {{
                     background: #ffffff;
                     color: #1e293b;
@@ -399,10 +351,10 @@ class PreferencesDialog(QDialog):
                 QComboBox QAbstractItemView {{
                     background: #ffffff;
                     color: #1e293b;
-                    selection-background-color: #f59e0b;
-                    selection-color: #111;
                     border: 1px solid #cbd5e1;
-                    padding: 4px;
+                    border-radius: 4px;
+                    padding: 2px 0px;
+                    outline: 0px;
                 }}
                 QFrame#sepAssoc {{
                     background: rgba(0, 0, 0, 0.08);
@@ -558,11 +510,13 @@ class PreferencesDialog(QDialog):
         lbl_hw.setFixedWidth(100)
         r_hw.addWidget(lbl_hw)
         self.combo_hw_accel = QComboBox()
+        self.combo_hw_accel.setFixedWidth(180)
         setup_solid_combobox(self.combo_hw_accel)
         self.combo_hw_accel.addItem("关闭", "off")
         self.combo_hw_accel.addItem("视口与缩略图", "preview_only")
         self.combo_hw_accel.addItem("全局", "global")
-        r_hw.addWidget(self.combo_hw_accel, 1)
+        r_hw.addWidget(self.combo_hw_accel)
+        r_hw.addStretch(1)
         l_ren.addLayout(r_hw)
 
         r_res = QHBoxLayout()
@@ -570,12 +524,14 @@ class PreferencesDialog(QDialog):
         lbl_res.setFixedWidth(100)
         r_res.addWidget(lbl_res)
         self.combo_preview_res = QComboBox()
+        self.combo_preview_res.setFixedWidth(180)
         setup_solid_combobox(self.combo_preview_res)
         self.combo_preview_res.addItem("1080P", 1440)
         self.combo_preview_res.addItem("2K", 2048)
         self.combo_preview_res.addItem("4K", 3840)
         self.combo_preview_res.addItem("全分辨率", 0)
-        r_res.addWidget(self.combo_preview_res, 1)
+        r_res.addWidget(self.combo_preview_res)
+        r_res.addStretch(1)
         l_ren.addLayout(r_res)
 
         self.chk_hq_preview = QCheckBox("视口平滑与抗锯齿")
@@ -587,9 +543,11 @@ class PreferencesDialog(QDialog):
         lbl_cs.setFixedWidth(100)
         r_cs.addWidget(lbl_cs)
         self.combo_default_cs = QComboBox()
+        self.combo_default_cs.setFixedWidth(180)
         setup_solid_combobox(self.combo_default_cs)
         self.combo_default_cs.addItems(["sRGB", "Display P3", "Adobe RGB"])
-        r_cs.addWidget(self.combo_default_cs, 1)
+        r_cs.addWidget(self.combo_default_cs)
+        r_cs.addStretch(1)
         l_ren.addLayout(r_cs)
 
         l_ren.addStretch()
@@ -606,11 +564,13 @@ class PreferencesDialog(QDialog):
         lbl_theme.setFixedWidth(100)
         r_theme.addWidget(lbl_theme)
         self.combo_ui_theme = QComboBox()
+        self.combo_ui_theme.setFixedWidth(180)
         setup_solid_combobox(self.combo_ui_theme)
         self.combo_ui_theme.addItem("浅色", "light")
         self.combo_ui_theme.addItem("深色", "dark")
         self.combo_ui_theme.addItem("跟随系统", "system")
-        r_theme.addWidget(self.combo_ui_theme, 1)
+        r_theme.addWidget(self.combo_ui_theme)
+        r_theme.addStretch(1)
         l_dr.addLayout(r_theme)
 
         r_fmt = QHBoxLayout()
@@ -618,12 +578,14 @@ class PreferencesDialog(QDialog):
         lbl_fmt.setFixedWidth(100)
         r_fmt.addWidget(lbl_fmt)
         self.combo_default_fmt = QComboBox()
+        self.combo_default_fmt.setFixedWidth(180)
         setup_solid_combobox(self.combo_default_fmt)
         self.combo_default_fmt.addItem("35mm", 35.0)
         self.combo_default_fmt.addItem("16mm", 16.0)
         self.combo_default_fmt.addItem("120 (6x6)", 60.0)
         self.combo_default_fmt.addItem("4x5", 100.0)
-        r_fmt.addWidget(self.combo_default_fmt, 1)
+        r_fmt.addWidget(self.combo_default_fmt)
+        r_fmt.addStretch(1)
         l_dr.addLayout(r_fmt)
 
         self.chk_restore_last_files = QCheckBox("启动时打开上次工程")
@@ -666,6 +628,7 @@ class PreferencesDialog(QDialog):
         lbl_max_size.setFixedWidth(100)
         r_max_size.addWidget(lbl_max_size)
         self.combo_cache_max_size = QComboBox()
+        self.combo_cache_max_size.setFixedWidth(180)
         setup_solid_combobox(self.combo_cache_max_size)
         self.combo_cache_max_size.addItem("500 MB", 0.5)
         self.combo_cache_max_size.addItem("1 GB", 1.0)
@@ -673,7 +636,8 @@ class PreferencesDialog(QDialog):
         self.combo_cache_max_size.addItem("5 GB", 5.0)
         self.combo_cache_max_size.addItem("10 GB", 10.0)
         self.combo_cache_max_size.addItem("不限制", 0.0)
-        r_max_size.addWidget(self.combo_cache_max_size, 1)
+        r_max_size.addWidget(self.combo_cache_max_size)
+        r_max_size.addStretch(1)
         l_ca.addLayout(r_max_size)
 
         r_interval = QHBoxLayout()
@@ -681,13 +645,15 @@ class PreferencesDialog(QDialog):
         lbl_interval.setFixedWidth(100)
         r_interval.addWidget(lbl_interval)
         self.combo_clean_interval = QComboBox()
+        self.combo_clean_interval.setFixedWidth(180)
         setup_solid_combobox(self.combo_clean_interval)
         self.combo_clean_interval.addItem("7 天", 7)
         self.combo_clean_interval.addItem("10 天", 10)
         self.combo_clean_interval.addItem("15 天", 15)
         self.combo_clean_interval.addItem("30 天", 30)
         self.combo_clean_interval.addItem("从不", 0)
-        r_interval.addWidget(self.combo_clean_interval, 1)
+        r_interval.addWidget(self.combo_clean_interval)
+        r_interval.addStretch(1)
         l_ca.addLayout(r_interval)
 
         r_cache = QHBoxLayout()

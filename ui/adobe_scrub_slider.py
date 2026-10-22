@@ -1,9 +1,9 @@
 import re
 import os
-from PySide6.QtCore import Qt, Signal, QPoint, QSize
-from PySide6.QtGui import QCursor, QFont, QIcon
+from PySide6.QtCore import Qt, Signal, QPoint, QSize, QRect, QVariantAnimation, QEasingCurve
+from PySide6.QtGui import QCursor, QFont, QIcon, QGuiApplication, QPainter, QColor
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication, QListView
+    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication, QListView, QStyledItemDelegate, QAbstractItemView, QStyle
 )
 
 from core.path_utils import get_icon_path
@@ -351,8 +351,8 @@ class RoundScrubSlider(QSlider):
         painter.drawEllipse(QPointF(knob_cx, cy), r, r)
 
 
-class AdobeScrubSlider(QWidget):
-    """Complete Adobe Photoshop / Camera Raw slider module:
+class ParamScrubSlider(QWidget):
+    """Complete scrubbable parameter slider module:
     - Left: Scrubbable label (drag to adjust, double-click to reset, detailed tooltip)
     - Center: Custom sleek dark slider with round knob and double-click reset
     - Right: Numeric line edit + reset button with light reset icon
@@ -381,7 +381,7 @@ class AdobeScrubSlider(QWidget):
         self._init_ui(label_text)
 
     def _init_ui(self, label_text):
-        self.setStyleSheet("AdobeScrubSlider { background: transparent; border: none; }")
+        self.setStyleSheet("ParamScrubSlider, AdobeScrubSlider { background: transparent; border: none; }")
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 3, 0, 4)
         main_layout.setSpacing(2)
@@ -663,8 +663,286 @@ class AdobeScrubSlider(QWidget):
         event.ignore()
 
 
+# Backward compatibility alias
+AdobeScrubSlider = ParamScrubSlider
+
+
+class DarkroomComboItemDelegate(QStyledItemDelegate):
+    """Custom item delegate for DarkroomComboBox popup:
+    - Fixed 24px item height matching unexpanded combobox
+    - 8px left margin matching unexpanded combobox text padding
+    - Clear visual feedback on hover (#262936 dark / #f1f5f9 light)
+    - Selected row highlight: left 3px amber accent bar (#f59e0b) and amber bold text
+    """
+    def __init__(self, combo, parent=None):
+        super().__init__(parent)
+        self.combo = combo
+        self.hovered_row = -1
+
+    def sizeHint(self, option, index):
+        w = option.rect.width() if (option and hasattr(option, "rect")) else 100
+        return QSize(w, 24)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = option.rect
+        row = index.row()
+        is_selected = (row == self.combo.currentIndex())
+        is_hovered = (row == self.hovered_row)
+
+        is_dark = theme_manager.is_dark()
+        if is_selected and is_hovered:
+            bg = QColor("#2e2a22") if is_dark else QColor("#fef3c7")
+        elif is_selected:
+            bg = QColor("#24211a") if is_dark else QColor("#fffbeb")
+        elif is_hovered:
+            bg = QColor("#262936") if is_dark else QColor("#f1f5f9")
+        else:
+            bg = QColor("#181920") if is_dark else QColor("#ffffff")
+        painter.fillRect(r, bg)
+
+        # Left 3px amber accent bar for selected item
+        if is_selected:
+            bar_color = QColor("#f59e0b")
+            painter.fillRect(QRect(r.x(), r.y() + 2, 3, r.height() - 4), bar_color)
+
+        # Text: 8px left margin matching the unexpanded combobox padding
+        txt_rect = QRect(r.x() + 8, r.y(), r.width() - 16, r.height())
+        if is_selected:
+            painter.setPen(QColor("#f59e0b") if is_dark else QColor("#d97706"))
+            font = painter.font()
+            font.setBold(True)
+            painter.setFont(font)
+        elif is_hovered:
+            painter.setPen(QColor("#ffffff") if is_dark else QColor("#0f172a"))
+        else:
+            painter.setPen(QColor("#cbd5e1") if is_dark else QColor("#334155"))
+
+        raw_text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        elided = option.fontMetrics.elidedText(raw_text, Qt.TextElideMode.ElideRight, txt_rect.width())
+        painter.drawText(txt_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
+        painter.restore()
+
+
+# Backward compatibility alias
+AdobeComboItemDelegate = DarkroomComboItemDelegate
+
+
+class DarkroomComboListView(QListView):
+    """Custom popup listview with smooth inertial scrolling and row hover tracking."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._scroll_anim = QVariantAnimation(self)
+        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._scroll_anim.valueChanged.connect(self._on_scroll_anim_step)
+        self._target_scroll = 0
+        self.delegate = None
+
+    def _on_scroll_anim_step(self, val):
+        self.verticalScrollBar().setValue(int(val))
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if not delta:
+            return
+        sb = self.verticalScrollBar()
+        if sb.maximum() <= 0:
+            event.ignore()
+            return
+        step = -int((delta / 120.0) * 72)
+        if self._scroll_anim.state() == QVariantAnimation.State.Running:
+            base = self._target_scroll
+        else:
+            base = sb.value()
+        target = max(0, min(sb.maximum(), base + step))
+        self._target_scroll = target
+        curr = sb.value()
+        dist = abs(target - curr)
+        if dist > 0:
+            duration = min(320, max(160, int(dist * 2.2)))
+            self._scroll_anim.stop()
+            self._scroll_anim.setDuration(duration)
+            self._scroll_anim.setStartValue(curr)
+            self._scroll_anim.setEndValue(target)
+            self._scroll_anim.start()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self.delegate:
+            idx = self.indexAt(event.pos())
+            row = idx.row() if idx.isValid() else -1
+            if self.delegate.hovered_row != row:
+                self.delegate.hovered_row = row
+                self.viewport().update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self.delegate and self.delegate.hovered_row != -1:
+            self.delegate.hovered_row = -1
+            self.viewport().update()
+        super().leaveEvent(event)
+
+
+# Backward compatibility alias
+AdobeComboListView = DarkroomComboListView
+
+
+class DarkroomComboBox(QComboBox):
+    """Custom darkroom styled combobox featuring:
+    - Screen-edge awareness (smart upward/downward popup direction)
+    - Dynamic visible item count (scales from 6 up to 24 items depending on available screen height)
+    - Compact bounded popup list width matching unexpanded control with tooltip for overflow
+    - Smooth opening animation (OutCubic expansion and opacity fade)
+    - Smooth inertial mouse-wheel scrolling
+    - Full text tooltip on hover for collapsed box and popup list items
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.combo_view = DarkroomComboListView()
+        self.combo_delegate = DarkroomComboItemDelegate(self)
+        self.combo_view.delegate = self.combo_delegate
+        self.setView(self.combo_view)
+        self.setItemDelegate(self.combo_delegate)
+        self.combo_view.setAutoFillBackground(True)
+        if hasattr(self.combo_view, "window"):
+            self.combo_view.window().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+            self.combo_view.window().setAutoFillBackground(True)
+            self.combo_view.window().setWindowOpacity(0.0)
+        self.wheelEvent = lambda ev: ev.ignore()
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._popup_anim = None
+        self._orig_sb_policy = None
+        self.apply_theme()
+        theme_manager.themeChanged.connect(self.apply_theme)
+
+    def apply_theme(self, theme_name=None):
+        is_dark = theme_manager.is_dark()
+        tooltip_bg = "#ffffff" if not is_dark else "rgba(22, 24, 30, 0.95)"
+        tooltip_fg = "#1e293b" if not is_dark else "#f1f5f9"
+        tooltip_border = "#cbd5e1" if not is_dark else "#333644"
+        if hasattr(self, "combo_view") and self.combo_view:
+            self.combo_view.setStyleSheet(f"""
+                QToolTip {{
+                    background-color: {tooltip_bg};
+                    color: {tooltip_fg};
+                    border: 1px solid {tooltip_border};
+                    border-radius: 6px;
+                    padding: 6px 10px;
+                    font-size: 11px;
+                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+                }}
+            """)
+
+    def showPopup(self):
+        if self.count() == 0:
+            super().showPopup()
+            return
+
+        # 1. Adapt popup width to content text length (8px left + 8px right + 20px scrollbar/border = 36px)
+        fm = self.fontMetrics()
+        max_text_w = 0
+        for i in range(self.count()):
+            w = fm.horizontalAdvance(self.itemText(i))
+            if w > max_text_w:
+                max_text_w = w
+        target_width = max(self.width(), max_text_w + 36)
+
+        # 2. Measure screen available geometry
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        p_global = self.mapToGlobal(QPoint(0, 0))
+
+        # Clamp width to maximum screen width
+        max_allowed_w = max(self.width(), avail.width() - 24)
+        target_width = min(target_width, max_allowed_w)
+
+        # Adaptive horizontal positioning: if expanding rightwards overflows screen edge, expand to the left!
+        target_x = p_global.x()
+        if target_x + target_width + 12 > avail.right():
+            right_edge = min(avail.right() - 8, p_global.x() + self.width())
+            target_x = max(avail.left() + 8, right_edge - target_width)
+
+        self.combo_view.setMinimumWidth(target_width)
+        self.combo_view.setMaximumWidth(target_width)
+
+        # 3. Dynamic visible items and direction detection
+        space_below = avail.bottom() - (p_global.y() + self.height())
+        space_above = p_global.y() - avail.top()
+
+        item_h = 24
+        max_space = max(space_below, space_above)
+        fit_items = max(6, min(24, int((max_space - 20) / item_h)))
+        self.setMaxVisibleItems(min(self.count(), fit_items))
+
+        # 4. Zero opacity before super().showPopup() to completely eliminate initial-frame flash
+        container = self.combo_view.window()
+        if container:
+            container.setWindowOpacity(0.0)
+
+        self._orig_sb_policy = self.combo_view.verticalScrollBarPolicy()
+        self.combo_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        super().showPopup()
+
+        # 5. Opening animation (smooth expansion from height 1 + opacity fade)
+        if container:
+            orig_geo = container.geometry()
+            is_upward = orig_geo.y() < p_global.y()
+            if hasattr(self, '_popup_anim') and self._popup_anim:
+                self._popup_anim.stop()
+
+            # Ensure final dest_geo uses adaptive target_x and target_width!
+            dest_geo = QRect(target_x, orig_geo.y(), target_width, orig_geo.height())
+
+            if is_upward:
+                start_geo = QRect(target_x, dest_geo.bottom(), target_width, 1)
+            else:
+                start_geo = QRect(target_x, dest_geo.y(), target_width, 1)
+            container.setGeometry(start_geo)
+
+            self._popup_anim = QVariantAnimation(self)
+            self._popup_anim.setDuration(120)
+            self._popup_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._popup_anim.setStartValue(start_geo)
+            self._popup_anim.setEndValue(dest_geo)
+
+            def _on_step(r):
+                container.setGeometry(r)
+                prog = self._popup_anim.currentTime() / max(1, self._popup_anim.duration())
+                container.setWindowOpacity(min(1.0, 0.1 + 0.9 * prog))
+
+            def _on_finished():
+                container.setGeometry(dest_geo)
+                container.setWindowOpacity(1.0)
+                if hasattr(self, '_orig_sb_policy') and self._orig_sb_policy is not None:
+                    self.combo_view.setVerticalScrollBarPolicy(self._orig_sb_policy)
+
+            self._popup_anim.valueChanged.connect(_on_step)
+            self._popup_anim.finished.connect(_on_finished)
+            self._popup_anim.start()
+
+    def hidePopup(self):
+        if hasattr(self, '_popup_anim') and self._popup_anim:
+            self._popup_anim.stop()
+        if hasattr(self, '_orig_sb_policy') and self._orig_sb_policy is not None:
+            self.combo_view.setVerticalScrollBarPolicy(self._orig_sb_policy)
+        container = self.combo_view.window() if hasattr(self, 'combo_view') else None
+        if container:
+            container.setWindowOpacity(0.0)
+        super().hidePopup()
+
+
+# Backward compatibility alias
+AdobeComboBox = DarkroomComboBox
+
+
 class ComboBoxRow(QWidget):
-    """Adobe-styled horizontal parameter row with label and drop-down selection."""
+    """Modern horizontal parameter row with label and drop-down selection."""
     valueChanged = Signal(object)
 
     def __init__(self, label_text, items, default_val=None, tooltip="", parent=None):
@@ -673,31 +951,30 @@ class ComboBoxRow(QWidget):
         self.default_tooltip = tooltip.strip() if tooltip else ""
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 3, 0, 3)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
 
         self.label = QLabel(label_text)
+        self.label.setFixedWidth(74)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         if self.default_tooltip:
             self.setToolTip(self.default_tooltip)
             self.label.setToolTip(self.default_tooltip)
         layout.addWidget(self.label)
-        layout.addStretch()
 
-        self.combo = QComboBox()
-        self.combo_view = QListView()
-        self.combo.setView(self.combo_view)
-        self.combo_view.setAutoFillBackground(True)
-        if hasattr(self.combo_view, "window"):
-            self.combo_view.window().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-            self.combo_view.window().setAutoFillBackground(True)
+        self.combo = DarkroomComboBox()
+        self.combo.setFixedHeight(24)
+        self.combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.combo.setMinimumWidth(100)
         if self.default_tooltip:
             self.combo.setToolTip(self.default_tooltip)
-        self.combo.wheelEvent = lambda ev: ev.ignore()
-        self.combo.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        for text, val in items:
+        for idx, (text, val) in enumerate(items):
             self.combo.addItem(text, val)
+            self.combo.setItemData(idx, text, Qt.ItemDataRole.ToolTipRole)
         if default_val is not None:
             self.set_value(default_val)
+        elif self.combo.currentIndex() >= 0:
+            self.combo.setToolTip(self.combo.currentText())
         self.combo.currentIndexChanged.connect(self._on_index_changed)
         layout.addWidget(self.combo)
 
@@ -715,6 +992,7 @@ class ComboBoxRow(QWidget):
                 color: {label_fg};
                 font-size: 11.5px;
                 font-weight: 500;
+                padding: 1px 0px;
                 font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
             }}
             QLabel:disabled {{
@@ -739,6 +1017,10 @@ class ComboBoxRow(QWidget):
         popup_border = "#333644" if is_dark else "#cbd5e1"
         sel_fg = "#111111" if is_dark else "#ffffff"
 
+        tooltip_bg = "#ffffff" if not is_dark else "rgba(22, 24, 30, 0.95)"
+        tooltip_fg = "#1e293b" if not is_dark else "#f1f5f9"
+        tooltip_border = "#cbd5e1" if not is_dark else "#333644"
+
         self.combo.setStyleSheet(f"""
             QComboBox {{
                 background: {combo_bg};
@@ -746,11 +1028,13 @@ class ComboBoxRow(QWidget):
                 border: 1px solid {combo_border};
                 border-radius: 4px;
                 padding: 3px 22px 3px 8px;
-                font-size: 10.5px;
-                min-width: 115px;
-                max-width: 180px;
+                font-size: 11.5px;
+                min-width: 100px;
             }}
             QComboBox:hover {{
+                border-color: #f59e0b;
+            }}
+            QComboBox:focus {{
                 border-color: #f59e0b;
             }}
             QComboBox:disabled {{
@@ -783,23 +1067,33 @@ class ComboBoxRow(QWidget):
                 background-color: {popup_bg};
                 background: {popup_bg};
                 color: {popup_fg};
-                selection-background-color: #f59e0b;
-                selection-color: {sel_fg};
                 border: 1px solid {popup_border};
                 border-radius: 4px;
-                padding: 3px;
+                padding: 2px 0px;
                 outline: 0px;
             }}
-            QComboBox QAbstractItemView::item {{
-                min-height: 22px;
-                padding: 2px 6px;
-                border-radius: 3px;
-            }}
-            QComboBox QAbstractItemView::item:selected {{
-                background-color: #f59e0b;
-                color: {sel_fg};
+            QToolTip {{
+                background-color: {tooltip_bg};
+                color: {tooltip_fg};
+                border: 1px solid {tooltip_border};
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 11px;
+                font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
             }}
         """)
+        if hasattr(self.combo, "view") and self.combo.view():
+            self.combo.view().setStyleSheet(f"""
+                QToolTip {{
+                    background-color: {tooltip_bg};
+                    color: {tooltip_fg};
+                    border: 1px solid {tooltip_border};
+                    border-radius: 6px;
+                    padding: 6px 10px;
+                    font-size: 11px;
+                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+                }}
+            """)
 
     def setToolTip(self, text):
         super().setToolTip(text)
@@ -816,6 +1110,9 @@ class ComboBoxRow(QWidget):
             self.combo.setEnabled(enabled)
 
     def _on_index_changed(self, idx):
+        if idx >= 0:
+            txt = self.combo.currentText()
+            self.combo.setToolTip(txt if txt else self.default_tooltip)
         self.valueChanged.emit(self.combo.currentData())
 
     def current_value(self):
@@ -826,9 +1123,30 @@ class ComboBoxRow(QWidget):
         if idx >= 0:
             self.combo.blockSignals(True)
             self.combo.setCurrentIndex(idx)
+            txt = self.combo.currentText()
+            self.combo.setToolTip(txt if txt else self.default_tooltip)
             self.combo.blockSignals(False)
 
     def reset_default(self):
         if self.default_val is not None:
             self.set_value(self.default_val)
+
+    def set_items(self, items, default_val=None):
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        for idx, (text, val) in enumerate(items):
+            self.combo.addItem(text, val)
+            self.combo.setItemData(idx, text, Qt.ItemDataRole.ToolTipRole)
+        if default_val is not None:
+            idx = self.combo.findData(default_val)
+            if idx >= 0:
+                self.combo.setCurrentIndex(idx)
+            elif self.combo.count() > 0:
+                self.combo.setCurrentIndex(0)
+        elif self.combo.count() > 0:
+            self.combo.setCurrentIndex(0)
+        if self.combo.currentIndex() >= 0:
+            txt = self.combo.currentText()
+            self.combo.setToolTip(txt if txt else self.default_tooltip)
+        self.combo.blockSignals(False)
 

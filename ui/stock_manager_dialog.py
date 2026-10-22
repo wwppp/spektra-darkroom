@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.path_utils import get_icon_path, get_resource_dir
-from ui.window_utils import apply_dark_titlebar, get_icon
+from ui.window_utils import apply_dark_titlebar, get_icon, get_standard_checkbox_style
 from ui.theme_manager import theme_manager
 
 
@@ -147,31 +147,7 @@ class StockManagerDialog(QDialog):
                     color: #ef4444;
                     border-color: #ef4444;
                 }}
-                QCheckBox {{
-                    spacing: 6px;
-                    color: #cbd5e1;
-                    font-size: 12px;
-                    outline: none;
-                }}
-                QCheckBox:focus {{
-                    outline: none;
-                }}
-                QCheckBox::indicator {{
-                    width: 12px;
-                    height: 12px;
-                    border: 1px solid #8b92a5;
-                    border-radius: 2px;
-                    background: transparent;
-                    outline: none;
-                }}
-                QCheckBox::indicator:hover {{
-                    border-color: #f59e0b;
-                }}
-                QCheckBox::indicator:checked {{
-                    border: 1px solid #f59e0b;
-                    background: #14151a;
-                    image: url("{chk_amber}");
-                }}
+{get_standard_checkbox_style(is_dark=True)}
                 QScrollBar:vertical {{
                     background: rgba(18, 19, 24, 0.75);
                     width: 6px;
@@ -324,31 +300,7 @@ class StockManagerDialog(QDialog):
                     color: #991b1b;
                     border-color: #dc2626;
                 }}
-                QCheckBox {{
-                    spacing: 6px;
-                    color: #334155;
-                    font-size: 12px;
-                    outline: none;
-                }}
-                QCheckBox:focus {{
-                    outline: none;
-                }}
-                QCheckBox::indicator {{
-                    width: 12px;
-                    height: 12px;
-                    border: 1px solid #94a3b8;
-                    border-radius: 2px;
-                    background: #ffffff;
-                    outline: none;
-                }}
-                QCheckBox::indicator:hover {{
-                    border-color: #f59e0b;
-                }}
-                QCheckBox::indicator:checked {{
-                    border: 1px solid #f59e0b;
-                    background: #ffffff;
-                    image: url("{chk_amber}");
-                }}
+{get_standard_checkbox_style(is_dark=False)}
                 QScrollBar:vertical {{
                     background: transparent;
                     width: 6px;
