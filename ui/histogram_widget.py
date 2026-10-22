@@ -11,12 +11,11 @@ from ui.theme_manager import theme_manager
 
 
 class ElidedLabel(QLabel):
-    """QLabel that automatically truncates overflowing text with ellipsis ('...')
-    and maintains tooltip with the full string for hover inspection."""
+    """QLabel that displays right-aligned text and automatically elides with '...'
+    only when overflowing its allocated layout width, maintaining tooltip for full inspection."""
     def __init__(self, text="", parent=None):
-        super().__init__(text, parent)
+        super().__init__(parent)
         self._full_text = text or ""
-        self.setMinimumWidth(10)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.setText(self._full_text)
@@ -24,36 +23,43 @@ class ElidedLabel(QLabel):
     def setText(self, text):
         self._full_text = str(text or "")
         self.setToolTip(self._full_text if self._full_text else "")
-        self._update_text()
+        self.update()
 
     def full_text(self):
         return self._full_text
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_text()
-
-    def _update_text(self):
+    def sizeHint(self):
+        from PySide6.QtCore import QSize
         if not self._full_text:
-            if super().text() != "":
-                super().setText("")
+            return QSize(0, self.fontMetrics().height())
+        return self.fontMetrics().size(0, self._full_text)
+
+    def minimumSizeHint(self):
+        from PySide6.QtCore import QSize
+        return QSize(16, self.fontMetrics().height())
+
+    def paintEvent(self, event):
+        if not self._full_text:
             return
+        painter = QPainter(self)
+        painter.setFont(self.font())
+        color = self.palette().color(self.foregroundRole())
+        painter.setPen(color)
         fm = self.fontMetrics()
-        avail_w = max(10, self.width())
-        elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideRight, avail_w)
-        if elided != super().text():
-            super().setText(elided)
+        elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideRight, self.width())
+        painter.drawText(self.rect(), int(self.alignment()), elided)
 
 
 class HistogramExifBar(QWidget):
     """Compact EXIF summary bar placed between the histogram card and parameter cards:
-    - Left-aligned: 快门 (Shutter speed), ISO, 光圈 (Aperture)
+    - Left-aligned with the parameter card title (8px padding from card border)
+    - Exposure parameters: 快门 (Shutter speed), ISO, 光圈 (Aperture) with clear spacing (14px)
     - Right-aligned: 镜头型号 (Lens model) with ellipsis truncation and full model tooltip
     - Vertically centered and horizontally flush with the cards
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(20)
+        self.setFixedHeight(22)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._init_ui()
         self.apply_theme()
@@ -61,24 +67,45 @@ class HistogramExifBar(QWidget):
 
     def _init_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        # 8px left margin precisely aligns with the '场景曝光' parameter card title below
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(12)
 
-        self.lbl_exposure = QLabel("--   ISO --   ƒ/--")
-        self.lbl_exposure.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.lbl_exposure.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(self.lbl_exposure, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # Exposure Triangle Container with generous spacing between elements
+        self.exp_container = QWidget(self)
+        self.exp_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        exp_layout = QHBoxLayout(self.exp_container)
+        exp_layout.setContentsMargins(0, 0, 0, 0)
+        exp_layout.setSpacing(14)
 
+        self.lbl_shutter = QLabel("--")
+        self.lbl_shutter.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.lbl_shutter.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        exp_layout.addWidget(self.lbl_shutter)
+
+        self.lbl_iso = QLabel("ISO --")
+        self.lbl_iso.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.lbl_iso.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        exp_layout.addWidget(self.lbl_iso)
+
+        self.lbl_aperture = QLabel("ƒ/--")
+        self.lbl_aperture.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.lbl_aperture.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        exp_layout.addWidget(self.lbl_aperture)
+
+        layout.addWidget(self.exp_container, 0)
+
+        # Right-aligned lens model (stretch 1 without alignment flag, expands to all available width)
         self.lbl_lens = ElidedLabel("")
         self.lbl_lens.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        layout.addWidget(self.lbl_lens, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.lbl_lens, 1)
 
     def apply_theme(self):
         is_dark = theme_manager.is_dark()
-        fg_exp = "#cbd5e1" if is_dark else "#334155"
+        fg_exp = "#cbd5e1" if is_dark else "#1e293b"
         fg_lens = "#94a3b8" if is_dark else "#64748b"
 
-        self.lbl_exposure.setStyleSheet(f"""
+        exp_style = f"""
             QLabel {{
                 color: {fg_exp};
                 font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -87,7 +114,11 @@ class HistogramExifBar(QWidget):
                 background: transparent;
                 border: none;
             }}
-        """)
+        """
+        self.lbl_shutter.setStyleSheet(exp_style)
+        self.lbl_iso.setStyleSheet(exp_style)
+        self.lbl_aperture.setStyleSheet(exp_style)
+
         self.lbl_lens.setStyleSheet(f"""
             QLabel {{
                 color: {fg_lens};
@@ -101,8 +132,12 @@ class HistogramExifBar(QWidget):
 
     def set_exif_data(self, data: dict):
         if not data:
-            self.lbl_exposure.setText("--   ISO --   ƒ/--")
-            self.lbl_exposure.setToolTip("")
+            self.lbl_shutter.setText("--")
+            self.lbl_shutter.setToolTip("快门速度: 未知")
+            self.lbl_iso.setText("ISO --")
+            self.lbl_iso.setToolTip("感光度: 未知")
+            self.lbl_aperture.setText("ƒ/--")
+            self.lbl_aperture.setToolTip("光圈: 未知")
             self.lbl_lens.setText("")
             return
 
@@ -132,8 +167,14 @@ class HistogramExifBar(QWidget):
             cleaned_ap = raw_ap.replace("f/", "").replace("F", "").replace("ƒ/", "").strip()
             ap = f"ƒ/{cleaned_ap}" if cleaned_ap else "ƒ/--"
 
-        self.lbl_exposure.setText(f"{shutter}   {iso}   {ap}")
-        self.lbl_exposure.setToolTip(f"快门: {shutter} | 感光度: {iso} | 光圈: {ap}")
+        self.lbl_shutter.setText(shutter)
+        self.lbl_shutter.setToolTip(f"快门速度: {shutter}")
+
+        self.lbl_iso.setText(iso)
+        self.lbl_iso.setToolTip(f"感光度: {iso}")
+
+        self.lbl_aperture.setText(ap)
+        self.lbl_aperture.setToolTip(f"光圈: {ap}")
 
         # 4. Lens Model (镜头型号)
         raw_lens = str(data.get("lens_model") or "").strip()
