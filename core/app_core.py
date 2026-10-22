@@ -776,6 +776,18 @@ def save_encoded_image(rendered_data, output_path, params_dict):
                     return
                 except Exception:
                     continue
+            if comp_val == "lzw" and data.dtype in (np.uint8, np.uint16):
+                try:
+                    bgr_data = cv2.cvtColor(data, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(path, bgr_data, [
+                        cv2.IMWRITE_TIFF_COMPRESSION, cv2.IMWRITE_TIFF_COMPRESSION_LZW,
+                        cv2.IMWRITE_TIFF_RESUNIT, cv2.IMWRITE_TIFF_RESOLUTION_UNIT_INCH,
+                        cv2.IMWRITE_TIFF_XDPI, int(dpi_val),
+                        cv2.IMWRITE_TIFF_YDPI, int(dpi_val)
+                    ])
+                    return
+                except Exception:
+                    pass
             try:
                 tifffile.imwrite(path, data, resolution=(dpi_val, dpi_val, 'INCH'), photometric='rgb', extratags=extratags if extratags else None)
             except Exception:
@@ -813,6 +825,10 @@ def save_encoded_image(rendered_data, output_path, params_dict):
                         ihdr_len = struct.unpack('>I', pdata[idx:idx+4])[0]
                         insert_pos = idx + 8 + ihdr_len + 4
                         injected_chunks = []
+                        if dpi_val > 0:
+                            ppu = int(round(dpi_val / 0.0254))
+                            cdata = struct.pack('>IIB', ppu, ppu, 1)  # 1 = meter
+                            injected_chunks.append(struct.pack('>I', len(cdata)) + b'pHYs' + cdata + struct.pack('>I', zlib.crc32(b'pHYs' + cdata) & 0xffffffff))
                         if icc_bytes:
                             comp_icc = zlib.compress(icc_bytes)
                             cdata = b'ICC Profile\x00\x00' + comp_icc

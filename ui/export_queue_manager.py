@@ -452,7 +452,9 @@ class ExportQueueManager(QObject):
                 self.task_progress.emit(task.task_id, 65)
 
                 # Step 3: Save to disk in background worker
-                save_worker = _SaveImageWorker(rendered_arr, task.output_path, task.params)
+                save_params = dict(task.params)
+                save_params["scale_pct"] = 100  # rendered_arr is already scaled to tgt_w x tgt_h by offscreen canvas
+                save_worker = _SaveImageWorker(rendered_arr, task.output_path, save_params)
                 self._current_worker = save_worker
 
                 def _on_save_done(succ, err):

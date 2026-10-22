@@ -11,3 +11,4 @@ imageio>=2.31.0
 numba>=0.59.0
 opt_einsum>=3.3.0
 scikit-image>=0.22.0
+imagecodecs>=2023.7.0
