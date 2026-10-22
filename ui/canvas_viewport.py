@@ -324,7 +324,7 @@ void main() {
             }
             if (u_crop_flip.y > 0.5) {
                 raw_uv.y = 1.0 - raw_uv.y;
-                d_sample_dx.y = -d_sample_dy.y;
+                d_sample_dx.y = -d_sample_dx.y;
                 d_sample_dy.y = -d_sample_dy.y;
             }
 
@@ -376,7 +376,7 @@ void main() {
             }
             if (u_crop_flip.y > 0.5) {
                 unrotated_p.y = 1.0 - unrotated_p.y;
-                d_sample_dx.y = -d_sample_dy.y;
+                d_sample_dx.y = -d_sample_dx.y;
                 d_sample_dy.y = -d_sample_dy.y;
             }
 
@@ -1926,6 +1926,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         menu.exec(event.globalPos())
 
+    def _clamp_pan(self):
+        """Clamp pan_x and pan_y to prevent the image from being thrown out of the viewport."""
+        limit = max(1.5, self.zoom * 2.0)
+        self.pan_x = max(-limit, min(limit, self.pan_x))
+        self.pan_y = max(-limit, min(limit, self.pan_y))
+
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
         if delta == 0:
@@ -1950,6 +1956,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         self.pan_x = mouse_norm_x - (mouse_norm_x - self.pan_x) * (new_zoom / old_zoom)
         self.pan_y = mouse_norm_y - (mouse_norm_y - self.pan_y) * (new_zoom / old_zoom)
+        self._clamp_pan()
 
         if self.params.get("view_mode") == 1:
             self._clamp_split_to_image()
@@ -1960,7 +1967,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         event.accept()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        btn = event.button()
+        if btn == Qt.MouseButton.LeftButton:
             # Check if clicking on split divider within visible image bounds
             if self._is_hovering_split_line(event.position()):
                 self._is_split_dragging = True
@@ -1968,6 +1976,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
             else:
                 self._is_panning = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._last_mouse_pos = event.position()
+            event.accept()
+        elif btn == Qt.MouseButton.MiddleButton:
+            self._is_panning = True
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
             self._last_mouse_pos = event.position()
             event.accept()
         else:
@@ -1998,6 +2011,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
             self.pan_x += dx
             self.pan_y += dy
+            self._clamp_pan()
             if self.params.get("view_mode") == 1:
                 self._clamp_split_to_image()
                 self._update_badges()
@@ -2012,7 +2026,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        btn = event.button()
+        if btn in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             self._is_panning = False
             self._is_split_dragging = False
             if self._is_hovering_split_line(event.position()):

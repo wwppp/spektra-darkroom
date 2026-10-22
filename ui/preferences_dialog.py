@@ -116,7 +116,7 @@ class PreferencesDialog(QDialog):
                     border: 1px solid #323542;
                     border-radius: 4px;
                     padding: 4px 26px 4px 8px;
-                    font-size: 11.5px;
+                    font-size: 11px;
                 }}
                 QComboBox:hover {{
                     border-color: #f59e0b;
@@ -326,7 +326,7 @@ class PreferencesDialog(QDialog):
                     border: 1px solid #cbd5e1;
                     border-radius: 4px;
                     padding: 4px 26px 4px 8px;
-                    font-size: 11.5px;
+                    font-size: 11px;
                 }}
                 QComboBox:hover {{
                     border-color: #f59e0b;

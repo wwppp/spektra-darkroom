@@ -55,7 +55,8 @@ class HistogramWidget(QWidget):
     def mousePressEvent(self, event):
         """Click on the histogram to toggle between Log and Linear views."""
         super().mousePressEvent(event)
-        self.toggle_scale_mode()
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggle_scale_mode()
 
     def clear(self):
         self._r_hist.fill(0)

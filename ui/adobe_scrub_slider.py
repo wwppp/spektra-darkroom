@@ -41,7 +41,7 @@ class ScrubLabel(QLabel):
                 background: transparent;
                 border: none;
                 color: {text_color};
-                font-size: 11.5px;
+                font-size: 11px;
                 font-weight: 500;
                 padding: 1px 0px;
                 font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
@@ -630,8 +630,8 @@ class ParamScrubSlider(QWidget):
     set_value = setValue
 
     def reset(self):
+        # setValue() already formats display and emits valueChanged once
         self.setValue(self.default_val)
-        self.valueChanged.emit(self.default_val)
         self.sliderReleased.emit()
 
     def set_default_value(self, val):
@@ -990,7 +990,7 @@ class ComboBoxRow(QWidget):
                 background: transparent;
                 border: none;
                 color: {label_fg};
-                font-size: 11.5px;
+                font-size: 11px;
                 font-weight: 500;
                 padding: 1px 0px;
                 font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
@@ -1028,7 +1028,7 @@ class ComboBoxRow(QWidget):
                 border: 1px solid {combo_border};
                 border-radius: 4px;
                 padding: 3px 22px 3px 8px;
-                font-size: 11.5px;
+                font-size: 11px;
                 min-width: 100px;
             }}
             QComboBox:hover {{

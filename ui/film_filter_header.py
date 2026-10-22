@@ -139,7 +139,7 @@ class FilmFilterHeader(QWidget):
 
         # Title Label
         self.lbl_title = QLabel("胶卷型号")
-        self.lbl_title.setStyleSheet("color: #f59e0b; font-size: 11.5px; font-weight: bold;")
+        self.lbl_title.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold;")
 
         # Capsule Search Box
         self.search_box = QLineEdit()
@@ -247,7 +247,7 @@ class FilmFilterHeader(QWidget):
         if hasattr(self, "search_action"):
             self.search_action.setIcon(get_icon("search.png", target_size=(13, 13), is_dark=is_dark))
         if is_dark:
-            self.lbl_title.setStyleSheet("color: #f59e0b; font-size: 11.5px; font-weight: bold;")
+            self.lbl_title.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold;")
             self.search_box.setStyleSheet("""
                 QLineEdit {
                     background: #171821;
@@ -288,7 +288,7 @@ class FilmFilterHeader(QWidget):
                 }
             """
         else:
-            self.lbl_title.setStyleSheet("color: #d97706; font-size: 11.5px; font-weight: bold;")
+            self.lbl_title.setStyleSheet("color: #d97706; font-size: 11px; font-weight: bold;")
             self.search_box.setStyleSheet("""
                 QLineEdit {
                     background: #ffffff;

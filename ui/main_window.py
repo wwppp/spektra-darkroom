@@ -2418,7 +2418,7 @@ class DarkroomMainWindow(QMainWindow):
             self.lbl_brand.setStyleSheet(f"color: {brand_col}; font-size: 13px; font-weight: bold; letter-spacing: 0.5px; border: none;")
         if hasattr(self, 'lbl_paper_title'):
             paper_col = "#f59e0b" if is_dark else "#d97706"
-            self.lbl_paper_title.setStyleSheet(f"color: {paper_col}; font-size: 11.5px; font-weight: bold;")
+            self.lbl_paper_title.setStyleSheet(f"color: {paper_col}; font-size: 11px; font-weight: bold;")
 
         # 5. Right Sidebar Container
         if hasattr(self, 'sidebar_container'):
@@ -2551,7 +2551,7 @@ class DarkroomMainWindow(QMainWindow):
                 border-bottom-left-radius: 0px;
                 border-bottom-right-radius: 0px;
                 color: {tab_normal};
-                font-size: 11.5px;
+                font-size: 11px;
                 font-weight: 500;
                 padding: 4px 12px;
             }}
@@ -2769,7 +2769,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.lbl_title_export_text = QLabel("扫描")
         self.lbl_title_export_text.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.lbl_title_export_text.setStyleSheet("background: transparent; border: none; color: #111113; font-weight: bold; font-size: 11.5px;")
+        self.lbl_title_export_text.setStyleSheet("background: transparent; border: none; color: #111113; font-weight: bold; font-size: 11px;")
         self.lbl_title_export_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         btn_export_layout.addStretch(1)
@@ -2982,7 +2982,7 @@ class DarkroomMainWindow(QMainWindow):
         p_header = QHBoxLayout()
         p_header.setContentsMargins(4, 2, 4, 0)
         self.lbl_paper_title = QLabel("放大相纸 (Papers)")
-        self.lbl_paper_title.setStyleSheet("color: #f59e0b; font-size: 11.5px; font-weight: bold;")
+        self.lbl_paper_title.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold;")
         p_header.addWidget(self.lbl_paper_title)
         p_header.addStretch()
         paper_layout.addLayout(p_header)
@@ -5518,20 +5518,20 @@ class DarkroomMainWindow(QMainWindow):
             film = self.current_film_stock
             paper = self.current_paper_stock
             pmode = getattr(self, "current_print_mode", "optical")
-            params = dict(self.current_params)
+            params = copy.deepcopy(self.current_params)
         else:
             film = target_p.get("film_profile", "none")
             paper = target_p.get("paper_profile", "none")
             pmode = target_p.get("print_mode", "optical")
             if target_p.get("params"):
-                params = dict(target_p["params"])
+                params = copy.deepcopy(target_p["params"])
             elif target_p.get("path"):
                 sdc = sdc_manager.load_sdc(target_p["path"])
                 if sdc:
                     film = sdc.get("film_profile", film)
                     paper = sdc.get("paper_profile", paper)
                     pmode = sdc.get("print_mode", pmode)
-                    params = dict(sdc.get("params", {}))
+                    params = copy.deepcopy(sdc.get("params", {}))
                 else:
                     params = {}
             else:
@@ -5559,7 +5559,7 @@ class DarkroomMainWindow(QMainWindow):
         copied_film = copied["film"]
         copied_paper = copied["paper"]
         copied_print_mode = copied.get("print_mode", "optical")
-        copied_params = dict(copied["params"])
+        copied_params = copy.deepcopy(copied["params"])
 
         selected_ids = self.filmstrip.get_selected_photo_ids() if hasattr(self, 'filmstrip') else []
         if not selected_ids and self.active_photo_id:
@@ -5578,14 +5578,14 @@ class DarkroomMainWindow(QMainWindow):
                 p_film = getattr(self, "current_film_stock", "none")
                 p_paper = getattr(self, "current_paper_stock", "none")
                 p_pmode = getattr(self, "current_print_mode", "optical")
-                p_params = dict(self.current_params)
+                p_params = copy.deepcopy(self.current_params)
                 p_dirty = bool(getattr(self, "_photo_is_dirty", False) or p.get("is_dirty", False))
                 p_edited = bool(self._is_photo_edited(p))
             else:
                 p_film = p.get("film_profile", "none")
                 p_paper = p.get("paper_profile", "none")
                 p_pmode = p.get("print_mode", "optical")
-                p_params = dict(p.get("params") or {})
+                p_params = copy.deepcopy(p.get("params") or {})
                 p_dirty = bool(p.get("is_dirty", False))
                 p_edited = bool(self._is_photo_edited(p))
 
@@ -5613,7 +5613,7 @@ class DarkroomMainWindow(QMainWindow):
             if not photo:
                 continue
 
-            target_params = dict(copied_params)
+            target_params = copy.deepcopy(copied_params)
             # Adapt white balance relative to target photo baseline EXIF if not custom
             if not target_params.get("custom_wb", False):
                 exif = photo.get("meta") or photo.get("exif") or {}
@@ -5659,7 +5659,7 @@ class DarkroomMainWindow(QMainWindow):
             self.current_film_stock = copied_film
             self.current_paper_stock = copied_paper
             self.current_print_mode = copied_print_mode
-            self.current_params = dict(copied_params)
+            self.current_params = copy.deepcopy(copied_params)
             self.current_params["print_mode"] = copied_print_mode
 
             self._update_all_sliders_from_params()
@@ -7184,6 +7184,24 @@ class DarkroomMainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _safely_terminate_worker(self, worker, wait_ms=1000):
+        if not worker:
+            return None
+        try:
+            if hasattr(worker, "stop"):
+                worker.stop()
+            elif hasattr(worker, "cancel"):
+                worker.cancel()
+            if hasattr(worker, "isRunning") and worker.isRunning():
+                worker.wait(wait_ms)
+            if hasattr(worker, "isRunning") and worker.isRunning():
+                if not hasattr(self, "_retained_zombie_workers"):
+                    self._retained_zombie_workers = []
+                self._retained_zombie_workers.append(worker)
+        except Exception:
+            pass
+        return None
+
     def _cancel_active_import(self, notify_user=True):
         """Forcefully cancels active batch import worker or slot decode worker, freeing CPU and memory."""
         was_importing = getattr(self, "_is_importing", False) or bool(getattr(self, "_pending_import_queue", None))
@@ -7203,11 +7221,7 @@ class DarkroomMainWindow(QMainWindow):
                 self._import_worker.importFinished.disconnect()
             except Exception:
                 pass
-            if hasattr(self._import_worker, "isRunning") and self._import_worker.isRunning():
-                if hasattr(self._import_worker, "stop"):
-                    self._import_worker.stop()
-                if hasattr(self._import_worker, "wait"):
-                    self._import_worker.wait(150)
+            self._safely_terminate_worker(self._import_worker, wait_ms=1000)
             self._import_worker = None
 
         # 3. Terminate slot decode worker
@@ -7218,11 +7232,7 @@ class DarkroomMainWindow(QMainWindow):
                 self._slot_decode_worker.finished.disconnect()
             except Exception:
                 pass
-            if hasattr(self._slot_decode_worker, "isRunning") and self._slot_decode_worker.isRunning():
-                if hasattr(self._slot_decode_worker, "stop"):
-                    self._slot_decode_worker.stop()
-                if hasattr(self._slot_decode_worker, "wait"):
-                    self._slot_decode_worker.wait(150)
+            self._safely_terminate_worker(self._slot_decode_worker, wait_ms=1000)
             self._slot_decode_worker = None
 
         # 4. Terminate session restore worker
@@ -7234,11 +7244,7 @@ class DarkroomMainWindow(QMainWindow):
                 self._session_restore_worker.failed.disconnect()
             except Exception:
                 pass
-            if hasattr(self._session_restore_worker, "isRunning") and self._session_restore_worker.isRunning():
-                if hasattr(self._session_restore_worker, "stop"):
-                    self._session_restore_worker.stop()
-                if hasattr(self._session_restore_worker, "wait"):
-                    self._session_restore_worker.wait(150)
+            self._safely_terminate_worker(self._session_restore_worker, wait_ms=1000)
             self._session_restore_worker = None
 
         self._is_importing = False
@@ -8703,14 +8709,14 @@ class DarkroomMainWindow(QMainWindow):
                 p_film = getattr(self, "current_film_stock", "none")
                 p_paper = getattr(self, "current_paper_stock", "none")
                 p_pmode = getattr(self, "current_print_mode", "optical")
-                p_params = dict(self.current_params)
+                p_params = copy.deepcopy(self.current_params)
                 p_dirty = bool(getattr(self, "_photo_is_dirty", False) or p.get("is_dirty", False))
                 p_edited = bool(self._is_photo_edited(p))
             else:
                 p_film = p.get("film_profile", "none")
                 p_paper = p.get("paper_profile", "none")
                 p_pmode = p.get("print_mode", "optical")
-                p_params = dict(p.get("params") or {})
+                p_params = copy.deepcopy(p.get("params") or {})
                 if not p_params and p.get("path"):
                     sdc = sdc_manager.load_sdc(p["path"])
                     if sdc:
@@ -9710,12 +9716,12 @@ class DarkroomMainWindow(QMainWindow):
         try:
             if hasattr(self, 'thumb_controller'):
                 self.thumb_controller.cancel_card_preview_worker()
-            if hasattr(self, '_single_photo_loader') and self._single_photo_loader and self._single_photo_loader.isRunning():
-                self._single_photo_loader.stop()
-                self._single_photo_loader.wait(100)
-            if hasattr(self, '_session_restore_worker') and self._session_restore_worker and self._session_restore_worker.isRunning():
-                self._session_restore_worker.stop()
-                self._session_restore_worker.wait(100)
+            if hasattr(self, '_single_photo_loader') and self._single_photo_loader:
+                self._safely_terminate_worker(self._single_photo_loader, wait_ms=1000)
+                self._single_photo_loader = None
+            if hasattr(self, '_session_restore_worker') and self._session_restore_worker:
+                self._safely_terminate_worker(self._session_restore_worker, wait_ms=1000)
+                self._session_restore_worker = None
         except Exception:
             pass
 

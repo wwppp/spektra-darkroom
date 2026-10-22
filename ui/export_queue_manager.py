@@ -130,18 +130,25 @@ class _SaveImageWorker(QThread):
         if self._is_cancelled:
             self.finished_save.emit(False, "任务已取消")
             return
+        tmp_target = f"{self.output_path}.tmp_{os.getpid()}_{uuid.uuid4().hex[:6]}"
         try:
-            _save_rendered_file(self.rendered_arr, self.output_path, self.params_dict)
+            _save_rendered_file(self.rendered_arr, tmp_target, self.params_dict)
             if self._is_cancelled:
-                if os.path.exists(self.output_path):
+                if os.path.exists(tmp_target):
                     try:
-                        os.remove(self.output_path)
+                        os.remove(tmp_target)
                     except Exception:
                         pass
                 self.finished_save.emit(False, "任务已取消")
             else:
+                os.replace(tmp_target, self.output_path)
                 self.finished_save.emit(True, "")
         except Exception as e:
+            if os.path.exists(tmp_target):
+                try:
+                    os.remove(tmp_target)
+                except Exception:
+                    pass
             self.finished_save.emit(False, str(e))
 
 
@@ -166,10 +173,11 @@ class _CpuExportWorker(QThread):
         def _cancel():
             return self._is_cancelled or self.task.status == "cancelled"
 
+        tmp_target = f"{self.task.output_path}.tmp_{os.getpid()}_{uuid.uuid4().hex[:6]}"
         try:
             res = self.engine.export_image(
                 params_dict=self.task.params,
-                output_path=self.task.output_path,
+                output_path=tmp_target,
                 format_type=self.task.format_type,
                 quality=self.task.params.get("quality", 9),
                 source_path=self.task.photo_path,
@@ -177,18 +185,29 @@ class _CpuExportWorker(QThread):
                 cancel_cb=_cancel
             )
             if self._is_cancelled or self.task.status == "cancelled":
-                if os.path.exists(self.task.output_path):
+                if os.path.exists(tmp_target):
                     try:
-                        os.remove(self.task.output_path)
+                        os.remove(tmp_target)
                     except Exception:
                         pass
                 self.finished_export.emit(False, "任务已取消")
             elif res.get("success"):
+                os.replace(tmp_target, self.task.output_path)
                 self.finished_export.emit(True, "")
             else:
+                if os.path.exists(tmp_target):
+                    try:
+                        os.remove(tmp_target)
+                    except Exception:
+                        pass
                 err = str(res.get("error") or "扫描显影失败")
                 self.finished_export.emit(False, err)
         except Exception as e:
+            if os.path.exists(tmp_target):
+                try:
+                    os.remove(tmp_target)
+                except Exception:
+                    pass
             self.finished_export.emit(False, str(e))
 
 
@@ -520,7 +539,13 @@ class ExportQueueManager(QObject):
         if self._current_worker:
             if hasattr(self._current_worker, "cancel"):
                 self._current_worker.cancel()
-            self._current_worker.wait(500)
+            if hasattr(self._current_worker, "isRunning") and self._current_worker.isRunning():
+                self._current_worker.wait(1000)
+            if hasattr(self._current_worker, "isRunning") and self._current_worker.isRunning():
+                if not hasattr(self, "_retained_workers"):
+                    self._retained_workers = []
+                self._retained_workers.append(self._current_worker)
+            self._current_worker = None
 
 
 class ExportQueueDialog(QDialog):

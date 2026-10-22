@@ -421,7 +421,7 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
             QCheckBox {{
                 color: #c4c4cc;
                 spacing: 8px;
-                font-size: 11.5px;
+                font-size: 11px;
                 font-weight: 500;
                 outline: none;
                 background: transparent;
@@ -461,7 +461,7 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
             QCheckBox {{
                 color: #334155;
                 spacing: 8px;
-                font-size: 11.5px;
+                font-size: 11px;
                 font-weight: 500;
                 outline: none;
                 background: transparent;

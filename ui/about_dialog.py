@@ -54,7 +54,7 @@ class AboutDialog(QDialog):
                     border-radius: 6px;
                     padding: 12px 14px;
                     color: #cbd5e1;
-                    font-size: 11.5px;
+                    font-size: 11px;
                 }
                 QScrollBar:vertical {
                     width: 6px;
@@ -123,7 +123,7 @@ class AboutDialog(QDialog):
                     border-radius: 6px;
                     padding: 12px 14px;
                     color: #334155;
-                    font-size: 11.5px;
+                    font-size: 11px;
                 }
                 QScrollBar:vertical {
                     width: 6px;

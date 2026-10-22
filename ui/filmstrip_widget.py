@@ -58,7 +58,7 @@ class DuplicateFilesDialog(QDialog):
                     border-radius: 6px;
                     padding: 10px;
                     font-family: Consolas, "Courier New", monospace;
-                    font-size: 11.5px;
+                    font-size: 11px;
                     line-height: 1.4;
                 }
                 QPushButton {
@@ -96,7 +96,7 @@ class DuplicateFilesDialog(QDialog):
                     border-radius: 6px;
                     padding: 10px;
                     font-family: Consolas, "Courier New", monospace;
-                    font-size: 11.5px;
+                    font-size: 11px;
                     line-height: 1.4;
                 }
                 QPushButton {

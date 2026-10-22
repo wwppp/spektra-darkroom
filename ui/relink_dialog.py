@@ -85,7 +85,7 @@ class RelinkMediaDialog(QDialog):
             f"会话共记录 {self.total_count} 张底片，其中 {missing_cnt} 张在原存储路径未找到。\n"
             "若您已将底片文件夹移动至其他位置或驱动器，请指定底片所在文件夹执行自动级联重链。"
         )
-        lbl_desc.setStyleSheet(f"font-size: 11.5px; color: {desc_col}; line-height: 1.4;")
+        lbl_desc.setStyleSheet(f"font-size: 11px; color: {desc_col}; line-height: 1.4;")
         text_layout.addWidget(lbl_desc)
 
         header.addLayout(text_layout, 1)
@@ -227,7 +227,7 @@ class RelinkMediaDialog(QDialog):
                     border: 1px solid #282a36;
                     border-radius: 4px;
                     gridline-color: #22242e;
-                    font-size: 11.5px;
+                    font-size: 11px;
                 }
                 QTableWidget::item {
                     padding: 4px 8px;
@@ -258,7 +258,7 @@ class RelinkMediaDialog(QDialog):
                     border: 1px solid #d5d9e4;
                     border-radius: 4px;
                     gridline-color: #f1f5f9;
-                    font-size: 11.5px;
+                    font-size: 11px;
                 }
                 QTableWidget::item {
                     padding: 4px 8px;

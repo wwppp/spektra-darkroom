@@ -2157,7 +2157,7 @@ class CropSidebarWidget(QFrame):
             QPushButton {
                 background: #f59e0b;
                 color: #000000;
-                font-size: 11.5px;
+                font-size: 11px;
                 font-weight: bold;
                 border: 1px solid #d97706;
                 border-radius: 4px;
@@ -2230,7 +2230,7 @@ class CropSidebarWidget(QFrame):
                     color: #cbd5e1;
                     border: 1px solid #333647;
                     border-radius: 4px;
-                    font-size: 11.5px;
+                    font-size: 11px;
                     font-weight: 500;
                 }
                 QPushButton:hover {
@@ -2266,7 +2266,7 @@ class CropSidebarWidget(QFrame):
                     color: #475569;
                     border: 1px solid #cbd5e1;
                     border-radius: 4px;
-                    font-size: 11.5px;
+                    font-size: 11px;
                     font-weight: 500;
                 }
                 QPushButton:hover {
