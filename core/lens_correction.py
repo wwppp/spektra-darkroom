@@ -45,6 +45,11 @@ class LensCalibrationEntry:
     k2: float = 0.0
     k3: float = 0.0
     vignette_coeffs: List[float] = field(default_factory=list)
+    vignette_fx: float = 1.0
+    vignette_fy: float = 1.0
+    vignette_cx: float = 0.5
+    vignette_cy: float = 0.5
+    vignette_piecewise: List[Tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -64,7 +69,6 @@ class LensProfile:
 
         fl = _parse_float_safe(focal_length)
         if fl is None:
-            # If no focal length provided in image EXIF, pick calibration at wide end of lens
             min_fl_entry = min(self.calibrations, key=lambda c: c.focal_length)
             fl = min_fl_entry.focal_length
 
@@ -76,12 +80,69 @@ class LensProfile:
 
         for entry in self.calibrations:
             fl_diff = abs(entry.focal_length - fl)
-            ap_diff = abs(entry.aperture - ap)
+            try:
+                ap_diff = abs(math.log2(max(0.5, entry.aperture) / max(0.5, ap)))
+            except Exception:
+                ap_diff = abs(entry.aperture - ap)
             dist = fl_diff * 10.0 + ap_diff
             if dist < best_dist:
                 best_dist = dist
                 best_entry = entry
 
+        return best_entry
+
+    def get_best_distortion_calibration(self, focal_length: Optional[float] = None, aperture: Optional[float] = None) -> LensCalibrationEntry:
+        """Find the calibration entry nearest to given focal length with calibrated distortion data."""
+        dist_entries = [c for c in self.calibrations if abs(c.k1) > 1e-6 or abs(c.k2) > 1e-6 or abs(c.k3) > 1e-6]
+        if not dist_entries:
+            return self.get_best_calibration(focal_length, aperture)
+
+        fl = _parse_float_safe(focal_length)
+        if fl is None:
+            fl = min(dist_entries, key=lambda c: c.focal_length).focal_length
+
+        ap_parsed = _parse_float_safe(aperture)
+        ap = ap_parsed if ap_parsed is not None else 2.8
+
+        best_entry = dist_entries[0]
+        best_dist = float("inf")
+        for entry in dist_entries:
+            fl_diff = abs(entry.focal_length - fl)
+            try:
+                ap_diff = abs(math.log2(max(0.5, entry.aperture) / max(0.5, ap)))
+            except Exception:
+                ap_diff = abs(entry.aperture - ap)
+            dist = fl_diff * 10.0 + ap_diff
+            if dist < best_dist:
+                best_dist = dist
+                best_entry = entry
+        return best_entry
+
+    def get_best_vignette_calibration(self, focal_length: Optional[float] = None, aperture: Optional[float] = None) -> Optional[LensCalibrationEntry]:
+        """Find the calibration entry nearest to given focal length and aperture that contains vignette calibration data."""
+        vig_entries = [c for c in self.calibrations if c.vignette_coeffs or c.vignette_piecewise]
+        if not vig_entries:
+            return None
+
+        fl = _parse_float_safe(focal_length)
+        if fl is None:
+            fl = min(vig_entries, key=lambda c: c.focal_length).focal_length
+
+        ap_parsed = _parse_float_safe(aperture)
+        ap = ap_parsed if ap_parsed is not None else 2.8
+
+        best_entry = vig_entries[0]
+        best_dist = float("inf")
+        for entry in vig_entries:
+            fl_diff = abs(entry.focal_length - fl)
+            try:
+                ap_diff = abs(math.log2(max(0.5, entry.aperture) / max(0.5, ap)))
+            except Exception:
+                ap_diff = abs(entry.aperture - ap)
+            dist = fl_diff * 10.0 + ap_diff * 2.0
+            if dist < best_dist:
+                best_dist = dist
+                best_entry = entry
         return best_entry
 
 
@@ -129,79 +190,89 @@ class LCPParser:
                     except Exception:
                         pass
 
-            # 2. Hierarchical calibration entries pass
-            for desc in root.iter():
-                tag = desc.tag.split("}")[-1] if "}" in desc.tag else desc.tag
-                if tag != "Description":
+            # 2. Calibration entries pass: each calibration profile is an <rdf:li> inside CameraProfiles
+            calib_nodes = [elem for elem in root.iter() if elem.tag.split("}")[-1] == "li"]
+            if not calib_nodes:
+                calib_nodes = [
+                    elem for elem in root.iter()
+                    if elem.tag.split("}")[-1] == "Description" and ("FocalLength" in {k.split("}")[-1]: v for k, v in elem.attrib.items()})
+                ]
+
+            for node in calib_nodes:
+                data = {}
+                piecewise = []
+                for sub in node.iter():
+                    sub_tag = sub.tag.split("}")[-1]
+                    for k, v in sub.attrib.items():
+                        data[k.split("}")[-1]] = v
+                    if sub.text and sub.text.strip():
+                        data[sub_tag] = sub.text.strip()
+                    if sub_tag == "VignetteModelPiecewiseParam":
+                        for pli in sub.iter():
+                            if pli.tag.split("}")[-1] == "li" and pli.text:
+                                parts = [float(x.strip()) for x in pli.text.split(",") if x.strip()]
+                                if len(parts) >= 2:
+                                    piecewise.append((parts[0], parts[1]))
+
+                if "FocalLength" not in data and "RadialDistortParam1" not in data and "VignetteModelParam1" not in data and not piecewise:
                     continue
 
-                desc_attr = {k.split("}")[-1]: v for k, v in desc.attrib.items()}
-                has_fl = "FocalLength" in desc_attr
-                has_model_child = any(c.tag.split("}")[-1] in ("PerspectiveModel", "FisheyeModel", "VignetteModel") for c in desc)
-                if not has_fl and not has_model_child:
-                    continue
-
-                fl = None
-                if "FocalLength" in desc_attr:
-                    try:
-                        fl = float(desc_attr["FocalLength"])
-                    except Exception:
-                        pass
-
+                fl = _parse_float_safe(data.get("FocalLength"))
                 ap = None
-                if "ApertureValue" in desc_attr:
+                if "ApertureValue" in data:
                     try:
-                        raw_ap = float(desc_attr["ApertureValue"])
+                        raw_ap = float(data["ApertureValue"])
                         # Adobe ApertureValue is APEX: F# = 2 ^ (Av / 2)
                         ap = (2.0 ** (raw_ap / 2.0)) if raw_ap < 15.0 else raw_ap
                     except Exception:
                         pass
 
                 fd = 3.0
-                if "FocusDistance" in desc_attr:
+                if "FocusDistance" in data:
                     try:
-                        fd = float(desc_attr["FocusDistance"])
+                        fd = float(data["FocusDistance"])
                     except Exception:
                         pass
 
                 k1, k2, k3 = 0.0, 0.0, 0.0
+                if "RadialDistortParam1" in data:
+                    try:
+                        k1 = float(data["RadialDistortParam1"])
+                        k2 = float(data.get("RadialDistortParam2", 0.0))
+                        k3 = float(data.get("RadialDistortParam3", 0.0))
+                    except Exception:
+                        pass
+                elif "RadialDistortCoeff" in data:
+                    try:
+                        parts = [float(p) for p in re.split(r"[\s,]+", data["RadialDistortCoeff"].strip()) if p]
+                        if len(parts) >= 1: k1 = parts[0]
+                        if len(parts) >= 2: k2 = parts[1]
+                        if len(parts) >= 3: k3 = parts[2]
+                    except Exception:
+                        pass
+
                 vig_coeffs = []
+                if "VignetteModelParam1" in data:
+                    try:
+                        vig_coeffs = [
+                            float(data["VignetteModelParam1"]),
+                            float(data.get("VignetteModelParam2", 0.0)),
+                            float(data.get("VignetteModelParam3", 0.0))
+                        ]
+                    except Exception:
+                        pass
+                elif "VignetteModelCoeff" in data:
+                    try:
+                        vig_coeffs = [float(p) for p in re.split(r"[\s,]+", data["VignetteModelCoeff"].strip()) if p]
+                    except Exception:
+                        pass
 
-                for sub in desc.iter():
-                    sub_attr = {k.split("}")[-1]: v for k, v in sub.attrib.items()}
+                fx = float(data.get("FocalLengthX", 1.0))
+                fy = float(data.get("FocalLengthY", fx))
+                cx = float(data.get("ImageXCenter", 0.5))
+                cy = float(data.get("ImageYCenter", 0.5))
 
-                    if "RadialDistortParam1" in sub_attr:
-                        try:
-                            k1 = float(sub_attr["RadialDistortParam1"])
-                            k2 = float(sub_attr.get("RadialDistortParam2", 0.0))
-                            k3 = float(sub_attr.get("RadialDistortParam3", 0.0))
-                        except Exception:
-                            pass
-                    elif "RadialDistortCoeff" in sub_attr:
-                        try:
-                            parts = [float(p) for p in re.split(r"[\s,]+", sub_attr["RadialDistortCoeff"].strip()) if p]
-                            if len(parts) >= 1: k1 = parts[0]
-                            if len(parts) >= 2: k2 = parts[1]
-                            if len(parts) >= 3: k3 = parts[2]
-                        except Exception:
-                            pass
-
-                    if "VignetteModelParam1" in sub_attr:
-                        try:
-                            vig_coeffs = [
-                                float(sub_attr["VignetteModelParam1"]),
-                                float(sub_attr.get("VignetteModelParam2", 0.0)),
-                                float(sub_attr.get("VignetteModelParam3", 0.0))
-                            ]
-                        except Exception:
-                            pass
-                    elif "VignetteModelCoeff" in sub_attr:
-                        try:
-                            vig_coeffs = [float(p) for p in re.split(r"[\s,]+", sub_attr["VignetteModelCoeff"].strip()) if p]
-                        except Exception:
-                            pass
-
-                if abs(k1) > 1e-6 or abs(k2) > 1e-6 or abs(k3) > 1e-6 or vig_coeffs:
+                if abs(k1) > 1e-6 or abs(k2) > 1e-6 or abs(k3) > 1e-6 or vig_coeffs or piecewise:
                     calibrations.append(LensCalibrationEntry(
                         focal_length=fl if fl is not None else 50.0,
                         aperture=ap if ap is not None else 2.8,
@@ -209,7 +280,12 @@ class LCPParser:
                         k1=k1,
                         k2=k2,
                         k3=k3,
-                        vignette_coeffs=vig_coeffs
+                        vignette_coeffs=vig_coeffs,
+                        vignette_fx=fx,
+                        vignette_fy=fy,
+                        vignette_cx=cx,
+                        vignette_cy=cy,
+                        vignette_piecewise=piecewise
                     ))
 
             if not lens_name:
@@ -474,6 +550,59 @@ def compute_manual_vignette_coeffs(amount: float, midpoint: float) -> Tuple[floa
     return v_amt, v_mid
 
 
+def evaluate_vignette_gain(calib: Optional[LensCalibrationEntry], photo_aperture: Optional[float] = None, aspect_ratio: float = 0.6667) -> float:
+    """Evaluate natural lens vignette compensation factor (base_amt) from calibration data.
+
+    Returns:
+        float: base_amt (typically 0.10 ~ 0.35, max 0.45) representing fractional gain
+               applied at the outermost image corners to naturally cancel light falloff.
+    """
+    if not calib:
+        return 0.15
+
+    raw_gain = 0.15
+
+    if calib.vignette_piecewise:
+        # Last point in piecewise curve represents maximum radial distance / corner
+        last_pt = calib.vignette_piecewise[-1]
+        v_corner = max(0.25, min(1.0, float(last_pt[1])))
+        raw_gain = (1.0 / v_corner) - 1.0
+    elif calib.vignette_coeffs:
+        v1 = calib.vignette_coeffs[0]
+        v2 = calib.vignette_coeffs[1] if len(calib.vignette_coeffs) > 1 else 0.0
+        v3 = calib.vignette_coeffs[2] if len(calib.vignette_coeffs) > 2 else 0.0
+
+        fx = max(0.1, getattr(calib, "vignette_fx", 1.0))
+        fy = max(0.1, getattr(calib, "vignette_fy", fx))
+
+        # Normalized coordinates at image corner (3:2 standard sensor: dx = 0.5, dy = 0.5 * 2/3 = 0.3333)
+        dx = 0.5 / fx
+        dy = (0.5 * aspect_ratio) / fy
+        r2 = dx * dx + dy * dy
+        r4 = r2 * r2
+        r6 = r4 * r2
+
+        v_corner = 1.0 + v1 * r2 + v2 * r4 + v3 * r6
+        # Clamp to realistic optical transmittance [0.25, 1.0]
+        v_clamped = max(0.25, min(1.0, v_corner))
+        raw_gain = (1.0 / v_clamped) - 1.0
+
+    # Scale down if photo is stopped down beyond calibration entry
+    ap_photo = _parse_float_safe(photo_aperture)
+    if ap_photo and ap_photo > calib.aperture and calib.aperture > 0.5:
+        try:
+            stops = math.log2(ap_photo / calib.aperture)
+            # Physical vignetting reduces by ~25% per stop
+            scale = max(0.35, 1.0 - stops * 0.25)
+            raw_gain *= scale
+        except Exception:
+            pass
+
+    # Natural optical compensation: 65% of raw physical drop (prevents reverse vignetting / white halo)
+    eff_gain = raw_gain * 0.65
+    return max(0.05, min(0.45, eff_gain))
+
+
 def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] = None, aperture: Optional[float] = None) -> dict:
     """Compute active (k1, k2, k3, vignette_amount, vignette_midpoint, remove_ca) from configuration dictionary."""
     if not isinstance(lens_cfg, dict):
@@ -534,25 +663,20 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
                 if prof:
                     fl_parsed = _parse_float_safe(focal_length)
                     ap_parsed = _parse_float_safe(aperture)
-                    calib = prof.get_best_calibration(fl_parsed, ap_parsed)
-                    k1 = calib.k1 * dist_scale
-                    k2 = calib.k2 * dist_scale
-                    k3 = calib.k3 * dist_scale
-                    if calib.vignette_coeffs:
-                        v1 = calib.vignette_coeffs[0]
-                        v2 = calib.vignette_coeffs[1] if len(calib.vignette_coeffs) > 1 else 0.0
-                        v3 = calib.vignette_coeffs[2] if len(calib.vignette_coeffs) > 2 else 0.0
-                        falloff = 1.0 + v1 + v2 + v3
-                        base_amt = (1.0 / max(0.1, falloff)) - 1.0
-                        base_amt = max(0.2, min(2.0, base_amt))
-                    else:
-                        base_amt = 0.6
+
+                    calib_dist = prof.get_best_distortion_calibration(fl_parsed, ap_parsed)
+                    k1 = calib_dist.k1 * dist_scale
+                    k2 = calib_dist.k2 * dist_scale
+                    k3 = calib_dist.k3 * dist_scale
+
+                    calib_vig = prof.get_best_vignette_calibration(fl_parsed, ap_parsed)
+                    base_amt = evaluate_vignette_gain(calib_vig, photo_aperture=ap_parsed)
 
                     if p_vig_val >= 0:
                         v_amt = base_amt * (1.0 + p_vig_val / 100.0)
                     else:
                         # Negative slider value:抵消去暗角并加深四角暗角
-                        v_amt = base_amt + (p_vig_val / 100.0) * (base_amt + 0.8)
+                        v_amt = base_amt + (p_vig_val / 100.0) * (base_amt + 0.5)
 
                     v_mid = 50.0
 
