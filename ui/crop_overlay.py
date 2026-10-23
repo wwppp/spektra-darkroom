@@ -174,25 +174,25 @@ class CropOverlayWidget(QWidget):
     ROTATE_MARGIN = 36
 
     def _draw_guide_line(self, painter: QPainter, p1: QPointF, p2: QPointF, is_fine: bool = False):
-        """Draw high-contrast, non-white hairline guide line visible across both sky and dark shadows."""
+        """Draw high-contrast, bright hairline guide line matching ACR styling."""
         pen_w = 0.75 if is_fine else 1.0
-        # 1. Subtle light shadow offset by +1px
-        painter.setPen(QPen(QColor(255, 255, 255, 65 if is_fine else 85), pen_w, Qt.PenStyle.SolidLine))
+        # 1. Subtle dark shadow offset by +1px for visibility on bright highlights
+        painter.setPen(QPen(QColor(0, 0, 0, 50 if is_fine else 75), pen_w, Qt.PenStyle.SolidLine))
         painter.drawLine(QPointF(p1.x() + 1.0, p1.y() + 1.0), QPointF(p2.x() + 1.0, p2.y() + 1.0))
-        # 2. Main charcoal/dark slate core at 0px
-        painter.setPen(QPen(QColor(18, 22, 30, 180 if is_fine else 220), pen_w, Qt.PenStyle.SolidLine))
+        # 2. Main bright translucent white hairline at 0px
+        painter.setPen(QPen(QColor(255, 255, 255, 125 if is_fine else 165), pen_w, Qt.PenStyle.SolidLine))
         painter.drawLine(p1, p2)
 
     def _draw_guide_path(self, painter: QPainter, path: QPainterPath):
-        """Draw high-contrast hairline guide path matching _draw_guide_line."""
+        """Draw high-contrast bright hairline guide path matching _draw_guide_line."""
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        # 1. Subtle light shadow offset by +1px
+        # 1. Subtle dark shadow offset by +1px
         offset_path = QPainterPath(path)
         offset_path.translate(1.0, 1.0)
-        painter.setPen(QPen(QColor(255, 255, 255, 85), 1.0, Qt.PenStyle.SolidLine))
+        painter.setPen(QPen(QColor(0, 0, 0, 75), 1.0, Qt.PenStyle.SolidLine))
         painter.drawPath(offset_path)
-        # 2. Main charcoal/dark slate core at 0px
-        painter.setPen(QPen(QColor(18, 22, 30, 220), 1.0, Qt.PenStyle.SolidLine))
+        # 2. Main bright translucent white hairline at 0px
+        painter.setPen(QPen(QColor(255, 255, 255, 165), 1.0, Qt.PenStyle.SolidLine))
         painter.drawPath(path)
 
     def __init__(self, canvas, parent=None):
@@ -660,6 +660,8 @@ class CropOverlayWidget(QWidget):
         self.crop_x = max(0.0, min(1.0 - self.crop_w, cx - self.crop_w * 0.5))
         self.crop_y = max(0.0, min(1.0 - self.crop_h, cy - self.crop_h * 0.5))
         self.is_portrait_orientation = bool(self.crop_w * img_w < self.crop_h * img_h)
+        self._user_crop_w = self.crop_w
+        self._user_crop_h = self.crop_h
 
         if abs(self.crop_angle) > 0.01:
             self._clamp_to_rotated_bounds()
@@ -741,6 +743,8 @@ class CropOverlayWidget(QWidget):
         self.crop_h = max(0.05, min(1.0, new_h))
         self.crop_x = max(0.0, min(1.0 - self.crop_w, cx - self.crop_w * 0.5))
         self.crop_y = max(0.0, min(1.0 - self.crop_h, cy - self.crop_h * 0.5))
+        self._user_crop_w = self.crop_w
+        self._user_crop_h = self.crop_h
 
         if abs(self.crop_angle) > 0.01:
             self._clamp_to_rotated_bounds()
@@ -843,10 +847,18 @@ class CropOverlayWidget(QWidget):
         ca = math.cos(rad)
         sa = math.sin(-rad)
 
-        # 1. Bounds for box size from user scale baseline
+        uc = cx - 0.5
+        vc = cy - 0.5
+        u_prime = uc * ca - vc * (sa / A)
+        v_prime = uc * A * sa + vc * ca
+
+        # 1. Available envelope around current rotated center (preserves position without jumping)
+        avail_x = max(0.1, 1.0 - 2.0 * abs(u_prime))
+        avail_y = max(0.1, 1.0 - 2.0 * abs(v_prime))
+
         X_term = self._user_crop_w * abs(ca) + self._user_crop_h * (abs(sa) / A)
         Y_term = self._user_crop_w * (A * abs(sa)) + self._user_crop_h * abs(ca)
-        scale = min(1.0, 1.0 / max(1e-4, X_term), 1.0 / max(1e-4, Y_term))
+        scale = min(1.0, avail_x / max(1e-4, X_term), avail_y / max(1e-4, Y_term))
         w = max(0.05, self._user_crop_w * scale)
         h = max(0.05, self._user_crop_h * scale)
 
@@ -855,11 +867,6 @@ class CropOverlayWidget(QWidget):
         Y_term_h = w * (A * abs(sa)) + h * abs(ca)
         M_x = max(0.0, (1.0 - X_term_w) * 0.5)
         M_y = max(0.0, (1.0 - Y_term_h) * 0.5)
-
-        uc = cx - 0.5
-        vc = cy - 0.5
-        u_prime = uc * ca - vc * (sa / A)
-        v_prime = uc * A * sa + vc * ca
 
         u_clamped = max(-M_x, min(M_x, u_prime))
         v_clamped = max(-M_y, min(M_y, v_prime))
@@ -915,34 +922,36 @@ class CropOverlayWidget(QWidget):
 
     def _hit_test(self, pos: QPointF) -> Optional[str]:
         rect = self._get_crop_screen_rect()
+        h_gap = 4.0
+        outer_rect = rect.adjusted(-h_gap, -h_gap, h_gap, h_gap)
         c_margin = 20.0   # Corner hit radius
         e_margin = 12.0   # Edge hit thickness
 
         px = pos.x()
         py = pos.y()
 
-        # 1. Check 4 corners first (highest priority)
-        if abs(px - rect.left()) <= c_margin and abs(py - rect.top()) <= c_margin:
+        # 1. Check 4 corners first (highest priority, tested on outer_rect where handles are)
+        if abs(px - outer_rect.left()) <= c_margin and abs(py - outer_rect.top()) <= c_margin:
             return "tl"
-        if abs(px - rect.right()) <= c_margin and abs(py - rect.top()) <= c_margin:
+        if abs(px - outer_rect.right()) <= c_margin and abs(py - outer_rect.top()) <= c_margin:
             return "tr"
-        if abs(px - rect.left()) <= c_margin and abs(py - rect.bottom()) <= c_margin:
+        if abs(px - outer_rect.left()) <= c_margin and abs(py - outer_rect.bottom()) <= c_margin:
             return "bl"
-        if abs(px - rect.right()) <= c_margin and abs(py - rect.bottom()) <= c_margin:
+        if abs(px - outer_rect.right()) <= c_margin and abs(py - outer_rect.bottom()) <= c_margin:
             return "br"
 
-        # 2. Check 4 edges
-        if abs(py - rect.top()) <= e_margin and (rect.left() - c_margin) <= px <= (rect.right() + c_margin):
+        # 2. Check 4 edges (tested on outer_rect where dashed line and pill handles are)
+        if abs(py - outer_rect.top()) <= e_margin and (outer_rect.left() - c_margin) <= px <= (outer_rect.right() + c_margin):
             return "t"
-        if abs(py - rect.bottom()) <= e_margin and (rect.left() - c_margin) <= px <= (rect.right() + c_margin):
+        if abs(py - outer_rect.bottom()) <= e_margin and (outer_rect.left() - c_margin) <= px <= (outer_rect.right() + c_margin):
             return "b"
-        if abs(px - rect.left()) <= e_margin and (rect.top() - c_margin) <= py <= (rect.bottom() + c_margin):
+        if abs(px - outer_rect.left()) <= e_margin and (outer_rect.top() - c_margin) <= py <= (outer_rect.bottom() + c_margin):
             return "l"
-        if abs(px - rect.right()) <= e_margin and (rect.top() - c_margin) <= py <= (rect.bottom() + c_margin):
+        if abs(px - outer_rect.right()) <= e_margin and (outer_rect.top() - c_margin) <= py <= (outer_rect.bottom() + c_margin):
             return "r"
 
         # 3. Inside crop box
-        if rect.contains(pos):
+        if rect.contains(pos) or outer_rect.contains(pos):
             # If currently at 100% full uncropped image or marquee mode is primed, drag creates marquee
             is_full = (self.crop_w >= 0.98 and self.crop_h >= 0.98)
             if is_full or getattr(self, "_marquee_mode_enabled", False):
@@ -1144,18 +1153,43 @@ class CropOverlayWidget(QWidget):
             t_max = max(0.01, min(1.0, t_max))
             return ax + t_max * dx_c, ay + t_max * dy_c
 
+        def check_orientation_swap(rw_val: float, rh_val: float):
+            nonlocal ratio, K
+            if self.aspect_ratio_mode in ("free", "1:1"):
+                return
+            if rw_val <= 0.01 or rh_val <= 0.01:
+                return
+            pw = rw_val * img_w
+            ph = rh_val * img_h
+            if pw < 10.0 or ph < 10.0:
+                return
+            mr = pw / ph
+            changed = False
+            if self.is_portrait_orientation:
+                if mr > 1.10:
+                    self.is_portrait_orientation = False
+                    changed = True
+            else:
+                if mr < 0.90:
+                    self.is_portrait_orientation = True
+                    changed = True
+            if changed:
+                ratio = self._get_target_ratio()
+                K = (ratio / native_ratio) if ratio else None
+
         if handle == "tl":
             # Anchor is bottom-right (sx + sw, sy + sh)
             ax, ay = sx + sw, sy + sh
             tx, ty = sx + dx, sy + dy
+            rw = ax - tx
+            rh = ay - ty
+            check_orientation_swap(rw, rh)
             if K is None:
                 new_x, new_y = clamp_free_corner(ax, ay, tx, ty, -1, -1)
                 new_w = ax - new_x
                 new_h = ay - new_y
             else:
                 w_max = get_anchor_w_max(ax, ay, -1, -1, K)
-                rw = ax - tx
-                rh = ay - ty
                 raw_w = max(0.05, (rw + rh * K) * 0.5)
                 w = min(raw_w, w_max)
                 new_w = max(0.05, w)
@@ -1168,6 +1202,9 @@ class CropOverlayWidget(QWidget):
             # Anchor is top-left (sx, sy)
             ax, ay = sx, sy
             tx, ty = sx + sw + dx, sy + sh + dy
+            rw = tx - ax
+            rh = ty - ay
+            check_orientation_swap(rw, rh)
             if K is None:
                 new_tx, new_ty = clamp_free_corner(ax, ay, tx, ty, 1, 1)
                 new_w = new_tx - ax
@@ -1175,8 +1212,6 @@ class CropOverlayWidget(QWidget):
                 new_x, new_y = ax, ay
             else:
                 w_max = get_anchor_w_max(ax, ay, 1, 1, K)
-                rw = tx - ax
-                rh = ty - ay
                 raw_w = max(0.05, (rw + rh * K) * 0.5)
                 w = min(raw_w, w_max)
                 new_w = max(0.05, w)
@@ -1188,6 +1223,9 @@ class CropOverlayWidget(QWidget):
             # Anchor is bottom-left (sx, sy + sh)
             ax, ay = sx, sy + sh
             tx, ty = sx + sw + dx, sy + dy
+            rw = tx - ax
+            rh = ay - ty
+            check_orientation_swap(rw, rh)
             if K is None:
                 new_tx, new_ty = clamp_free_corner(ax, ay, tx, ty, 1, -1)
                 new_w = new_tx - ax
@@ -1196,8 +1234,6 @@ class CropOverlayWidget(QWidget):
                 new_y = new_ty
             else:
                 w_max = get_anchor_w_max(ax, ay, 1, -1, K)
-                rw = tx - ax
-                rh = ay - ty
                 raw_w = max(0.05, (rw + rh * K) * 0.5)
                 w = min(raw_w, w_max)
                 new_w = max(0.05, w)
@@ -1210,6 +1246,9 @@ class CropOverlayWidget(QWidget):
             # Anchor is top-right (sx + sw, sy)
             ax, ay = sx + sw, sy
             tx, ty = sx + dx, sy + sh + dy
+            rw = ax - tx
+            rh = ty - ay
+            check_orientation_swap(rw, rh)
             if K is None:
                 new_tx, new_ty = clamp_free_corner(ax, ay, tx, ty, -1, 1)
                 new_w = ax - new_tx
@@ -1218,8 +1257,6 @@ class CropOverlayWidget(QWidget):
                 new_y = ay
             else:
                 w_max = get_anchor_w_max(ax, ay, -1, 1, K)
-                rw = ax - tx
-                rh = ty - ay
                 raw_w = max(0.05, (rw + rh * K) * 0.5)
                 w = min(raw_w, w_max)
                 new_w = max(0.05, w)
@@ -1252,12 +1289,19 @@ class CropOverlayWidget(QWidget):
                 new_x, new_w = sx, sw
             else:
                 cx = sx + sw * 0.5
-                h_max = get_edge_h_max(cx, ay, -1, K)
                 requested_h = ay - (sy + dy)
-                new_h = max(0.05, min(requested_h, h_max))
-                new_w = new_h * K
-                new_x = cx - new_w * 0.5
-                new_y = ay - new_h
+                if abs(self.crop_angle) < 0.01:
+                    max_h_fit = min(1.0, 1.0 / K)
+                    new_h = min(max(0.05, requested_h), max_h_fit)
+                    new_w = new_h * K
+                    new_y = max(0.0, min(1.0 - new_h, ay - requested_h))
+                    new_x = max(0.0, min(1.0 - new_w, cx - new_w * 0.5))
+                else:
+                    h_max = get_edge_h_max(cx, ay, -1, K)
+                    new_h = max(0.05, min(requested_h, h_max))
+                    new_w = new_h * K
+                    new_x = cx - new_w * 0.5
+                    new_y = ay - new_h
             self.crop_x, self.crop_y, self.crop_w, self.crop_h = new_x, new_y, new_w, new_h
 
         elif handle == "b":
@@ -1284,12 +1328,21 @@ class CropOverlayWidget(QWidget):
                 new_x, new_w = sx, sw
             else:
                 cx = sx + sw * 0.5
-                h_max = get_edge_h_max(cx, ay, 1, K)
                 requested_h = sy + sh + dy - ay
-                new_h = max(0.05, min(requested_h, h_max))
-                new_w = new_h * K
-                new_x = cx - new_w * 0.5
-                new_y = ay
+                if abs(self.crop_angle) < 0.01:
+                    max_h_fit = min(1.0, 1.0 / K)
+                    new_h = min(max(0.05, requested_h), max_h_fit)
+                    new_w = new_h * K
+                    ideal_bottom = ay + requested_h
+                    bottom = min(1.0, ideal_bottom)
+                    new_y = max(0.0, min(1.0 - new_h, bottom - new_h))
+                    new_x = max(0.0, min(1.0 - new_w, cx - new_w * 0.5))
+                else:
+                    h_max = get_edge_h_max(cx, ay, 1, K)
+                    new_h = max(0.05, min(requested_h, h_max))
+                    new_w = new_h * K
+                    new_x = cx - new_w * 0.5
+                    new_y = ay
             self.crop_x, self.crop_y, self.crop_w, self.crop_h = new_x, new_y, new_w, new_h
 
         elif handle == "l":
@@ -1316,12 +1369,19 @@ class CropOverlayWidget(QWidget):
                 new_y, new_h = sy, sh
             else:
                 cy = sy + sh * 0.5
-                w_max = get_edge_w_max(ax, cy, -1, K)
                 requested_w = ax - (sx + dx)
-                new_w = max(0.05, min(requested_w, w_max))
-                new_h = new_w / K
-                new_x = ax - new_w
-                new_y = cy - new_h * 0.5
+                if abs(self.crop_angle) < 0.01:
+                    max_w_fit = min(1.0, 1.0 * K)
+                    new_w = min(max(0.05, requested_w), max_w_fit)
+                    new_h = new_w / K
+                    new_x = max(0.0, min(1.0 - new_w, ax - requested_w))
+                    new_y = max(0.0, min(1.0 - new_h, cy - new_h * 0.5))
+                else:
+                    w_max = get_edge_w_max(ax, cy, -1, K)
+                    new_w = max(0.05, min(requested_w, w_max))
+                    new_h = new_w / K
+                    new_x = ax - new_w
+                    new_y = cy - new_h * 0.5
             self.crop_x, self.crop_y, self.crop_w, self.crop_h = new_x, new_y, new_w, new_h
 
         elif handle == "r":
@@ -1348,17 +1408,28 @@ class CropOverlayWidget(QWidget):
                 new_y, new_h = sy, sh
             else:
                 cy = sy + sh * 0.5
-                w_max = get_edge_w_max(ax, cy, 1, K)
                 requested_w = sx + sw + dx - ax
-                new_w = max(0.05, min(requested_w, w_max))
-                new_h = new_w / K
-                new_x = ax
-                new_y = cy - new_h * 0.5
+                if abs(self.crop_angle) < 0.01:
+                    max_w_fit = min(1.0, 1.0 * K)
+                    new_w = min(max(0.05, requested_w), max_w_fit)
+                    new_h = new_w / K
+                    ideal_right = ax + requested_w
+                    right = min(1.0, ideal_right)
+                    new_x = max(0.0, min(1.0 - new_w, right - new_w))
+                    new_y = max(0.0, min(1.0 - new_h, cy - new_h * 0.5))
+                else:
+                    w_max = get_edge_w_max(ax, cy, 1, K)
+                    new_w = max(0.05, min(requested_w, w_max))
+                    new_h = new_w / K
+                    new_x = ax
+                    new_y = cy - new_h * 0.5
             self.crop_x, self.crop_y, self.crop_w, self.crop_h = new_x, new_y, new_w, new_h
 
         # Update user scale baseline
         self._user_crop_w = self.crop_w
         self._user_crop_h = self.crop_h
+        if self.aspect_ratio_mode == "free":
+            self.is_portrait_orientation = bool((self.crop_w * img_w) < (self.crop_h * img_h))
 
     def _apply_marquee_drag(self, pos: QPointF):
         """Draw a new crop box dynamically from marquee start position to current mouse pos."""
@@ -1377,6 +1448,18 @@ class CropOverlayWidget(QWidget):
 
         raw_du = abs(u1 - u0)
         raw_dv = abs(v1 - v0)
+
+        if self.aspect_ratio_mode not in ("free", "1:1"):
+            pw = raw_du * img_w
+            ph = raw_dv * img_h
+            if pw >= 10.0 and ph >= 10.0:
+                mr = pw / ph
+                if self.is_portrait_orientation and mr > 1.10:
+                    self.is_portrait_orientation = False
+                    ratio = self._get_target_ratio()
+                elif not self.is_portrait_orientation and mr < 0.90:
+                    self.is_portrait_orientation = True
+                    ratio = self._get_target_ratio()
 
         if ratio is not None and native_ratio > 0:
             K = ratio / native_ratio  # norm_w / norm_h
@@ -1784,10 +1867,10 @@ class CropOverlayWidget(QWidget):
         mask_a = getattr(self, "mask_alpha", 160)
         painter.setBrush(QBrush(QColor(0, 0, 0, mask_a)))
         painter.drawPath(dim_path)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
         # 2. Reference & Leveling Grids
-        gap = 4.0
-        inner_rect = rect.adjusted(gap, gap, -gap, -gap)
+        inner_rect = rect
 
         draw_guides = getattr(self, "show_guides", True) or self._is_rotating
         # When crop box is shrunk small (< 64px), suppress interior guide lines to avoid visual clutter and overlapping artifacts
@@ -1968,26 +2051,18 @@ class CropOverlayWidget(QWidget):
                 self._draw_guide_path(painter, spiral_path)
                 painter.restore()
 
-        # 3. Inner exact crop boundary: 1.0px white solid line backed by subtle 2.0px dark shadow
-        shadow_pen = QPen(QColor(0, 0, 0, 100), 2.0, Qt.PenStyle.SolidLine)
-        bound_pen = QPen(QColor(255, 255, 255, 210), 1.0, Qt.PenStyle.SolidLine)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(shadow_pen)
-        painter.drawRect(rect)
-        painter.setPen(bound_pen)
-        painter.drawRect(rect)
+        # 3. Inner crop boundary (solid line removed per ACR style; rectangular dim mask defines the clean crop edge)
 
-        # 4. Outer Control Frame (2.0px white L-brackets with rounded corner bends and pill tabs)
-        h_gap = 3.5
+        # 4. ACR-Style Floating Control Frame (4.0px outer gap, 4 corner L-brackets and 4 midpoint pill bars, NO connecting lines)
+        h_gap = 4.0
         outer_rect = rect.adjusted(-h_gap, -h_gap, h_gap, h_gap)
-        ext = 16.0
-        mid_ext = 8.0
-        r = 2.5
+
+        ext = 13.0
+        mid_ext = 11.0
 
         # Clamp ext if box is very small so corners never collide or overlap
         ext_x = min(ext, max(3.0, (outer_rect.width() * 0.5) - 3.0))
         ext_y = min(ext, max(3.0, (outer_rect.height() * 0.5) - 3.0))
-        r_c = min(r, min(ext_x, ext_y) * 0.5)
 
         handle_shadow = QPen(QColor(0, 0, 0, 140), 3.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         handle_pen = QPen(QColor(255, 255, 255, 255), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
@@ -1996,35 +2071,32 @@ class CropOverlayWidget(QWidget):
         # TL
         ox, oy = outer_rect.left(), outer_rect.top()
         corners_path.moveTo(ox + ext_x, oy)
-        corners_path.lineTo(ox + r_c, oy)
-        corners_path.quadTo(ox, oy, ox, oy + r_c)
+        corners_path.lineTo(ox, oy)
         corners_path.lineTo(ox, oy + ext_y)
 
         # TR
         ox, oy = outer_rect.right(), outer_rect.top()
         corners_path.moveTo(ox - ext_x, oy)
-        corners_path.lineTo(ox - r_c, oy)
-        corners_path.quadTo(ox, oy, ox, oy + r_c)
+        corners_path.lineTo(ox, oy)
         corners_path.lineTo(ox, oy + ext_y)
 
         # BR
         ox, oy = outer_rect.right(), outer_rect.bottom()
         corners_path.moveTo(ox - ext_x, oy)
-        corners_path.lineTo(ox - r_c, oy)
-        corners_path.quadTo(ox, oy, ox, oy - r_c)
+        corners_path.lineTo(ox, oy)
         corners_path.lineTo(ox, oy - ext_y)
 
         # BL
         ox, oy = outer_rect.left(), outer_rect.bottom()
         corners_path.moveTo(ox + ext_x, oy)
-        corners_path.lineTo(ox + r_c, oy)
-        corners_path.quadTo(ox, oy, ox, oy - r_c)
+        corners_path.lineTo(ox, oy)
         corners_path.lineTo(ox, oy - ext_y)
 
         cx = outer_rect.center().x()
         cy = outer_rect.center().y()
 
         def _draw_handles(p_pen):
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(p_pen)
             painter.drawPath(corners_path)
             # Midpoint pill tabs with RoundCap - auto-hidden when box is small to prevent overlap/artifacts

@@ -36,7 +36,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QStackedWidget, QMenuBar, QMenu, QFileDialog,
+    QPushButton, QStackedWidget, QStackedLayout, QGraphicsOpacityEffect, QMenuBar, QMenu, QFileDialog,
     QMessageBox, QScrollArea, QFrame, QSplitter, QSplitterHandle, QGridLayout, QSizePolicy, QApplication,
     QDialog, QLineEdit, QTextEdit, QCheckBox, QButtonGroup
 )
@@ -105,6 +105,7 @@ from ui.export_dialog import (
     SingleExportDialog, BatchExportDialog, ExportImageDialog, ExportProgressDialog, SingleExportWorker, BatchExportWorker
 )
 from ui.filmstrip_widget import FilmstripWidget, DuplicateFilesDialog
+from ui.canvas_rating_widget import CanvasRatingWidget
 from ui.spinner_widget import SpinnerWidget
 from ui.histogram_widget import HistogramWidget, HistogramExifBar
 from ui.fading_stacked_widget import FadingStackedWidget
@@ -397,11 +398,12 @@ class BatchImportWorker(QThread):
                 if entry and entry.get("success"):
                     pid = f"photo_{self.start_idx + idx}_{os.path.basename(file_path)}"
                     entry["id"] = pid
-                    if abs(float(entry.get("base_ev", 0.0))) < 0.0001:
-                        if sdc_manager.has_sdc(file_path):
-                            sdc_data = sdc_manager.load_sdc(file_path)
-                            if sdc_data and sdc_data.get("params", {}).get("base_ev"):
+                    if sdc_manager.has_sdc(file_path):
+                        sdc_data = sdc_manager.load_sdc(file_path)
+                        if sdc_data:
+                            if abs(float(entry.get("base_ev", 0.0))) < 0.0001 and sdc_data.get("params", {}).get("base_ev"):
                                 entry["base_ev"] = float(sdc_data["params"]["base_ev"])
+                    entry["rating"] = 0
                     entry["raw_thumbnail_rgb"] = entry.get("raw_thumbnail_rgb") if entry.get("raw_thumbnail_rgb") is not None else entry.get("thumbnail_rgb")
                     entry["graded_thumbnail_rgb"] = entry.get("graded_thumbnail_rgb")
                     if not is_first:
@@ -423,6 +425,7 @@ class BatchImportWorker(QThread):
                     "path": file_path,
                     "width": dw,
                     "height": dh,
+                    "rating": 0,
                     "thumbnail_rgb": fast_th,
                     "raw_thumbnail_rgb": fast_th,
                     "graded_thumbnail_rgb": None,
@@ -537,13 +540,14 @@ class SessionRestoreWorker(QThread):
     restoreFinished = Signal(list, list, str)  # all_photos, uncached_slots, target_path
     failed = Signal(str)
 
-    def __init__(self, existing_files, active_file=None, thumb_controller=None, engine=None, is_params_modified_fn=None, parent=None):
+    def __init__(self, existing_files, active_file=None, thumb_controller=None, engine=None, is_params_modified_fn=None, ratings_map=None, parent=None):
         super().__init__(parent)
         self.existing_files = list(existing_files or [])
         self.active_file = active_file
         self.thumb_controller = thumb_controller
         self.engine = engine
         self.is_params_modified_fn = is_params_modified_fn
+        self.ratings_map = dict(ratings_map or {})
         self._stopped = False
 
     def stop(self):
@@ -554,6 +558,11 @@ class SessionRestoreWorker(QThread):
         from core import sdc_manager
         pid = f"photo_{idx}_{os.path.basename(p)}"
         sdc = sdc_manager.load_sdc(p)
+        norm_p = os.path.normpath(os.path.abspath(p))
+        if self.ratings_map and norm_p in self.ratings_map:
+            rating = int(self.ratings_map[norm_p])
+        else:
+            rating = 0
         film_profile = sdc.get("film_profile", "none") if sdc else "none"
         paper_profile = sdc.get("paper_profile", "none") if sdc else "none"
         print_mode = sdc.get("print_mode", sdc.get("params", {}).get("print_mode", "optical")) if sdc else "scan"
@@ -642,6 +651,7 @@ class SessionRestoreWorker(QThread):
                 "print_mode": print_mode,
                 "params": params,
                 "crop": crop_data,
+                "rating": rating,
                 "is_dirty": is_dirty,
                 "is_edited": is_edited,
             }
@@ -688,6 +698,7 @@ class SessionRestoreWorker(QThread):
                 "print_mode": print_mode,
                 "params": params,
                 "crop": crop_data,
+                "rating": rating,
                 "is_dirty": is_dirty,
                 "is_edited": is_edited,
             }
@@ -1611,6 +1622,225 @@ class CompareButton(QPushButton):
         super().hideEvent(event)
 
 
+class StatusSlotWidget(QWidget):
+    """Dynamic cross-fading status slot that unifies permanent photo information (filename & zoom)
+    and transient application notifications / import progress into a single compact area.
+
+    When a status notification or import occurs, it smoothly fades out the photo title and fades in
+    the notification / progress in-place ('直接顶掉标题'). When the notification expires, it smoothly
+    cross-fades back to the photo title & zoom percentage ('循环显示').
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(28)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        self._stack = QStackedLayout(self)
+        self._stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        self._stack.setContentsMargins(0, 0, 0, 0)
+
+        # Layer 0: Photo Info Layer (Default / Persistent)
+        self.w_info = QWidget(self)
+        self.w_info.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        l_info = QHBoxLayout(self.w_info)
+        l_info.setContentsMargins(0, 0, 0, 0)
+        l_info.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.lbl_photo_info = QLabel("")
+        self.lbl_photo_info.setObjectName("lbl_photo_info")
+        self.lbl_photo_info.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.lbl_photo_info.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.lbl_photo_info.setStyleSheet("QLabel#lbl_photo_info { color: #cbd5e1; font-size: 11px; font-weight: 500; padding-top: 1px; }")
+        l_info.addWidget(self.lbl_photo_info)
+
+        # Layer 1: Transient Status / Notification / Import Layer
+        self.w_status = QWidget(self)
+        self.w_status.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        l_status = QHBoxLayout(self.w_status)
+        l_status.setContentsMargins(0, 0, 0, 0)
+        l_status.setSpacing(5)
+        l_status.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.spinner = SpinnerWidget(size=13)
+        l_status.addWidget(self.spinner)
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("status_label")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; padding-top: 1px; }")
+        l_status.addWidget(self.status_label)
+
+        self.btn_cancel_import = QPushButton("✕ 取消导入")
+        self.btn_cancel_import.setVisible(False)
+        self.btn_cancel_import.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel_import.setToolTip("中断当前正在进行的底片批量导入流程")
+        self.btn_cancel_import.setStyleSheet("""
+            QPushButton {
+                background: #2a1515;
+                color: #ef4444;
+                border: 1px solid #7f1d1d;
+                border-radius: 3px;
+                padding: 1px 7px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: #3f1d1d;
+                color: #f87171;
+                border-color: #ef4444;
+            }
+            QPushButton:pressed {
+                background: #1f0d0d;
+            }
+        """)
+        l_status.addWidget(self.btn_cancel_import)
+
+        # Graphics Opacity Effects for smooth cross-fading
+        self.eff_info = QGraphicsOpacityEffect(self.w_info)
+        self.w_info.setGraphicsEffect(self.eff_info)
+        self.eff_status = QGraphicsOpacityEffect(self.w_status)
+        self.w_status.setGraphicsEffect(self.eff_status)
+
+        self._stack.addWidget(self.w_info)
+        self._stack.addWidget(self.w_status)
+
+        self.eff_info.setOpacity(1.0)
+        self.eff_status.setOpacity(0.0)
+        self._mode = "info"
+        self._anim_group = None
+
+    def sizeHint(self):
+        if self._mode == "status":
+            sh = self.w_status.sizeHint()
+            return QSize(sh.width(), 28)
+        sh = self.w_info.sizeHint()
+        return QSize(sh.width(), 28)
+
+    def current_mode(self) -> str:
+        return self._mode
+
+    def transition_to(self, target_mode: str, duration_ms: int = 180, on_finished=None):
+        if target_mode == self._mode and self._anim_group is None:
+            if callable(on_finished):
+                on_finished()
+            return
+
+        self._mode = target_mode
+        self.updateGeometry()
+
+        if self._anim_group:
+            try:
+                self._anim_group.stop()
+            except Exception:
+                pass
+            self._anim_group = None
+
+        if os.environ.get("FAST_TEST") or duration_ms <= 0 or not self.isVisible():
+            self.eff_info.setOpacity(1.0 if target_mode == "info" else 0.0)
+            self.eff_status.setOpacity(1.0 if target_mode == "status" else 0.0)
+            if callable(on_finished):
+                on_finished()
+            return
+
+        group = QParallelAnimationGroup(self)
+
+        a_info = QPropertyAnimation(self.eff_info, b"opacity", self)
+        a_info.setDuration(duration_ms)
+        a_info.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        a_info.setStartValue(self.eff_info.opacity())
+        a_info.setEndValue(1.0 if target_mode == "info" else 0.0)
+
+        a_status = QPropertyAnimation(self.eff_status, b"opacity", self)
+        a_status.setDuration(duration_ms)
+        a_status.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        a_status.setStartValue(self.eff_status.opacity())
+        a_status.setEndValue(1.0 if target_mode == "status" else 0.0)
+
+        group.addAnimation(a_info)
+        group.addAnimation(a_status)
+
+        def _on_finish():
+            self._anim_group = None
+            if callable(on_finished):
+                on_finished()
+
+        group.finished.connect(_on_finish)
+        self._anim_group = group
+        group.start()
+
+
+class CenteredViewToolbar(QFrame):
+    """View toolbar frame that keeps its center_widget (canvas rating) at the absolute geometric center,
+    automatically resolving collision with status messages when the window is narrow.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.center_widget = None
+        self.status_slot = None
+        self.status_label = None
+        self._rating_enabled = False
+
+    def set_center_widget(self, w):
+        self.center_widget = w
+        if w:
+            w.setParent(self)
+            self._update_center()
+
+    def set_status_slot(self, slot):
+        self.status_slot = slot
+        self._update_center()
+
+    def set_status_label(self, lbl):
+        self.status_label = lbl
+
+    def set_rating_enabled(self, enabled: bool):
+        self._rating_enabled = enabled
+        self._update_center()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_center()
+
+    def _update_center(self):
+        if not self.center_widget:
+            return
+
+        cw = self.center_widget.sizeHint().width() if hasattr(self.center_widget, 'sizeHint') else self.center_widget.width()
+        ch = self.center_widget.sizeHint().height() if hasattr(self.center_widget, 'sizeHint') else self.center_widget.height()
+        if cw <= 0:
+            cw = 68
+        if ch <= 0:
+            ch = 20
+
+        x = (self.width() - cw) // 2
+        y = (self.height() - ch) // 2
+        self.center_widget.setGeometry(x, y, cw, ch)
+        self.center_widget.raise_()
+
+        if not self._rating_enabled:
+            self.center_widget.setVisible(False)
+            return
+
+        # Check collision with left-side status slot
+        should_hide = False
+        if self.status_slot and not self.status_slot.isHidden():
+            slot_r = self.status_slot.x() + self.status_slot.sizeHint().width()
+            if slot_r > 0 and slot_r + 14 >= x:
+                should_hide = True
+        elif self.status_label and not self.status_label.isHidden():
+            txt = self.status_label.text()
+            if txt and txt.strip():
+                fm = self.status_label.fontMetrics()
+                txt_w = fm.horizontalAdvance(txt)
+                lbl_x = self.status_label.x()
+                status_right = lbl_x + txt_w
+                if status_right + 12 >= x:
+                    should_hide = True
+
+        self.center_widget.setVisible(not should_hide)
+
+
 class DarkroomMainWindow(QMainWindow):
     """SpektraDarkroom Complete Application Window."""
     def __init__(self, engine, initial_session=None, initial_files=None):
@@ -1864,7 +2094,7 @@ class DarkroomMainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"Error restoring application state: {e}")
 
-    def _restore_saved_session(self, existing_files, active_file=None, session_name="", path_updated=False):
+    def _restore_saved_session(self, existing_files, active_file=None, session_name="", path_updated=False, ratings_map=None):
         """Asynchronously restores session photos using SessionRestoreWorker and FadingStackedWidget.
         Pre-allocates slots for all files to guarantee order and count stability (100 remains 100).
         Transitions smoothly to editor workspace while restoring active photo and thumbnails in background.
@@ -1896,6 +2126,7 @@ class DarkroomMainWindow(QMainWindow):
             thumb_controller=self.thumb_controller,
             engine=self.engine,
             is_params_modified_fn=self._is_params_modified,
+            ratings_map=ratings_map,
             parent=self
         )
         self._session_restore_worker = worker
@@ -2193,6 +2424,13 @@ class DarkroomMainWindow(QMainWindow):
                         mmi.ptMaxPosition.y = mi.rcWork.top - by
                         mmi.ptMaxSize.x = w + 2 * bx
                         mmi.ptMaxSize.y = h + 2 * by
+
+                        # Enforce hardware-level minimum tracking size (prevents window squishing below minimum dimensions)
+                        dpr = self.devicePixelRatio() if hasattr(self, 'devicePixelRatio') else 1.0
+                        min_w = int(max(960, self.minimumWidth()) * dpr)
+                        min_h = int(max(600, self.minimumHeight()) * dpr)
+                        mmi.ptMinTrackSize.x = min_w
+                        mmi.ptMinTrackSize.y = min_h
                     return True, 0
 
                 # 1. WM_NCCALCSIZE (0x0083): Remove standard title bar and frame while keeping DWM animations
@@ -3099,68 +3337,33 @@ class DarkroomMainWindow(QMainWindow):
 
         # View Toolbar (Item 6: Status on Left, Buttons on Right)
         # View Toolbar (Status on Left, Buttons on Right - Narrow 28px, clean borderless background)
-        self.view_toolbar = QFrame()
+        self.view_toolbar = CenteredViewToolbar()
         self.view_toolbar.setFixedHeight(28)
         self.view_toolbar.setStyleSheet(f"background: {theme_manager.color('view_toolbar_bg')}; border: none;")
         tb_layout = QHBoxLayout(self.view_toolbar)
         tb_layout.setContentsMargins(10, 2, 10, 1)
         tb_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        tb_layout.setSpacing(6)
+        tb_layout.setSpacing(5)
 
-        # Permanent photo filename & zoom percentage display (never erased or overwritten by transient notifications)
-        self.lbl_photo_info = QLabel("")
-        self.lbl_photo_info.setObjectName("lbl_photo_info")
-        self.lbl_photo_info.setFixedWidth(160)
-        self.lbl_photo_info.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.lbl_photo_info.setStyleSheet("QLabel#lbl_photo_info { color: #cbd5e1; font-size: 11px; font-weight: 500; padding-top: 1px; }")
-        tb_layout.addWidget(self.lbl_photo_info)
-
-        # Subtle separator between permanent photo info and transient system notification
-        self.status_sep = QLabel("│")
-        self.status_sep.setObjectName("status_sep")
-        self.status_sep.setFixedWidth(10)
-        self.status_sep.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
-        self.status_sep.setStyleSheet("QLabel#status_sep { color: transparent; font-size: 11px; padding-top: 1px; }")
-        tb_layout.addWidget(self.status_sep)
-
-        # Left: Spinner & Status Label (Item 6 & 8)
-        self.spinner = SpinnerWidget(size=13)
-        tb_layout.addWidget(self.spinner)
-
-        self.status_label = QLabel("")
-        self.status_label.setObjectName("status_label")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; padding-top: 1px; }")
-        self.status_label.mousePressEvent = self._on_status_label_clicked
-        tb_layout.addWidget(self.status_label)
-
-        self.btn_cancel_import = QPushButton("✕ 取消导入")
-        self.btn_cancel_import.setVisible(False)
-        self.btn_cancel_import.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_cancel_import.setToolTip("中断当前正在进行的底片批量导入流程")
-        self.btn_cancel_import.setStyleSheet("""
-            QPushButton {
-                background: #2a1515;
-                color: #ef4444;
-                border: 1px solid #7f1d1d;
-                border-radius: 3px;
-                padding: 1px 7px;
-                font-size: 11px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #3f1d1d;
-                color: #f87171;
-                border-color: #ef4444;
-            }
-            QPushButton:pressed {
-                background: #1f0d0d;
-            }
-        """)
+        # Left: Dynamic Unified Cross-Fading Status Slot (Unifies photo filename & zoom with transient notifications)
+        self.status_slot = StatusSlotWidget(self.view_toolbar)
+        self.lbl_photo_info = self.status_slot.lbl_photo_info
+        self.status_label = self.status_slot.status_label
+        self.spinner = self.status_slot.spinner
+        self.btn_cancel_import = self.status_slot.btn_cancel_import
         self.btn_cancel_import.clicked.connect(lambda: self._cancel_active_import(notify_user=True))
-        tb_layout.addWidget(self.btn_cancel_import)
+        self.status_label.mousePressEvent = self._on_status_label_clicked
+        tb_layout.addWidget(self.status_slot)
 
         tb_layout.addStretch(1)
+
+        # Center: Canvas Star Rating Widget (placed in CenteredViewToolbar at absolute geometric center)
+        self.canvas_rating = CanvasRatingWidget(self.view_toolbar)
+        self.canvas_rating.setVisible(False)
+        self.canvas_rating.ratingChanged.connect(self._on_canvas_rating_changed)
+        self.view_toolbar.set_center_widget(self.canvas_rating)
+        self.view_toolbar.set_status_slot(self.status_slot)
+        self.view_toolbar.set_status_label(self.status_label)
 
         # Right: Dedicated Export Status Prompt (Pure text + underline, matching left status bar)
         self.export_status_container = QWidget()
@@ -3296,6 +3499,9 @@ class DarkroomMainWindow(QMainWindow):
         self.filmstrip.sortRequested.connect(self._sort_photos_by)
         self.filmstrip.copyParamsRequested.connect(self.action_copy_params)
         self.filmstrip.pasteParamsRequested.connect(self.action_paste_params)
+        self.filmstrip.photoRated.connect(self._on_filmstrip_photo_rated)
+        self.filmstrip.batchPhotoRated.connect(self._on_filmstrip_batch_rated)
+        self.filmstrip.filterChanged.connect(self._on_filter_changed)
         self.center_splitter.addWidget(self.filmstrip)
 
         self.center_splitter.setStretchFactor(0, 1)
@@ -4279,6 +4485,31 @@ class DarkroomMainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
+        self.menu_star_filter = view_menu.addMenu("星标筛选")
+        self.menu_star_filter.setStyleSheet(get_darkroom_menu_style())
+        self.star_filter_actions = {}
+        for key, text in [
+            ("all", "全部"),
+            ("separator", ""),
+            ("5", "★★★★★"),
+            ("4", "★★★★"),
+            ("3", "★★★"),
+            ("2", "★★"),
+            ("1", "★"),
+            ("separator", ""),
+            ("0", "无评分"),
+        ]:
+            if key == "separator":
+                self.menu_star_filter.addSeparator()
+            else:
+                act = QAction(text, self)
+                act.setCheckable(True)
+                act.triggered.connect(lambda chk=False, k=key: self._on_menu_filter_selected(k))
+                self.menu_star_filter.addAction(act)
+                self.star_filter_actions[key] = act
+
+        view_menu.addSeparator()
+
         self.act_reset_layout = QAction("恢复默认布局", self)
         self.act_reset_layout.setShortcut(QKeySequence("Ctrl+Shift+R"))
         self.act_reset_layout.triggered.connect(self.reset_default_layout)
@@ -4349,7 +4580,7 @@ class DarkroomMainWindow(QMainWindow):
         # 1. Edit menu: Undo / Redo
         can_undo = False
         can_redo = False
-        if has_active_photo:
+        if not is_startup:
             if getattr(self.canvas, "is_crop_editing", False):
                 overlay = getattr(self.canvas, "crop_overlay", None)
                 can_undo = bool(overlay and len(getattr(overlay, "_crop_undo_stack", [])) > 1)
@@ -4405,6 +4636,27 @@ class DarkroomMainWindow(QMainWindow):
             self.act_zoom_in.setEnabled(has_active_photo)
         if hasattr(self, 'act_zoom_out'):
             self.act_zoom_out.setEnabled(has_active_photo)
+        if hasattr(self, 'menu_star_filter'):
+            self.menu_star_filter.setEnabled(has_any_photos)
+            curr_f = getattr(self.filmstrip, "_rating_filter", "all") if hasattr(self, "filmstrip") else "all"
+            if hasattr(self, "filmstrip"):
+                counts = self.filmstrip.get_filter_counts()
+                labels_map = {
+                    "all": f"全部（{counts['all']}张）",
+                    "5": f"★★★★★（{counts['5']}张）",
+                    "4": f"★★★★（{counts['4']}张）",
+                    "3": f"★★★（{counts['3']}张）",
+                    "2": f"★★（{counts['2']}张）",
+                    "1": f"★（{counts['1']}张）",
+                    "0": f"无评分（{counts['0']}张）",
+                }
+                for k, act in getattr(self, "star_filter_actions", {}).items():
+                    if k in labels_map:
+                        act.setText(labels_map[k])
+                    act.setChecked(k == curr_f)
+            else:
+                for k, act in getattr(self, "star_filter_actions", {}).items():
+                    act.setChecked(k == curr_f)
 
     def reset_default_layout(self):
         """Restore all splitters to optimal default layout."""
@@ -4538,6 +4790,10 @@ class DarkroomMainWindow(QMainWindow):
         else:
             self.lbl_photo_info.setText("")
             self.lbl_photo_info.setToolTip("")
+        if hasattr(self, "status_slot"):
+            self.status_slot.updateGeometry()
+        if hasattr(self, 'view_toolbar') and hasattr(self.view_toolbar, '_update_center'):
+            self.view_toolbar._update_center()
 
     def _on_filmstrip_selection_changed(self, selected_ids):
         """Item 10: Permanent multi-selection notification without blinking or auto-hide."""
@@ -4560,13 +4816,21 @@ class DarkroomMainWindow(QMainWindow):
             return
         if hasattr(self, "_status_timer") and self._status_timer.isActive():
             return
+        if hasattr(self, 'status_slot'):
+            self.status_slot.transition_to("info", duration_ms=180, on_finished=self._clear_status_text)
+        else:
+            self._clear_status_text()
+
+    def _clear_status_text(self):
+        if getattr(self, "_is_importing", False) or getattr(self, "_is_multi_selecting", False):
+            return
         self.status_label.setText("")
         self.status_label.setCursor(Qt.CursorShape.ArrowCursor)
         self.status_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
         self.status_label.setToolTip("")
         self.spinner.stop()
-        if hasattr(self, "status_sep"):
-            self.status_sep.setStyleSheet("color: transparent; font-size: 11px;")
+        if hasattr(self, 'view_toolbar') and hasattr(self.view_toolbar, '_update_center'):
+            self.view_toolbar._update_center()
 
     def action_save_current(self):
         if self._current_photo_path:
@@ -4592,8 +4856,15 @@ class DarkroomMainWindow(QMainWindow):
             self._on_compare_long_press_start()
 
     def eventFilter(self, watched, event):
-        """Handle global backslash key and navigation shortcuts."""
+        """Handle global backslash key, navigation shortcuts, and scrollbar context menus."""
         et = event.type()
+
+        # Suppress context menus and right-clicks on all scrollbars app-wide
+        if et in (QEvent.Type.ContextMenu, QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+            from PySide6.QtWidgets import QScrollBar
+            if isinstance(watched, QScrollBar) or (hasattr(watched, "parent") and isinstance(watched.parent(), QScrollBar)):
+                if et == QEvent.Type.ContextMenu or (hasattr(event, "button") and event.button() == Qt.MouseButton.RightButton):
+                    return True
 
         if et in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             # Do not intercept if a dialog or child modal is active and event belongs to it
@@ -4713,6 +4984,14 @@ class DarkroomMainWindow(QMainWindow):
                 event.accept()
                 return
 
+            # Rating shortcuts: Number keys 0-5 (0 to clear, 1-5 to rate)
+            if not has_ctrl and not has_alt:
+                if event.key() in (Qt.Key.Key_0, Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_4, Qt.Key.Key_5):
+                    target_rating = event.key() - Qt.Key.Key_0
+                    self.action_set_active_rating(target_rating)
+                    event.accept()
+                    return
+
             if event.key() == Qt.Key.Key_C and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
                 self.toggle_crop_mode()
                 event.accept()
@@ -4783,31 +5062,36 @@ class DarkroomMainWindow(QMainWindow):
             self.spinner.stop()
 
         self.status_label.setText(text)
-        if hasattr(self, "status_sep"):
-            if text or spinning:
-                self.status_sep.setStyleSheet("QLabel#status_sep { color: #333644; font-size: 11px; }")
-            else:
-                self.status_sep.setStyleSheet("QLabel#status_sep { color: transparent; font-size: 11px; }")
-
         self.status_label.setCursor(Qt.CursorShape.ArrowCursor)
         self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; }")
         self.status_label.setToolTip("")
 
-        if timeout_ms > 0:
-            if hasattr(self, "_status_timer"):
-                self._status_timer.start(timeout_ms)
-        elif not spinning and text and not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False):
-            # Default lingering duration: 4.0 seconds without flickering or premature wipeout
-            if hasattr(self, "_status_timer"):
-                self._status_timer.start(4000)
+        if text and text.strip():
+            if hasattr(self, 'status_slot'):
+                self.status_slot.transition_to("status", duration_ms=180)
+            if timeout_ms > 0:
+                if hasattr(self, "_status_timer"):
+                    self._status_timer.start(timeout_ms)
+            elif not spinning and not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False):
+                # Default lingering duration: 3.5 seconds
+                if hasattr(self, "_status_timer"):
+                    self._status_timer.start(3500)
+        else:
+            if hasattr(self, 'status_slot'):
+                self.status_slot.transition_to("info", duration_ms=180, on_finished=self._clear_status_text)
+            else:
+                self._clear_status_text()
+
+        if hasattr(self, 'view_toolbar') and hasattr(self.view_toolbar, '_update_center'):
+            self.view_toolbar._update_center()
 
     def _on_status_timeout(self):
         if getattr(self, "_is_importing", False) or getattr(self, "_is_multi_selecting", False):
             return
-        self.status_label.setText("")
-        self.spinner.stop()
-        if hasattr(self, "status_sep"):
-            self.status_sep.setStyleSheet("QLabel#status_sep { color: transparent; font-size: 11px; }")
+        if hasattr(self, 'status_slot'):
+            self.status_slot.transition_to("info", duration_ms=180, on_finished=self._clear_status_text)
+        else:
+            self._clear_status_text()
 
     def _on_status_label_clicked(self, event):
         pass
@@ -5002,7 +5286,8 @@ class DarkroomMainWindow(QMainWindow):
                 p_path = normalize_path(p["path"])
                 session_photos.append({
                     "path": p_path,
-                    "filename": os.path.basename(p_path)
+                    "filename": os.path.basename(p_path),
+                    "rating": p.get("rating", 0)
                 })
 
             from core.version import VERSION_STRING
@@ -5024,6 +5309,7 @@ class DarkroomMainWindow(QMainWindow):
         self.set_app_status("正在保存会话...", spinning=True)
         # Flush current dirty photo parameters to .sdc sidecar
         if self._photo_is_dirty and self._current_photo_path:
+            curr_target_p = next((x for x in self.photos if x and x.get("id") == self.active_photo_id), None)
             sdc_manager.save_sdc(
                 self._current_photo_path,
                 self.current_film_stock,
@@ -5033,10 +5319,9 @@ class DarkroomMainWindow(QMainWindow):
             )
             self._photo_is_dirty = False
             if self.active_photo_id:
-                p = next((x for x in self.photos if x and x.get("id") == self.active_photo_id), None)
-                if p:
-                    p["is_dirty"] = False
-                    p["is_edited"] = True
+                if curr_target_p:
+                    curr_target_p["is_dirty"] = False
+                    curr_target_p["is_edited"] = True
             self.filmstrip.set_photo_dirty(self.active_photo_id, True)
 
         # Flush any other dirty photos in session to their respective .sdc sidecars
@@ -5070,7 +5355,8 @@ class DarkroomMainWindow(QMainWindow):
             session_photos.append({
                 "path": normalize_path(p["path"]),
                 "rel_path": rel_p,
-                "filename": os.path.basename(p["path"])
+                "filename": os.path.basename(p["path"]),
+                "rating": p.get("rating", 0)
             })
 
         active_rel = None
@@ -5307,9 +5593,61 @@ class DarkroomMainWindow(QMainWindow):
                         resolved_files.append(norm_p)
                         m["entry"]["path"] = norm_p
                         path_updated = True
+                if hasattr(dlg, "get_removed_orig_paths") and dlg.get_removed_orig_paths():
+                    removed_paths = {normalize_path(p) for p in dlg.get_removed_orig_paths()}
+                    photo_entries = [p for p in photo_entries if normalize_path(p.get("path", "")) not in removed_paths]
+                    session_data["photos"] = photo_entries
+                    path_updated = True
             elif dlg.action_result == RelinkMediaDialog.STATUS_OFFLINE:
                 # User chose to keep offline and open with only found photos
-                pass
+                if hasattr(dlg, "get_removed_orig_paths") and dlg.get_removed_orig_paths():
+                    removed_paths = {normalize_path(p) for p in dlg.get_removed_orig_paths()}
+                    photo_entries = [p for p in photo_entries if normalize_path(p.get("path", "")) not in removed_paths]
+                    session_data["photos"] = photo_entries
+                    path_updated = True
+                    try:
+                        if is_temp and not photo_entries:
+                            config_manager.clear_auto_saved_session()
+                            config_manager.save_last_session_path(None)
+                        else:
+                            session_cache_manager.save_session_file(file_path, session_data)
+                    except Exception as e:
+                        logger.warning(f"Failed to update session file after removing offline media: {e}")
+            elif dlg.action_result == RelinkMediaDialog.STATUS_REMOVE_OFFLINE:
+                # User explicitly chose to remove offline media from the session!
+                mapping = dlg.get_relinked_mapping()
+                # 1. Any photos that were successfully relinked in the dialog should be kept and loaded
+                for m in missing_entries:
+                    new_p = mapping.get(m["orig_path"]) or m.get("resolved_path")
+                    if new_p and os.path.exists(new_p):
+                        norm_p = normalize_path(new_p)
+                        resolved_files.append(norm_p)
+                        m["entry"]["path"] = norm_p
+
+                # 2. Determine which entries are still missing/offline
+                unresolved_orig_paths = {
+                    normalize_path(m["orig_path"]) for m in missing_entries
+                    if not (mapping.get(m["orig_path"]) or m.get("resolved_path"))
+                }
+                if hasattr(dlg, "get_removed_orig_paths"):
+                    unresolved_orig_paths.update(normalize_path(p) for p in dlg.get_removed_orig_paths())
+
+                # 3. Filter photo_entries to remove the offline ones
+                photo_entries = [p for p in photo_entries if normalize_path(p.get("path", "")) not in unresolved_orig_paths]
+                path_updated = True
+
+                # 4. Save the updated session file immediately so this dialog NEVER pops up again for these photos!
+                session_data["photos"] = photo_entries
+                try:
+                    if is_temp and not photo_entries:
+                        config_manager.clear_auto_saved_session()
+                        config_manager.save_last_session_path(None)
+                    else:
+                        session_cache_manager.save_session_file(file_path, session_data)
+                except Exception as e:
+                    logger.warning(f"Failed to update session file after removing offline media: {e}")
+
+                self.set_app_status(f"已从会话中移除 {len(unresolved_orig_paths)} 张脱机底片", timeout_ms=3000)
             else:
                 # User cancelled opening session
                 self.set_app_status("已取消载入会话", timeout_ms=2500)
@@ -5373,8 +5711,14 @@ class DarkroomMainWindow(QMainWindow):
         self._session_is_dirty = path_updated
         self._update_window_title()
 
+        # Build ratings mapping from session photo entries (ratings belong to session)
+        ratings_map = {}
+        for pe in photo_entries:
+            if isinstance(pe, dict) and pe.get("path"):
+                ratings_map[normalize_path(pe["path"])] = max(0, min(5, int(pe.get("rating", 0) or 0)))
+
         if resolved_files:
-            self._restore_saved_session(resolved_files, active_file=active_path, session_name=fn, path_updated=path_updated)
+            self._restore_saved_session(resolved_files, active_file=active_path, session_name=fn, path_updated=path_updated, ratings_map=ratings_map)
         else:
             if is_temp:
                 # If opening an empty temporary/auto-saved session, stay on the welcome start screen
@@ -5517,7 +5861,7 @@ class DarkroomMainWindow(QMainWindow):
         if self._undo_stack:
             top = self._undo_stack[-1]
             top_pid = top.get("photo_id") if top.get("type") == "single_photo_state" else None
-            if top.get("type") == "batch_photos_state" or (top_pid and top_pid != self.active_photo_id):
+            if top.get("type") in ("batch_photos_state", "library_photos_state") or (top_pid and top_pid != self.active_photo_id):
                 baseline = getattr(self, "_active_photo_baseline_state", None)
                 if baseline and baseline.get("photo_id") == self.active_photo_id:
                     if not (baseline.get("film") == state["film"] and
@@ -5560,6 +5904,10 @@ class DarkroomMainWindow(QMainWindow):
 
         curr_state = self._undo_stack.pop()
         self._redo_stack.append(curr_state)
+        if curr_state.get("type") == "photo_rating_state":
+            old_ratings = curr_state.get("old_ratings")
+            if old_ratings:
+                self._apply_rating_history_state({"ratings": old_ratings})
         prev_state = self._undo_stack[-1]
         self._apply_history_state(prev_state)
 
@@ -5570,6 +5918,14 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已撤销粘贴暗房配方", timeout_ms=2000)
         elif act == "clear_crop":
             self.set_app_status("已撤销清除裁切", timeout_ms=2000)
+        elif act in ("remove_photos", "delete_photos"):
+            self.set_app_status("已撤销移除底片", timeout_ms=2000)
+        elif act == "clear_photos":
+            self.set_app_status("已撤销清空底片库", timeout_ms=2000)
+        elif act == "sort_photos":
+            self.set_app_status("已撤销底片排序", timeout_ms=2000)
+        elif act == "rate_photos":
+            self.set_app_status("已撤销底片评分", timeout_ms=2000)
         else:
             self.set_app_status("已撤销", timeout_ms=1500)
         self._update_menu_actions_state()
@@ -5598,6 +5954,14 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已重做粘贴暗房配方", timeout_ms=2000)
         elif act == "clear_crop":
             self.set_app_status("已重做清除裁切", timeout_ms=2000)
+        elif act in ("remove_photos", "delete_photos"):
+            self.set_app_status("已重做移除底片", timeout_ms=2000)
+        elif act == "clear_photos":
+            self.set_app_status("已重做清空底片库", timeout_ms=2000)
+        elif act == "sort_photos":
+            self.set_app_status("已重做底片排序", timeout_ms=2000)
+        elif act == "rate_photos":
+            self.set_app_status("已重做底片评分", timeout_ms=2000)
         else:
             self.set_app_status("已重做", timeout_ms=1500)
         self._update_menu_actions_state()
@@ -5949,6 +6313,15 @@ class DarkroomMainWindow(QMainWindow):
             self._apply_batch_history_state(state)
             return
 
+        if state.get("type") == "library_photos_state":
+            self._apply_library_history_state(state)
+            return
+
+        if state.get("type") == "photo_rating_state":
+            self._apply_rating_history_state(state)
+            if not state.get("params"):
+                return
+
         target_pid = state.get("photo_id")
         if target_pid and target_pid != self.active_photo_id:
             try:
@@ -6170,6 +6543,97 @@ class DarkroomMainWindow(QMainWindow):
                     self.on_switch_photo(target_pid)
                 except Exception:
                     pass
+
+    def _snapshot_photo_entry(self, p: dict) -> dict:
+        snap = dict(p)
+        if "params" in p and isinstance(p["params"], dict):
+            snap["params"] = copy.deepcopy(p["params"])
+        if "crop" in p and isinstance(p["crop"], dict):
+            snap["crop"] = copy.deepcopy(p["crop"])
+        return snap
+
+    def _apply_library_history_state(self, state: dict):
+        """Restores a filmstrip library snapshot (e.g. undo/redo photo removal or library clearing)."""
+        if not state or not isinstance(state, dict):
+            return
+
+        photos_data = state.get("photos", [])
+        active_id = state.get("active_photo_id")
+
+        if not photos_data:
+            # Reached empty library state (e.g. redo clear or redo remove all)
+            self.action_clear_photos(push_undo=False)
+            return
+
+        # 1. Restore self.photos list
+        self.photos = [self._snapshot_photo_entry(p) for p in photos_data]
+        self._photo_id_counter = max(getattr(self, "_photo_id_counter", 0), len(self.photos))
+
+        # 2. Synchronize engine session photos
+        if hasattr(self, "engine") and hasattr(self.engine, "session_photos"):
+            self.engine.session_photos.clear()
+            for photo_entry in self.photos:
+                ep_dict = {
+                    "id": photo_entry["id"],
+                    "path": photo_entry.get("path"),
+                    "filename": photo_entry.get("filename"),
+                    "width": photo_entry.get("width", 0),
+                    "height": photo_entry.get("height", 0),
+                    "thumbnail_rgb": photo_entry.get("thumbnail_rgb"),
+                    "raw_preview": None,
+                    "meta": dict(photo_entry.get("exif") or {}),
+                    "is_raw": photo_entry.get("is_raw", False),
+                    "base_ev": photo_entry.get("base_ev", 0.0),
+                    "auto_ev": photo_entry.get("auto_ev", 0.0)
+                }
+                self.engine.session_photos.append(ep_dict)
+
+        # 3. Synchronize filmstrip widget
+        if hasattr(self, "filmstrip") and self.filmstrip:
+            self.filmstrip.set_photos(self.photos, active_id=active_id)
+            for p in self.photos:
+                pid = p.get("id")
+                if pid:
+                    if p.get("is_dirty"):
+                        self.filmstrip.set_photo_dirty(pid, True)
+                    if p.get("crop"):
+                        self.filmstrip.set_photo_crop(pid, p["crop"])
+
+        # 4. Restore session flags & title
+        self._session_is_dirty = state.get("session_is_dirty", True)
+        if state.get("session_path") is not None:
+            self._current_session_path = state.get("session_path")
+        self._update_window_title()
+
+        # 5. Restore canvas visibility & activate target photo
+        if hasattr(self, "canvas") and self.canvas:
+            self.canvas.set_has_library_photos(True)
+        if hasattr(self, "btn_title_export"):
+            self.btn_title_export.setVisible(True)
+
+        target_id = active_id if (active_id and any(p.get("id") == active_id for p in self.photos)) else (self.photos[0]["id"] if self.photos else None)
+        if target_id:
+            self.on_switch_photo(target_id, force=True)
+
+        self._update_menu_actions_state()
+
+    def _apply_rating_history_state(self, state: dict):
+        """Restores photo rating state across one or multiple photos."""
+        ratings = state.get("ratings", {})
+        if not ratings:
+            return
+        for pid, r in ratings.items():
+            p = next((x for x in self.photos if x and x.get("id") == pid), None)
+            if p:
+                p["rating"] = r
+            if hasattr(self, 'filmstrip'):
+                self.filmstrip.set_photo_rating(pid, r)
+            if pid == self.active_photo_id and hasattr(self, 'canvas_rating'):
+                self.canvas_rating.set_rating(r)
+        self._session_is_dirty = True
+        self._update_window_title()
+        self._save_auto_temp_session()
+        self._update_menu_actions_state()
 
     def _init_histogram_widget(self):
         pass
@@ -6941,8 +7405,8 @@ class DarkroomMainWindow(QMainWindow):
         if push_undo:
             self.push_undo_state()
             self._save_current_photo_sdc()
-            film_desc = "无" if stock_id == "none" else f"胶卷 ({stock_id})"
-            self.set_app_status(f"已选用: {film_desc}", timeout_ms=2500)
+            film_desc = "无" if stock_id == "none" else f"{stock_id}"
+            self.set_app_status(f"胶卷: {film_desc}", timeout_ms=2500)
 
     def on_switch_print_mode(self, mode, push_undo=True):
         if mode not in ("optical", "scan"):
@@ -7023,8 +7487,8 @@ class DarkroomMainWindow(QMainWindow):
         if push_undo:
             self.push_undo_state()
             self._save_current_photo_sdc()
-            mode_desc = "数码扫描" if stock_id == "none" else f"相纸印相 ({stock_id})"
-            self.set_app_status(f"已选用: {mode_desc}", timeout_ms=2500)
+            mode_desc = "数码扫描" if stock_id == "none" else f"{stock_id}"
+            self.set_app_status(f"相纸: {mode_desc}", timeout_ms=2500)
 
     def set_view_mode(self, mode):
         self.canvas.set_view_mode(mode)
@@ -7302,6 +7766,8 @@ class DarkroomMainWindow(QMainWindow):
                     photo_entry["paper_profile"] = sdc.get("paper_profile", "none")
                     photo_entry["print_mode"] = sdc.get("print_mode", sdc.get("params", {}).get("print_mode", "optical"))
                     photo_entry["params"] = dict(sdc.get("params") or {})
+                    if "rating" not in photo_entry:
+                        photo_entry["rating"] = 0
                     if "crop" in photo_entry["params"]:
                         photo_entry["crop"] = dict(photo_entry["params"]["crop"])
                     photo_entry["is_dirty"] = True
@@ -7611,6 +8077,16 @@ class DarkroomMainWindow(QMainWindow):
         if not self.photos or len(self.photos) <= 1:
             return
 
+        pre_state = {
+            "type": "library_photos_state",
+            "action": "sort_photos",
+            "photos": [self._snapshot_photo_entry(p) for p in self.photos],
+            "active_photo_id": self.active_photo_id,
+            "session_path": self._current_session_path,
+            "session_is_dirty": getattr(self, "_session_is_dirty", False),
+        }
+        self._push_raw_state(pre_state)
+
         def _get_photo_timestamp(photo):
             if not photo:
                 return 0.0
@@ -7711,6 +8187,17 @@ class DarkroomMainWindow(QMainWindow):
         self._update_window_title()
         self.set_app_status(msg, timeout_ms=3000)
 
+        post_state = {
+            "type": "library_photos_state",
+            "action": "sort_photos",
+            "photos": [self._snapshot_photo_entry(p) for p in self.photos],
+            "active_photo_id": self.active_photo_id,
+            "session_path": self._current_session_path,
+            "session_is_dirty": getattr(self, "_session_is_dirty", False),
+        }
+        self._push_raw_state(post_state)
+        self._update_menu_actions_state()
+
     def _on_step_photo(self, delta):
         """Step previous (-1) or next (+1) photo in filmstrip with 0ms visual responsiveness."""
         if hasattr(self, 'filmstrip') and self.filmstrip:
@@ -7745,6 +8232,102 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, "filmstrip"):
                 self.filmstrip.scroll_to_end()
                 self.filmstrip.scroll_to_active()
+
+    def _on_canvas_rating_changed(self, rating: int):
+        """User clicked canvas status bar rating widget."""
+        self.action_set_active_rating(rating)
+
+    def _on_menu_filter_selected(self, filter_key: str):
+        """User toggled a filter in the View menu."""
+        if hasattr(self, 'filmstrip'):
+            self.filmstrip.set_rating_filter(filter_key)
+
+    def _on_filter_changed(self, filter_key: str):
+        """Synchronize View menu checkmark state and counts when filmstrip filter changes."""
+        if hasattr(self, 'star_filter_actions'):
+            labels_map = {}
+            if hasattr(self, "filmstrip"):
+                counts = self.filmstrip.get_filter_counts()
+                labels_map = {
+                    "all": f"全部（{counts['all']}张）",
+                    "5": f"★★★★★（{counts['5']}张）",
+                    "4": f"★★★★（{counts['4']}张）",
+                    "3": f"★★★（{counts['3']}张）",
+                    "2": f"★★（{counts['2']}张）",
+                    "1": f"★（{counts['1']}张）",
+                    "0": f"无评分（{counts['0']}张）",
+                }
+            for k, act in self.star_filter_actions.items():
+                if k in labels_map:
+                    act.setText(labels_map[k])
+                act.setChecked(k == filter_key)
+
+    def _on_filmstrip_photo_rated(self, photo_id: str, rating: int):
+        """Single photo rated directly in filmstrip item widget."""
+        self._on_filmstrip_batch_rated([photo_id], rating)
+
+    def _on_filmstrip_batch_rated(self, photo_ids: list, rating: int):
+        """Batch rate one or multiple photos and persist to .sdc sidecars."""
+        if not photo_ids or not self.photos:
+            return
+        clean_r = max(0, min(5, int(rating or 0)))
+        target_set = set(photo_ids)
+
+        old_ratings = {
+            p["id"]: int(p.get("rating", 0) or 0)
+            for p in self.photos
+            if p and p.get("id") in target_set
+        }
+        if all(r == clean_r for r in old_ratings.values()):
+            return
+
+        rating_state = {
+            "type": "photo_rating_state",
+            "action": "rate_photos",
+            "ratings": {pid: clean_r for pid in old_ratings},
+            "old_ratings": old_ratings,
+            "photo_id": self.active_photo_id,
+            "film": getattr(self, "current_film_stock", "none"),
+            "paper": getattr(self, "current_paper_stock", "none"),
+            "print_mode": getattr(self, "current_print_mode", "optical"),
+            "params": dict(self.current_params) if hasattr(self, "current_params") else {},
+        }
+        self._push_raw_state(rating_state)
+
+        for p in self.photos:
+            if p and p.get("id") in target_set:
+                p["rating"] = clean_r
+        if hasattr(self, 'filmstrip'):
+            self.filmstrip.set_photos_rating(photo_ids, clean_r)
+        if self.active_photo_id in target_set and hasattr(self, 'canvas_rating'):
+            self.canvas_rating.set_rating(clean_r)
+
+        self._session_is_dirty = True
+        self._update_window_title()
+        self._save_auto_temp_session()
+        self._update_menu_actions_state()
+
+        cnt = len(photo_ids)
+        stars_str = "★" * clean_r + "☆" * (5 - clean_r)
+        if clean_r > 0:
+            msg = f"已评为 {stars_str} {clean_r} 星 ({cnt} 张底片)" if cnt > 1 else f"底片已评为 {stars_str} {clean_r} 星"
+        else:
+            msg = f"已清除评级 ({cnt} 张底片)" if cnt > 1 else "底片已清除评级"
+        self.set_app_status(msg, timeout_ms=3000)
+
+    def action_set_active_rating(self, rating: int):
+        """Set rating for currently selected photo(s) or active photo via shortcut or UI."""
+        if not self.photos:
+            return
+        clean_r = max(0, min(5, int(rating or 0)))
+        target_ids = []
+        if hasattr(self, 'filmstrip'):
+            target_ids = self.filmstrip.get_selected_photo_ids()
+        if not target_ids and self.active_photo_id:
+            target_ids = [self.active_photo_id]
+        if not target_ids:
+            return
+        self._on_filmstrip_batch_rated(target_ids, clean_r)
 
     def grade_thumbnail_fast(self, raw_thumb, film="none", paper="none", params=None):
         """Ultra-fast (2-4ms) CPU thumbnail grading applying exposure, highlights/shadows, and 3D LUT."""
@@ -8383,6 +8966,14 @@ class DarkroomMainWindow(QMainWindow):
 
             self.active_photo_id = photo_id
             self._current_photo_path = photo["path"]
+            if "rating" not in photo:
+                photo["rating"] = 0
+            if hasattr(self, 'canvas_rating'):
+                self.canvas_rating.set_rating(photo.get("rating", 0))
+                if hasattr(self, 'view_toolbar') and hasattr(self.view_toolbar, 'set_rating_enabled'):
+                    self.view_toolbar.set_rating_enabled(True)
+                else:
+                    self.canvas_rating.setVisible(True)
             if getattr(self.filmstrip, "_active_id", None) != photo_id:
                 self.filmstrip.set_active_photo(photo_id, scroll_to_visible=True, reset_selection=True)
             self.canvas.set_has_library_photos(bool(self.photos))
@@ -8890,10 +9481,32 @@ class DarkroomMainWindow(QMainWindow):
             return
         card.set_thumbnail(pixmap)
 
-    def on_remove_photo(self, photo_id):
+    def on_remove_photo(self, photo_id, push_undo=True):
         idx = next((i for i, p in enumerate(self.photos) if p and p.get("id") == photo_id), -1)
         if idx == -1:
             return
+
+        # Synchronize current active photo state into self.photos first if dirty
+        if self.active_photo_id:
+            curr_target_p = next((x for x in self.photos if x and x.get("id") == self.active_photo_id), None)
+            if curr_target_p:
+                curr_target_p["film_profile"] = self.current_film_stock
+                curr_target_p["paper_profile"] = self.current_paper_stock
+                curr_target_p["print_mode"] = getattr(self, "current_print_mode", "optical")
+                curr_target_p["params"] = copy.deepcopy(self.current_params)
+                curr_target_p["is_dirty"] = getattr(self, "_photo_is_dirty", False)
+
+        pre_state = None
+        if push_undo:
+            pre_state = {
+                "type": "library_photos_state",
+                "action": "remove_photos",
+                "photos": [self._snapshot_photo_entry(p) for p in self.photos],
+                "active_photo_id": self.active_photo_id,
+                "session_path": self._current_session_path,
+                "session_is_dirty": getattr(self, "_session_is_dirty", False),
+            }
+            self._push_raw_state(pre_state)
 
         # Determine next photo to activate:
         # Standard professional darkroom behavior: switch to the photo immediately following the deleted one.
@@ -8912,15 +9525,49 @@ class DarkroomMainWindow(QMainWindow):
         self._update_window_title()
 
         if not self.photos:
-            self.action_clear_photos()
+            self.action_clear_photos(push_undo=False)
         else:
             self.filmstrip.remove_photo(photo_id, next_active_id=next_id)
             self.on_switch_photo(next_id)
 
-    def on_remove_multiple_photos(self, photo_ids):
+        if push_undo and pre_state:
+            post_state = {
+                "type": "library_photos_state",
+                "action": "remove_photos",
+                "photos": [self._snapshot_photo_entry(p) for p in self.photos],
+                "active_photo_id": self.active_photo_id,
+                "session_path": self._current_session_path,
+                "session_is_dirty": getattr(self, "_session_is_dirty", False),
+            }
+            self._push_raw_state(post_state)
+        self._update_menu_actions_state()
+
+    def on_remove_multiple_photos(self, photo_ids, push_undo=True):
         id_set = set(photo_ids)
         if not id_set:
             return
+
+        # Synchronize current active photo state into self.photos first if dirty
+        if self.active_photo_id:
+            curr_target_p = next((x for x in self.photos if x and x.get("id") == self.active_photo_id), None)
+            if curr_target_p:
+                curr_target_p["film_profile"] = self.current_film_stock
+                curr_target_p["paper_profile"] = self.current_paper_stock
+                curr_target_p["print_mode"] = getattr(self, "current_print_mode", "optical")
+                curr_target_p["params"] = copy.deepcopy(self.current_params)
+                curr_target_p["is_dirty"] = getattr(self, "_photo_is_dirty", False)
+
+        pre_state = None
+        if push_undo:
+            pre_state = {
+                "type": "library_photos_state",
+                "action": "remove_photos",
+                "photos": [self._snapshot_photo_entry(p) for p in self.photos],
+                "active_photo_id": self.active_photo_id,
+                "session_path": self._current_session_path,
+                "session_is_dirty": getattr(self, "_session_is_dirty", False),
+            }
+            self._push_raw_state(pre_state)
 
         # Find surviving candidate to activate following deletion:
         # 1. If currently active photo is NOT in id_set and survives, retain it as active.
@@ -8958,12 +9605,24 @@ class DarkroomMainWindow(QMainWindow):
         self._update_window_title()
 
         if not self.photos:
-            self.action_clear_photos()
+            self.action_clear_photos(push_undo=False)
         else:
             if not next_id and self.photos and self.photos[0]:
                 next_id = self.photos[0]["id"]
             self.filmstrip.remove_multiple_photos(photo_ids, next_active_id=next_id)
             self.on_switch_photo(next_id)
+
+        if push_undo and pre_state:
+            post_state = {
+                "type": "library_photos_state",
+                "action": "remove_photos",
+                "photos": [self._snapshot_photo_entry(p) for p in self.photos],
+                "active_photo_id": self.active_photo_id,
+                "session_path": self._current_session_path,
+                "session_is_dirty": getattr(self, "_session_is_dirty", False),
+            }
+            self._push_raw_state(post_state)
+        self._update_menu_actions_state()
 
     def on_delete_multiple_photos(self, photo_ids):
         """Prompt user with confirmation warning and delete selected photo files to Recycle Bin."""
@@ -9179,6 +9838,9 @@ class DarkroomMainWindow(QMainWindow):
             "photos": post_photos,
         }
         self._push_raw_state(post_state)
+        self._session_is_dirty = True
+        self._update_window_title()
+        self._save_auto_temp_session()
 
         if active_cleared and len(id_set) == 1:
             self.set_app_status("已清除暗房配置并重置为原生底片", timeout_ms=3000)
@@ -9394,10 +10056,32 @@ class DarkroomMainWindow(QMainWindow):
         msg = "已清除裁切" if count == 1 else f"已清除 {count} 项底片裁切"
         self.set_app_status(msg, timeout_ms=1500)
 
-    def action_clear_photos(self):
+    def action_clear_photos(self, push_undo=True):
         """Completely flush bottom filmstrip, engine session, and canvas without exiting to start screen."""
         self._cancel_active_import(notify_user=False)
         self._photo_id_counter = 0
+
+        pre_state = None
+        if push_undo and self.photos:
+            if self.active_photo_id:
+                curr_target_p = next((x for x in self.photos if x and x.get("id") == self.active_photo_id), None)
+                if curr_target_p:
+                    curr_target_p["film_profile"] = self.current_film_stock
+                    curr_target_p["paper_profile"] = self.current_paper_stock
+                    curr_target_p["print_mode"] = getattr(self, "current_print_mode", "optical")
+                    curr_target_p["params"] = copy.deepcopy(self.current_params)
+                    curr_target_p["is_dirty"] = getattr(self, "_photo_is_dirty", False)
+
+            pre_state = {
+                "type": "library_photos_state",
+                "action": "clear_photos",
+                "photos": [self._snapshot_photo_entry(p) for p in self.photos],
+                "active_photo_id": self.active_photo_id,
+                "session_path": self._current_session_path,
+                "session_is_dirty": getattr(self, "_session_is_dirty", False),
+            }
+            self._push_raw_state(pre_state)
+
         if self._photo_is_dirty and self._current_photo_path:
             sdc_manager.save_sdc(
                 self._current_photo_path,
@@ -9430,6 +10114,12 @@ class DarkroomMainWindow(QMainWindow):
         self.canvas.set_has_library_photos(False)
         self.canvas.set_image(None)
         self.filmstrip.set_photos([], None)
+        if hasattr(self, 'canvas_rating'):
+            if hasattr(self, 'view_toolbar') and hasattr(self.view_toolbar, 'set_rating_enabled'):
+                self.view_toolbar.set_rating_enabled(False)
+            else:
+                self.canvas_rating.setVisible(False)
+            self.canvas_rating.set_rating(0)
 
         self.btn_title_export.setVisible(False)
         self._update_window_title()
@@ -9451,6 +10141,18 @@ class DarkroomMainWindow(QMainWindow):
         self.restore_default_status()
         import gc
         gc.collect()
+
+        if push_undo and pre_state:
+            post_state = {
+                "type": "library_photos_state",
+                "action": "clear_photos",
+                "photos": [],
+                "active_photo_id": None,
+                "session_path": self._current_session_path,
+                "session_is_dirty": getattr(self, "_session_is_dirty", False),
+            }
+            self._push_raw_state(post_state)
+        self._update_menu_actions_state()
 
     def action_export_image(self):
         # 1. Check filmstrip multi-selection

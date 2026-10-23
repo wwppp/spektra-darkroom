@@ -1,12 +1,16 @@
 """Sidecar Configuration (.sdc) Manager for SpektraDarkroom
-Saves and loads non-destructive editing parameters, film profiles, and paper profiles
-alongside original image files.
+Saves and loads non-destructive editing parameters, film profiles, paper profiles,
+and cached thumbnails alongside original image files.
+Star ratings belong exclusively to project session files (.sdss).
 """
 
 import os
 import json
 import logging
 from datetime import datetime
+import base64
+import numpy as np
+import cv2
 
 logger = logging.getLogger("SpektraDarkroom.SDC")
 
@@ -45,14 +49,10 @@ def delete_sdc(image_path: str) -> bool:
 remove_sdc = delete_sdc
 
 
-import base64
-import numpy as np
-import cv2
-
-
 def load_sdc(image_path: str) -> dict | None:
     """Load sidecar editing configuration if it exists.
     Returns dict with keys 'film_profile', 'paper_profile', 'params', and optional 'thumbnail_rgb'.
+    Note: Ratings belong exclusively to session files (.sdss) and are never loaded from .sdc sidecars.
     """
     sdc_path = get_sdc_path(image_path)
     if not sdc_path or not os.path.isfile(sdc_path):
@@ -61,6 +61,8 @@ def load_sdc(image_path: str) -> dict | None:
     try:
         with open(sdc_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+            # Guarantee rating is never loaded from SDC
+            data.pop("rating", None)
             # Restore cached thumbnail if present
             if "thumbnail_b64" in data:
                 try:
@@ -77,22 +79,32 @@ def load_sdc(image_path: str) -> dict | None:
         return None
 
 
-def save_sdc(image_path: str, film_profile: str, paper_profile: str, params: dict, thumbnail_rgb: np.ndarray = None, print_mode: str = None) -> bool:
-    """Save sidecar editing configuration next to the image file, optionally caching thumbnail."""
+def save_sdc(
+    image_path: str,
+    film_profile: str,
+    paper_profile: str,
+    params: dict,
+    thumbnail_rgb: np.ndarray = None,
+    print_mode: str = None,
+    rating: int = None
+) -> bool:
+    """Save sidecar editing configuration next to the image file, optionally caching thumbnail.
+    Note: Star ratings belong exclusively to session files (.sdss) and are never written to .sdc sidecars.
+    """
     sdc_path = get_sdc_path(image_path)
     if not sdc_path:
         return False
 
     try:
         resolved_pm = print_mode
+        existing = load_sdc(image_path)
         if not resolved_pm and params and isinstance(params, dict):
             resolved_pm = params.get("print_mode")
+        if not resolved_pm and existing and existing.get("print_mode"):
+            resolved_pm = existing.get("print_mode")
         if not resolved_pm:
-            existing = load_sdc(image_path)
-            if existing and existing.get("print_mode"):
-                resolved_pm = existing.get("print_mode")
-        if not resolved_pm:
-            resolved_pm = "optical" 
+            resolved_pm = "optical"
+
         data = {
             "format": "SpektraDarkroom Sidecar",
             "version": "1.0",
@@ -126,3 +138,10 @@ def save_sdc(image_path: str, film_profile: str, paper_profile: str, params: dic
     except Exception as e:
         logger.warning(f"Failed to write SDC sidecar {sdc_path}: {e}")
         return False
+
+
+def update_sdc_rating(image_path: str, rating: int) -> bool:
+    """Deprecated: Star ratings belong exclusively to session files (.sdss).
+    Kept as a safe no-op for backward compatibility.
+    """
+    return True

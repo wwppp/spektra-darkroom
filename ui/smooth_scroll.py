@@ -52,8 +52,14 @@ class SmoothScrollArea(QScrollArea):
         # Connect scrollbar signals to maintain sync with manual interactions
         v_bar = self.verticalScrollBar()
         h_bar = self.horizontalScrollBar()
+        if v_bar:
+            v_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        if h_bar:
+            h_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         v_bar.valueChanged.connect(self._on_scroll_value_changed)
         h_bar.valueChanged.connect(self._on_scroll_value_changed)
+        v_bar.rangeChanged.connect(lambda min_val, max_val: self._sync_overlay())
+        h_bar.rangeChanged.connect(lambda min_val, max_val: self._sync_overlay())
         v_bar.sliderPressed.connect(self._stop_physics)
         h_bar.sliderPressed.connect(self._stop_physics)
 
@@ -458,16 +464,24 @@ class _ScrollEdgeOverlay(QWidget):
                     painter.fillRect(QRectF(0, h - 16, w, 16), grad_bottom)
         else:
             sb = self.scroll_area.horizontalScrollBar()
+            fade_w = 26.0
+            if is_dark:
+                h_fade_col = QColor(8, 9, 13, 235)
+                h_trans_col = QColor(8, 9, 13, 0)
+            else:
+                h_fade_col = QColor(224, 228, 236, 235)
+                h_trans_col = QColor(224, 228, 236, 0)
+
             if sb.maximum() > 0:
                 if sb.value() > 0:
-                    grad_left = QLinearGradient(0, 0, 16, 0)
-                    grad_left.setColorAt(0.0, fade_col)
-                    grad_left.setColorAt(1.0, trans_col)
-                    painter.fillRect(QRectF(0, 0, 16, h), grad_left)
+                    grad_left = QLinearGradient(0, 0, fade_w, 0)
+                    grad_left.setColorAt(0.0, h_fade_col)
+                    grad_left.setColorAt(1.0, h_trans_col)
+                    painter.fillRect(QRectF(0, 0, fade_w, h), grad_left)
 
                 if sb.value() < sb.maximum():
-                    grad_right = QLinearGradient(w - 16, 0, w, 0)
-                    grad_right.setColorAt(0.0, trans_col)
-                    grad_right.setColorAt(1.0, fade_col)
-                    painter.fillRect(QRectF(w - 16, 0, 16, h), grad_right)
+                    grad_right = QLinearGradient(w - fade_w, 0, w, 0)
+                    grad_right.setColorAt(0.0, h_trans_col)
+                    grad_right.setColorAt(1.0, h_fade_col)
+                    painter.fillRect(QRectF(w - fade_w, 0, fade_w, h), grad_right)
         painter.end()

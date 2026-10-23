@@ -806,12 +806,14 @@ def save_session_file(file_path: str, session_data: dict) -> bool:
             if isinstance(item, str):
                 clean_photos.append({
                     "path": os.path.abspath(item),
-                    "filename": os.path.basename(item)
+                    "filename": os.path.basename(item),
+                    "rating": 0
                 })
             elif isinstance(item, dict) and "path" in item:
                 entry = {
                     "path": os.path.abspath(item["path"]),
-                    "filename": item.get("filename") or os.path.basename(item["path"])
+                    "filename": item.get("filename") or os.path.basename(item["path"]),
+                    "rating": max(0, min(5, int(item.get("rating", 0) or 0)))
                 }
                 if "rel_path" in item and item["rel_path"]:
                     entry["rel_path"] = item["rel_path"]
@@ -861,7 +863,8 @@ def load_session_file(file_path: str) -> dict | None:
             if isinstance(item, str):
                 norm_photos.append({
                     "path": os.path.abspath(item),
-                    "filename": os.path.basename(item)
+                    "filename": os.path.basename(item),
+                    "rating": 0
                 })
             elif isinstance(item, dict) and "path" in item:
                 photo_path = os.path.abspath(item["path"])
@@ -878,7 +881,8 @@ def load_session_file(file_path: str) -> dict | None:
                         pass
                 entry = {
                     "path": photo_path,
-                    "filename": item.get("filename") or os.path.basename(photo_path)
+                    "filename": item.get("filename") or os.path.basename(photo_path),
+                    "rating": max(0, min(5, int(item.get("rating", 0) or 0)))
                 }
                 if "rel_path" in item and item["rel_path"]:
                     entry["rel_path"] = item["rel_path"]

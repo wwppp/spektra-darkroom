@@ -5,12 +5,12 @@ Supports cascaded auto-relink by scanning a user-specified root folder.
 """
 
 import os
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QPoint
 from PySide6.QtGui import QIcon, QColor, QFont
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog,
-    QAbstractItemView, QMessageBox
+    QAbstractItemView, QMessageBox, QMenu
 )
 
 from core.path_utils import get_resource_dir, normalize_path
@@ -24,11 +24,12 @@ class RelinkMediaDialog(QDialog):
     STATUS_OFFLINE = 0
     STATUS_RELINKED = 1
     STATUS_CANCEL = 2
+    STATUS_REMOVE_OFFLINE = 3
 
     def __init__(self, missing_entries, total_photos_count=0, parent=None):
         super().__init__(parent)
         self.setWindowTitle("底片脱机 — 重新关联媒体文件")
-        self.setFixedSize(700, 480)
+        self.setFixedSize(740, 480)
         self.setModal(True)
 
         icon_path = os.path.join(get_resource_dir(), "app_icon.png")
@@ -38,6 +39,7 @@ class RelinkMediaDialog(QDialog):
         self.missing_entries = missing_entries  # list of dicts: {"filename": ..., "orig_path": ..., "resolved_path": None}
         self.total_count = total_photos_count or len(missing_entries)
         self.relinked_mapping = {}  # {orig_path: new_path}
+        self._individually_removed_paths = set()
         self.action_result = self.STATUS_CANCEL
 
         self._init_ui()
@@ -100,6 +102,8 @@ class RelinkMediaDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(False)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_context_menu)
 
         h_header = self.table.horizontalHeader()
         h_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
@@ -175,6 +179,49 @@ class RelinkMediaDialog(QDialog):
             """)
         self.btn_offline.clicked.connect(self._on_keep_offline)
         btn_row.addWidget(self.btn_offline)
+
+        self.btn_remove = QPushButton("移除脱机底片")
+        self.btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        if is_dark:
+            self.btn_remove.setStyleSheet("""
+                QPushButton {
+                    background: #231b20;
+                    color: #f87171;
+                    border: 1px solid #7f1d1d;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background: #7f1d1d;
+                    color: #ffffff;
+                }
+                QPushButton:pressed {
+                    background: #991b1b;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.btn_remove.setStyleSheet("""
+                QPushButton {
+                    background: #fef2f2;
+                    color: #dc2626;
+                    border: 1px solid #fca5a5;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background: #fee2e2;
+                    color: #b91c1c;
+                }
+                QPushButton:pressed {
+                    background: #fecaca;
+                    color: #991b1b;
+                }
+            """)
+        self.btn_remove.clicked.connect(self._on_remove_offline)
+        btn_row.addWidget(self.btn_remove)
 
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -370,6 +417,36 @@ class RelinkMediaDialog(QDialog):
     def _on_keep_offline(self):
         self.action_result = self.STATUS_OFFLINE
         self.accept()
+
+    def _on_remove_offline(self):
+        self.action_result = self.STATUS_REMOVE_OFFLINE
+        self.accept()
+
+    def _on_table_context_menu(self, pos: QPoint):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        if 0 <= row < len(self.missing_entries):
+            entry = self.missing_entries[row]
+            fn = entry.get("filename", "底片")
+            menu = QMenu(self)
+            act_remove = menu.addAction(f"从会话中移除「{fn}」")
+            action = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if action == act_remove:
+                removed_entry = self.missing_entries.pop(row)
+                if not hasattr(self, "_individually_removed_paths"):
+                    self._individually_removed_paths = set()
+                if removed_entry.get("orig_path"):
+                    self._individually_removed_paths.add(removed_entry.get("orig_path"))
+                self._populate_table()
+                if not self.missing_entries:
+                    self.action_result = self.STATUS_REMOVE_OFFLINE
+                    self.accept()
+
+    def get_removed_orig_paths(self):
+        """Returns set of original paths that the user explicitly removed individually."""
+        return getattr(self, "_individually_removed_paths", set())
 
     def get_relinked_mapping(self):
         """Returns dict of {orig_path: new_path} for all successfully relinked photos."""

@@ -1,7 +1,7 @@
 import os
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QRectF, QPoint, QEvent, QTimer
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QFontMetrics, QKeySequence, QIcon, QLinearGradient, QCursor
+from PySide6.QtCore import Qt, Signal, QRect, QRectF, QPoint, QEvent, QTimer, QVariantAnimation, QEasingCurve
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QFont, QFontMetrics, QKeySequence, QIcon, QLinearGradient, QCursor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QScrollArea, QFrame,
     QMenu, QDialog, QTextEdit, QSizePolicy
@@ -179,6 +179,7 @@ class FilmstripItemWidget(QFrame):
     clicked = Signal(str, object)  # photo_id, mouse event for modifier keys
     removeRequested = Signal(str)
     contextMenuRequested = Signal(str, QPoint)
+    ratingChanged = Signal(str, int)  # photo_id, rating
 
     def __init__(self, photo_data, is_active=False, is_selected=False, parent=None):
         super().__init__(parent)
@@ -189,10 +190,13 @@ class FilmstripItemWidget(QFrame):
         self.is_active = is_active
         self.is_selected = is_selected
         self.photo_data = photo_data
+        self.rating = int(photo_data.get("rating", 0) or 0)
 
         self.setFixedSize(76, 82)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_tooltip()
+        self._apply_theme_style()
+        theme_manager.themeChanged.connect(self._apply_theme_style)
 
         self._base_pixmap = None
         self._pixmap = None
@@ -276,17 +280,29 @@ class FilmstripItemWidget(QFrame):
             self.is_selected = is_selected
             self.update()
 
+    def set_rating(self, rating: int):
+        clean_r = max(0, min(5, int(rating or 0)))
+        if self.rating != clean_r:
+            self.rating = clean_r
+            self.photo_data["rating"] = clean_r
+            self.update()
+
     def update_photo_data(self, photo_data):
         """Update photo metadata and ensure tooltip is synchronized."""
         if not photo_data:
             return
         self.photo_data = photo_data
+        if "rating" in photo_data:
+            self.rating = int(photo_data.get("rating", 0) or 0)
         if photo_data.get("filename"):
             self.filename = photo_data["filename"]
         if photo_data.get("path"):
             from core.path_utils import normalize_path
             self.file_path = normalize_path(photo_data["path"])
         self.update_tooltip()
+
+    def _apply_theme_style(self, _theme=None):
+        self.setStyleSheet(f"FilmstripItemWidget {{ background: transparent; border: none; }}\n{theme_manager.get_tooltip_stylesheet()}")
 
     def update_tooltip(self):
         """Dynamically build tooltip ensuring resolution is accurate and never 0 x 0."""
@@ -311,6 +327,29 @@ class FilmstripItemWidget(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            h = float(self.height())
+            can_fit_stars = (h >= 50)
+            if can_fit_stars:
+                margin_y = h * 0.14
+                thumb_rect = QRectF(4.0, margin_y, self.width() - 8.0, h - margin_y * 2.0)
+                overlay_h = max(22.0, min(28.0, h * 0.35))
+                overlay_top = thumb_rect.bottom() - overlay_h
+                fn_h = overlay_h * 0.48
+                star_row_top = overlay_top + fn_h
+                click_x = event.position().x()
+                click_y = event.position().y()
+                if overlay_top <= click_y <= thumb_rect.bottom():
+                    start_x = thumb_rect.x() + 3.0
+                    star_w = max(7.0, min(9.0, (thumb_rect.width() - 6.0) / 5.2))
+                    star_area_end = start_x + 5.0 * star_w
+                    if star_row_top - 2.0 <= click_y <= thumb_rect.bottom() and start_x <= click_x <= star_area_end + 4.0:
+                        star_idx = int((click_x - start_x) / star_w) + 1
+                        star_idx = max(1, min(5, star_idx))
+                        new_r = 0 if star_idx == self.rating else star_idx
+                        self.set_rating(new_r)
+                        self.ratingChanged.emit(self.photo_id, new_r)
+                        event.accept()
+                        return
             self.clicked.emit(self.photo_id, event)
             event.accept()
         elif event.button() == Qt.MouseButton.RightButton:
@@ -401,20 +440,61 @@ class FilmstripItemWidget(QFrame):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(thumb_rect)
 
-        # 5. Draw Filename Overlay at the bottom of the active frame (Light translucent glass)
-        overlay_h = max(14.0, min(24.0, h * 0.20))
+        # 5. Draw Filename & Star Rating Overlay at the bottom
+        can_fit_stars = (h >= 50)
+        if can_fit_stars:
+            overlay_h = max(22.0, min(28.0, h * 0.35))
+        else:
+            overlay_h = max(13.0, min(16.0, h * 0.20))
+
         overlay_rect = QRectF(thumb_rect.x(), thumb_rect.bottom() - overlay_h, thumb_rect.width(), overlay_h)
-        painter.fillRect(overlay_rect, QColor(0, 0, 0, 85))
+        painter.fillRect(overlay_rect, QColor(0, 0, 0, 115))
 
-        painter.setPen(QPen(QColor(230, 230, 230)))
-        font = painter.font()
-        font_size = max(7, min(10, int(round(h * 0.09))))
-        font.setPointSize(font_size)
-        painter.setFont(font)
+        if can_fit_stars:
+            # Row 1: Filename (slightly smaller font, left-aligned with 3px margin)
+            font = painter.font()
+            fn_font_size = max(6.5, min(7.5, h * 0.085))
+            font.setPointSizeF(fn_font_size)
+            painter.setFont(font)
+            fm = QFontMetrics(font)
 
-        fm = QFontMetrics(font)
-        elided = fm.elidedText(self.filename, Qt.TextElideMode.ElideMiddle, int(overlay_rect.width() - 4))
-        painter.drawText(overlay_rect, Qt.AlignmentFlag.AlignCenter, elided)
+            painter.setPen(QPen(QColor(230, 230, 230)))
+            fn_h = overlay_h * 0.48
+            fn_rect = QRectF(overlay_rect.x() + 3.0, overlay_rect.top() + 1.0, overlay_rect.width() - 6.0, fn_h)
+            elided = fm.elidedText(self.filename, Qt.TextElideMode.ElideMiddle, int(fn_rect.width()))
+            painter.drawText(fn_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
+
+            # Row 2: 5 Stars (Left-aligned with filename)
+            star_font = QFont("Segoe UI Symbol")
+            star_font.setStyleHint(QFont.StyleHint.SansSerif)
+            star_font.setPointSizeF(max(6.5, min(8.0, h * 0.09)))
+            painter.setFont(star_font)
+
+            star_w = max(7.0, min(9.0, (overlay_rect.width() - 6.0) / 5.2))
+            start_x = overlay_rect.x() + 3.0
+            star_y = overlay_rect.top() + fn_h
+            star_h = overlay_rect.bottom() - star_y
+            active_col = QColor("#f59e0b")
+            empty_col = QColor(100, 110, 125, 170) if is_dark else QColor(148, 163, 184, 190)
+
+            for i in range(5):
+                s_rect = QRectF(start_x + i * star_w, star_y, star_w, star_h)
+                if i < self.rating:
+                    painter.setPen(active_col)
+                else:
+                    painter.setPen(empty_col)
+                painter.drawText(s_rect, Qt.AlignmentFlag.AlignCenter, "★")
+        else:
+            # Compact mode (h < 50): single line filename only (stars automatically hidden)
+            font = painter.font()
+            font_size = max(7, min(9, int(round(h * 0.09))))
+            font.setPointSize(font_size)
+            painter.setFont(font)
+            fm = QFontMetrics(font)
+
+            painter.setPen(QPen(QColor(230, 230, 230)))
+            elided = fm.elidedText(self.filename, Qt.TextElideMode.ElideMiddle, int(overlay_rect.width() - 4))
+            painter.drawText(overlay_rect, Qt.AlignmentFlag.AlignCenter, elided)
 
         # 6. Draw Edited/Modified indicator badge (Item 1)
         if self.photo_data.get("is_dirty") or self.photo_data.get("is_edited"):
@@ -509,16 +589,18 @@ class FilmstripItemWidget(QFrame):
 class FilmTrackContainer(QFrame):
     """Concave physical film groove / guide-rail channel with rounded corners.
     Renders an authentic darkroom recessed track (长条凹形胶片条槽路) with subtle 3D sunken depth.
+    Uses WA_TranslucentBackground so 4 outer corners are 100% transparent without rectangular artifacts.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent; border: none;")
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = float(self.width()), float(self.height())
-        r = 8.0
+        r = 6.0
 
         is_dark = theme_manager.is_dark()
         if is_dark:
@@ -580,6 +662,9 @@ class FilmstripWidget(QWidget):
     stepPhotoRequested = Signal(int)
     navigateFirstRequested = Signal()
     navigateLastRequested = Signal()
+    photoRated = Signal(str, int)  # photo_id, rating
+    batchPhotoRated = Signal(list, int)  # photo_ids, rating
+    filterChanged = Signal(str)  # filter_key
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -591,6 +676,7 @@ class FilmstripWidget(QWidget):
         self._active_id = None
         self._selection_anchor_id = None
         self._selected_ids = set()
+        self._rating_filter = "all"
         self._can_paste_params = False
         self._pending_scroll_timers = []
         self._select_debounce_timer = QTimer(self)
@@ -662,6 +748,172 @@ class FilmstripWidget(QWidget):
         """Update whether clipboard contains a valid darkroom recipe."""
         self._can_paste_params = bool(can_paste)
 
+
+    def _matches_filter(self, rating: int, filter_key: str) -> bool:
+        if filter_key == "all":
+            return True
+        r = int(rating or 0)
+        if filter_key in ("5", "4", "3", "2", "1", "0"):
+            return r == int(filter_key)
+        if filter_key.endswith("+"):
+            return r == int(filter_key[:-1])
+        return True
+
+    def set_rating_filter(self, filter_key: str):
+        self._rating_filter = filter_key
+        labels_map = {
+            "all": "★ 全部 ▾",
+            "5": "★ 5星 ▾",
+            "4": "★ 4星 ▾",
+            "3": "★ 3星 ▾",
+            "2": "★ 2星 ▾",
+            "1": "★ 1星 ▾",
+            "0": "★ 无评分 ▾"
+        }
+        if hasattr(self, 'filter_btn'):
+            self.filter_btn.setText(labels_map.get(filter_key, "★ 筛选 ▾"))
+            self.apply_theme()
+
+        visible_pids = []
+        for p in self._photos_list:
+            pid = p.get("id")
+            r = int(p.get("rating", 0) or 0)
+            matches = self._matches_filter(r, filter_key)
+            if pid in self._item_widgets:
+                self._item_widgets[pid].setVisible(matches)
+            if matches:
+                visible_pids.append(pid)
+
+        total = len(self._photos_list)
+        if hasattr(self, 'count_label'):
+            if filter_key == "all":
+                self.count_label.setText(f"{total} 张")
+            else:
+                self.count_label.setText(f"{len(visible_pids)}/{total} 张")
+
+        # If current active photo is hidden by filter, auto switch to first visible photo
+        if self._active_id not in visible_pids and visible_pids:
+            self.set_active_photo(visible_pids[0], reset_selection=True)
+            self.photoSelected.emit(visible_pids[0])
+
+        self.filterChanged.emit(filter_key)
+
+    def set_photo_rating(self, photo_id: str, rating: int):
+        clean_r = max(0, min(5, int(rating or 0)))
+        for p in self._photos_list:
+            if p.get("id") == photo_id:
+                p["rating"] = clean_r
+                break
+        if photo_id in self._item_widgets:
+            self._item_widgets[photo_id].set_rating(clean_r)
+            matches = self._matches_filter(clean_r, self._rating_filter)
+            self._item_widgets[photo_id].setVisible(matches)
+
+        total = len(self._photos_list)
+        if self._rating_filter == "all":
+            self.count_label.setText(f"{total} 张")
+        else:
+            visible_cnt = sum(1 for p in self._photos_list if self._matches_filter(p.get("rating", 0), self._rating_filter))
+            self.count_label.setText(f"{visible_cnt}/{total} 张")
+
+    def set_photos_rating(self, photo_ids: list, rating: int):
+        clean_r = max(0, min(5, int(rating or 0)))
+        target_set = set(photo_ids)
+        for p in self._photos_list:
+            if p.get("id") in target_set:
+                p["rating"] = clean_r
+                pid = p["id"]
+                if pid in self._item_widgets:
+                    self._item_widgets[pid].set_rating(clean_r)
+                    self._item_widgets[pid].setVisible(self._matches_filter(clean_r, self._rating_filter))
+
+        total = len(self._photos_list)
+        if self._rating_filter == "all":
+            self.count_label.setText(f"{total} 张")
+        else:
+            visible_cnt = sum(1 for p in self._photos_list if self._matches_filter(p.get("rating", 0), self._rating_filter))
+            self.count_label.setText(f"{visible_cnt}/{total} 张")
+
+    def _on_item_rating_changed(self, photo_id: str, rating: int):
+        self.photoRated.emit(photo_id, rating)
+
+    def get_filter_counts(self) -> dict:
+        total = len(self._photos_list)
+        c5 = sum(1 for p in self._photos_list if int(p.get("rating", 0) or 0) == 5)
+        c4 = sum(1 for p in self._photos_list if int(p.get("rating", 0) or 0) == 4)
+        c3 = sum(1 for p in self._photos_list if int(p.get("rating", 0) or 0) == 3)
+        c2 = sum(1 for p in self._photos_list if int(p.get("rating", 0) or 0) == 2)
+        c1 = sum(1 for p in self._photos_list if int(p.get("rating", 0) or 0) == 1)
+        c0 = sum(1 for p in self._photos_list if int(p.get("rating", 0) or 0) == 0)
+        return {
+            "all": total,
+            "5": c5,
+            "4": c4,
+            "3": c3,
+            "2": c2,
+            "1": c1,
+            "0": c0,
+        }
+
+    def get_filter_menu_items(self) -> list:
+        counts = self.get_filter_counts()
+        return [
+            ("all", f"全部（{counts['all']}张）"),
+            ("separator", ""),
+            ("5", f"★★★★★（{counts['5']}张）"),
+            ("4", f"★★★★（{counts['4']}张）"),
+            ("3", f"★★★（{counts['3']}张）"),
+            ("2", f"★★（{counts['2']}张）"),
+            ("1", f"★（{counts['1']}张）"),
+            ("separator", ""),
+            ("0", f"无评分（{counts['0']}张）"),
+        ]
+
+    def _show_filter_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(get_darkroom_menu_style())
+        for key, text in self.get_filter_menu_items():
+            if key == "separator":
+                menu.addSeparator()
+                continue
+            act = menu.addAction(text)
+            act.setCheckable(True)
+            act.setChecked(self._rating_filter == key)
+            act.triggered.connect(lambda chk=False, k=key: self.set_rating_filter(k))
+
+        btn_global = self.filter_btn.mapToGlobal(QPoint(0, self.filter_btn.height() + 2))
+        menu.setWindowOpacity(0.0)
+        menu.popup(btn_global)
+
+        dest_geo = menu.geometry()
+        is_upward = dest_geo.bottom() <= self.filter_btn.mapToGlobal(QPoint(0, 0)).y() + 5
+        if is_upward:
+            start_geo = QRect(dest_geo.x(), dest_geo.bottom(), dest_geo.width(), 1)
+        else:
+            start_geo = QRect(dest_geo.x(), dest_geo.y(), dest_geo.width(), 1)
+
+        menu.setGeometry(start_geo)
+        anim = QVariantAnimation(menu)
+        anim.setDuration(120)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setStartValue(start_geo)
+        anim.setEndValue(dest_geo)
+
+        def _on_step(r):
+            menu.setGeometry(r)
+            prog = anim.currentTime() / max(1, anim.duration())
+            menu.setWindowOpacity(min(1.0, 0.1 + 0.9 * prog))
+
+        def _on_finish():
+            menu.setGeometry(dest_geo)
+            menu.setWindowOpacity(1.0)
+
+        anim.valueChanged.connect(_on_step)
+        anim.finished.connect(_on_finish)
+        self._filter_menu_anim = anim
+        self._active_filter_menu = menu
+        anim.start()
+
     def keyPressEvent(self, event):
         mods = event.modifiers()
         if (mods & Qt.KeyboardModifier.ControlModifier) and (mods & Qt.KeyboardModifier.ShiftModifier) and event.key() == Qt.Key.Key_I:
@@ -672,6 +924,16 @@ class FilmstripWidget(QWidget):
             self.select_all()
             event.accept()
             return
+
+        # 0-5 Star rating shortcuts
+        if not (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            if event.key() in (Qt.Key.Key_0, Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_4, Qt.Key.Key_5):
+                target_r = event.key() - Qt.Key.Key_0
+                targets = list(self._selected_ids) if self._selected_ids else ([self._active_id] if self._active_id else [])
+                if targets:
+                    self.batchPhotoRated.emit(targets, target_r)
+                    event.accept()
+                    return
 
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             if self._selected_ids:
@@ -706,25 +968,35 @@ class FilmstripWidget(QWidget):
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(10, 2, 10, 4)
-        main_layout.setSpacing(8)
-        self.setStyleSheet(f"background: #0d0e12; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
+        main_layout.setContentsMargins(8, 2, 8, 2)
+        main_layout.setSpacing(6)
+        is_dark = theme_manager.is_dark()
+        top_border = "#1c1e28" if is_dark else "#c2c8d4"
+        bg = theme_manager.color('filmstrip_bg')
+        self.setStyleSheet(f"FilmstripWidget {{ background: {bg}; border: none; border-top: 1px solid {top_border}; }}\n{theme_manager.get_tooltip_stylesheet()}")
 
         # 1. Long Concave Film Track Channel (长条凹形胶片条槽路)
         self.track_container = FilmTrackContainer(self)
         self.track_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.track_container.customContextMenuRequested.connect(self._on_blank_context_menu)
         track_layout = QVBoxLayout(self.track_container)
-        track_layout.setContentsMargins(6, 2, 6, 3)
+        track_layout.setContentsMargins(6, 0, 6, 0)
         track_layout.setSpacing(0)
 
         # Scroll area for items (Smooth non-linear scrolling within the concave track)
-        self.scroll_area = SmoothScrollArea(self.track_container, is_horizontal=True, enable_edge_fade=False)
+        self.scroll_area = SmoothScrollArea(self.track_container, is_horizontal=True, enable_edge_fade=True)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        if self.scroll_area.viewport():
+            self.scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
+            self.scroll_area.viewport().setAutoFillBackground(False)
         self.scroll_area.setStyleSheet("""
             QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea > QWidget > QWidget {
                 background: transparent;
                 border: none;
             }
@@ -761,6 +1033,7 @@ class FilmstripWidget(QWidget):
         """)
 
         self.scroll_content = QWidget()
+        self.scroll_content.setStyleSheet("background: transparent; border: none;")
         self.scroll_layout = QHBoxLayout(self.scroll_content)
         self.scroll_layout.setContentsMargins(4, 0, 4, 0)
         self.scroll_layout.setSpacing(6)
@@ -775,6 +1048,7 @@ class FilmstripWidget(QWidget):
         self.scroll_area.setWidget(self.scroll_content)
         hbar = self.scroll_area.horizontalScrollBar()
         if hbar:
+            hbar.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             hbar.sliderMoved.connect(lambda _: self._cancel_pending_scroll_timers())
         self.scroll_area.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.scroll_area.customContextMenuRequested.connect(self._on_blank_context_menu)
@@ -820,17 +1094,19 @@ class FilmstripWidget(QWidget):
         main_layout.addWidget(self.track_container, 1)
 
         # 2. Right Action Container (Upper: 胶片库 + 张数; Lower: ＋ 添加 button)
-        self.action_container = QWidget()
+        self.action_container = QWidget(self)
         self.action_container.setFixedWidth(66)
+        self.action_container.setStyleSheet("background: transparent; border: none;")
         action_layout = QVBoxLayout(self.action_container)
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.setSpacing(4)
 
         # Upper container: 胶片库 + 张数
         self.top_box = QFrame()
+        self.top_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.top_box.setStyleSheet("background: #13141a; border: 1px solid #20222a; border-radius: 6px;")
         top_layout = QVBoxLayout(self.top_box)
-        top_layout.setContentsMargins(0, 2, 0, 2)
+        top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(0)
 
         self.lbl_lib_title = QLabel("胶片库")
@@ -840,11 +1116,20 @@ class FilmstripWidget(QWidget):
 
         self.count_label = QLabel("0 张")
         self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.count_label.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
+        self.count_label.setStyleSheet("color: #f59e0b; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
         top_layout.addWidget(self.count_label, 1)
         action_layout.addWidget(self.top_box, 1)
 
-        # Lower container: ＋ 添加 按钮全部铺满
+        # Middle container: ★ 筛选 按钮 (位于张数与添加按钮之间，三等分高度)
+        self.filter_btn = QPushButton("★ 全部 ▾")
+        self.filter_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.filter_btn.setToolTip("按底片星标评级筛选")
+        self.filter_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.filter_btn.clicked.connect(self._show_filter_menu)
+        action_layout.addWidget(self.filter_btn, 1)
+
+        # Lower container: ＋ 添加 按钮全部铺满 (三等分高度)
         self.add_btn = QPushButton("＋ 添加")
         self.add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -859,50 +1144,120 @@ class FilmstripWidget(QWidget):
     def apply_theme(self):
         """Re-render filmstrip and track colors to match active UI theme (light / dark)."""
         is_dark = theme_manager.is_dark()
+        top_border = "#1c1e28" if is_dark else "#c2c8d4"
+        bg = theme_manager.color('filmstrip_bg')
+        tt_ss = theme_manager.get_tooltip_stylesheet()
+        self.setStyleSheet(f"FilmstripWidget {{ background: {bg}; border: none; border-top: 1px solid {top_border}; }}\n{tt_ss}")
+        if hasattr(self, "track_container") and self.track_container:
+            self.track_container.setStyleSheet(f"background: transparent; border: none;\n{tt_ss}")
+            self.track_container.update()
+        if hasattr(self, "action_container") and self.action_container:
+            self.action_container.setStyleSheet(f"background: transparent; border: none;\n{tt_ss}")
+        if hasattr(self, "scroll_area") and self.scroll_area:
+            if self.scroll_area.viewport():
+                self.scroll_area.viewport().setStyleSheet(f"background: transparent; border: none;\n{tt_ss}")
+                self.scroll_area.viewport().setAutoFillBackground(False)
+            hbar = self.scroll_area.horizontalScrollBar()
+            if hbar:
+                hbar.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        if hasattr(self, "scroll_content") and self.scroll_content:
+            self.scroll_content.setStyleSheet(f"background: transparent; border: none;\n{tt_ss}")
         if is_dark:
-            self.setStyleSheet(f"background: #0d0e12; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
-            self.scroll_area.setStyleSheet("""
-                QScrollArea {
+            self.scroll_area.setStyleSheet(f"""
+                QScrollArea {{
                     background: transparent;
                     border: none;
-                }
-                QScrollBar:horizontal {
+                }}
+                QScrollArea > QWidget > QWidget {{
+                    background: transparent;
+                    border: none;
+                }}
+                QScrollBar:horizontal {{
                     background: transparent;
                     height: 6px;
                     margin: 0px;
                     border: none;
-                }
-                QScrollBar::handle:horizontal {
+                }}
+                QScrollBar::handle:horizontal {{
                     background: #3f4350;
                     min-width: 24px;
                     border-radius: 3px;
                     border: none;
-                }
-                QScrollBar::handle:horizontal:hover {
+                }}
+                QScrollBar::handle:horizontal:hover {{
                     background: #cbd5e1;
                     border-radius: 3px;
-                }
-                QScrollBar::handle:horizontal:pressed {
+                }}
+                QScrollBar::handle:horizontal:pressed {{
                     background: #f59e0b;
                     border-radius: 3px;
-                }
-                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                     height: 0px;
                     width: 0px;
                     background: none;
                     border: none;
-                }
-                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                }}
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
                     background: none;
                     border: none;
-                }
+                }}
+                {tt_ss}
             """)
             if hasattr(self, "top_box"):
                 self.top_box.setStyleSheet("background: #13141a; border: 1px solid #20222a; border-radius: 6px;")
             if hasattr(self, "lbl_lib_title"):
                 self.lbl_lib_title.setStyleSheet("color: #71717a; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
             if hasattr(self, "count_label"):
-                self.count_label.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
+                self.count_label.setStyleSheet("color: #f59e0b; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
+            if hasattr(self, "filter_btn"):
+                if self._rating_filter == "all":
+                    self.filter_btn.setStyleSheet("""
+                        QPushButton {
+                            background: #15161c;
+                            color: #cbd5e1;
+                            border: 1px solid #282a36;
+                            border-radius: 6px;
+                            font-size: 10px;
+                            font-weight: 500;
+                            padding: 0px;
+                            margin: 0px;
+                            outline: none;
+                        }
+                        QPushButton:hover {
+                            background: #232532;
+                            border-color: #f59e0b;
+                            color: #ffffff;
+                        }
+                        QPushButton:pressed {
+                            background: #121317;
+                            color: #d97706;
+                            border: 1px solid #d97706;
+                        }
+                    """)
+                else:
+                    self.filter_btn.setStyleSheet("""
+                        QPushButton {
+                            background: #241d11;
+                            color: #f59e0b;
+                            border: 1px solid #f59e0b;
+                            border-radius: 6px;
+                            font-size: 10px;
+                            font-weight: bold;
+                            padding: 0px;
+                            margin: 0px;
+                            outline: none;
+                        }
+                        QPushButton:hover {
+                            background: #332714;
+                            color: #fbbf24;
+                        }
+                        QPushButton:pressed {
+                            background: #18130a;
+                            color: #d97706;
+                            border: 1px solid #d97706;
+                        }
+                    """)
             if hasattr(self, "add_btn"):
                 self.add_btn.setStyleSheet("""
                     QPushButton {
@@ -932,49 +1287,100 @@ class FilmstripWidget(QWidget):
                     }
                 """)
         else:
-            self.setStyleSheet(f"background: #e0e3ea; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
-            self.scroll_area.setStyleSheet("""
-                QScrollArea {
+            self.scroll_area.setStyleSheet(f"""
+                QScrollArea {{
                     background: transparent;
                     border: none;
-                }
-                QScrollBar:horizontal {
+                }}
+                QScrollArea > QWidget > QWidget {{
+                    background: transparent;
+                    border: none;
+                }}
+                QScrollBar:horizontal {{
                     background: transparent;
                     height: 6px;
                     margin: 0px;
                     border: none;
-                }
-                QScrollBar::handle:horizontal {
+                }}
+                QScrollBar::handle:horizontal {{
                     background: #94a3b8;
                     min-width: 24px;
                     border-radius: 3px;
                     border: none;
-                }
-                QScrollBar::handle:horizontal:hover {
+                }}
+                QScrollBar::handle:horizontal:hover {{
                     background: #64748b;
                     border-radius: 3px;
-                }
-                QScrollBar::handle:horizontal:pressed {
+                }}
+                QScrollBar::handle:horizontal:pressed {{
                     background: #f59e0b;
                     border-radius: 3px;
-                }
-                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                     height: 0px;
                     width: 0px;
                     background: none;
                     border: none;
-                }
-                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                }}
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
                     background: none;
                     border: none;
-                }
+                }}
+                {tt_ss}
             """)
             if hasattr(self, "top_box"):
                 self.top_box.setStyleSheet("background: #ffffff; border: 1px solid #d5d9e4; border-radius: 6px;")
             if hasattr(self, "lbl_lib_title"):
                 self.lbl_lib_title.setStyleSheet("color: #64748b; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
             if hasattr(self, "count_label"):
-                self.count_label.setStyleSheet("color: #d97706; font-size: 11px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
+                self.count_label.setStyleSheet("color: #d97706; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
+            if hasattr(self, "filter_btn"):
+                if self._rating_filter == "all":
+                    self.filter_btn.setStyleSheet("""
+                        QPushButton {
+                            background: #ffffff;
+                            color: #334155;
+                            border: 1px solid #d5d9e4;
+                            border-radius: 6px;
+                            font-size: 10px;
+                            font-weight: 500;
+                            padding: 0px;
+                            margin: 0px;
+                            outline: none;
+                        }
+                        QPushButton:hover {
+                            background: #f8fafc;
+                            color: #0f172a;
+                            border-color: #d97706;
+                        }
+                        QPushButton:pressed {
+                            background: #e2e8f0;
+                            color: #0f172a;
+                            border: 1px solid #d97706;
+                        }
+                    """)
+                else:
+                    self.filter_btn.setStyleSheet("""
+                        QPushButton {
+                            background: #fef3c7;
+                            color: #d97706;
+                            border: 1px solid #d97706;
+                            border-radius: 6px;
+                            font-size: 10px;
+                            font-weight: bold;
+                            padding: 0px;
+                            margin: 0px;
+                            outline: none;
+                        }
+                        QPushButton:hover {
+                            background: #fde68a;
+                        }
+                        QPushButton:pressed {
+                            background: #fcd34d;
+                            color: #92400e;
+                            border: 1px solid #d97706;
+                        }
+                    """)
             if hasattr(self, "add_btn"):
                 self.add_btn.setStyleSheet("""
                     QPushButton {
@@ -1006,6 +1412,8 @@ class FilmstripWidget(QWidget):
         if hasattr(self, "track_container"):
             self.track_container.update()
         for w in self._item_widgets.values():
+            if hasattr(w, "_apply_theme_style"):
+                w._apply_theme_style()
             w.update()
         self.update()
 
@@ -1042,11 +1450,10 @@ class FilmstripWidget(QWidget):
 
     def _compute_item_dimensions(self):
         """Computes (item_w, item_h) leaving comfortable vertical padding
-        inside the concave film track so selection border doesn't touch the groove rims
-        and horizontal scrollbar doesn't obscure sprocket holes.
+        inside the concave film track matching horizontal ends padding (10px).
         """
         avail_h = self.height()
-        item_h = max(48, min(240, avail_h - 34))
+        item_h = max(48, min(240, avail_h - 24))
         item_w = int(round(item_h * 0.92))
         return item_w, item_h
 
@@ -1195,9 +1602,14 @@ class FilmstripWidget(QWidget):
             item.clicked.connect(self._on_item_clicked)
             item.removeRequested.connect(self.photoRemoved.emit)
             item.contextMenuRequested.connect(self._show_context_menu)
+            item.ratingChanged.connect(self._on_item_rating_changed)
             self._item_widgets[pid] = item
             self.scroll_layout.insertWidget(idx, item, 0, Qt.AlignmentFlag.AlignVCenter)
         self.selectionChanged.emit(list(self._selected_ids))
+
+        # Apply active rating filter
+        if self._rating_filter != "all":
+            self.set_rating_filter(self._rating_filter)
 
         # Auto-scroll to active photo upon initial population with multi-phase layout calibration
         if active_id:
@@ -1229,6 +1641,8 @@ class FilmstripWidget(QWidget):
         item.clicked.connect(self._on_item_clicked)
         item.removeRequested.connect(self.photoRemoved.emit)
         item.contextMenuRequested.connect(self._show_context_menu)
+        item.ratingChanged.connect(self._on_item_rating_changed)
+        item.setVisible(self._matches_filter(photo.get("rating", 0), self._rating_filter))
         self._item_widgets[pid] = item
         idx = max(0, len(self._item_widgets) - 1)
         self.scroll_layout.insertWidget(idx, item, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -1513,6 +1927,39 @@ class FilmstripWidget(QWidget):
             act_reveal = menu.addAction("在文件资源管理器中显示")
             act_reveal.triggered.connect(lambda checked=False, p=target_path: self._reveal_in_explorer(p))
 
+        menu.addSeparator()
+
+        # Submenu: 底片评级 (Rating)
+        target_r = int(target_photo.get("rating", 0) or 0) if target_photo else 0
+        rate_menu = menu.addMenu("底片评级")
+        rate_menu.setStyleSheet(get_darkroom_menu_style())
+        for r_val, r_text in [
+            (5, "★★★★★ 5 星\t5"),
+            (4, "★★★★☆ 4 星\t4"),
+            (3, "★★★☆☆ 3 星\t3"),
+            (2, "★★☆☆☆ 2 星\t2"),
+            (1, "★☆☆☆☆ 1 星\t1"),
+            (0, "清除评级\t0"),
+        ]:
+            act_r = rate_menu.addAction(r_text)
+            if r_val == target_r:
+                act_r.setIcon(get_icon("check.png") if os.path.exists(os.path.join(get_resource_dir(), "icons", "check.png")) else QIcon())
+            act_r.triggered.connect(lambda chk=False, r=r_val: self.batchPhotoRated.emit(list(self._selected_ids), r))
+
+        # Submenu: 星标筛选 (Filter)
+        filter_menu = menu.addMenu("星标筛选")
+        filter_menu.setStyleSheet(get_darkroom_menu_style())
+        for key, text in self.get_filter_menu_items():
+            if key == "separator":
+                filter_menu.addSeparator()
+                continue
+            act_f = filter_menu.addAction(text)
+            act_f.setCheckable(True)
+            act_f.setChecked(self._rating_filter == key)
+            act_f.triggered.connect(lambda chk=False, k=key: self.set_rating_filter(k))
+
+        menu.addSeparator()
+
         remove_label = "从底片库移除" if sel_count == 1 else f"从底片库移除 ({sel_count} 项)"
         act_remove = menu.addAction(remove_label)
         act_remove.setIcon(get_icon("dlg_discard.png"))
@@ -1600,6 +2047,19 @@ class FilmstripWidget(QWidget):
 
         menu.addSeparator()
 
+        # Submenu: 星标筛选
+        b_filter_menu = menu.addMenu("星标筛选")
+        b_filter_menu.setStyleSheet(get_darkroom_menu_style())
+        b_filter_menu.setEnabled(bool(self._photos_list))
+        for key, text in self.get_filter_menu_items():
+            if key == "separator":
+                b_filter_menu.addSeparator()
+                continue
+            act_bf = b_filter_menu.addAction(text)
+            act_bf.setCheckable(True)
+            act_bf.setChecked(self._rating_filter == key)
+            act_bf.triggered.connect(lambda chk=False, k=key: self.set_rating_filter(k))
+
         # Submenu: 整理底片
         sort_menu = menu.addMenu("整理底片")
         sort_menu.setStyleSheet(get_darkroom_menu_style())
@@ -1651,6 +2111,19 @@ class FilmstripWidget(QWidget):
         act_add.triggered.connect(self.addRequested.emit)
 
         menu.addSeparator()
+
+        # Submenu: 星标筛选
+        filter_menu = menu.addMenu("星标筛选")
+        filter_menu.setStyleSheet(get_darkroom_menu_style())
+        filter_menu.setEnabled(bool(self._photos_list))
+        for key, text in self.get_filter_menu_items():
+            if key == "separator":
+                filter_menu.addSeparator()
+                continue
+            act_f = filter_menu.addAction(text)
+            act_f.setCheckable(True)
+            act_f.setChecked(self._rating_filter == key)
+            act_f.triggered.connect(lambda chk=False, k=key: self.set_rating_filter(k))
 
         # Submenu: 整理底片
         sort_menu = menu.addMenu("整理底片")
