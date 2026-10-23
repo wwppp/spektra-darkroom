@@ -55,6 +55,13 @@ _CACHED_SESSION_DIR = None
 _CACHE_DIR_LOCK = threading.Lock()
 
 
+def reset_cache_dir():
+    """Resets cached session directory memoization to pick up updated configuration."""
+    global _CACHED_SESSION_DIR
+    with _CACHE_DIR_LOCK:
+        _CACHED_SESSION_DIR = None
+
+
 def get_cache_dir() -> str:
     """Returns path to the session cache folder, creating it if needed.
     Memoizes the validated path to eliminate multi-threaded filesystem race conditions.
@@ -67,38 +74,22 @@ def get_cache_dir() -> str:
         if _CACHED_SESSION_DIR is not None and os.path.isdir(_CACHED_SESSION_DIR):
             return _CACHED_SESSION_DIR
 
-        cache_path = None
+        from .path_utils import get_user_session_cache_dir
+        from . import config_manager
+        app_dir = config_manager.get_app_dir()
+        portable_marker = os.path.join(app_dir, "portable.txt")
+
+        # 1. Portable mode if marker exists
+        if os.path.exists(portable_marker):
+            cache_path = os.path.join(app_dir, ".session_cache")
+        else:
+            # 2. Standard user local cache (%LOCALAPPDATA%/SpektraDarkroom/session_cache)
+            cache_path = get_user_session_cache_dir()
+
         try:
-            from . import config_manager
-            app_dir = config_manager.get_app_dir()
-            local_cache = os.path.join(app_dir, ".session_cache")
-            os.makedirs(local_cache, exist_ok=True)
-            # Safe probe once with unique PID token to avoid multi-thread collision
-            test_p = os.path.join(local_cache, f".perm_test_{os.getpid()}")
-            with open(test_p, "w") as f:
-                f.write("1")
-            try:
-                os.remove(test_p)
-            except Exception:
-                pass
-            cache_path = local_cache
+            os.makedirs(cache_path, exist_ok=True)
         except Exception:
             pass
-
-        if not cache_path:
-            # Fallback to User AppData / Cache directory
-            if sys.platform == "win32":
-                base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA") or os.path.expanduser("~")
-                cache_dir = os.path.join(base, "SpektraDarkroom", "session_cache")
-            else:
-                base = os.getenv("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-                cache_dir = os.path.join(base, "spektra_darkroom", "session_cache")
-
-            try:
-                os.makedirs(cache_dir, exist_ok=True)
-            except Exception:
-                pass
-            cache_path = cache_dir
 
         _CACHED_SESSION_DIR = cache_path
         return _CACHED_SESSION_DIR

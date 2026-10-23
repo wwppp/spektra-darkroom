@@ -1937,14 +1937,13 @@ class DarkroomMainWindow(QMainWindow):
                 if entry and (entry.get("is_dirty") or entry.get("is_edited")):
                     self.filmstrip.set_photo_dirty(entry["id"], True)
 
-            # Activate target photo if not yet active or canvas empty
-            if target_id and (self.active_photo_id != target_id or not getattr(self.canvas, '_has_image', False)):
+            # Force activation of target photo so filmstrip, canvas, sidebar, cards, and histogram are all completely initialized
+            if target_id:
                 try:
-                    self.on_switch_photo(target_id)
+                    self.on_switch_photo(target_id, force=True)
                 except Exception as e:
-                    logger.error(f"Error activating photo on session restore: {e}")
+                    logger.error(f"Error activating photo on session restore: {e}", exc_info=True)
             else:
-                # Target photo is already active in viewport; ensure card previews and histogram are triggered
                 if hasattr(self, '_cards_debounce_timer'):
                     self._cards_debounce_timer.start(100)
                 self._schedule_histogram_update()
@@ -1954,6 +1953,13 @@ class DarkroomMainWindow(QMainWindow):
                 self.filmstrip.scroll_to_photo(target_id, animate=False, force_center=True)
                 QTimer.singleShot(60, lambda: self.filmstrip.scroll_to_photo(target_id, animate=False, force_center=True))
                 QTimer.singleShot(260, lambda: self.filmstrip.scroll_to_photo(target_id, animate=False, force_center=True))
+
+            # Trigger a post-animation polish pass once FadingStackedWidget transition reaches 100%
+            QTimer.singleShot(280, lambda: (
+                getattr(self, 'canvas', None) and self.canvas.update(),
+                self._schedule_histogram_update(),
+                self._refresh_card_previews()
+            ))
 
             self._update_window_title()
 
@@ -3736,7 +3742,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.combo_lens_profile = ComboBoxRow(
             "配置文件",
-            [("无", "")],
+            [("无", ""), ("[+ 添加配置文件 (.lcp)...]", "__import_lcp__")],
             default_val="",
             tooltip="匹配的标准镜头校正配置文件 (.lcp)"
         )
@@ -4154,6 +4160,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # 2. Edit Menu (Item 5: Simplified concise labels, 13px icons)
         edit_menu = self.menu_bar.addMenu("编辑 (E)")
+        self.edit_menu = edit_menu
         
         self.act_undo = QAction("撤销", self)
         self.act_undo.setIcon(get_icon("undo.png"))
@@ -4177,25 +4184,25 @@ class DarkroomMainWindow(QMainWindow):
 
         edit_menu.addSeparator()
 
-        act_copy_params = QAction("复制所有参数", self)
-        act_copy_params.setShortcut(QKeySequence("Ctrl+C"))
-        act_copy_params.triggered.connect(self.action_copy_params)
-        edit_menu.addAction(act_copy_params)
+        self.act_copy_params = QAction("复制所有参数", self)
+        self.act_copy_params.setShortcut(QKeySequence("Ctrl+C"))
+        self.act_copy_params.triggered.connect(self.action_copy_params)
+        edit_menu.addAction(self.act_copy_params)
 
-        act_paste_params = QAction("粘贴所有参数", self)
-        act_paste_params.setShortcut(QKeySequence("Ctrl+V"))
-        act_paste_params.triggered.connect(self.action_paste_params)
-        edit_menu.addAction(act_paste_params)
+        self.act_paste_params = QAction("粘贴所有参数", self)
+        self.act_paste_params.setShortcut(QKeySequence("Ctrl+V"))
+        self.act_paste_params.triggered.connect(self.action_paste_params)
+        edit_menu.addAction(self.act_paste_params)
 
-        act_select_all = QAction("全选底片", self)
-        act_select_all.setShortcut(QKeySequence("Ctrl+A"))
-        act_select_all.triggered.connect(self.action_select_all_photos)
-        edit_menu.addAction(act_select_all)
+        self.act_select_all = QAction("全选底片", self)
+        self.act_select_all.setShortcut(QKeySequence("Ctrl+A"))
+        self.act_select_all.triggered.connect(self.action_select_all_photos)
+        edit_menu.addAction(self.act_select_all)
 
-        act_invert_selection = QAction("反选底片", self)
-        act_invert_selection.setShortcut(QKeySequence("Ctrl+Shift+I"))
-        act_invert_selection.triggered.connect(self.action_invert_selection)
-        edit_menu.addAction(act_invert_selection)
+        self.act_invert_selection = QAction("反选底片", self)
+        self.act_invert_selection.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        self.act_invert_selection.triggered.connect(self.action_invert_selection)
+        edit_menu.addAction(self.act_invert_selection)
 
         edit_menu.addSeparator()
 
@@ -4223,8 +4230,11 @@ class DarkroomMainWindow(QMainWindow):
         self.act_prefs.triggered.connect(self.open_preferences)
         edit_menu.addAction(self.act_prefs)
 
+        edit_menu.aboutToShow.connect(self._update_menu_actions_state)
+
         # 3. View Menu
         view_menu = self.menu_bar.addMenu("视图 (V)")
+        self.view_menu = view_menu
         
         self.act_fit_img = QAction("适应图像", self)
         self.act_fit_img.setIcon(get_icon("fit_window.png"))
@@ -4248,37 +4258,153 @@ class DarkroomMainWindow(QMainWindow):
         self.act_100.triggered.connect(self.canvas.set_zoom_100)
         view_menu.addAction(self.act_100)
 
-        act_zoom_in = QAction("放大", self)
-        act_zoom_in.setShortcuts([
+        self.act_zoom_in = QAction("放大", self)
+        self.act_zoom_in.setShortcuts([
             QKeySequence.StandardKey.ZoomIn,
             QKeySequence("Ctrl+="),
             QKeySequence("Ctrl++")
         ])
-        act_zoom_in.triggered.connect(lambda: self.canvas.zoom_in(animate=True))
-        view_menu.addAction(act_zoom_in)
-        self.addAction(act_zoom_in)
+        self.act_zoom_in.triggered.connect(lambda: self.canvas.zoom_in(animate=True))
+        view_menu.addAction(self.act_zoom_in)
+        self.addAction(self.act_zoom_in)
 
-        act_zoom_out = QAction("缩小", self)
-        act_zoom_out.setShortcuts([
+        self.act_zoom_out = QAction("缩小", self)
+        self.act_zoom_out.setShortcuts([
             QKeySequence.StandardKey.ZoomOut,
             QKeySequence("Ctrl+-")
         ])
-        act_zoom_out.triggered.connect(lambda: self.canvas.zoom_out(animate=True))
-        view_menu.addAction(act_zoom_out)
-        self.addAction(act_zoom_out)
+        self.act_zoom_out.triggered.connect(lambda: self.canvas.zoom_out(animate=True))
+        view_menu.addAction(self.act_zoom_out)
+        self.addAction(self.act_zoom_out)
 
         view_menu.addSeparator()
 
-        act_reset_layout = QAction("恢复默认布局", self)
-        act_reset_layout.setShortcut(QKeySequence("Ctrl+Shift+R"))
-        act_reset_layout.triggered.connect(self.reset_default_layout)
-        view_menu.addAction(act_reset_layout)
+        self.act_reset_layout = QAction("恢复默认布局", self)
+        self.act_reset_layout.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self.act_reset_layout.triggered.connect(self.reset_default_layout)
+        view_menu.addAction(self.act_reset_layout)
+
+        view_menu.aboutToShow.connect(self._update_menu_actions_state)
+        self._update_menu_actions_state()
 
         # 4. Help Menu (Item 8: Version in About)
         help_menu = self.menu_bar.addMenu("帮助 (H)")
         act_about = QAction("关于 SpektraDarkroom", self)
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
+
+    def _update_menu_actions_state(self):
+        """Dynamically enable/disable Edit and View menu actions based on photo selection and history."""
+        is_startup = (hasattr(self, 'stack') and self.stack.currentIndex() == 0)
+        has_active_photo = bool(self._current_photo_path) and bool(self.photos) and not is_startup and bool(self.active_photo_id)
+        has_any_photos = bool(self.photos) and not is_startup
+
+        # Multi-photo / target photo modification states
+        is_edited = False
+        has_crop = False
+        has_sdc = False
+        if has_active_photo:
+            sel_ids = self.filmstrip.get_selected_photo_ids() if hasattr(self, 'filmstrip') else []
+            if not sel_ids and self.active_photo_id:
+                sel_ids = [self.active_photo_id]
+            target_photos = [p for p in self.photos if p and p.get("id") in set(sel_ids)]
+            if not target_photos and self.active_photo_id:
+                target_photos = [p for p in self.photos if p and p.get("id") == self.active_photo_id]
+
+            if getattr(self.canvas, "is_crop_editing", False):
+                overlay = getattr(self.canvas, "crop_overlay", None)
+                if overlay:
+                    has_crop = self._is_crop_modified(overlay.get_crop_dict())
+                is_edited = has_crop
+            else:
+                # 1. Check if crop is modified for any target photo
+                for p in target_photos:
+                    c = p.get("crop")
+                    if not c and isinstance(p.get("params"), dict):
+                        c = p["params"].get("crop")
+                    if not c and p.get("id") == self.active_photo_id:
+                        c = self.current_params.get("crop")
+                    if self._is_crop_modified(c):
+                        has_crop = True
+                        break
+
+                # 2. Check if any target photo is edited or dirty
+                for p in target_photos:
+                    if p.get("id") == self.active_photo_id:
+                        if getattr(self, "_photo_is_dirty", False):
+                            is_edited = True
+                            break
+                    if p.get("is_dirty") or self._is_photo_edited(p):
+                        is_edited = True
+                        break
+
+                # 3. Check if any target photo has .sdc on disk
+                from core import sdc_manager
+                for p in target_photos:
+                    p_path = p.get("path") or (self._current_photo_path if p.get("id") == self.active_photo_id else None)
+                    if p_path and sdc_manager.has_sdc(p_path):
+                        has_sdc = True
+                        break
+
+        # 1. Edit menu: Undo / Redo
+        can_undo = False
+        can_redo = False
+        if has_active_photo:
+            if getattr(self.canvas, "is_crop_editing", False):
+                overlay = getattr(self.canvas, "crop_overlay", None)
+                can_undo = bool(overlay and len(getattr(overlay, "_crop_undo_stack", [])) > 1)
+                can_redo = bool(overlay and len(getattr(overlay, "_crop_redo_stack", [])) > 0)
+            else:
+                can_undo = len(self._undo_stack) > 1
+                can_redo = len(self._redo_stack) > 0
+
+        if hasattr(self, 'act_undo'):
+            self.act_undo.setEnabled(can_undo)
+        if hasattr(self, 'act_redo'):
+            self.act_redo.setEnabled(can_redo)
+
+        # 2. Edit menu: Photo-dependent actions
+        if hasattr(self, 'act_crop'):
+            self.act_crop.setEnabled(has_active_photo)
+        # Copy params is only enabled when photo has actual edits to copy
+        if hasattr(self, 'act_copy_params'):
+            self.act_copy_params.setEnabled(has_active_photo and is_edited)
+        if hasattr(self, 'act_paste_params'):
+            has_clipboard = bool(getattr(self, "_copied_darkroom_profile", None))
+            self.act_paste_params.setEnabled(has_active_photo and has_clipboard)
+        if hasattr(self, 'act_select_all'):
+            self.act_select_all.setEnabled(has_any_photos)
+        if hasattr(self, 'act_invert_selection'):
+            self.act_invert_selection.setEnabled(has_any_photos)
+
+        if hasattr(self, 'act_reset_all'):
+            if getattr(self.canvas, "is_crop_editing", False):
+                self.act_reset_all.setEnabled(has_crop)
+            else:
+                self.act_reset_all.setEnabled(has_active_photo and is_edited)
+
+        if hasattr(self, 'act_clear_crop'):
+            self.act_clear_crop.setEnabled(has_active_photo and has_crop)
+
+        if hasattr(self, 'act_clear_sdc'):
+            self.act_clear_sdc.setEnabled(has_active_photo and (has_sdc or is_edited))
+
+        # 3. View menu: Canvas & Viewport navigation actions
+        if hasattr(self, 'act_fit_img'):
+            self.act_fit_img.setEnabled(has_active_photo)
+        # Compare mode is only enabled when photo is actually edited
+        if hasattr(self, 'act_compare'):
+            self.act_compare.setEnabled(has_active_photo and is_edited)
+        if hasattr(self, 'btn_split'):
+            self.btn_split.setEnabled(has_active_photo and is_edited)
+        if hasattr(self, 'act_fit_win'):
+            self.act_fit_win.setEnabled(has_active_photo)
+        if hasattr(self, 'act_100'):
+            self.act_100.setEnabled(has_active_photo)
+        if hasattr(self, 'act_zoom_in'):
+            self.act_zoom_in.setEnabled(has_active_photo)
+        if hasattr(self, 'act_zoom_out'):
+            self.act_zoom_out.setEnabled(has_active_photo)
 
     def reset_default_layout(self):
         """Restore all splitters to optimal default layout."""
@@ -4365,6 +4491,7 @@ class DarkroomMainWindow(QMainWindow):
             self.act_save_session_as.setEnabled(has_session)
         if hasattr(self, 'act_close_session'):
             self.act_close_session.setEnabled(has_session)
+        self._update_menu_actions_state()
 
         # Only display pure app brand on the startup welcome screen when NO session is loaded
         if not self.photos and not self._current_session_path and is_startup:
@@ -4422,6 +4549,7 @@ class DarkroomMainWindow(QMainWindow):
             if getattr(self, "_is_multi_selecting", False):
                 self._is_multi_selecting = False
                 self.restore_default_status()
+        self._update_menu_actions_state()
 
     def restore_default_status(self):
         """Restores transient status to default or clears it while preserving permanent photo info."""
@@ -5407,6 +5535,7 @@ class DarkroomMainWindow(QMainWindow):
         if len(self._undo_stack) > 50:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
+        self._update_menu_actions_state()
 
     def _push_raw_state(self, state: dict):
         """Pushes a custom state (e.g. batch operation snapshot) to the undo stack."""
@@ -5414,6 +5543,7 @@ class DarkroomMainWindow(QMainWindow):
         if len(self._undo_stack) > 50:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
+        self._update_menu_actions_state()
 
     def undo(self):
         if getattr(self.canvas, "is_crop_editing", False):
@@ -5421,6 +5551,7 @@ class DarkroomMainWindow(QMainWindow):
                 self.set_app_status("已撤销裁切操作", timeout_ms=1500)
             else:
                 self.set_app_status("已到最初裁切状态", timeout_ms=1500)
+            self._update_menu_actions_state()
             return
 
         if len(self._undo_stack) <= 1:
@@ -5441,6 +5572,7 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已撤销清除裁切", timeout_ms=2000)
         else:
             self.set_app_status("已撤销", timeout_ms=1500)
+        self._update_menu_actions_state()
 
     def redo(self):
         if getattr(self.canvas, "is_crop_editing", False):
@@ -5448,6 +5580,7 @@ class DarkroomMainWindow(QMainWindow):
                 self.set_app_status("已重做裁切操作", timeout_ms=1500)
             else:
                 self.set_app_status("已到最新裁切状态", timeout_ms=1500)
+            self._update_menu_actions_state()
             return
 
         if not self._redo_stack:
@@ -5467,6 +5600,7 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已重做清除裁切", timeout_ms=2000)
         else:
             self.set_app_status("已重做", timeout_ms=1500)
+        self._update_menu_actions_state()
 
     def _is_photo_edited(self, photo_entry=None) -> bool:
         """Determines whether the target or current active photo has been modified."""
@@ -5546,8 +5680,29 @@ class DarkroomMainWindow(QMainWindow):
         if self._is_crop_modified(params_dict.get("crop")):
             return True
 
-        # Ignore internal non-color keys
-        ignored_keys = {"print_mode", "custom_wb", "film_format_mm", "base_temp", "base_tint", "crop"}
+        # Check lens optical modifications separately
+        lens_cfg = params_dict.get("lens")
+        if isinstance(lens_cfg, dict):
+            if (
+                bool(lens_cfg.get("profile_enabled", False)) or
+                bool(lens_cfg.get("remove_ca", False)) or
+                abs(float(lens_cfg.get("profile_distortion", 0.0) or 0.0)) > 0.01 or
+                abs(float(lens_cfg.get("profile_vignette", 0.0) or 0.0)) > 0.01 or
+                abs(float(lens_cfg.get("manual_distortion", 0.0) or 0.0)) > 0.01 or
+                abs(float(lens_cfg.get("manual_vignette_amount", 0.0) or 0.0)) > 0.01 or
+                abs(float(lens_cfg.get("manual_vignette_midpoint", 0.0) or 0.0)) > 0.01 or
+                abs(float(lens_cfg.get("k1", 0.0) or 0.0)) > 0.01 or
+                abs(float(lens_cfg.get("k2", 0.0) or 0.0)) > 0.01 or
+                abs(float(lens_cfg.get("k3", 0.0) or 0.0)) > 0.01 or
+                abs(float(lens_cfg.get("vignette_amount", 0.0) or 0.0)) > 0.01
+            ):
+                return True
+
+        # Ignore internal non-color keys, lens (checked above), and viewport flags
+        ignored_keys = {
+            "print_mode", "custom_wb", "film_format_mm", "base_temp", "base_tint", "base_ev",
+            "crop", "lens", "split_x", "view_mode"
+        }
         if not params_dict.get("custom_wb", False):
             ignored_keys.add("color_temp")
             ignored_keys.add("tint")
@@ -5633,6 +5788,7 @@ class DarkroomMainWindow(QMainWindow):
             self.filmstrip.set_can_paste(True)
         film_desc = "数码原生" if film == "none" else f"胶卷 ({film})"
         self.set_app_status(f"已复制暗房配方 [{film_desc}]", timeout_ms=2000)
+        self._update_menu_actions_state()
 
     def action_paste_params(self):
         """Ctrl+V handler: Paste copied physical darkroom parameters to all selected photos."""
@@ -6657,6 +6813,7 @@ class DarkroomMainWindow(QMainWindow):
         self.canvas.start_crop_mode(cur_crop)
         if hasattr(self, 'crop_sidebar'):
             self.crop_sidebar.sync_from_overlay(self.canvas.crop_overlay.get_crop_dict())
+        self._update_menu_actions_state()
 
     def _exit_crop_workspace(self):
         if hasattr(self, 'btn_crop'):
@@ -6679,6 +6836,7 @@ class DarkroomMainWindow(QMainWindow):
         # 2. Exit canvas crop mode & refresh
         self.canvas.exit_crop_mode()
         self.canvas.update()
+        self._update_menu_actions_state()
 
     def _on_crop_live(self, crop_dict):
         self.current_params["crop"] = crop_dict
@@ -6896,6 +7054,9 @@ class DarkroomMainWindow(QMainWindow):
             self.restore_default_status()
 
     def toggle_split_view(self):
+        if not self._is_photo_edited():
+            self.set_app_status("原生未调色底片无前后对比", timeout_ms=1500)
+            return
         curr_mode = self.canvas.params.get("view_mode", 0)
         if curr_mode == 3:
             curr_mode = getattr(self, "_saved_view_mode_before_long_press", 0)
@@ -7885,7 +8046,7 @@ class DarkroomMainWindow(QMainWindow):
         self._is_updating_sliders = True
         try:
             self.combo_lens_model.set_items(model_items, default_val="")
-            self.combo_lens_profile.set_items([("无", "")], default_val="")
+            self.combo_lens_profile.set_items([("无", ""), ("[+ 添加配置文件 (.lcp)...]", "__import_lcp__")], default_val="")
         finally:
             self._is_updating_sliders = False
 
@@ -7920,6 +8081,7 @@ class DarkroomMainWindow(QMainWindow):
                 prof_items.append((p_display, p_path))
                 matching_paths.append((p_display, p_path))
 
+        prof_items.append(("[+ 添加配置文件 (.lcp)...]", "__import_lcp__"))
         self._is_updating_sliders = True
         try:
             def_path = matching_paths[0][1] if matching_paths else ""
@@ -7941,6 +8103,9 @@ class DarkroomMainWindow(QMainWindow):
     def _on_lens_profile_changed(self, profile_path):
         if getattr(self, "_is_updating_sliders", False):
             return
+        if profile_path == "__import_lcp__":
+            self._handle_import_lens_profile()
+            return
         lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
         lens_cfg["profile_path"] = profile_path
         if hasattr(self, 'combo_lens_profile') and hasattr(self.combo_lens_profile, 'combo'):
@@ -7949,6 +8114,66 @@ class DarkroomMainWindow(QMainWindow):
         self._mark_current_photo_dirty()
         self._save_current_photo_sdc()
         self.push_undo_state()
+
+    def _handle_import_lens_profile(self):
+        """Handle user selecting '[+ 添加配置文件 (.lcp)...]' in profile dropdown."""
+        lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+        prev_path = lens_cfg.get("profile_path", "")
+
+        last_d = config_manager.get_last_dialog_dir("lcp")
+        f_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择镜头校正配置文件 (.lcp)",
+            last_d,
+            "Adobe 镜头配置文件 (*.lcp);;所有文件 (*.*)"
+        )
+        if not f_path:
+            # Revert selection back to previous
+            if hasattr(self, "combo_lens_profile"):
+                self._is_updating_sliders = True
+                try:
+                    self.combo_lens_profile.set_value(prev_path)
+                finally:
+                    self._is_updating_sliders = False
+            return
+
+        config_manager.set_last_dialog_dir("lcp", f_path)
+
+        from core.lens_correction import import_user_lcp_file
+        cur_make = lens_cfg.get("make", "")
+        success, make, model_name, prof_display, dest_path = import_user_lcp_file(f_path, target_make=cur_make)
+
+        if not success:
+            self._show_warning_dialog("导入失败", f"无法导入配置文件:\n{f_path}")
+            if hasattr(self, "combo_lens_profile"):
+                self._is_updating_sliders = True
+                try:
+                    self.combo_lens_profile.set_value(prev_path)
+                finally:
+                    self._is_updating_sliders = False
+            return
+
+        lens_cfg["make"] = make
+        lens_cfg["model"] = model_name
+        lens_cfg["profile_name"] = prof_display
+        lens_cfg["profile_path"] = dest_path
+        lens_cfg["setup"] = "custom"
+        lens_cfg["enabled"] = True
+        lens_cfg["profile_enabled"] = True
+
+        if hasattr(self, "combo_lens_setup"):
+            self.combo_lens_setup.set_value("custom")
+        if hasattr(self, "chk_lens_profile_enabled"):
+            self.chk_lens_profile_enabled.setChecked(True)
+
+        self._sync_lens_combos_from_cfg(lens_cfg)
+        self._apply_lens_to_canvas()
+        self._mark_current_photo_dirty()
+        self._save_current_photo_sdc()
+        self.push_undo_state()
+
+        if hasattr(self, "statusBar") and self.statusBar():
+            self.statusBar().showMessage(f"已成功导入镜头配置文件：{prof_display}", 4000)
 
     def _on_lens_amount_changed(self, key, val):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
@@ -8023,6 +8248,7 @@ class DarkroomMainWindow(QMainWindow):
             if prof_path and prof_path not in [p for _, p in prof_items]:
                 p_display = lens_cfg.get("profile_name") or "已加载配置文件"
                 prof_items.append((p_display, prof_path))
+            prof_items.append(("[+ 添加配置文件 (.lcp)...]", "__import_lcp__"))
             self.combo_lens_profile.set_items(prof_items, default_val=prof_path)
         finally:
             self._is_updating_sliders = False
@@ -8035,7 +8261,7 @@ class DarkroomMainWindow(QMainWindow):
         if not photo:
             return
 
-        from core.lens_correction import LCPDatabase, read_lens_metadata
+        from core.lens_correction import LCPDatabase, read_lens_metadata, detect_lens_brand
         exif = photo.get("exif", {})
         meta = read_lens_metadata(photo["path"])
 
@@ -8056,7 +8282,8 @@ class DarkroomMainWindow(QMainWindow):
             lens_cfg["profile_name"] = prof_name
             lens_cfg["profile_path"] = p_path
         else:
-            lens_cfg["make"] = cam_make or ""
+            suspected_make = detect_lens_brand(lens_model, cam_make)
+            lens_cfg["make"] = suspected_make or cam_make or ""
             lens_cfg["model"] = lens_model or cam_model or "未找到匹配镜头"
             lens_cfg["profile_name"] = "无配置文件"
             lens_cfg["profile_path"] = ""
@@ -8110,7 +8337,7 @@ class DarkroomMainWindow(QMainWindow):
             import gc
             gc.collect()
 
-    def on_switch_photo(self, photo_id):
+    def on_switch_photo(self, photo_id, force=False):
         # Stop any lingering live/debounce timers from previous photo
         if hasattr(self, '_live_thumb_timer') and self._live_thumb_timer.isActive():
             self._live_thumb_timer.stop()
@@ -8120,7 +8347,7 @@ class DarkroomMainWindow(QMainWindow):
             self.thumb_controller.cancel_card_preview_worker()
 
         # If user clicks the currently active photo and it is already fully loaded, avoid redundant reload
-        if photo_id == self.active_photo_id:
+        if not force and photo_id == self.active_photo_id:
             curr_photo = next((p for p in self.photos if p and p.get("id") == photo_id), None)
             if curr_photo and curr_photo.get("float_img") is not None:
                 return
@@ -8792,7 +9019,7 @@ class DarkroomMainWindow(QMainWindow):
         Supports full undo/redo across single or batch/all selected photos.
         """
         id_set = set(photo_ids)
-        target_photos = [p for p in self.photos if p.get("id") in id_set]
+        target_photos = [p for p in self.photos if p and p.get("id") in id_set]
         if not target_photos:
             return
 
@@ -8969,7 +9196,7 @@ class DarkroomMainWindow(QMainWindow):
     def on_clear_crop_photos(self, photo_ids):
         """Clear crop configuration for target photo(s) without altering develop parameters."""
         id_set = set(photo_ids)
-        target_photos = [p for p in self.photos if p.get("id") in id_set]
+        target_photos = [p for p in self.photos if p and p.get("id") in id_set]
         if not target_photos:
             return
 

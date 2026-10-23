@@ -13,8 +13,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox,
-    QPushButton, QTabWidget, QWidget, QFrame, QMessageBox, QSpinBox
+    QPushButton, QTabWidget, QWidget, QFrame, QMessageBox, QSpinBox, QLineEdit
 )
+from ui.confirm_dialog import show_darkroom_confirm, show_darkroom_info
 
 from core.path_utils import get_resource_dir, get_icon_path
 from ui.window_utils import apply_dark_titlebar, show_dark_message_box, get_icon, setup_solid_combobox, get_standard_checkbox_style
@@ -109,7 +110,26 @@ class PreferencesDialog(QDialog):
                     color: #cbd5e1;
                     font-size: 12px;
                 }}
+                QLabel#lblCachePath {{
+                    color: #8b92a5;
+                    font-size: 11px;
+                    line-height: 1.3;
+                }}
 {get_standard_checkbox_style(is_dark=True)}
+                QLineEdit {{
+                    background: #14151a;
+                    color: #e2e8f0;
+                    border: 1px solid #323542;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    font-size: 11px;
+                }}
+                QLineEdit:hover {{
+                    border-color: #f59e0b;
+                }}
+                QLineEdit:focus {{
+                    border-color: #f59e0b;
+                }}
                 QComboBox {{
                     background: #14151a;
                     color: #e2e8f0;
@@ -146,7 +166,7 @@ class PreferencesDialog(QDialog):
                     padding: 2px 0px;
                     outline: 0px;
                 }}
-                QFrame#sepAssoc {{
+                QFrame#sepAssoc, QFrame#sepLens {{
                     background: rgba(255, 255, 255, 0.08);
                     height: 1px;
                     max-height: 1px;
@@ -155,7 +175,7 @@ class PreferencesDialog(QDialog):
                     margin-top: 6px;
                     margin-bottom: 6px;
                 }}
-                QLabel#lblAssocTitle {{
+                QLabel#lblAssocTitle, QLabel#lblLensTitle {{
                     color: #e2e8f0;
                     font-size: 12px;
                     font-weight: 500;
@@ -319,7 +339,26 @@ class PreferencesDialog(QDialog):
                     color: #334155;
                     font-size: 12px;
                 }}
+                QLabel#lblCachePath {{
+                    color: #64748b;
+                    font-size: 11px;
+                    line-height: 1.3;
+                }}
 {get_standard_checkbox_style(is_dark=False)}
+                QLineEdit {{
+                    background: #ffffff;
+                    color: #1e293b;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    font-size: 11px;
+                }}
+                QLineEdit:hover {{
+                    border-color: #f59e0b;
+                }}
+                QLineEdit:focus {{
+                    border-color: #f59e0b;
+                }}
                 QComboBox {{
                     background: #ffffff;
                     color: #1e293b;
@@ -356,7 +395,7 @@ class PreferencesDialog(QDialog):
                     padding: 2px 0px;
                     outline: 0px;
                 }}
-                QFrame#sepAssoc {{
+                QFrame#sepAssoc, QFrame#sepLens {{
                     background: rgba(0, 0, 0, 0.08);
                     height: 1px;
                     max-height: 1px;
@@ -365,7 +404,7 @@ class PreferencesDialog(QDialog):
                     margin-top: 6px;
                     margin-bottom: 6px;
                 }}
-                QLabel#lblAssocTitle {{
+                QLabel#lblAssocTitle, QLabel#lblLensTitle {{
                     color: #1e293b;
                     font-size: 12px;
                     font-weight: 500;
@@ -614,6 +653,30 @@ class PreferencesDialog(QDialog):
         r_assoc.addWidget(self.btn_assoc)
         l_dr.addLayout(r_assoc)
 
+        # Lens Profiles / 镜头配置文件库
+        sep_lens = QFrame()
+        sep_lens.setObjectName("sepLens")
+        sep_lens.setFrameShape(QFrame.Shape.NoFrame)
+        sep_lens.setFixedHeight(1)
+        l_dr.addWidget(sep_lens)
+
+        r_lens = QHBoxLayout()
+        r_lens.setSpacing(10)
+        lbl_lens_info = QLabel("镜头配置文件:")
+        lbl_lens_info.setObjectName("lblLensTitle")
+        r_lens.addWidget(lbl_lens_info, 1)
+
+        self.btn_import_acr = QPushButton("从 ACR 导入镜头库")
+        self.btn_import_acr.setToolTip("检测系统 Adobe Camera Raw 镜头库并克隆到本地用户库 (%APPDATA%/SpektraDarkroom/LensProfiles)")
+        self.btn_import_acr.clicked.connect(self._on_import_acr_clicked)
+        r_lens.addWidget(self.btn_import_acr)
+
+        self.btn_open_lens_dir = QPushButton("打开镜头库文件夹")
+        self.btn_open_lens_dir.setToolTip("在资源管理器中打开用户镜头配置存放目录")
+        self.btn_open_lens_dir.clicked.connect(self._on_open_lens_dir_clicked)
+        r_lens.addWidget(self.btn_open_lens_dir)
+        l_dr.addLayout(r_lens)
+
         l_dr.addStretch()
         self.tabs.addTab(tab_darkroom, "暗房与工作流")
 
@@ -622,6 +685,44 @@ class PreferencesDialog(QDialog):
         l_ca = QVBoxLayout(tab_cache)
         l_ca.setContentsMargins(16, 16, 16, 16)
         l_ca.setSpacing(14)
+
+        # 缓存存储目录组合
+        v_cache_dir_grp = QVBoxLayout()
+        v_cache_dir_grp.setSpacing(5)
+
+        r_dir_hdr = QHBoxLayout()
+        r_dir_hdr.setSpacing(10)
+        lbl_dir = QLabel("缓存目录:")
+        lbl_dir.setFixedWidth(100)
+        r_dir_hdr.addWidget(lbl_dir)
+
+        self.btn_change_cache_dir = QPushButton("更改...")
+        self.btn_change_cache_dir.setToolTip("选择新的缓存存储目录")
+        self.btn_change_cache_dir.clicked.connect(self._on_change_cache_dir_clicked)
+        r_dir_hdr.addWidget(self.btn_change_cache_dir)
+
+        self.btn_reset_cache_dir = QPushButton("默认")
+        self.btn_reset_cache_dir.setToolTip("恢复为系统默认缓存目录 (%LOCALAPPDATA%/SpektraDarkroom)")
+        self.btn_reset_cache_dir.clicked.connect(self._on_reset_cache_dir_clicked)
+        r_dir_hdr.addWidget(self.btn_reset_cache_dir)
+
+        r_dir_hdr.addStretch(1)
+        v_cache_dir_grp.addLayout(r_dir_hdr)
+
+        # 当前目录单独起一行在下面，纯文本展示，不设样式框
+        r_dir_path = QHBoxLayout()
+        r_dir_path.setContentsMargins(100, 0, 0, 2)
+        self.lbl_cache_dir = QLabel()
+        self.lbl_cache_dir.setObjectName("lblCachePath")
+        self.lbl_cache_dir.setWordWrap(True)
+        self.lbl_cache_dir.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        r_dir_path.addWidget(self.lbl_cache_dir, 1)
+        v_cache_dir_grp.addLayout(r_dir_path)
+
+        l_ca.addLayout(v_cache_dir_grp)
+
+        # 兼容性别名
+        self.txt_cache_dir = self.lbl_cache_dir
 
         r_max_size = QHBoxLayout()
         lbl_max_size = QLabel("缓存容量上限:")
@@ -727,6 +828,13 @@ class PreferencesDialog(QDialog):
         idx_intv = self.combo_clean_interval.findData(interval_days)
         self.combo_clean_interval.setCurrentIndex(idx_intv if idx_intv >= 0 else 0)
 
+        from core.path_utils import get_default_cache_dir
+        custom_cache = prefs.get("custom_cache_dir", "")
+        self._pending_cache_dir = custom_cache
+        current_display = custom_cache if (custom_cache and os.path.isdir(custom_cache)) else get_default_cache_dir()
+        self.txt_cache_dir.setText(current_display)
+        self.txt_cache_dir.setToolTip(current_display)
+
         theme_mode = config_manager.get_preference("ui_theme", "system")
         idx_th = self.combo_ui_theme.findData(theme_mode)
         self.combo_ui_theme.setCurrentIndex(idx_th if idx_th >= 0 else 2)
@@ -803,15 +911,112 @@ class PreferencesDialog(QDialog):
             config_manager.register_sdss_file_association()
         self._update_assoc_button()
 
+    def _on_open_lens_dir_clicked(self):
+        from core.lens_correction import get_user_lcp_directory
+        d = get_user_lcp_directory()
+        try:
+            os.startfile(d)
+        except Exception as e:
+            show_dark_message_box("打开文件夹失败", f"无法打开目录:\n{d}\n{e}", parent=self)
+
+    def _on_change_cache_dir_clicked(self):
+        from PySide6.QtWidgets import QFileDialog
+        from core.path_utils import get_user_cache_dir
+        cur_d = self.lbl_cache_dir.text().strip() or get_user_cache_dir()
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "选择缓存存储目录",
+            cur_d
+        )
+        if selected:
+            selected = os.path.abspath(selected)
+            self._pending_cache_dir = selected
+            self.lbl_cache_dir.setText(selected)
+            self.lbl_cache_dir.setToolTip(selected)
+            try:
+                os.makedirs(os.path.join(selected, "session_cache"), exist_ok=True)
+                os.makedirs(os.path.join(selected, "lut_cache"), exist_ok=True)
+            except Exception:
+                pass
+            self._refresh_cache_size()
+
+    def _on_reset_cache_dir_clicked(self):
+        from core.path_utils import get_default_cache_dir
+        def_d = get_default_cache_dir()
+        self._pending_cache_dir = ""
+        self.lbl_cache_dir.setText(def_d)
+        self.lbl_cache_dir.setToolTip(def_d)
+        self._refresh_cache_size()
+
+    def _on_import_acr_clicked(self):
+        from core.lens_correction import find_system_lcp_directories, copy_system_acr_profiles_to_user_dir, get_user_lcp_directory
+        acr_dirs = find_system_lcp_directories()
+        if not acr_dirs:
+            show_darkroom_info(
+                self,
+                title="未检测到 ACR 镜头库",
+                heading="未检测到系统 ACR 镜头库",
+                description="未在系统中检测到 Adobe Camera Raw / Lightroom 镜头配置文件目录。\n\n"
+                            "提示：您可以免费安装官方 Adobe DNG Converter 即可自动获取数千款官方镜头库，\n"
+                            "或直接点击【打开镜头库文件夹】手动放入第三方/厂商提供的 .lcp 文件。",
+                ok_text="知道了",
+                badge_symbol="!"
+            )
+            return
+
+        confirmed = show_darkroom_confirm(
+            self,
+            title="确认导入镜头库",
+            heading="导入 Adobe Camera Raw 镜头库",
+            description="是否立即将系统 Adobe Camera Raw 镜头配置文件克隆至本软件的本地用户库？\n\n"
+                        "导入后即使卸载 Adobe 软件亦可完全独立离线使用该镜头库。",
+            confirm_text="开始导入",
+            cancel_text="取消",
+            badge_symbol="?"
+        )
+        if not confirmed:
+            return
+
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.btn_import_acr.setEnabled(False)
+        self.btn_import_acr.setText("正在导入...")
+        QApplication.processEvents()
+
+        try:
+            copied, skipped = copy_system_acr_profiles_to_user_dir()
+            QApplication.restoreOverrideCursor()
+            self.btn_import_acr.setText("从 ACR 导入镜头库")
+            self.btn_import_acr.setEnabled(True)
+            show_darkroom_info(
+                self,
+                title="导入完成",
+                heading="镜头库导入成功",
+                description=f"镜头库已成功同步至本地用户目录！\n\n"
+                            f"• 已导入文件: {copied} 个\n"
+                            f"• 已存在跳过: {skipped} 个\n\n"
+                            f"存放位置:\n{get_user_lcp_directory()}",
+                ok_text="完成",
+                badge_symbol="✓"
+            )
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            self.btn_import_acr.setText("从 ACR 导入镜头库")
+            self.btn_import_acr.setEnabled(True)
+            show_darkroom_info(self, "导入发生异常", "导入镜头库失败", f"导入过程中发生错误:\n{e}", ok_text="确定", badge_symbol="!")
+
     def _refresh_cache_size(self):
         try:
-            cache_dir = os.path.join(get_resource_dir(), ".lut_cache")
-            if os.path.exists(cache_dir):
-                total_bytes = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in os.listdir(cache_dir) if os.path.isfile(os.path.join(cache_dir, f)))
-                sz_mb = total_bytes / (1024.0 * 1024.0)
-                self.lbl_cache_size.setText(f"LUT 缓存: {sz_mb:.1f} MB")
-            else:
-                self.lbl_cache_size.setText("LUT 缓存: 0.0 MB")
+            from core.path_utils import get_user_lut_cache_dir
+            u_cache = get_user_lut_cache_dir()
+            b_cache = os.path.join(get_resource_dir(), ".lut_cache")
+            total_bytes = 0
+            for d in (u_cache, b_cache):
+                if os.path.isdir(d):
+                    total_bytes += sum(os.path.getsize(os.path.join(d, f)) for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
+            sz_mb = total_bytes / (1024.0 * 1024.0)
+            self.lbl_cache_size.setText(f"LUT 缓存: {sz_mb:.1f} MB")
         except Exception:
             self.lbl_cache_size.setText("LUT 缓存: 0.0 MB")
 
@@ -823,11 +1028,12 @@ class PreferencesDialog(QDialog):
 
     def _clean_lut_cache(self):
         try:
-            cache_dir = os.path.join(get_resource_dir(), ".lut_cache")
-            if os.path.exists(cache_dir):
+            from core.path_utils import get_user_lut_cache_dir
+            u_cache = get_user_lut_cache_dir()
+            if os.path.isdir(u_cache):
                 import shutil
-                shutil.rmtree(cache_dir, ignore_errors=True)
-                os.makedirs(cache_dir, exist_ok=True)
+                shutil.rmtree(u_cache, ignore_errors=True)
+                os.makedirs(u_cache, exist_ok=True)
             self._refresh_cache_size()
             self.btn_clean_cache.setEnabled(False)
             self.btn_clean_cache.setText("已清理")
@@ -861,6 +1067,10 @@ class PreferencesDialog(QDialog):
         prefs["default_film_format"] = float(self.combo_default_fmt.currentData())
         prefs["session_cache_max_gb"] = float(self.combo_cache_max_size.currentData())
         prefs["session_cache_clean_interval_days"] = int(self.combo_clean_interval.currentData())
+
+        if hasattr(self, "_pending_cache_dir"):
+            prefs["custom_cache_dir"] = self._pending_cache_dir
+            session_cache_manager.reset_cache_dir()
 
         th_mode = self.combo_ui_theme.currentData()
         prefs["ui_theme"] = th_mode

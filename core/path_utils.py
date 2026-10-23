@@ -29,6 +29,94 @@ def get_icon_dir():
 def get_icon_path(name: str):
     return os.path.join(get_icon_dir(), name)
 
+
+def get_user_data_dir() -> str:
+    """Return user data directory (%APPDATA%/SpektraDarkroom on Windows).
+    Used for permanent user settings, lens profiles, and configurations.
+    """
+    if sys.platform == "win32":
+        base = os.getenv("APPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "SpektraDarkroom")
+    elif sys.platform == "darwin":
+        d = os.path.join(os.path.expanduser("~/Library/Application Support"), "SpektraDarkroom")
+    else:
+        xdg_config = os.getenv("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        d = os.path.join(xdg_config, "spektra_darkroom")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def get_default_cache_dir() -> str:
+    """Return default system user cache directory (%LOCALAPPDATA%/SpektraDarkroom on Windows)."""
+    if sys.platform == "win32":
+        base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "SpektraDarkroom")
+    elif sys.platform == "darwin":
+        d = os.path.join(os.path.expanduser("~/Library/Caches"), "SpektraDarkroom")
+    else:
+        xdg_cache = os.getenv("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+        d = os.path.join(xdg_cache, "spektra_darkroom")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def get_user_cache_dir() -> str:
+    """Return user cache directory (custom configured or default %LOCALAPPDATA%/SpektraDarkroom).
+    Used for high-speed scratch caches, session images, and compiled textures.
+    """
+    try:
+        from . import config_manager
+        custom_d = config_manager.get_preference("custom_cache_dir", "")
+        if custom_d and isinstance(custom_d, str):
+            custom_d = custom_d.strip()
+            if custom_d:
+                try:
+                    os.makedirs(custom_d, exist_ok=True)
+                    if os.path.isdir(custom_d):
+                        return custom_d
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return get_default_cache_dir()
+
+
+def get_user_lens_profiles_dir() -> str:
+    """Return directory for custom user lens profiles (%APPDATA%/SpektraDarkroom/LensProfiles)."""
+    d = os.path.join(get_user_data_dir(), "LensProfiles")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def get_user_session_cache_dir() -> str:
+    """Return directory for temporary session raw/float image cache."""
+    d = os.path.join(get_user_cache_dir(), "session_cache")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def get_user_lut_cache_dir() -> str:
+    """Return directory for runtime compiled 3D LUT cache."""
+    d = os.path.join(get_user_cache_dir(), "lut_cache")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
 def normalize_path(path: str) -> str:
     """Normalize file or directory path to native OS format, resolving mixed slashes and quotes."""
     if not path:

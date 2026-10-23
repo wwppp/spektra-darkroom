@@ -69,7 +69,6 @@ spektrafilm-repo/
 Thumbs.db
 
 # Excluded documentation and planning files
-CHANGELOG.md
 DEVELOPMENT_SUMMARY.md
 FIX_PLAN_13_ISSUES.md
 ARCHITECTURAL_CONSTRAINTS.md

@@ -321,6 +321,250 @@ def find_system_lcp_directories() -> List[str]:
 find_system_adobe_lcp_directories = find_system_lcp_directories
 
 
+def get_user_lcp_directory() -> str:
+    """Return the user lens profile directory (%APPDATA%/SpektraDarkroom/LensProfiles)."""
+    try:
+        from .path_utils import get_user_lens_profiles_dir
+        return get_user_lens_profiles_dir()
+    except Exception:
+        if sys.platform == "win32":
+            base = os.getenv("APPDATA") or os.path.expanduser("~")
+            p = os.path.join(base, "SpektraDarkroom", "LensProfiles")
+        else:
+            xdg_data = os.getenv("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+            p = os.path.join(xdg_data, "spektra_darkroom", "LensProfiles")
+        os.makedirs(p, exist_ok=True)
+        return p
+
+
+def get_bundled_lcp_directory() -> str:
+    """Return bundled resources lens profile directory if it exists."""
+    try:
+        from .path_utils import get_resource_dir
+        return os.path.join(get_resource_dir(), "lens_profiles")
+    except Exception:
+        return ""
+
+
+def find_all_lcp_root_directories() -> List[str]:
+    """Scan and aggregate user, bundled, and system Adobe directories."""
+    roots = []
+    # 1. User custom directory (top priority)
+    user_dir = get_user_lcp_directory()
+    if os.path.isdir(user_dir):
+        roots.append(user_dir)
+
+    # 2. Bundled application resources (if present)
+    bundled_dir = get_bundled_lcp_directory()
+    if bundled_dir and os.path.isdir(bundled_dir) and bundled_dir not in roots:
+        roots.append(bundled_dir)
+
+    # 3. System Adobe Camera Raw directories (read-only reference)
+    for p in find_system_lcp_directories():
+        if p not in roots:
+            roots.append(p)
+    return roots
+
+
+def detect_lens_brand(lens_model: str, camera_make: Optional[str] = None) -> Optional[str]:
+    """Detect lens brand from lens model string or fallback to camera make.
+    Accurately maps abbreviations, adapters, and prefixes (e.g. 'YN', 'TAMRON', 'SIGMA') to database makes.
+    """
+    if not lens_model:
+        return (camera_make or "").strip() or None
+
+    lm_lower = lens_model.lower().strip()
+
+    # If an adapter is in the string (e.g. "YONGNUO ADPTER II + TAMRON 35-150mm"),
+    # prioritize the primary mounted lens brand following/inside the adapter string
+    if "adapter" in lm_lower or "adpter" in lm_lower or "+" in lm_lower:
+        for b_name in ["tamron", "sigma", "samyang", "rokinon", "viltrox", "tokina", "zeiss", "canon", "nikon", "sony"]:
+            if b_name in lm_lower:
+                return b_name.capitalize()
+
+    # Yongnuo (永诺)
+    if re.search(r"\b(yn|yongnuo|yongnou)\b", lm_lower) or lm_lower.startswith("yn") or "ynlens" in lm_lower:
+        return "Yongnuo"
+    # Tamron (腾龙)
+    if "tamron" in lm_lower or re.search(r"\bsp\b", lm_lower):
+        return "Tamron"
+    # Sigma (适马)
+    if "sigma" in lm_lower:
+        return "Sigma"
+    # Samyang / Rokinon (森养 / 三阳)
+    if "samyang" in lm_lower or "rokinon" in lm_lower:
+        return "Samyang"
+    # Viltrox (唯卓仕)
+    if "viltrox" in lm_lower:
+        return "Viltrox"
+    # Venus Optics / Laowa (老蛙)
+    if "laowa" in lm_lower or "venus" in lm_lower:
+        return "Venus Optics"
+    # TTArtisan (铭匠)
+    if "ttartisan" in lm_lower or "tt artisan" in lm_lower:
+        return "TTArtisan"
+    # 7Artisans (七工匠)
+    if "7artisans" in lm_lower or "7 artisans" in lm_lower:
+        return "7Artisans"
+    # Meike (美科)
+    if "meike" in lm_lower:
+        return "Meike"
+    # Tokina (图丽)
+    if "tokina" in lm_lower or "at-x" in lm_lower or "firin" in lm_lower:
+        return "Tokina"
+    # Zeiss (蔡司)
+    if "zeiss" in lm_lower:
+        return "Zeiss"
+    # Voigtlander (福伦达)
+    if "voigtlander" in lm_lower or "voigtländer" in lm_lower:
+        return "Voigtlander"
+    # IRIX
+    if "irix" in lm_lower:
+        return "IRIX"
+    # Schneider (施耐德)
+    if "schneider" in lm_lower:
+        return "Schneider"
+    # Leica (徕卡)
+    if "leica" in lm_lower:
+        return "Leica"
+    # Major camera OEMs
+    if "canon" in lm_lower:
+        return "Canon"
+    if "nikon" in lm_lower or "nikkor" in lm_lower:
+        return "Nikon"
+    if "sony" in lm_lower:
+        return "Sony"
+    if "fujifilm" in lm_lower or "fuji" in lm_lower or "fujinon" in lm_lower:
+        return "Fujifilm"
+    if "panasonic" in lm_lower or "lumix" in lm_lower:
+        return "Panasonic"
+    if "olympus" in lm_lower or "m.zuiko" in lm_lower or "zuiko" in lm_lower:
+        return "Olympus"
+    if "pentax" in lm_lower:
+        return "Pentax"
+    if "ricoh" in lm_lower:
+        return "Ricoh"
+    if "hasselblad" in lm_lower:
+        return "Hasselblad"
+
+    if camera_make and camera_make.strip():
+        return camera_make.strip()
+    return None
+
+
+def extract_lcp_header(lcp_path: str) -> Tuple[str, str]:
+    """Quickly extract (make, lens_name) from LCP XML header without full parsing."""
+    make = ""
+    lens_name = ""
+    if not os.path.isfile(lcp_path):
+        return make, lens_name
+    try:
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(lcp_path)
+        root = tree.getroot()
+        for elem in root.iter():
+            attribs = {k.split("}")[-1]: v for k, v in elem.attrib.items()}
+            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if not lens_name:
+                lens_name = attribs.get("LensPrettyName") or attribs.get("Lens") or attribs.get("Model") or (elem.text.strip() if tag in ("LensPrettyName", "Lens", "Model") and elem.text else "")
+            if not make:
+                make = attribs.get("Make") or attribs.get("CameraPrettyName") or (elem.text.strip() if tag in ("Make", "CameraPrettyName") and elem.text else "")
+            if make and lens_name:
+                break
+
+        brand_cand = detect_lens_brand(lens_name) or detect_lens_brand(os.path.basename(lcp_path))
+        if brand_cand:
+            make = brand_cand
+    except Exception:
+        pass
+    return make.strip(), lens_name.strip()
+
+
+def import_user_lcp_file(source_path: str, target_make: Optional[str] = None) -> Tuple[bool, str, str, str, str]:
+    """Import a .lcp file into user lens profile directory (%APPDATA%/SpektraDarkroom/LensProfiles/<Make>/).
+
+    Returns:
+        (success, make, model_name, profile_display_name, dest_file_path)
+    """
+    if not source_path or not os.path.isfile(source_path):
+        return False, "", "", "", ""
+
+    import shutil
+    parsed_make, parsed_lens = extract_lcp_header(source_path)
+
+    make = ""
+    if target_make and target_make.strip() and target_make.strip() != "无":
+        make = target_make.strip()
+    elif parsed_make:
+        make = parsed_make
+    else:
+        make = "Custom"
+
+    user_dir = get_user_lcp_directory()
+    dest_dir = os.path.join(user_dir, make)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_path = os.path.join(dest_dir, os.path.basename(source_path))
+        shutil.copy2(source_path, dest_path)
+    except Exception as e:
+        logger.error(f"Failed to copy LCP file to {dest_dir}: {e}")
+        return False, "", "", "", ""
+
+    db = LCPDatabase.get_instance()
+    db.index_installed_profiles()
+
+    f = os.path.basename(dest_path)
+    clean_name = f[:-4]
+    if clean_name.upper().startswith(make.upper()):
+        clean_name = clean_name[len(make):].strip(" -_()")
+    if clean_name.endswith(" - RAW") or clean_name.endswith(" - JPEG"):
+        clean_name = clean_name[:-7].strip()
+    model_name = clean_name or f[:-4]
+    prof_display = parsed_lens or clean_name
+
+    return True, make, model_name, prof_display, dest_path
+
+
+def copy_system_acr_profiles_to_user_dir(progress_cb=None) -> Tuple[int, int]:
+    """Copy all .lcp files from system Adobe Camera Raw directories into the user AppData directory.
+    Returns (num_copied, num_skipped).
+    """
+    import shutil
+    acr_dirs = find_system_lcp_directories()
+    user_dir = get_user_lcp_directory()
+    if not acr_dirs:
+        return 0, 0
+
+    copied = 0
+    skipped = 0
+    for root_dir in acr_dirs:
+        for make in os.listdir(root_dir):
+            make_src = os.path.join(root_dir, make)
+            if not os.path.isdir(make_src):
+                continue
+            make_dest = os.path.join(user_dir, make)
+            os.makedirs(make_dest, exist_ok=True)
+            for r, dirs, files in os.walk(make_src):
+                for f in files:
+                    if f.lower().endswith(".lcp"):
+                        src_f = os.path.join(r, f)
+                        dest_f = os.path.join(make_dest, f)
+                        if os.path.exists(dest_f):
+                            skipped += 1
+                            continue
+                        try:
+                            shutil.copy2(src_f, dest_f)
+                            copied += 1
+                            if progress_cb and copied % 50 == 0:
+                                progress_cb(copied)
+                        except Exception:
+                            pass
+
+    db = LCPDatabase.get_instance()
+    db.index_installed_profiles()
+    return copied, skipped
+
+
 class LCPDatabase:
     """In-memory indexer and manager for Lens Profiles (.lcp)."""
 
@@ -333,7 +577,7 @@ class LCPDatabase:
         return cls._instance
 
     def __init__(self):
-        self._roots: List[str] = find_system_lcp_directories()
+        self._roots: List[str] = find_all_lcp_root_directories()
         self._makes: List[str] = []
         self._models_by_make: Dict[str, List[Tuple[str, str, str]]] = {}  # make -> [(model_name, profile_name, path)]
         self._profile_cache: Dict[str, LensProfile] = {}
@@ -342,6 +586,8 @@ class LCPDatabase:
 
     def index_installed_profiles(self):
         """Build or refresh profile database index."""
+        self._roots = find_all_lcp_root_directories()
+        self._models_by_make.clear()
         self._build_index()
 
     def _build_index(self):
@@ -372,6 +618,7 @@ class LCPDatabase:
             return self._models_by_make[make]
 
         results = []
+        seen_paths = set()
         for root_dir in self._roots:
             make_dir = os.path.join(root_dir, make)
             if not os.path.isdir(make_dir):
@@ -380,6 +627,9 @@ class LCPDatabase:
                 for f in files:
                     if f.lower().endswith(".lcp"):
                         p = os.path.join(r, f)
+                        if p in seen_paths:
+                            continue
+                        seen_paths.add(p)
                         # Derive model name cleanly from filename or quick metadata
                         clean_name = f[:-4]
                         # Remove leading brand prefix if redundant
@@ -418,11 +668,21 @@ class LCPDatabase:
         clean_lens = (lens_model or "").strip()
         clean_cam_make = (camera_make or "").strip()
 
+        # Check detected brand first (prioritizes third-party manufacturers like Yongnuo, Tamron, Sigma)
+        detected_brand = detect_lens_brand(clean_lens)
+        if detected_brand:
+            for m in self._makes:
+                if m.lower() == detected_brand.lower():
+                    make_candidates.append(m)
+                    break
+
         # Check if lens_model starts with or contains any known make
         for m in self._makes:
-            if m.lower() in clean_lens.lower():
+            if m.lower() in clean_lens.lower() and m not in make_candidates:
                 make_candidates.append(m)
-        if clean_cam_make:
+
+        # Fallback to camera manufacturer only if no third-party lens brand was positively matched
+        if clean_cam_make and not detected_brand:
             for m in self._makes:
                 if m.lower() == clean_cam_make.lower() and m not in make_candidates:
                     make_candidates.append(m)
@@ -430,15 +690,18 @@ class LCPDatabase:
         if not make_candidates and self._makes:
             make_candidates = list(self._makes)
 
-        # 2. Search inside candidate makes
-        lens_tokens = set(re.findall(r"[A-Za-z0-9]+", clean_lens.lower()))
+        # 2. Search inside candidate makes with advanced alphanumeric tokenization
+        lens_tokens = set(re.findall(r"[A-Za-z]+|[0-9]+", clean_lens.lower()))
+        noisy_tokens = {"mm", "f", "lens", "adapter", "adpter"}
+        lens_tokens = {t for t in lens_tokens if t not in noisy_tokens}
         best_match = None
         best_score = 0
 
         for m in make_candidates:
             models = self.get_models_for_make(m)
             for mod_name, prof_name, p in models:
-                mod_tokens = set(re.findall(r"[A-Za-z0-9]+", mod_name.lower()))
+                mod_tokens = set(re.findall(r"[A-Za-z]+|[0-9]+", mod_name.lower()))
+                mod_tokens = {t for t in mod_tokens if t not in noisy_tokens}
                 common = lens_tokens.intersection(mod_tokens)
                 score = len(common)
                 if score > best_score and score >= 2:
@@ -475,11 +738,28 @@ def read_lens_metadata(file_path: str) -> Dict[str, any]:
                     meta["lens_model"] = getattr(lens_obj, "model", "") or ""
                 if hasattr(r, "other"):
                     other_obj = r.other
-                    meta["focal_length"] = getattr(other_obj, "focal_len", None)
+                    meta["focal_length"] = getattr(other_obj, "focal_length", None) or getattr(other_obj, "focal_len", None)
                     meta["aperture"] = getattr(other_obj, "aperture", None)
                     meta["iso"] = getattr(other_obj, "iso_speed", None)
         except Exception as e:
             logger.debug(f"rawpy metadata read error for {file_path}: {e}")
+
+    # 1.5. Try tifffile if camera make/model or lens is still empty (e.g. ARW, DNG, CR2, TIFF)
+    if not meta["camera_make"] or not meta["camera_model"] or not meta["lens_model"]:
+        try:
+            import tifffile
+            with tifffile.TiffFile(file_path) as tif:
+                for page in tif.pages:
+                    for tag in page.tags:
+                        t_name = tag.name
+                        if t_name == "Make" and not meta["camera_make"]:
+                            meta["camera_make"] = str(tag.value).strip()
+                        elif t_name == "Model" and not meta["camera_model"]:
+                            meta["camera_model"] = str(tag.value).strip()
+                        elif (t_name in ("LensModel", 0xa434)) and not meta["lens_model"]:
+                            meta["lens_model"] = str(tag.value).strip().strip("\x00")
+        except Exception as e:
+            logger.debug(f"tifffile metadata read error for {file_path}: {e}")
 
     # 2. Try PIL EXIF for all formats
     try:
@@ -609,6 +889,8 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
         return {
             "enabled": False,
             "remove_ca": False,
+            "ca_kr": 0.0,
+            "ca_kb": 0.0,
             "k1": 0.0,
             "k2": 0.0,
             "k3": 0.0,
@@ -631,6 +913,8 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
         return {
             "enabled": False,
             "remove_ca": False,
+            "ca_kr": 0.0,
+            "ca_kb": 0.0,
             "k1": 0.0,
             "k2": 0.0,
             "k3": 0.0,
@@ -665,9 +949,26 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
                     ap_parsed = _parse_float_safe(aperture)
 
                     calib_dist = prof.get_best_distortion_calibration(fl_parsed, ap_parsed)
-                    k1 = calib_dist.k1 * dist_scale
-                    k2 = calib_dist.k2 * dist_scale
-                    k3 = calib_dist.k3 * dist_scale
+
+                    # Adobe ACM polynomial defines r = R_sensor / eff_fl.
+                    # Our shader operates on corner-normalized coordinates r_norm in [0, 1] where r_norm = 1 at the image corner.
+                    # Standard 35mm full frame sensor corner semi-diagonal: sqrt(18^2 + 12^2) = 21.633333 mm.
+                    # For a given crop factor (sensor format factor) C: R_corner = 21.633333 / C.
+                    # At the corner: r_corner = (21.633333 / C) / eff_fl.
+                    # Thus r = r_norm * r_corner.
+                    # Since scale = 1 + k1*r^2 + k2*r^4 + k3*r^6:
+                    # k1*r^2 = (k1 * r_corner^2) * r_norm^2
+                    # k2*r^4 = (k2 * r_corner^4) * r_norm^4
+                    # k3*r^6 = (k3 * r_corner^6) * r_norm^6
+                    eff_fl = fl_parsed if (fl_parsed and fl_parsed > 0) else calib_dist.focal_length
+                    if not eff_fl or eff_fl <= 0:
+                        eff_fl = 50.0
+                    crop_factor = float(prof.sensor_format_factor) if (prof.sensor_format_factor and prof.sensor_format_factor > 0) else 1.0
+                    r_corner = 21.633333 / (crop_factor * eff_fl)
+
+                    k1 = calib_dist.k1 * (r_corner ** 2) * dist_scale
+                    k2 = calib_dist.k2 * (r_corner ** 4) * dist_scale
+                    k3 = calib_dist.k3 * (r_corner ** 6) * dist_scale
 
                     calib_vig = prof.get_best_vignette_calibration(fl_parsed, ap_parsed)
                     base_amt = evaluate_vignette_gain(calib_vig, photo_aperture=ap_parsed)
@@ -683,6 +984,8 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
     return {
         "enabled": is_enabled,
         "remove_ca": remove_ca,
+        "ca_kr": float(lens_cfg.get("ca_kr", 0.0)) if isinstance(lens_cfg, dict) else 0.0,
+        "ca_kb": float(lens_cfg.get("ca_kb", 0.0)) if isinstance(lens_cfg, dict) else 0.0,
         "k1": k1,
         "k2": k2,
         "k3": k3,

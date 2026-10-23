@@ -54,6 +54,7 @@ DEFAULT_CONFIG = {
         "session_cache_max_gb": 2.0,
         "session_cache_clean_interval_days": 7,
         "session_cache_last_clean_time": 0.0,
+        "custom_cache_dir": "",
     },
     "recent_files": [],
     "recent_sessions": [],
@@ -77,41 +78,33 @@ def get_app_dir() -> str:
 
 
 def get_config_path() -> str:
-    """Returns the config file path, prioritizing the program root directory.
-    Falls back to user AppData directory only if the program root is read-only.
+    """Returns the config file path.
+    Prioritizes the standard user AppData directory (%APPDATA%/SpektraDarkroom/config.json).
+    Supports portable mode if portable.txt or local config marker exists in app_dir.
     """
+    from .path_utils import get_user_data_dir
     app_dir = get_app_dir()
     local_config = os.path.join(app_dir, "config.json")
+    portable_marker = os.path.join(app_dir, "portable.txt")
 
-    # Check if local config already exists or if app_dir is writable
-    try:
-        if os.path.exists(local_config):
-            return local_config
-        # Test write permission in app_dir
-        test_file = os.path.join(app_dir, ".perm_test")
-        with open(test_file, "w") as f:
-            f.write("1")
-        if os.path.exists(test_file):
-            os.remove(test_file)
+    # If portable.txt explicitly exists, stay in portable mode
+    if os.path.exists(portable_marker):
         return local_config
-    except Exception:
-        # Fallback to User AppData if app_dir is read-only (e.g. Program Files)
-        if sys.platform == "win32":
-            app_data = os.getenv("APPDATA")
-            if app_data:
-                user_config_dir = os.path.join(app_data, "SpektraDarkroom")
-            else:
-                user_config_dir = os.path.join(os.path.expanduser("~"), ".spektra_darkroom")
-        else:
-            xdg_config = os.getenv("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-            user_config_dir = os.path.join(xdg_config, "spektra_darkroom")
 
+    user_dir = get_user_data_dir()
+    user_config = os.path.join(user_dir, "config.json")
+
+    # Seamless migration: If user config does not exist yet but local config exists, copy it over
+    if not os.path.exists(user_config) and os.path.exists(local_config):
         try:
-            os.makedirs(user_config_dir, exist_ok=True)
+            import shutil
+            shutil.copy2(local_config, user_config)
         except Exception:
             pass
 
-        return os.path.join(user_config_dir, "config.json")
+    if os.path.exists(user_config) or not os.path.exists(local_config):
+        return user_config
+    return local_config
 
 
 def _deep_merge(target: dict, source: dict) -> dict:

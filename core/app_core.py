@@ -1769,12 +1769,16 @@ class SpektraEngine:
                     self._lut_cache.popitem(last=False)
             return identity_lut
 
-        cache_dir = os.path.join(self.resources_dir, ".lut_cache")
+        from .path_utils import get_user_lut_cache_dir
+        cache_dir = get_user_lut_cache_dir()
+        bundled_cache_dir = os.path.join(self.resources_dir, ".lut_cache")
         if is_default_params:
             cache_file = os.path.join(cache_dir, f"v4_shaper__{film_stock}__{eff_paper}__{lut_size}.npy")
-            if os.path.exists(cache_file):
+            bundled_file = os.path.join(bundled_cache_dir, f"v4_shaper__{film_stock}__{eff_paper}__{lut_size}.npy")
+            load_target = cache_file if os.path.exists(cache_file) else (bundled_file if os.path.exists(bundled_file) else None)
+            if load_target:
                 try:
-                    lut_3d = np.load(cache_file)
+                    lut_3d = np.load(load_target)
                     with self._render_lock:
                         self._lut_cache[cache_key] = lut_3d
                         self._lut_cache.move_to_end(cache_key)

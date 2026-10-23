@@ -448,18 +448,45 @@ void main() {
         sample_uv = clamp(sample_uv, half_texel, vec2(1.0) - half_texel);
     }
     
-    vec3 orig_rgb;
-    if (u_lens_ca_enabled == 1) {
+    vec3 orig_rgb = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).rgb;
+
+    // 1. Lateral CA Radial Shift (only when calibrated non-zero params provided)
+    if (u_lens_ca_enabled == 1 && (abs(u_lens_ca_params.x) > 0.00001 || abs(u_lens_ca_params.y) > 0.00001)) {
         vec2 lp_ca = (sample_uv - 0.5);
         float r2_ca = dot(lp_ca, lp_ca);
         vec2 uv_r = clamp(sample_uv + lp_ca * (u_lens_ca_params.x * r2_ca), half_texel, vec2(1.0) - half_texel);
         vec2 uv_b = clamp(sample_uv + lp_ca * (u_lens_ca_params.y * r2_ca), half_texel, vec2(1.0) - half_texel);
-        float r_val = textureGrad(u_image, uv_r, d_sample_dx, d_sample_dy).r;
-        float g_val = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).g;
-        float b_val = textureGrad(u_image, uv_b, d_sample_dx, d_sample_dy).b;
-        orig_rgb = vec3(r_val, g_val, b_val);
-    } else {
-        orig_rgb = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).rgb;
+        orig_rgb.r = textureGrad(u_image, uv_r, d_sample_dx, d_sample_dy).r;
+        orig_rgb.b = textureGrad(u_image, uv_b, d_sample_dx, d_sample_dy).b;
+    }
+
+    // 2. High-Contrast Edge Defringing (Removes purple, green, cyan & red color fringing along contrast boundaries)
+    if (u_lens_ca_enabled == 1) {
+        vec2 texel_step = 1.0 / tex_dim;
+        vec3 col_px = textureGrad(u_image, sample_uv + vec2(texel_step.x, 0.0), d_sample_dx, d_sample_dy).rgb;
+        vec3 col_py = textureGrad(u_image, sample_uv + vec2(0.0, texel_step.y), d_sample_dx, d_sample_dy).rgb;
+
+        float luma_c = 0.299 * orig_rgb.r + 0.587 * orig_rgb.g + 0.114 * orig_rgb.b;
+        float luma_x = 0.299 * col_px.r + 0.587 * col_px.g + 0.114 * col_px.b;
+        float luma_y = 0.299 * col_py.r + 0.587 * col_py.g + 0.114 * col_py.b;
+
+        float edge_val = max(abs(luma_c - luma_x), abs(luma_c - luma_y));
+        float edge_mask = clamp(edge_val * 15.0, 0.0, 1.0);
+
+        if (edge_mask > 0.01) {
+            float r = orig_rgb.r;
+            float g = orig_rgb.g;
+            float b = orig_rgb.b;
+
+            float purple = max(0.0, min(r, b) - g);
+            float green = max(0.0, g - max(r, b));
+            float cyan = max(0.0, b - max(r, g));
+            float red = max(0.0, r - max(g, b));
+
+            orig_rgb.r = max(0.0, r - (purple * 0.90 + red * 0.90) * edge_mask);
+            orig_rgb.g = max(0.0, g - (green * 0.90) * edge_mask);
+            orig_rgb.b = max(0.0, b - (purple * 0.90 + cyan * 0.90) * edge_mask);
+        }
     }
 
     // Apply Lens Vignette compensation/darkening if enabled
@@ -1165,7 +1192,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_2f("u_lens_vignette", lens_cfg.get("vignette_amount", 0.0), lens_cfg.get("vignette_midpoint", 50.0))
             ca_en = 1 if lens_cfg.get("remove_ca", False) else 0
             u_1i("u_lens_ca_enabled", ca_en)
-            u_2f("u_lens_ca_params", 0.0012, -0.0010)
+            ca_r = float(lens_cfg.get("ca_kr", 0.0))
+            ca_b = float(lens_cfg.get("ca_kb", 0.0))
+            u_2f("u_lens_ca_params", ca_r, ca_b)
         else:
             u_1i("u_lens_enabled", 0)
             u_3f("u_lens_distort", 0.0, 0.0, 0.0)
@@ -1857,9 +1886,22 @@ class DarkroomGLCanvas(QOpenGLWidget):
         act_100.setShortcut(QKeySequence("Ctrl+1"))
         act_100.triggered.connect(self.set_zoom_100)
 
+        win = self.window()
+        if hasattr(win, "_update_menu_actions_state"):
+            try:
+                win._update_menu_actions_state()
+            except Exception:
+                pass
+
+        can_undo = win.act_undo.isEnabled() if hasattr(win, 'act_undo') else getattr(self, "can_undo", False)
+        can_redo = win.act_redo.isEnabled() if hasattr(win, 'act_redo') else getattr(self, "can_redo", False)
+        can_reset = win.act_reset_all.isEnabled() if hasattr(win, 'act_reset_all') else getattr(self, "can_reset", False)
+        can_compare = win.act_compare.isEnabled() if hasattr(win, 'act_compare') else getattr(self, "can_compare", False)
+
         act_split = menu.addAction("原片前后对比")
         act_split.setIcon(get_icon("compare.png"))
         act_split.setShortcut(QKeySequence("\\"))
+        act_split.setEnabled(can_compare)
         act_split.triggered.connect(self.requestToggleSplit.emit)
 
         menu.addSeparator()
@@ -1867,16 +1909,19 @@ class DarkroomGLCanvas(QOpenGLWidget):
         act_undo = menu.addAction("撤销 (Undo)")
         act_undo.setIcon(get_icon("undo.png"))
         act_undo.setShortcut(QKeySequence("Ctrl+Z"))
+        act_undo.setEnabled(can_undo)
         act_undo.triggered.connect(self.requestUndo.emit)
 
         act_redo = menu.addAction("重做 (Redo)")
         act_redo.setIcon(get_icon("redo.png"))
         act_redo.setShortcut(QKeySequence("Ctrl+Y"))
+        act_redo.setEnabled(can_redo)
         act_redo.triggered.connect(self.requestRedo.emit)
 
         act_reset = menu.addAction("重置所有参数 (Reset All)")
         act_reset.setIcon(get_icon("reset.png"))
         act_reset.setShortcut(QKeySequence("Ctrl+R"))
+        act_reset.setEnabled(can_reset)
         act_reset.triggered.connect(self.requestReset.emit)
 
         crop_cfg = self.params.get("crop", {})
@@ -2223,7 +2268,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 u_2f("u_lens_vignette", 0.0, 50.0)
             off_ca = 1 if (isinstance(off_lens, dict) and off_lens.get("remove_ca", False)) else 0
             u_1i("u_lens_ca_enabled", off_ca)
-            u_2f("u_lens_ca_params", 0.0012, -0.0010)
+            off_ca_r = float(off_lens.get("ca_kr", 0.0)) if isinstance(off_lens, dict) else 0.0
+            off_ca_b = float(off_lens.get("ca_kb", 0.0)) if isinstance(off_lens, dict) else 0.0
+            u_2f("u_lens_ca_params", off_ca_r, off_ca_b)
 
             # Crop in offscreen export
             off_crop = eff_params.get("crop", {})

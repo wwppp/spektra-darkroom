@@ -16,6 +16,7 @@ from PySide6.QtGui import QPixmap, QImage, QColor, QIcon, QFontMetrics
 
 from ui.window_utils import apply_dark_titlebar
 from ui.theme_manager import theme_manager
+from ui.smooth_scroll import SmoothScrollArea
 
 logger = logging.getLogger("SpektraDarkroom.ExportQueue")
 
@@ -805,7 +806,7 @@ class ExportQueueDialog(QDialog):
         layout.addLayout(hdr)
 
         # Scrollable Task List
-        self.scroll = QScrollArea()
+        self.scroll = SmoothScrollArea()
         self.scroll.setWidgetResizable(True)
         self.container = QWidget()
         self.item_layout = QVBoxLayout(self.container)
