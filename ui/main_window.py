@@ -2359,8 +2359,6 @@ class DarkroomMainWindow(QMainWindow):
             return
         try:
             hwnd = int(self.winId())
-            from core.version import get_app_title
-            ctypes.windll.user32.SetWindowTextW(hwnd, get_app_title())
 
             ico_path = os.path.join(get_resource_dir(), "app_icon.ico")
             if not os.path.exists(ico_path):
@@ -2406,8 +2404,6 @@ class DarkroomMainWindow(QMainWindow):
             WS_EX_TOOLWINDOW = 0x00000080
             ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW)
-
-            ctypes.windll.user32.SetWindowTextW(hwnd, self.windowTitle() or get_app_title())
         except Exception:
             pass
 
@@ -2491,8 +2487,12 @@ class DarkroomMainWindow(QMainWindow):
                         mmi.ptMinTrackSize.y = min_h
                     return True, 0
 
-                # Suppress Windows Non-Client Painting entirely (prevents ghost titlebar painting)
+                # Suppress Windows Non-Client Painting and Text/Activation redraws entirely (prevents Win7 Aero Basic ghost titlebar)
                 if msg.message == 0x0085:  # WM_NCPAINT
+                    return True, 0
+                if msg.message == 0x0086:  # WM_NCACTIVATE
+                    return True, 1
+                if msg.message in (0x00AE, 0x00AF):  # WM_NCUAHDRAWCAPTION, WM_NCUAHDRAWFRAME
                     return True, 0
 
                 # 1. WM_NCCALCSIZE (0x0083): Remove standard title bar and frame while keeping DWM animations
@@ -4784,6 +4784,7 @@ class DarkroomMainWindow(QMainWindow):
     def _mark_current_photo_dirty(self):
         if getattr(self, '_is_updating_sliders', False) or getattr(self, '_is_switching_photo', False):
             return
+        was_dirty = bool(getattr(self, '_photo_is_dirty', False))
         self._photo_is_dirty = True
         if self.active_photo_id:
             photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
@@ -4792,8 +4793,9 @@ class DarkroomMainWindow(QMainWindow):
                 photo["film_profile"] = self.current_film_stock
                 photo["paper_profile"] = self.current_paper_stock
                 photo["params"] = dict(self.current_params)
-            self.filmstrip.set_photo_dirty(self.active_photo_id, True)
-            self._update_window_title()
+            if not was_dirty:
+                self.filmstrip.set_photo_dirty(self.active_photo_id, True)
+                self._update_window_title()
 
     def _update_window_title(self):
         base_title = get_app_title()
@@ -4811,6 +4813,7 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'act_save_session'):
             self.act_save_session.setEnabled(has_session)
         if hasattr(self, 'act_save_session_as'):
+            self.act_save_session.setEnabled(has_session)
             self.act_save_session_as.setEnabled(has_session)
         if hasattr(self, 'act_close_session'):
             self.act_close_session.setEnabled(has_session)
@@ -4818,14 +4821,8 @@ class DarkroomMainWindow(QMainWindow):
 
         # Only display pure app brand on the startup welcome screen when NO session is loaded
         if not self.photos and not self._current_session_path and is_startup:
-            self.setWindowTitle(base_title)
-            if sys.platform == "win32":
-                try:
-                    import ctypes
-                    hwnd = int(self.winId())
-                    ctypes.windll.user32.SetWindowTextW(hwnd, base_title)
-                except Exception:
-                    pass
+            if self.windowTitle() != base_title:
+                self.setWindowTitle(base_title)
             if hasattr(self, 'lbl_brand'):
                 self.lbl_brand.setText("SpektraDarkroom")
             self._update_photo_info_display()
@@ -4837,14 +4834,8 @@ class DarkroomMainWindow(QMainWindow):
         display_title = f"{dirty_flag}{session_name}"
 
         full_title = f"{display_title} - {base_title}"
-        self.setWindowTitle(full_title)
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                hwnd = int(self.winId())
-                ctypes.windll.user32.SetWindowTextW(hwnd, full_title)
-            except Exception:
-                pass
+        if self.windowTitle() != full_title:
+            self.setWindowTitle(full_title)
         if hasattr(self, 'lbl_brand'):
             self.lbl_brand.setText(display_title)
         self._update_photo_info_display()
