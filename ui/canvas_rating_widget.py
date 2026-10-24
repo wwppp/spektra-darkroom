@@ -3,7 +3,7 @@ Interactive 5-star rating widget embedded directly in the canvas view toolbar.
 Supports mouse hover preview, click-to-rate, click-again-to-clear, and dark/light theme styling.
 """
 
-from PySide6.QtCore import Qt, Signal, QRectF
+from PySide6.QtCore import Qt, Signal, QRectF, QSize
 from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QPainter, QColor, QFont, QCursor
 
@@ -27,6 +27,12 @@ class CanvasRatingWidget(QWidget):
         self.setFixedSize(92, 22)
         self.setToolTip("底片评级 (快捷键 1-5 评分，0 清除)")
         theme_manager.themeChanged.connect(lambda _: self.update())
+
+    def sizeHint(self) -> QSize:
+        return QSize(92, 22)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(92, 22)
 
     def get_rating(self) -> int:
         return self._rating

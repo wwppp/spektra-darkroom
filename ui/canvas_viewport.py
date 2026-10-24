@@ -1,7 +1,7 @@
 import os
 import math
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF
+from PySide6.QtCore import Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF, QTimer
 from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QActionGroup, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
 from PySide6.QtWidgets import QMenu, QLabel, QWidget, QPushButton, QVBoxLayout
 from ui.window_utils import get_darkroom_menu_style, get_icon
@@ -816,8 +816,8 @@ void main() {
 
 CANVAS_BG_COLORS = {
     "white": (1.0, 1.0, 1.0),
-    "light_gray": (0.75, 0.75, 0.75),
-    "dark_gray": (0.07, 0.07, 0.07),
+    "light_gray": (0.67, 0.67, 0.67),
+    "dark_gray": (0.33, 0.33, 0.33),
     "black": (0.0, 0.0, 0.0),
 }
 
@@ -827,6 +827,44 @@ CANVAS_BG_NAMES = [
     ("深灰", "dark_gray"),
     ("黑色", "black"),
 ]
+
+
+def get_bg_color_circle_icon(key: str, is_dark: bool = True) -> QIcon:
+    """Generate high-DPI solid circular swatch icon for canvas background color options."""
+    fill_map = {
+        "white": QColor(255, 255, 255),
+        "light_gray": QColor(171, 171, 171),
+        "dark_gray": QColor(84, 84, 84),
+        "black": QColor(0, 0, 0),
+    }
+    if is_dark:
+        border_map = {
+            "white": QColor("#cbd5e1"),
+            "light_gray": QColor("#64748b"),
+            "dark_gray": QColor("#475569"),
+            "black": QColor("#64748b"),
+        }
+    else:
+        border_map = {
+            "white": QColor("#94a3b8"),
+            "light_gray": QColor("#94a3b8"),
+            "dark_gray": QColor("#475569"),
+            "black": QColor("#334155"),
+        }
+
+    size = 14
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    r = 4.5
+    cx, cy = size / 2.0, size / 2.0
+    p.setBrush(QBrush(fill_map.get(key, QColor(128, 128, 128))))
+    p.setPen(QPen(border_map.get(key, QColor(100, 100, 100)), 1.0))
+    p.drawEllipse(QRectF(cx - r, cy - r, r * 2.0, r * 2.0))
+    p.end()
+    return QIcon(pm)
 
 
 class DarkroomGLCanvas(QOpenGLWidget):
@@ -844,6 +882,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
     requestExport = Signal()
     requestQuickExport = Signal()
     requestToggleSplit = Signal()
+    requestCompareStart = Signal()
+    requestCompareEnd = Signal()
     importRequested = Signal()
 
     def __init__(self, parent=None):
@@ -872,6 +912,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._pending_image = None
         self._pending_lut = None
         self._gl_initialized = False
+
+        # Long-press on canvas to preview original (Before)
+        self._canvas_long_press_timer = QTimer(self)
+        self._canvas_long_press_timer.setSingleShot(True)
+        self._canvas_long_press_timer.setInterval(220)
+        self._canvas_long_press_timer.timeout.connect(self._on_canvas_long_press_timeout)
+        self._is_canvas_long_pressing = False
+        self._press_start_pos = None
 
         # Parameters
         self.params = {
@@ -920,7 +968,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._last_mouse_pos = QPointF(0, 0)
 
         # Floating HUD Badges for Before / After Compare (Native QLabels immune to OpenGL texture corruption)
-        self.badge_before = QLabel("原图", self)
+        self.badge_before = QLabel("原片", self)
         self.badge_before.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.badge_before.setStyleSheet("""
             QLabel {
@@ -1389,9 +1437,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.badge_before.raise_()
             self.badge_after.raise_()
         elif self.params.get("view_mode") == 3 and self._has_image and self.width() > 0:
-            b1_w, b1_h = 96, 26
+            b1_w, b1_h = 56, 26
             b1_x = int(self.width() / 2.0 - b1_w / 2.0)
-            self.badge_before.setText("原片 (Before)")
+            self.badge_before.setText("原片")
             self.badge_before.setGeometry(b1_x, 16, b1_w, b1_h)
             self.badge_before.show()
             self.badge_before.raise_()
@@ -1863,6 +1911,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.update()
 
     def contextMenuEvent(self, event):
+        if hasattr(self, '_canvas_long_press_timer') and self._canvas_long_press_timer.isActive():
+            self._canvas_long_press_timer.stop()
+        if getattr(self, '_is_canvas_long_pressing', False):
+            self._is_canvas_long_pressing = False
+            self.requestCompareEnd.emit()
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
@@ -1939,7 +1992,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 if abs(cw - 1.0) > 0.001 or abs(ch - 1.0) > 0.001 or abs(cx) > 0.001 or abs(cy) > 0.001 or rot != 0 or abs(ang) > 0.01 or crop_cfg.get("flip_h") or crop_cfg.get("flip_v"):
                     has_active_crop = True
         act_clear_crop = menu.addAction("清除裁切")
-        act_clear_crop.setIcon(get_icon("crop.png"))
         act_clear_crop.setEnabled(has_active_crop)
         act_clear_crop.triggered.connect(self.requestClearCrop.emit)
 
@@ -1949,8 +2001,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
         menu_bg.setStyleSheet(get_darkroom_menu_style())
         bg_group = QActionGroup(self)
         bg_group.setExclusive(True)
+        try:
+            from ui.theme_manager import theme_manager
+            is_dark_theme = theme_manager.is_dark()
+        except Exception:
+            is_dark_theme = True
         for label, key in CANVAS_BG_NAMES:
-            act = menu_bg.addAction(label)
+            icon = get_bg_color_circle_icon(key, is_dark=is_dark_theme)
+            act = menu_bg.addAction(icon, label)
             act.setCheckable(True)
             if key == self._bg_choice:
                 act.setChecked(True)
@@ -2011,6 +2069,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.update()
         event.accept()
 
+    def _on_canvas_long_press_timeout(self):
+        if not self._has_image or getattr(self, '_is_crop_editing', False):
+            return
+        self._is_canvas_long_pressing = True
+        self._is_panning = False
+        self.requestCompareStart.emit()
+
     def mousePressEvent(self, event):
         btn = event.button()
         if btn == Qt.MouseButton.LeftButton:
@@ -2021,6 +2086,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             else:
                 self._is_panning = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                if self._has_image and not getattr(self, '_is_crop_editing', False):
+                    self._press_start_pos = event.position()
+                    self._is_canvas_long_pressing = False
+                    self._canvas_long_press_timer.start(220)
             self._last_mouse_pos = event.position()
             event.accept()
         elif btn == Qt.MouseButton.MiddleButton:
@@ -2032,6 +2101,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if getattr(self, '_is_canvas_long_pressing', False):
+            event.accept()
+            return
+
+        if hasattr(self, '_canvas_long_press_timer') and self._canvas_long_press_timer.isActive() and self._press_start_pos is not None:
+            delta = event.position() - self._press_start_pos
+            if (abs(delta.x()) + abs(delta.y())) > 5.0:
+                self._canvas_long_press_timer.stop()
+
         norm_x = event.position().x() / float(max(1, self.width()))
 
         if self._is_split_dragging:
@@ -2072,6 +2150,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def mouseReleaseEvent(self, event):
         btn = event.button()
+        if btn == Qt.MouseButton.LeftButton:
+            if hasattr(self, '_canvas_long_press_timer') and self._canvas_long_press_timer.isActive():
+                self._canvas_long_press_timer.stop()
+            if getattr(self, '_is_canvas_long_pressing', False):
+                self._is_canvas_long_pressing = False
+                self.requestCompareEnd.emit()
+
         if btn in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             self._is_panning = False
             self._is_split_dragging = False
@@ -2082,6 +2167,22 @@ class DarkroomGLCanvas(QOpenGLWidget):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        if hasattr(self, '_canvas_long_press_timer') and self._canvas_long_press_timer.isActive():
+            self._canvas_long_press_timer.stop()
+        if getattr(self, '_is_canvas_long_pressing', False):
+            self._is_canvas_long_pressing = False
+            self.requestCompareEnd.emit()
+        super().leaveEvent(event)
+
+    def focusOutEvent(self, event):
+        if hasattr(self, '_canvas_long_press_timer') and self._canvas_long_press_timer.isActive():
+            self._canvas_long_press_timer.stop()
+        if getattr(self, '_is_canvas_long_pressing', False):
+            self._is_canvas_long_pressing = False
+            self.requestCompareEnd.emit()
+        super().focusOutEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

@@ -873,7 +873,7 @@ class FilmGridCard(QFrame):
         self.lbl_thumb.setObjectName("filmCardThumb")
         self.lbl_thumb.setFixedSize(98, 70)
         self.lbl_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_thumb.setStyleSheet("QLabel#filmCardThumb { border-radius: 4px; background: #18191f; border: none; }")
+        self.lbl_thumb.setStyleSheet("QLabel#filmCardThumb { border-radius: 4px; background: transparent; border: none; }")
         layout.addWidget(self.lbl_thumb, 0, Qt.AlignmentFlag.AlignCenter)
 
         # Bottom label container
@@ -911,7 +911,16 @@ class FilmGridCard(QFrame):
         tw, th = self.lbl_thumb.width(), self.lbl_thumb.height()
         if pixmap and not pixmap.isNull():
             scaled = pixmap.scaled(tw, th, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            self.lbl_thumb.setPixmap(scaled)
+            out_pm = QPixmap(scaled.size())
+            out_pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(out_pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.setBrush(QBrush(scaled))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(QRectF(0.0, 0.0, float(scaled.width()), float(scaled.height())), 4.0, 4.0)
+            p.end()
+            self.lbl_thumb.setPixmap(out_pm)
         else:
             self._draw_color_pill()
 
@@ -1130,7 +1139,10 @@ class FilmGridCard(QFrame):
     def _update_appearance(self):
         is_dark = theme_manager.is_dark()
         tooltip_bubble_style = theme_manager.get_tooltip_stylesheet()
-        thumb_bg = "#18191f" if is_dark else "#e6eaf0"
+        thumb_bg = "transparent"
+
+        if hasattr(self, "lbl_thumb") and self.lbl_thumb:
+            self.lbl_thumb.setStyleSheet("QLabel#filmCardThumb { border: none; background: transparent; border-radius: 4px; }")
 
         if not self.isEnabled():
             dis_bg = "#101114" if is_dark else "#f1f5f9"
@@ -1142,7 +1154,7 @@ class FilmGridCard(QFrame):
                     border: 1px solid {dis_border};
                     border-radius: 6px;
                 }}
-                QLabel#filmCardThumb {{ border: none; background: {thumb_bg}; border-radius: 4px; }}
+                QLabel#filmCardThumb {{ border: none; background: transparent; border-radius: 4px; }}
                 QLabel#filmCardName {{ border: none; background: transparent; color: {dis_name}; font-size: 9.5px; }}
                 {tooltip_bubble_style}
             """)
@@ -1156,7 +1168,7 @@ class FilmGridCard(QFrame):
                     border: 1px solid #f59e0b;
                     border-radius: 6px;
                 }}
-                QLabel#filmCardThumb {{ border: none; background: {thumb_bg}; border-radius: 4px; }}
+                QLabel#filmCardThumb {{ border: none; background: transparent; border-radius: 4px; }}
                 QLabel#filmCardName {{ border: none; background: transparent; color: #f59e0b; font-size: 9.5px; font-weight: bold; }}
                 {tooltip_bubble_style}
             """)
@@ -1177,7 +1189,7 @@ class FilmGridCard(QFrame):
                     border-color: {hover_border};
                     background: {hover_bg};
                 }}
-                QLabel#filmCardThumb {{ border: none; background: {thumb_bg}; border-radius: 4px; }}
+                QLabel#filmCardThumb {{ border: none; background: transparent; border-radius: 4px; }}
                 QLabel#filmCardName {{ border: none; background: transparent; color: {name_color}; font-size: 9.5px; font-weight: 500; }}
                 {tooltip_bubble_style}
             """)
@@ -1662,11 +1674,13 @@ class StatusSlotWidget(QWidget):
         l_status.setSpacing(5)
         l_status.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
 
-        self.spinner = SpinnerWidget(size=13)
+        self.spinner = SpinnerWidget(size=13, auto_hide=True)
+        self.spinner.setVisible(False)
         l_status.addWidget(self.spinner)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("status_label")
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; padding-top: 1px; }")
         l_status.addWidget(self.status_label)
@@ -1806,12 +1820,10 @@ class CenteredViewToolbar(QFrame):
         if not self.center_widget:
             return
 
-        cw = self.center_widget.sizeHint().width() if hasattr(self.center_widget, 'sizeHint') else self.center_widget.width()
-        ch = self.center_widget.sizeHint().height() if hasattr(self.center_widget, 'sizeHint') else self.center_widget.height()
-        if cw <= 0:
-            cw = 68
-        if ch <= 0:
-            ch = 20
+        w_hint = self.center_widget.sizeHint().width() if hasattr(self.center_widget, 'sizeHint') else -1
+        cw = w_hint if w_hint > 0 else (self.center_widget.width() if self.center_widget.width() > 0 else 92)
+        h_hint = self.center_widget.sizeHint().height() if hasattr(self.center_widget, 'sizeHint') else -1
+        ch = h_hint if h_hint > 0 else (self.center_widget.height() if self.center_widget.height() > 0 else 22)
 
         x = (self.width() - cw) // 2
         y = (self.height() - ch) // 2
@@ -2722,6 +2734,8 @@ class DarkroomMainWindow(QMainWindow):
         # 10. Update menu action icons
         actions_icons = [
             ('act_open_file', "open_file.png"),
+            ('act_open_folder', "open_folder.png"),
+            ('act_open_session', "open_session.png"),
             ('act_save_session', "save.png"),
             ('act_quick_export', "quick_export.png"),
             ('act_export', "export.png"),
@@ -2729,8 +2743,6 @@ class DarkroomMainWindow(QMainWindow):
             ('act_redo', "redo.png"),
             ('act_crop', "crop.png"),
             ('act_reset_all', "reset.png"),
-            ('act_clear_crop', "crop.png"),
-            ('act_clear_sdc', "reset.png"),
             ('act_prefs', "preferences.png"),
             ('act_fit_img', "fit_window.png"),
             ('act_compare', "compare.png"),
@@ -2741,6 +2753,10 @@ class DarkroomMainWindow(QMainWindow):
             act = getattr(self, attr, None)
             if act:
                 act.setIcon(get_icon(icon_name, is_dark=is_dark))
+        if hasattr(self, 'act_clear_sdc') and self.act_clear_sdc:
+            self.act_clear_sdc.setIcon(QIcon())
+        if hasattr(self, 'act_clear_crop') and self.act_clear_crop:
+            self.act_clear_crop.setIcon(QIcon())
 
         # 11. Optics section styling
         self._update_optics_ui_style()
@@ -3444,16 +3460,14 @@ class DarkroomMainWindow(QMainWindow):
         self.crop_toolbar_sep.setStyleSheet(f"background-color: {sep_color}; border: none;")
         tb_layout.addWidget(self.crop_toolbar_sep)
 
-        self.btn_split = CompareButton(self)
+        self.btn_split = QPushButton(self)
         self.btn_split.setFixedSize(28, 22)
         self.btn_split.setIcon(get_icon("compare.png"))
         self.btn_split.setIconSize(QSize(14, 14))
         self.btn_split.setCheckable(True)
-        self.btn_split.setToolTip("对比视图 (快捷键 \\): 点击切换分屏对比，长按查看原片")
+        self.btn_split.setToolTip("对比视图 (快捷键 \\): 点击切换分屏对比")
         self.btn_split.setStyleSheet(btn_style)
         self.btn_split.clicked.connect(self.toggle_split_view)
-        self.btn_split.longPressStarted.connect(self._on_compare_long_press_start)
-        self.btn_split.longPressFinished.connect(self._on_compare_long_press_end)
         tb_layout.addWidget(self.btn_split)
 
         self.btn_fit = QPushButton()
@@ -4290,20 +4304,22 @@ class DarkroomMainWindow(QMainWindow):
         # 1. File Menu
         file_menu = self.menu_bar.addMenu("文件 (F)")
         
-        self.act_open_file = QAction("打开文件...", self)
+        self.act_open_file = QAction("导入底片...", self)
         self.act_open_file.setIcon(get_icon("open_file.png"))
         self.act_open_file.setShortcut(QKeySequence("Ctrl+O"))
         self.act_open_file.triggered.connect(self.action_open_files)
         file_menu.addAction(self.act_open_file)
 
-        act_open_folder = QAction("打开文件夹...", self)
-        act_open_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
-        act_open_folder.triggered.connect(self.action_open_folder)
-        file_menu.addAction(act_open_folder)
+        self.act_open_folder = QAction("导入文件夹...", self)
+        self.act_open_folder.setIcon(get_icon("open_folder.png"))
+        self.act_open_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        self.act_open_folder.triggered.connect(self.action_open_folder)
+        file_menu.addAction(self.act_open_folder)
 
-        act_open_session = QAction("打开会话工程 (.sdss)...", self)
-        act_open_session.triggered.connect(self.action_open_session)
-        file_menu.addAction(act_open_session)
+        self.act_open_session = QAction("打开会话工程 (.sdss)...", self)
+        self.act_open_session.setIcon(get_icon("open_session.png"))
+        self.act_open_session.triggered.connect(self.action_open_session)
+        file_menu.addAction(self.act_open_session)
 
         # Recent Sessions Submenu (Item 8 & 11)
         self.recent_menu = file_menu.addMenu("最近会话")
@@ -4419,7 +4435,6 @@ class DarkroomMainWindow(QMainWindow):
         edit_menu.addAction(self.act_reset_all)
 
         self.act_clear_crop = QAction("清除裁切", self)
-        self.act_clear_crop.setIcon(get_icon("crop.png"))
         self.act_clear_crop.triggered.connect(self.action_clear_active_crop)
         edit_menu.addAction(self.act_clear_crop)
 
@@ -4683,6 +4698,8 @@ class DarkroomMainWindow(QMainWindow):
         self.canvas.requestExport.connect(self.action_export_image)
         self.canvas.requestQuickExport.connect(self.action_quick_export)
         self.canvas.requestToggleSplit.connect(self.toggle_split_view)
+        self.canvas.requestCompareStart.connect(self._on_compare_long_press_start)
+        self.canvas.requestCompareEnd.connect(self._on_compare_long_press_end)
         self.canvas.importRequested.connect(self.action_open_files)
 
     def _update_recent_menu(self):
@@ -4826,9 +4843,11 @@ class DarkroomMainWindow(QMainWindow):
             return
         self.status_label.setText("")
         self.status_label.setCursor(Qt.CursorShape.ArrowCursor)
-        self.status_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        colors = theme_manager.get_colors() if hasattr(theme_manager, 'get_colors') else {'text_muted': '#94a3b8'}
+        self.status_label.setStyleSheet(f"QLabel#status_label {{ color: {colors['text_muted']}; font-size: 11px; padding-top: 1px; }}")
         self.status_label.setToolTip("")
         self.spinner.stop()
+        self.spinner.setVisible(False)
         if hasattr(self, 'view_toolbar') and hasattr(self.view_toolbar, '_update_center'):
             self.view_toolbar._update_center()
 
@@ -5057,13 +5076,16 @@ class DarkroomMainWindow(QMainWindow):
             self._status_timer.stop()
 
         if spinning:
+            self.spinner.setVisible(True)
             self.spinner.start()
         else:
             self.spinner.stop()
+            self.spinner.setVisible(False)
 
         self.status_label.setText(text)
         self.status_label.setCursor(Qt.CursorShape.ArrowCursor)
-        self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; }")
+        colors = theme_manager.get_colors() if hasattr(theme_manager, 'get_colors') else {'text_muted': '#94a3b8'}
+        self.status_label.setStyleSheet(f"QLabel#status_label {{ color: {colors['text_muted']}; font-size: 11px; padding-top: 1px; }}")
         self.status_label.setToolTip("")
 
         if text and text.strip():
@@ -5847,7 +5869,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self._set_export_status(f"已加入扫描队列 ({enqueued_count} 张)", state="busy")
 
-    def push_undo_state(self):
+    def push_undo_state(self, action: str = None):
         state = {
             "type": "single_photo_state",
             "photo_id": self.active_photo_id,
@@ -5857,6 +5879,8 @@ class DarkroomMainWindow(QMainWindow):
             "print_mode": getattr(self, "current_print_mode", "optical"),
             "params": dict(self.current_params)
         }
+        if action:
+            state["action"] = action
         # Avoid pushing duplicate states that match the top of the undo stack
         if self._undo_stack:
             top = self._undo_stack[-1]
@@ -5926,6 +5950,23 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已撤销底片排序", timeout_ms=2000)
         elif act == "rate_photos":
             self.set_app_status("已撤销底片评分", timeout_ms=2000)
+        elif act == "reset_all_params":
+            self.set_app_status("已撤销重置所有参数", timeout_ms=2000)
+        elif act == "reset_to_open":
+            self.set_app_status("已撤销恢复至原始底片", timeout_ms=2000)
+        elif act and act.startswith("reset_track_"):
+            track_names = {
+                "exposure": "曝光",
+                "optics": "光学",
+                "chemistry": "化学",
+                "enlarger": "放大机",
+                "halation": "光晕",
+                "grain": "颗粒"
+            }
+            tname = track_names.get(act[12:], "模块")
+            self.set_app_status(f"已撤销重置{tname}模块", timeout_ms=2000)
+        elif act == "auto_meter":
+            self.set_app_status("已撤销基准测光", timeout_ms=2000)
         else:
             self.set_app_status("已撤销", timeout_ms=1500)
         self._update_menu_actions_state()
@@ -5962,6 +6003,23 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("已重做底片排序", timeout_ms=2000)
         elif act == "rate_photos":
             self.set_app_status("已重做底片评分", timeout_ms=2000)
+        elif act == "reset_all_params":
+            self.set_app_status("已重做重置所有参数", timeout_ms=2000)
+        elif act == "reset_to_open":
+            self.set_app_status("已重做恢复至原始底片", timeout_ms=2000)
+        elif act and act.startswith("reset_track_"):
+            track_names = {
+                "exposure": "曝光",
+                "optics": "光学",
+                "chemistry": "化学",
+                "enlarger": "放大机",
+                "halation": "光晕",
+                "grain": "颗粒"
+            }
+            tname = track_names.get(act[12:], "模块")
+            self.set_app_status(f"已重做重置{tname}模块", timeout_ms=2000)
+        elif act == "auto_meter":
+            self.set_app_status("已重做基准测光", timeout_ms=2000)
         else:
             self.set_app_status("已重做", timeout_ms=1500)
         self._update_menu_actions_state()
@@ -6852,7 +6910,7 @@ class DarkroomMainWindow(QMainWindow):
         dur = (time.time() - t0) * 1000.0
         self.set_app_status(f"LUT 烘焙完成 ({dur:.0f}ms)", timeout_ms=2000)
 
-    def _on_slider_committed(self):
+    def _on_slider_committed(self, action: str = None):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
             return
         if hasattr(self, '_live_thumb_timer') and self._live_thumb_timer.isActive():
@@ -6863,7 +6921,7 @@ class DarkroomMainWindow(QMainWindow):
             self._pending_lut_refresh = False
             if getattr(self, "current_film_stock", "none") != "none":
                 self._refresh_lut()
-        self.push_undo_state()
+        self.push_undo_state(action=action)
         self._mark_current_photo_dirty()
         self._update_active_thumbnails()
         self._save_current_photo_sdc()
@@ -6881,7 +6939,7 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'slider_ev'):
             self.slider_ev.set_value(ev_val)
         self.canvas.update_params(exposure_ev=ev_val)
-        self._on_slider_committed()
+        self._on_slider_committed(action="auto_meter")
         base_ev = float(photo.get("base_ev", 0.0))
         self.set_app_status(f"基准测光: 18% 中灰 (基准 {base_ev:+.2f} EV)", timeout_ms=2500)
 
@@ -6989,7 +7047,6 @@ class DarkroomMainWindow(QMainWindow):
 
         # Item 5: Resetting an unedited photo never marks it dirty!
         if getattr(self, "_photo_is_dirty", False):
-            self.push_undo_state()
             all_defs = {}
             for d in defaults.values():
                 all_defs.update(d)
@@ -7011,7 +7068,7 @@ class DarkroomMainWindow(QMainWindow):
         self._update_reset_buttons_state()
         self._update_active_thumbnails()
         self._refresh_card_previews()
-        self.push_undo_state()
+        self.push_undo_state(action=f"reset_track_{track_name}")
         self.setFocus()
 
     def reset_all_params(self):
@@ -7052,7 +7109,7 @@ class DarkroomMainWindow(QMainWindow):
         self._update_reset_buttons_state()
         self._update_active_thumbnails()
         self._refresh_card_previews()
-        self.push_undo_state()
+        self.push_undo_state(action="reset_all_params")
 
     def on_reset_to_open(self):
         """Dispatch '重置为打开状态' (Ctrl+Alt+R) according to workspace mode."""
@@ -7108,7 +7165,7 @@ class DarkroomMainWindow(QMainWindow):
         self._update_reset_buttons_state()
         self._update_active_thumbnails()
         self._refresh_card_previews()
-        self.push_undo_state()
+        self.push_undo_state(action="reset_to_open")
 
         self._photo_is_dirty = False
         if self.active_photo_id:
@@ -7400,7 +7457,7 @@ class DarkroomMainWindow(QMainWindow):
         self._schedule_histogram_update()
         if self._current_photo_path:
             self._update_active_thumbnails()
-            self._refresh_card_previews(paper_only=False)
+            self._refresh_card_previews(paper_only=True)
         self._update_stock_mode_ui()
         if push_undo:
             self.push_undo_state()
@@ -7481,7 +7538,6 @@ class DarkroomMainWindow(QMainWindow):
         self.canvas.update_params(paper_profile=stock_id, print_mode=self.current_print_mode)
         self._schedule_histogram_update()
         if push_undo and self._current_photo_path:
-            self._refresh_card_previews(paper_only=False)
             self._update_active_thumbnails()
         self._update_stock_mode_ui()
         if push_undo:
@@ -7495,11 +7551,11 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'btn_split'):
             self.btn_split.setChecked(mode != 0)
             if mode == 0:
-                self.btn_split.setToolTip("对比视图 (快捷键 \\): 点击切换分屏对比，长按查看原片")
+                self.btn_split.setToolTip("对比视图 (快捷键 \\): 点击切换分屏对比")
             elif mode == 1:
-                self.btn_split.setToolTip("对比视图 (快捷键 \\): 拖动分屏对比中，再次点击切换为左右全局双屏对比，长按查看原片")
+                self.btn_split.setToolTip("对比视图 (快捷键 \\): 拖动分屏对比中，再次点击切换为左右全局双屏对比")
             elif mode == 2:
-                self.btn_split.setToolTip("对比视图 (快捷键 \\): 左右全局双屏对比中，再次点击恢复编辑模式，长按查看原片")
+                self.btn_split.setToolTip("对比视图 (快捷键 \\): 左右全局双屏对比中，再次点击恢复编辑模式")
             elif mode == 3:
                 self.btn_split.setToolTip("对比视图: 正在查看原始图像 (松开恢复)")
 
@@ -8402,13 +8458,7 @@ class DarkroomMainWindow(QMainWindow):
                 qimg = QImage(rendered_rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
                 pix = QPixmap.fromImage(qimg)
 
-                # 1. Left active film and paper cards (WYSIWYG)
-                self.thumb_controller.update_active_card_wysiwyg(
-                    self.film_cards, self.paper_cards,
-                    self.current_film_stock, self.current_paper_stock, pix
-                )
-
-                # 2. Bottom filmstrip active frame thumbnail
+                # Bottom filmstrip active frame thumbnail
                 if self.active_photo_id and is_valid:
                     curr_p = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
                     if curr_p:
@@ -9469,15 +9519,11 @@ class DarkroomMainWindow(QMainWindow):
         card = self.film_cards.get(stock_id)
         if not card:
             return
-        if stock_id == self.current_film_stock and card.thumbnail_pixmap is not None:
-            return
         card.set_thumbnail(pixmap)
 
     def _on_paper_thumb_ready(self, stock_id, pixmap):
         card = self.paper_cards.get(stock_id)
         if not card:
-            return
-        if stock_id == self.current_paper_stock and card.thumbnail_pixmap is not None:
             return
         card.set_thumbnail(pixmap)
 
@@ -9661,7 +9707,30 @@ class DarkroomMainWindow(QMainWindow):
                 session_cache_manager.invalidate_photo_cache(fpath)
 
         count = len(target_photos)
-        self.on_remove_multiple_photos(photo_ids)
+        self.on_remove_multiple_photos(photo_ids, push_undo=False)
+
+        # Purge deleted photos from prior undo/redo history so undo cannot revive recycled files
+        id_set = set(photo_ids)
+        new_undo = []
+        for s in self._undo_stack:
+            stype = s.get("type")
+            if stype == "single_photo_state" and s.get("photo_id") in id_set:
+                continue
+            if stype == "library_photos_state":
+                s["photos"] = [p for p in s.get("photos", []) if p.get("id") not in id_set]
+            elif stype == "batch_photos_state":
+                for pid in id_set:
+                    s.get("photos", {}).pop(pid, None)
+            elif stype == "photo_rating_state":
+                for pid in id_set:
+                    s.get("ratings", {}).pop(pid, None)
+                    s.get("old_ratings", {}).pop(pid, None)
+            new_undo.append(s)
+        self._undo_stack = new_undo
+        self._redo_stack.clear()
+        if not self._undo_stack and self.active_photo_id and getattr(self, "_active_photo_baseline_state", None):
+            self._undo_stack = [self._active_photo_baseline_state]
+        self._update_menu_actions_state()
         self.set_app_status(f"已将 {count} 个底片文件移至回收站", timeout_ms=3000)
 
     def action_clear_sdc_active(self):

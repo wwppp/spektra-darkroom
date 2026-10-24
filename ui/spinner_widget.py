@@ -6,31 +6,38 @@ from PySide6.QtWidgets import QWidget
 class SpinnerWidget(QWidget):
     """Sleek Adobe-style rotating loading spinner circle widget.
     - When active (loading/processing/rendering): rotates an amber arc smoothly at 30 FPS.
-    - When idle (ready): displays a subtle calm green dot indicator.
+    - When idle (ready): hidden automatically to eliminate layout padding/offset when not spinning.
     """
-    def __init__(self, size=14, parent=None):
+    def __init__(self, size=14, auto_hide=True, parent=None):
         super().__init__(parent)
         self._size = size
+        self._auto_hide = auto_hide
         self.setFixedSize(size, size)
         self._angle = 0
         self._is_spinning = False
+        if self._auto_hide:
+            self.setVisible(False)
 
         self._timer = QTimer(self)
         self._timer.setInterval(33)  # ~30 FPS
         self._timer.timeout.connect(self._on_tick)
 
     def start(self):
-        """Start spinning animation."""
+        """Start spinning animation and reveal widget."""
         self._is_spinning = True
+        if self._auto_hide:
+            self.setVisible(True)
         if not self._timer.isActive():
             self._timer.start()
         self.update()
 
     def stop(self):
-        """Stop spinning animation and return to idle green indicator."""
+        """Stop spinning animation and hide widget."""
         self._is_spinning = False
         if self._timer.isActive():
             self._timer.stop()
+        if self._auto_hide:
+            self.setVisible(False)
         self.update()
 
     def is_spinning(self) -> bool:

@@ -1777,7 +1777,6 @@ class CropOverlayWidget(QWidget):
         act_reset_all.triggered.connect(self.reset_to_initial_state)
 
         act_clear = menu.addAction("清除裁切")
-        act_clear.setIcon(get_icon("crop.png"))
         act_clear.triggered.connect(self.clear_crop_completely)
 
         menu.addSeparator()

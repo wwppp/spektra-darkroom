@@ -1968,7 +1968,6 @@ class FilmstripWidget(QWidget):
 
         delete_label = "删除文件" if sel_count == 1 else f"删除文件 ({sel_count} 项)"
         act_delete = menu.addAction(delete_label)
-        act_delete.setIcon(get_icon("dlg_discard.png"))
         act_delete.setShortcut(QKeySequence("Shift+Delete"))
         act_delete.triggered.connect(lambda: self.photosDeleted.emit(list(self._selected_ids)))
 
@@ -2041,7 +2040,6 @@ class FilmstripWidget(QWidget):
 
         crop_label = "清除裁切" if sel_count == 1 else f"清除裁切 ({sel_count} 项)"
         act_clear_crop = menu.addAction(crop_label)
-        act_clear_crop.setIcon(get_icon("crop.png"))
         act_clear_crop.setEnabled(can_clear_crop)
         act_clear_crop.triggered.connect(lambda: self.clearCropRequested.emit(list(self._selected_ids)))
 

@@ -556,13 +556,17 @@ class ThumbnailController(QObject):
                 pass
 
     def update_active_card_wysiwyg(self, film_cards: dict, paper_cards: dict,
-                                   active_film: str, active_paper: str, pixmap: QPixmap):
-        """Updates the active film and paper cards with 100% WYSIWYG offscreen canvas render."""
+                                   active_film: str, active_paper: str, pixmap: QPixmap, force: bool = False):
+        """Updates active cards only if uninitialized or explicitly forced; preserves crisp CPU candidate thumbnails."""
         if pixmap and not pixmap.isNull():
             if film_cards and active_film in film_cards:
-                film_cards[active_film].set_thumbnail(pixmap)
+                card = film_cards[active_film]
+                if force or card.thumbnail_pixmap is None:
+                    card.set_thumbnail(pixmap)
             if paper_cards and active_paper in paper_cards:
-                paper_cards[active_paper].set_thumbnail(pixmap)
+                card = paper_cards[active_paper]
+                if force or card.thumbnail_pixmap is None:
+                    card.set_thumbnail(pixmap)
 
     def trigger_candidate_card_previews(self, linear_thumb: np.ndarray, film_cards: dict, paper_cards: dict,
                                         current_film: str, current_paper: str, params: dict, base_ev: float = 0.0,
