@@ -13,11 +13,15 @@ datas_colour, bin_colour, hid_colour = collect_all('colour')
 datas_rawpy, bin_rawpy, hid_rawpy = collect_all('rawpy')
 datas_gl, bin_gl, hid_gl = collect_all('OpenGL')
 
+# Strip raw .py source files from datas so core, ui, and spektrafilm are compiled into PYZ bytecode
+datas_spektra = [
+    (src, dst) for (src, dst) in datas_spektra
+    if not str(src).lower().endswith(('.py', '.pyc', '.pyo'))
+]
+
 added_datas = [
     (os.path.join(ROOT_DIR, 'resources'), 'resources'),
-    (os.path.join(ROOT_DIR, 'core'), 'core'),
-    (os.path.join(ROOT_DIR, 'ui'), 'ui'),
-    (os.path.join(ROOT_DIR, 'spektrafilm'), 'spektrafilm'),
+    (os.path.join(ROOT_DIR, 'spektrafilm', 'data'), os.path.join('spektrafilm', 'data')),
 ] + datas_spektra + datas_colour + datas_rawpy + datas_gl
 
 sample_arw = os.path.join(ROOT_DIR, 'sample.ARW')
@@ -33,12 +37,17 @@ added_hidden = [
     'core.session_cache_manager',
     'core.sdc_manager',
     'core.format_constants',
+    'core.lens_correction',
     'core.version',
     'ui',
     'ui.about_dialog',
     'ui.accordion',
     'ui.adobe_scrub_slider',
+    'ui.canvas_rating_widget',
     'ui.canvas_viewport',
+    'ui.confirm_dialog',
+    'ui.crop_overlay',
+    'ui.delete_photo_dialog',
     'ui.export_dialog',
     'ui.export_queue_manager',
     'ui.fading_stacked_widget',
@@ -58,15 +67,19 @@ added_hidden = [
     'PySide6.QtOpenGLWidgets',
     'PySide6.QtOpenGL',
     'PySide6.QtNetwork',
+    'PySide6.QtSvg',
     'OpenGL.platform.win32',
     'scipy.ndimage',
     'scipy.spatial',
     'scipy.interpolate',
+    'scipy.optimize',
     'numba',
     'llvmlite',
     'cv2',
     'rawpy',
     'PIL',
+    'tifffile',
+    'imagecodecs',
 ] + hid_spektra + hid_colour + hid_rawpy + hid_gl
 
 a = Analysis(
