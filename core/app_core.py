@@ -2355,81 +2355,80 @@ class SpektraEngine:
         # 4. Rawpy extraction for white balance, color temp, camera make, model, resolution
         if rawpy is not None and ext in cls.RAW_EXTS:
             try:
-                with open(file_path, "rb") as fp:
-                    with rawpy.imread(fp) as raw:
-                        if meta["resolution"] == "-":
-                            rw, rh = raw.sizes.width, raw.sizes.height
-                            if getattr(raw.sizes, "flip", 0) in (4, 5, 6, 7):
-                                rw, rh = rh, rw
-                            meta["resolution"] = f"{rw} × {rh}"
+                with rawpy.imread(file_path) as raw:
+                    if meta["resolution"] == "-":
+                        rw, rh = raw.sizes.width, raw.sizes.height
+                        if getattr(raw.sizes, "flip", 0) in (4, 5, 6, 7):
+                            rw, rh = rh, rw
+                        meta["resolution"] = f"{rw} × {rh}"
 
-                        try:
-                            if hasattr(raw, "other") and raw.other:
-                                o = raw.other
-                                if getattr(o, "iso_speed", None) and meta["iso"] == "-":
-                                    meta["iso"] = f"ISO-{int(o.iso_speed)}"
-                                if getattr(o, "aperture", None) and meta["aperture"] == "-":
-                                    meta["aperture"] = f"f/{o.aperture:.1f}"
-                                if getattr(o, "shutter_speed", None) and meta["shutter_speed"] == "-":
-                                    ss = float(o.shutter_speed)
-                                    if ss > 0:
-                                        meta["shutter_speed"] = f"1/{int(round(1.0/ss))} 秒" if ss < 1.0 else f"{ss:.1f} 秒"
-                                if getattr(o, "focal_length", None) and meta["focal_length"] == "-":
-                                    meta["focal_length"] = f"{int(round(o.focal_length))} 毫米"
-                                if getattr(o, "artist", None) and meta["artist"] == "-":
-                                    meta["artist"] = str(o.artist).strip()
-                                if getattr(o, "timestamp", None) and meta["capture_time"] == "-":
-                                    try:
-                                        meta["capture_time"] = time.strftime("%Y:%m:%d %H:%M:%S", time.localtime(o.timestamp))
-                                    except Exception:
-                                        pass
-                            if hasattr(raw, "lens") and raw.lens:
-                                l = raw.lens
-                                if getattr(l, "model", None) and meta["lens_model"] == "-":
-                                    meta["lens_model"] = str(l.model).strip().strip("\x00")
-                                if getattr(l, "make", None) and meta["lens_make"] == "-":
-                                    meta["lens_make"] = str(l.make).strip().strip("\x00")
-                        except Exception:
-                            pass
+                    try:
+                        if hasattr(raw, "other") and raw.other:
+                            o = raw.other
+                            if getattr(o, "iso_speed", None) and meta["iso"] == "-":
+                                meta["iso"] = f"ISO-{int(o.iso_speed)}"
+                            if getattr(o, "aperture", None) and meta["aperture"] == "-":
+                                meta["aperture"] = f"f/{o.aperture:.1f}"
+                            if getattr(o, "shutter_speed", None) and meta["shutter_speed"] == "-":
+                                ss = float(o.shutter_speed)
+                                if ss > 0:
+                                    meta["shutter_speed"] = f"1/{int(round(1.0/ss))} 秒" if ss < 1.0 else f"{ss:.1f} 秒"
+                            if getattr(o, "focal_length", None) and meta["focal_length"] == "-":
+                                meta["focal_length"] = f"{int(round(o.focal_length))} 毫米"
+                            if getattr(o, "artist", None) and meta["artist"] == "-":
+                                meta["artist"] = str(o.artist).strip()
+                            if getattr(o, "timestamp", None) and meta["capture_time"] == "-":
+                                try:
+                                    meta["capture_time"] = time.strftime("%Y:%m:%d %H:%M:%S", time.localtime(o.timestamp))
+                                except Exception:
+                                    pass
+                        if hasattr(raw, "lens") and raw.lens:
+                            l = raw.lens
+                            if getattr(l, "model", None) and meta["lens_model"] == "-":
+                                meta["lens_model"] = str(l.model).strip().strip("\x00")
+                            if getattr(l, "make", None) and meta["lens_make"] == "-":
+                                meta["lens_make"] = str(l.make).strip().strip("\x00")
+                    except Exception:
+                        pass
 
-                        wb = getattr(raw, "camera_whitebalance", None)
-                        mat = getattr(raw, "rgb_xyz_matrix", None)
-                        if wb is not None and len(wb) >= 3 and wb[0] > 0 and wb[1] > 0 and wb[2] > 0:
-                            calc_cct = None
-                            calc_duv = 0.0
+                    wb = getattr(raw, "camera_whitebalance", None)
+                    mat = getattr(raw, "rgb_xyz_matrix", None)
+                    if wb is not None and len(wb) >= 3 and wb[0] > 0 and wb[1] > 0 and wb[2] > 0:
+                        calc_cct = None
+                        calc_duv = 0.0
 
-                            # Method A: Invert camera RGB->XYZ matrix and evaluate neutral sensor chromaticity
-                            if mat is not None and hasattr(mat, "shape") and mat.shape[0] >= 3 and mat.shape[1] >= 3:
-                                m3 = mat[:3, :3]
-                                if np.linalg.matrix_rank(m3) == 3:
-                                    try:
-                                        import colour
-                                        inv_m = np.linalg.inv(m3)
-                                        cam_n = np.array([1.0 / wb[0], 1.0 / wb[1], 1.0 / wb[2]])
-                                        xyz = np.dot(inv_m, cam_n)
-                                        if xyz[1] != 0:
-                                            xyz = xyz / xyz[1]
-                                        cct_v, duv_v = colour.temperature.XYZ_to_CCT_Ohno2013(xyz)
-                                        calc_cct = float(cct_v)
-                                        calc_duv = float(duv_v)
-                                    except Exception:
-                                        pass
+                        # Method A: Invert camera RGB->XYZ matrix and evaluate neutral sensor chromaticity
+                        if mat is not None and hasattr(mat, "shape") and mat.shape[0] >= 3 and mat.shape[1] >= 3:
+                            m3 = mat[:3, :3]
+                            if np.linalg.matrix_rank(m3) == 3:
+                                try:
+                                    import colour
+                                    inv_m = np.linalg.inv(m3)
+                                    cam_n = np.array([1.0 / wb[0], 1.0 / wb[1], 1.0 / wb[2]])
+                                    xyz = np.dot(inv_m, cam_n)
+                                    if xyz[1] != 0:
+                                        xyz = xyz / xyz[1]
+                                    cct_v, duv_v = colour.temperature.XYZ_to_CCT_Ohno2013(xyz)
+                                    calc_cct = float(cct_v)
+                                    calc_duv = float(duv_v)
+                                except Exception:
+                                    pass
 
-                            # Method B: Daylight reference white balance ratio fallback
-                            if calc_cct is None:
-                                day_wb = getattr(raw, "daylight_whitebalance", None)
-                                if day_wb is not None and len(day_wb) >= 3 and day_wb[0] > 0 and day_wb[2] > 0:
-                                    ratio_rb = (wb[0] / wb[2]) / (day_wb[0] / day_wb[2])
-                                    calc_cct = 5500.0 / np.sqrt(max(0.1, ratio_rb))
+                        # Method B: Daylight reference white balance ratio fallback
+                        if calc_cct is None:
+                            day_wb = getattr(raw, "daylight_whitebalance", None)
+                            if day_wb is not None and len(day_wb) >= 3 and day_wb[0] > 0 and day_wb[2] > 0:
+                                ratio_rb = (wb[0] / wb[2]) / (day_wb[0] / day_wb[2])
+                                calc_cct = 5500.0 / np.sqrt(max(0.1, ratio_rb))
 
-                            if calc_cct is not None:
-                                cct_rounded = round(float(calc_cct) / 25.0) * 25.0
-                                cct_clamped = max(3000.0, min(8500.0, cct_rounded))
-                                tint_val = round(float(1.0 + calc_duv * 4.0), 2)
-                                tint_clamped = max(0.8, min(1.2, tint_val))
-                                meta["color_temp"] = cct_clamped
-                                meta["tint"] = tint_clamped
-                                meta["white_balance"] = f"{int(cct_clamped)} K"
+                        if calc_cct is not None:
+                            cct_rounded = round(float(calc_cct) / 25.0) * 25.0
+                            cct_clamped = max(3000.0, min(8500.0, cct_rounded))
+                            tint_val = round(float(1.0 + calc_duv * 4.0), 2)
+                            tint_clamped = max(0.8, min(1.2, tint_val))
+                            meta["color_temp"] = cct_clamped
+                            meta["tint"] = tint_clamped
+                            meta["white_balance"] = f"{int(cct_clamped)} K"
             except Exception:
                 pass
 
@@ -2509,8 +2508,26 @@ class SpektraEngine:
                 "filename": os.path.basename(file_path),
                 "ext": ext
             }
-            # Extract rich EXIF shooting attributes
-            original_meta.update(cls._extract_exif(file_path))
+            # Fast thumbnail mode skips expensive EXIF parsing (rawpy.imread / tifffile / PIL);
+            # full EXIF is progressively loaded when photo is actively opened
+            if not fast_thumbnail:
+                original_meta.update(cls._extract_exif(file_path))
+            else:
+                try:
+                    st = os.stat(file_path)
+                    original_meta["file_size"] = f"{st.st_size / (1024.0 * 1024.0):.1f} MB"
+                    original_meta["_mtime"] = float(st.st_mtime)
+                except Exception:
+                    pass
+                try:
+                    import re
+                    with open(file_path, "rb") as _hfp:
+                        _hdr = _hfp.read(65536)
+                    _m = re.search(rb"((?:19|20)\d{2}:(?:0[1-9]|1[0-2]):(?:0[1-9]|[12]\d|3[01]) (?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)", _hdr)
+                    if _m:
+                        original_meta["capture_time"] = _m.group(1).decode("ascii", errors="ignore")
+                except Exception:
+                    pass
 
             raw_exts = cls.RAW_EXTS
 
@@ -2518,117 +2535,218 @@ class SpektraEngine:
                 if rawpy is None:
                     return {"success": False, "error": "系统未检测到 rawpy 模块，无法解析相机 RAW"}
 
-                if fast_thumbnail and (not is_first) and (load_preview is not True):
+                if fast_thumbnail and (load_preview is not True):
                     # Fast path: Extract camera-embedded JPEG preview in sub-15ms
-                    # Avoids expensive LibRaw full-resolution demosaicing during batch import
+                    # Pass file_path directly to rawpy.imread(file_path) so LibRaw only seeks to the IFD header
+                    # and thumbnail offset (~300 KB) instead of reading the entire 47 MB RAW file into RAM!
+                    th_u8 = None
                     try:
-                        with open(file_path, "rb") as fp:
-                            with rawpy.imread(fp) as raw:
-                                rw, rh = raw.sizes.width, raw.sizes.height
-                                flip = getattr(raw.sizes, "flip", 0)
-                                if flip in (4, 5, 6, 7):
-                                    w, h = rh, rw
-                                else:
-                                    w, h = rw, rh
-                                original_meta["width"] = w
-                                original_meta["height"] = h
-                                original_meta["resolution"] = f"{w} × {h}"
+                        with rawpy.imread(file_path) as raw:
+                            rw, rh = raw.sizes.width, raw.sizes.height
+                            flip = getattr(raw.sizes, "flip", 0)
+                            if flip in (4, 5, 6, 7):
+                                w, h = rh, rw
+                            else:
+                                w, h = rw, rh
+                            original_meta["width"] = w
+                            original_meta["height"] = h
+                            original_meta["resolution"] = f"{w} × {h}"
 
+                            # Tier 1: Try LibRaw thumb extractor (JPEG and BITMAP/PPM)
+                            try:
                                 thumb = raw.extract_thumb()
+                                rgb = None
                                 if thumb.format == rawpy.ThumbFormat.JPEG:
-                                    file_bytes = np.frombuffer(thumb.data, dtype=np.uint8)
+                                    file_bytes = np.frombuffer(thumb.data, dtype=np.uint8) if not isinstance(thumb.data, np.ndarray) else thumb.data
                                     img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
                                     if img_bgr is not None:
-                                        th_h_raw, th_w_raw = img_bgr.shape[:2]
-                                        if (h > w and th_w_raw > th_h_raw):
-                                            img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
-                                        elif (w > h and th_h_raw > th_w_raw):
-                                            img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
-
                                         rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                                elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                                    if isinstance(thumb.data, np.ndarray) and len(thumb.data.shape) >= 2:
+                                        rgb = thumb.data
+                                    else:
+                                        try:
+                                            file_bytes = np.frombuffer(thumb.data, dtype=np.uint8)
+                                            img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                                            if img_bgr is not None:
+                                                rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                                        except Exception:
+                                            rgb = None
+                                if rgb is not None and rgb.size > 0:
+                                    th_h_raw, th_w_raw = rgb.shape[:2]
+                                    if (h > w and th_w_raw > th_h_raw) or (w > h and th_h_raw > th_w_raw):
+                                        rgb = cv2.rotate(rgb, cv2.ROTATE_90_CLOCKWISE)
+                                    th_h = 72
+                                    th_w = max(48, int(rgb.shape[1] * (th_h / float(rgb.shape[0]))))
+                                    th_u8 = cv2.resize(rgb, (th_w, th_h), interpolation=cv2.INTER_AREA)
+                            except Exception:
+                                th_u8 = None
+
+                            # Tier 2: Direct raw file byte scanner for embedded camera JPEG preview (Sony ARW, etc.)
+                            if th_u8 is None:
+                                try:
+                                    with open(file_path, "rb") as fp:
+                                        raw_bytes = fp.read(4 * 1024 * 1024)
+                                    start = 0
+                                    best_bgr = None
+                                    best_area = 0
+                                    checked = 0
+                                    while start < len(raw_bytes) and checked < 3:
+                                        idx = raw_bytes.find(b'\xff\xd8\xff', start)
+                                        if idx == -1:
+                                            break
+                                        end_idx = raw_bytes.find(b'\xff\xd9', idx + 1024 * 10)
+                                        if end_idx != -1:
+                                            cand = raw_bytes[idx:end_idx + 2]
+                                            cand_bgr = cv2.imdecode(np.frombuffer(cand, dtype=np.uint8), cv2.IMREAD_COLOR)
+                                            checked += 1
+                                            if cand_bgr is not None and cand_bgr.shape[0] >= 100:
+                                                area = cand_bgr.shape[0] * cand_bgr.shape[1]
+                                                if area > best_area:
+                                                    best_area = area
+                                                    best_bgr = cand_bgr
+                                                    if cand_bgr.shape[0] >= 600:
+                                                        break
+                                            start = end_idx + 2
+                                        else:
+                                            start = idx + 1024
+                                    if best_bgr is not None:
+                                        th_h_raw, th_w_raw = best_bgr.shape[:2]
+                                        if (h > w and th_w_raw > th_h_raw) or (w > h and th_h_raw > th_w_raw):
+                                            best_bgr = cv2.rotate(best_bgr, cv2.ROTATE_90_CLOCKWISE)
+                                        rgb = cv2.cvtColor(best_bgr, cv2.COLOR_BGR2RGB)
                                         th_h = 72
                                         th_w = max(48, int(rgb.shape[1] * (th_h / float(rgb.shape[0]))))
                                         th_u8 = cv2.resize(rgb, (th_w, th_h), interpolation=cv2.INTER_AREA)
+                                except Exception:
+                                    th_u8 = None
 
-                                        from . import session_cache_manager
-                                        cache_entry = {
-                                            "path": file_path,
-                                            "filename": original_meta["filename"],
-                                            "width": w,
-                                            "height": h,
-                                            "thumbnail_rgb": th_u8,
-                                            "raw_thumbnail_rgb": th_u8,
-                                            "graded_thumbnail_rgb": None,
-                                            "exif": original_meta,
-                                            "auto_ev": 0.0,
-                                            "base_ev": 0.0,
-                                            "is_raw": True
-                                        }
-                                        session_cache_manager.save_photo_cache(file_path, cache_entry, save_preview=False)
+                            # Tier 3: Emergency fast 8-bit LINEAR demosaic (~40ms, uint8, avoids heavy 16-bit ProPhoto float32 math)
+                            if th_u8 is None:
+                                try:
+                                    rgb8 = raw.postprocess(
+                                        demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
+                                        half_size=True,
+                                        output_color=rawpy.ColorSpace.sRGB,
+                                        output_bps=8,
+                                        use_camera_wb=False,
+                                        no_auto_bright=True,
+                                        no_auto_scale=False
+                                    )
+                                    if rgb8 is not None:
+                                        th_h = 72
+                                        th_w = max(48, int(rgb8.shape[1] * (th_h / float(rgb8.shape[0]))))
+                                        th_u8 = cv2.resize(rgb8, (th_w, th_h), interpolation=cv2.INTER_AREA)
+                                except Exception:
+                                    th_u8 = None
 
-                                        return {
-                                            "success": True,
-                                            "path": file_path,
-                                            "filename": original_meta["filename"],
-                                            "width": w,
-                                            "height": h,
-                                            "preview_w": th_w,
-                                            "preview_h": th_h,
-                                            "thumbnail_rgb": th_u8,
-                                            "raw_thumbnail_rgb": th_u8,
-                                            "graded_thumbnail_rgb": None,
-                                            "float_img": None,
-                                            "raw_preview": None,
-                                            "exif": dict(original_meta),
-                                            "is_raw": True,
-                                            "auto_ev": 0.0,
-                                            "base_ev": 0.0
-                                        }
+                            if th_u8 is not None:
+                                from . import session_cache_manager
+                                cache_entry = {
+                                    "path": file_path,
+                                    "filename": original_meta["filename"],
+                                    "width": w,
+                                    "height": h,
+                                    "thumbnail_rgb": th_u8,
+                                    "raw_thumbnail_rgb": th_u8,
+                                    "graded_thumbnail_rgb": None,
+                                    "exif": original_meta,
+                                    "auto_ev": 0.0,
+                                    "base_ev": 0.0,
+                                    "is_raw": True
+                                }
+                                session_cache_manager.save_photo_cache(file_path, cache_entry, save_preview=False)
+
+                                return {
+                                    "success": True,
+                                    "path": file_path,
+                                    "filename": original_meta["filename"],
+                                    "width": w,
+                                    "height": h,
+                                    "preview_w": th_w,
+                                    "preview_h": th_h,
+                                    "thumbnail_rgb": th_u8,
+                                    "raw_thumbnail_rgb": th_u8,
+                                    "graded_thumbnail_rgb": None,
+                                    "float_img": None,
+                                    "raw_preview": None,
+                                    "exif": dict(original_meta),
+                                    "is_raw": True,
+                                    "auto_ev": 0.0,
+                                    "base_ev": 0.0
+                                }
                     except Exception as e_fast:
-                        logger.debug(f"Fast thumbnail extraction fell back to demosaic: {e_fast}")
+                        logger.debug(f"Fast thumbnail extraction encountered error: {e_fast}")
+
+                    # Hard block fallthrough: fast thumbnail mode must NEVER execute 16-bit float demosaic
+                    w = original_meta.get("width") or 6000
+                    h = original_meta.get("height") or 4000
+                    th_w = 76
+                    th_h = 72
+                    # Distinct checkered placeholder so cache validators do not treat as corrupted dark frame
+                    th_u8 = np.full((th_h, th_w, 3), 32, dtype=np.uint8)
+                    th_u8[::4, ::4] = 48
+                    return {
+                        "success": True,
+                        "path": file_path,
+                        "filename": original_meta["filename"],
+                        "width": w,
+                        "height": h,
+                        "preview_w": th_w,
+                        "preview_h": th_h,
+                        "thumbnail_rgb": th_u8,
+                        "raw_thumbnail_rgb": th_u8,
+                        "graded_thumbnail_rgb": None,
+                        "float_img": None,
+                        "raw_preview": None,
+                        "exif": dict(original_meta),
+                        "is_raw": True,
+                        "auto_ev": 0.0,
+                        "base_ev": 0.0,
+                        "decode_error": True
+                    }
 
                 # Use fast half_size demosaic for background batch loading to prevent OOM across worker pools
                 use_half = (not is_first) and (load_preview is not True) and (preview_max_edge > 0 and preview_max_edge <= 2048)
                 demosaic_algo = rawpy.DemosaicAlgorithm.LINEAR if use_half else rawpy.DemosaicAlgorithm.AHD
 
-                with open(file_path, "rb") as fp:
-                    with rawpy.imread(fp) as raw:
-                        rw, rh = raw.sizes.width, raw.sizes.height
-                        flip = getattr(raw.sizes, "flip", 0)
-                        if flip in (4, 5, 6, 7):
-                            w, h = rh, rw
-                        else:
-                            w, h = rw, rh
-                        original_meta["width"] = w
-                        original_meta["height"] = h
-                        original_meta["resolution"] = f"{w} × {h}"
-                        try:
-                            # 16-bit linear ProPhoto extraction using LibRaw native ProPhoto colorspace
-                            rgb16 = raw.postprocess(
-                                demosaic_algorithm=demosaic_algo,
-                                half_size=use_half,
-                                four_color_rgb=False,
-                                output_color=rawpy.ColorSpace.ProPhoto,
-                                output_bps=16,
-                                gamma=(1, 1),
-                                no_auto_bright=True,
-                                no_auto_scale=False,
-                                use_camera_wb=True,
-                                highlight_mode=rawpy.HighlightMode.Clip
-                            )
-                        except Exception:
-                            rgb16 = raw.postprocess(
-                                demosaic_algorithm=demosaic_algo,
-                                half_size=use_half,
-                                four_color_rgb=False,
-                                output_color=rawpy.ColorSpace.ProPhoto,
-                                output_bps=16,
-                                gamma=(1, 1),
-                                no_auto_bright=True,
-                                no_auto_scale=False,
-                                use_auto_wb=True,
-                                highlight_mode=rawpy.HighlightMode.Clip
-                            )
+                with rawpy.imread(file_path) as raw:
+                    rw, rh = raw.sizes.width, raw.sizes.height
+                    flip = getattr(raw.sizes, "flip", 0)
+                    if flip in (4, 5, 6, 7):
+                        w, h = rh, rw
+                    else:
+                        w, h = rw, rh
+                    original_meta["width"] = w
+                    original_meta["height"] = h
+                    original_meta["resolution"] = f"{w} × {h}"
+                    try:
+                        # 16-bit linear ProPhoto extraction using LibRaw native ProPhoto colorspace
+                        rgb16 = raw.postprocess(
+                            demosaic_algorithm=demosaic_algo,
+                            half_size=use_half,
+                            four_color_rgb=False,
+                            output_color=rawpy.ColorSpace.ProPhoto,
+                            output_bps=16,
+                            gamma=(1, 1),
+                            no_auto_bright=True,
+                            no_auto_scale=False,
+                            use_camera_wb=True,
+                            highlight_mode=rawpy.HighlightMode.Clip
+                        )
+                    except Exception:
+                        rgb16 = raw.postprocess(
+                            demosaic_algorithm=demosaic_algo,
+                            half_size=use_half,
+                            four_color_rgb=False,
+                            output_color=rawpy.ColorSpace.ProPhoto,
+                            output_bps=16,
+                            gamma=(1, 1),
+                            no_auto_bright=True,
+                            no_auto_scale=False,
+                            use_auto_wb=True,
+                            highlight_mode=rawpy.HighlightMode.Clip
+                        )
                 # Linear ProPhoto float32 representation
                 rgb_linear_pro = (rgb16.astype(np.float32) / 65535.0)
                 del rgb16

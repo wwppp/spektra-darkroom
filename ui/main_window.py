@@ -347,8 +347,8 @@ class BatchImportWorker(QThread):
         except Exception:
             preview_max_edge = 2048
 
-        # Multi-core CPU concurrency pool capped to safe threshold (avoids LibRaw OOM)
-        max_workers = min(6, max(2, (os.cpu_count() or 4) // 2))
+        # Multi-core CPU concurrency pool capped to safe threshold (avoids LibRaw OOM and UI starvation)
+        max_workers = min(3, max(2, (os.cpu_count() or 4) // 2))
         logger.info(f"BatchImportWorker starting with {max_workers} worker threads for {total} files")
 
         results = {}
@@ -359,8 +359,8 @@ class BatchImportWorker(QThread):
             if self._stopped:
                 return idx, None
             try:
-                is_first = (idx == 0 and self.start_idx == 0)
-                cached = session_cache_manager.get_photo_cache(file_path, load_preview=is_first)
+                import time
+                cached = session_cache_manager.get_photo_cache(file_path, load_preview=False)
                 if cached is not None:
                     trgb = cached.get("thumbnail_rgb")
                     if session_cache_manager.is_dummy_or_corrupted_thumbnail(trgb):
@@ -376,24 +376,24 @@ class BatchImportWorker(QThread):
                         "thumbnail_rgb": cached.get("thumbnail_rgb"),
                         "raw_thumbnail_rgb": cached.get("raw_thumbnail_rgb") if cached.get("raw_thumbnail_rgb") is not None else cached.get("thumbnail_rgb"),
                         "graded_thumbnail_rgb": cached.get("graded_thumbnail_rgb"),
-                        "float_img": cached.get("float_img") if is_first else None,
+                        "float_img": None,
                         "raw_preview": None,
                         "exif": cached.get("exif", {}),
                         "auto_ev": cached.get("auto_ev", 0.0),
                         "base_ev": cached.get("base_ev", 0.0),
                         "is_raw": cached.get("is_raw", False)
                     }
+                    time.sleep(0.001)
                     return idx, entry
 
                 # 2. Parallel thread-safe decode:
-                # First photo gets full demosaic for immediate viewport presentation;
-                # all subsequent photos use fast_thumbnail=True (embedded JPEG, sub-15ms)
-                use_fast = not is_first
+                # Fast path: Extract camera-embedded JPEG preview in sub-15ms for all photos!
+                # (The active photo gets full 16-bit linear demosaic progressively via SinglePhotoLoadWorker)
                 entry = self.engine.decode_photo_data(
                     file_path,
                     preview_max_edge=preview_max_edge,
-                    is_first=is_first,
-                    fast_thumbnail=use_fast
+                    is_first=False,
+                    fast_thumbnail=True
                 )
                 if entry and entry.get("success"):
                     pid = f"photo_{self.start_idx + idx}_{os.path.basename(file_path)}"
@@ -406,9 +406,9 @@ class BatchImportWorker(QThread):
                     entry["rating"] = 0
                     entry["raw_thumbnail_rgb"] = entry.get("raw_thumbnail_rgb") if entry.get("raw_thumbnail_rgb") is not None else entry.get("thumbnail_rgb")
                     entry["graded_thumbnail_rgb"] = entry.get("graded_thumbnail_rgb")
-                    if not is_first:
-                        entry["float_img"] = None
-                        entry["raw_preview"] = None
+                    entry["float_img"] = None
+                    entry["raw_preview"] = None
+                    time.sleep(0.001)
                     return idx, entry
                 else:
                     logger.warning(f"Failed to decode {file_path}: {entry.get('error') if entry else 'Unknown error'}")
@@ -419,6 +419,11 @@ class BatchImportWorker(QThread):
             try:
                 fast_th = session_cache_manager.extract_fast_thumbnail(file_path)
                 dw, dh = session_cache_manager.get_image_dimensions(file_path)
+                if dw <= 0 or dh <= 0:
+                    dw, dh = 6000, 4000
+                if fast_th is None or not isinstance(fast_th, np.ndarray) or fast_th.size == 0:
+                    fast_th = np.full((72, 76, 3), 32, dtype=np.uint8)
+                    fast_th[::4, ::4] = 48
                 fallback_entry = {
                     "id": f"photo_{self.start_idx + idx}_{os.path.basename(file_path)}",
                     "filename": os.path.basename(file_path),
@@ -435,35 +440,71 @@ class BatchImportWorker(QThread):
                     "auto_ev": 0.0,
                     "base_ev": 0.0,
                     "is_raw": True,
-                    "decode_error": (fast_th is None)
+                    "decode_error": True
                 }
                 return idx, fallback_entry
             except Exception:
-                return idx, None
+                dummy_th = np.full((72, 76, 3), 32, dtype=np.uint8)
+                dummy_th[::4, ::4] = 48
+                fallback_entry = {
+                    "id": f"photo_{self.start_idx + idx}_{os.path.basename(file_path)}",
+                    "filename": os.path.basename(file_path),
+                    "path": file_path,
+                    "width": 6000,
+                    "height": 4000,
+                    "rating": 0,
+                    "thumbnail_rgb": dummy_th,
+                    "raw_thumbnail_rgb": dummy_th,
+                    "graded_thumbnail_rgb": None,
+                    "float_img": None,
+                    "raw_preview": None,
+                    "exif": {"filename": os.path.basename(file_path), "path": file_path, "width": 6000, "height": 4000},
+                    "auto_ev": 0.0,
+                    "base_ev": 0.0,
+                    "is_raw": True,
+                    "decode_error": True
+                }
+                return idx, fallback_entry
 
-        # Execute concurrently with high CPU utilization
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(_decode_item, i, p): i for i, p in enumerate(self.file_paths)}
-            for future in concurrent.futures.as_completed(future_map):
-                if self._stopped:
-                    break
-                idx, entry = future.result()
-                results[idx] = entry
+        # 1. Priority fast-lane for the very first photo (index 0):
+        # Decode index 0 immediately before launching the remaining pool so the canvas and status bar
+        # update to (1/total) within ~15ms with zero thread contention!
+        import time
+        if total > 0 and not self._stopped:
+            _, first_entry = _decode_item(0, self.file_paths[0])
+            if first_entry is not None and not self._stopped:
+                loaded_count += 1
+                self.photoLoaded.emit(first_entry, loaded_count, total)
+            next_to_emit = 1
 
-                # In-order streaming emission so filmstrip keeps exact file sequence
-                while next_to_emit in results:
-                    emit_entry = results.pop(next_to_emit)
-                    if emit_entry is not None:
-                        loaded_count += 1
-                        self.photoLoaded.emit(emit_entry, loaded_count, total)
-                    next_to_emit += 1
+        # 2. Execute remaining files concurrently with paced emission so the GUI thread stays 60 FPS responsive
+        if total > 1 and not self._stopped:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {executor.submit(_decode_item, i, self.file_paths[i]): i for i in range(1, total)}
+                for future in concurrent.futures.as_completed(future_map):
+                    if self._stopped:
+                        break
+                    idx, entry = future.result()
+                    results[idx] = entry
+
+                    # In-order streaming emission so filmstrip keeps exact file sequence
+                    while next_to_emit in results:
+                        emit_entry = results.pop(next_to_emit)
+                        if emit_entry is not None:
+                            loaded_count += 1
+                            self.photoLoaded.emit(emit_entry, loaded_count, total)
+                            if loaded_count % 4 == 0:
+                                time.sleep(0.004)
+                        next_to_emit += 1
 
         # Drain any remaining results
-        while next_to_emit in results:
+        while next_to_emit in results and not self._stopped:
             emit_entry = results.pop(next_to_emit)
             if emit_entry is not None:
                 loaded_count += 1
                 self.photoLoaded.emit(emit_entry, loaded_count, total)
+                if loaded_count % 4 == 0:
+                    time.sleep(0.004)
             next_to_emit += 1
 
         self.importFinished.emit(loaded_count)
@@ -2085,7 +2126,12 @@ class DarkroomMainWindow(QMainWindow):
                             config_manager.save_last_session_path(None)
                             last_session = None
                     if last_session:
-                        QTimer.singleShot(40, lambda: (not self.photos and not self._current_session_path) and self._open_session_by_path(last_session))
+                        self._pending_startup_restore_timer = QTimer(self)
+                        self._pending_startup_restore_timer.setSingleShot(True)
+                        self._pending_startup_restore_timer.timeout.connect(
+                            lambda: (not getattr(self, "_is_importing", False) and not self.photos and not self._current_session_path) and self._open_session_by_path(last_session)
+                        )
+                        self._pending_startup_restore_timer.start(40)
                     else:
                         self.stack.setCurrentIndex(0)
                         self.btn_title_export.setVisible(False)
@@ -2149,7 +2195,7 @@ class DarkroomMainWindow(QMainWindow):
             if 0 <= target_idx < len(self.photos):
                 self.photos[target_idx] = target_entry
             target_id = target_entry.get("id")
-            if target_id and target_entry.get("float_img") is not None:
+            if target_id:
                 try:
                     self.on_switch_photo(target_id)
                 except Exception as e:
@@ -2445,6 +2491,10 @@ class DarkroomMainWindow(QMainWindow):
                         mmi.ptMinTrackSize.y = min_h
                     return True, 0
 
+                # Suppress Windows Non-Client Painting entirely (prevents ghost titlebar painting)
+                if msg.message == 0x0085:  # WM_NCPAINT
+                    return True, 0
+
                 # 1. WM_NCCALCSIZE (0x0083): Remove standard title bar and frame while keeping DWM animations
                 if msg.message == 0x0083:
                     if msg.wParam:
@@ -2456,7 +2506,7 @@ class DarkroomMainWindow(QMainWindow):
                             params.rgrc[0].top += by
                             params.rgrc[0].right -= bx
                             params.rgrc[0].bottom -= by
-                        return True, 0x0300  # WVR_REDRAW
+                        return True, 0
                     return True, 0
 
                 # 2. WM_NCHITTEST (0x0084): Handle border resize hover and dragging with physical coords
@@ -3750,7 +3800,8 @@ class DarkroomMainWindow(QMainWindow):
                 is_visible = cat_match and query_match
 
             card.is_filter_matched = is_visible
-            card.setVisible(is_visible)
+            if card.parent() is not None:
+                card.setVisible(is_visible)
             if is_visible:
                 visible_count += 1
 
@@ -3765,9 +3816,10 @@ class DarkroomMainWindow(QMainWindow):
 
     def _populate_film_grid(self):
         stocks = self.engine.get_film_stocks()
+        parent_w = getattr(self, "film_container", None)
         for group in stocks:
             for item in group.get("stocks", group.get("items", [])):
-                card = FilmGridCard(item, is_active=(item["id"] == self.current_film_stock), is_custom=False, stock_type="film")
+                card = FilmGridCard(item, is_active=(item["id"] == self.current_film_stock), is_custom=False, stock_type="film", parent=parent_w)
                 card.selected.connect(self.on_switch_film)
                 card.sortRequested.connect(lambda st, sb: self._sort_and_reflow_stocks(st, sb))
                 self.film_cards[item["id"]] = card
@@ -3779,8 +3831,9 @@ class DarkroomMainWindow(QMainWindow):
 
     def _populate_paper_grid(self):
         papers = self.engine.get_paper_stocks()
+        parent_w = getattr(self, "paper_container", None)
         for item in papers:
-            card = FilmGridCard(item, is_active=(item["id"] == self.current_paper_stock), is_custom=False, stock_type="paper")
+            card = FilmGridCard(item, is_active=(item["id"] == self.current_paper_stock), is_custom=False, stock_type="paper", parent=parent_w)
             card.selected.connect(self.on_switch_paper)
             card.sortRequested.connect(lambda st, sb: self._sort_and_reflow_stocks(st, sb))
             self.paper_cards[item["id"]] = card
@@ -4208,6 +4261,7 @@ class DarkroomMainWindow(QMainWindow):
         )
         self.slider_exhaustion.valueChanged.connect(lambda v: self._on_slider_live("developer_exhaustion", v))
         self.slider_exhaustion.sliderReleased.connect(self._on_slider_committed)
+        self.sec_enlarger.addWidget(self.slider_exhaustion)
         # Backward compatibility aliases
         self.slider_enlarger_c = self.slider_cyan
         self.slider_enlarger_m = self.slider_magenta
@@ -6167,6 +6221,9 @@ class DarkroomMainWindow(QMainWindow):
 
     def action_copy_params(self, photo_id=None):
         """Ctrl+C handler: Copy all physical darkroom parameters from the currently viewed or specified photo."""
+        if hasattr(self, "filmstrip") and hasattr(self.filmstrip, "flush_pending_selection"):
+            self.filmstrip.flush_pending_selection()
+
         target_id = photo_id if (photo_id and isinstance(photo_id, str)) else self.active_photo_id
         if not target_id:
             return
@@ -6176,28 +6233,43 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("当前底片为原生底片（未做任何暗房修改），无暗房配方可复制", timeout_ms=2500)
             return
 
+        exif = target_p.get("meta") or target_p.get("exif") or {}
+        src_base_temp = float(exif.get("color_temp", 5500.0))
+        src_base_tint = float(exif.get("tint", 1.0))
+
         if target_id == self.active_photo_id:
             film = self.current_film_stock
             paper = self.current_paper_stock
             pmode = getattr(self, "current_print_mode", "optical")
-            params = copy.deepcopy(self.current_params)
+            raw_params = copy.deepcopy(self.current_params)
         else:
             film = target_p.get("film_profile", "none")
             paper = target_p.get("paper_profile", "none")
             pmode = target_p.get("print_mode", "optical")
             if target_p.get("params"):
-                params = copy.deepcopy(target_p["params"])
+                raw_params = copy.deepcopy(target_p["params"])
             elif target_p.get("path"):
                 sdc = sdc_manager.load_sdc(target_p["path"])
                 if sdc:
                     film = sdc.get("film_profile", film)
                     paper = sdc.get("paper_profile", paper)
                     pmode = sdc.get("print_mode", pmode)
-                    params = copy.deepcopy(sdc.get("params", {}))
+                    raw_params = copy.deepcopy(sdc.get("params", {}))
                 else:
-                    params = {}
+                    raw_params = {}
             else:
-                params = {}
+                raw_params = {}
+
+        params = self.get_default_params(src_base_temp, src_base_tint)
+        params.update(raw_params)
+        if "halation_amount" not in raw_params and "halation" in raw_params:
+            params["halation_amount"] = raw_params["halation"]
+        if "boost_ev" not in raw_params and "halation_boost" in raw_params:
+            params["boost_ev"] = raw_params["halation_boost"]
+        if "crop" not in raw_params and isinstance(target_p.get("crop"), dict):
+            params["crop"] = copy.deepcopy(target_p["crop"])
+        params.pop("split_x", None)
+        params.pop("view_mode", None)
 
         self._copied_darkroom_profile = {
             "film": film,
@@ -6214,6 +6286,9 @@ class DarkroomMainWindow(QMainWindow):
 
     def action_paste_params(self):
         """Ctrl+V handler: Paste copied physical darkroom parameters to all selected photos."""
+        if hasattr(self, "filmstrip") and hasattr(self.filmstrip, "flush_pending_selection"):
+            self.filmstrip.flush_pending_selection()
+
         copied = getattr(self, '_copied_darkroom_profile', None)
         if not copied or not copied.get("is_edited"):
             self.set_app_status("剪贴板中无有效暗房配方可粘贴", timeout_ms=2500)
@@ -6231,6 +6306,20 @@ class DarkroomMainWindow(QMainWindow):
         if not selected_ids:
             return
 
+        default_crop = {
+            "enabled": False,
+            "x": 0.0,
+            "y": 0.0,
+            "w": 1.0,
+            "h": 1.0,
+            "angle": 0.0,
+            "rot_90": 0,
+            "flip_h": False,
+            "flip_v": False,
+            "aspect_ratio": "original",
+            "is_portrait": False
+        }
+
         # 1. Snapshot pre-paste state for all affected photos
         pre_photos = {}
         for pid in selected_ids:
@@ -6242,6 +6331,7 @@ class DarkroomMainWindow(QMainWindow):
                 p_paper = getattr(self, "current_paper_stock", "none")
                 p_pmode = getattr(self, "current_print_mode", "optical")
                 p_params = copy.deepcopy(self.current_params)
+                p_crop = copy.deepcopy(self.current_params.get("crop") or p.get("crop") or default_crop)
                 p_dirty = bool(getattr(self, "_photo_is_dirty", False) or p.get("is_dirty", False))
                 p_edited = bool(self._is_photo_edited(p))
             else:
@@ -6249,6 +6339,7 @@ class DarkroomMainWindow(QMainWindow):
                 p_paper = p.get("paper_profile", "none")
                 p_pmode = p.get("print_mode", "optical")
                 p_params = copy.deepcopy(p.get("params") or {})
+                p_crop = copy.deepcopy(p.get("crop") or p_params.get("crop") or default_crop)
                 p_dirty = bool(p.get("is_dirty", False))
                 p_edited = bool(self._is_photo_edited(p))
 
@@ -6257,6 +6348,7 @@ class DarkroomMainWindow(QMainWindow):
                 "paper": p_paper,
                 "print_mode": p_pmode,
                 "params": p_params,
+                "crop": p_crop,
                 "is_dirty": p_dirty,
                 "is_edited": p_edited,
                 "path": p.get("path"),
@@ -6271,17 +6363,52 @@ class DarkroomMainWindow(QMainWindow):
         self._push_raw_state(pre_state)
 
         affected_count = 0
+        active_adapted_params = None
         for pid in selected_ids:
             photo = next((p for p in self.photos if p and p.get("id") == pid), None)
             if not photo:
                 continue
 
-            target_params = copy.deepcopy(copied_params)
+            exif = photo.get("meta") or photo.get("exif") or {}
+            p_base_temp = float(exif.get("color_temp", 5500.0))
+            p_base_tint = float(exif.get("tint", 1.0))
+            p_base_ev = float(photo.get("base_ev", 0.0))
+            if abs(p_base_ev) < 0.0001 and isinstance(photo.get("params"), dict) and photo["params"].get("base_ev"):
+                p_base_ev = float(photo["params"]["base_ev"])
+
+            target_params = self.get_default_params(p_base_temp, p_base_tint)
+            target_params.update(copy.deepcopy(copied_params))
+            if "halation_amount" not in copied_params and "halation" in copied_params:
+                target_params["halation_amount"] = copied_params["halation"]
+            if "boost_ev" not in copied_params and "halation_boost" in copied_params:
+                target_params["boost_ev"] = copied_params["halation_boost"]
+
+            # Preserve target photo's sensor baseline exposure and camera EXIF white balance baseline
+            target_params["base_temp"] = p_base_temp
+            target_params["base_tint"] = p_base_tint
+            target_params["base_ev"] = p_base_ev
+            target_params["print_mode"] = copied_print_mode
+
             # Adapt white balance relative to target photo baseline EXIF if not custom
             if not target_params.get("custom_wb", False):
-                exif = photo.get("meta") or photo.get("exif") or {}
-                target_params["color_temp"] = float(exif.get("color_temp", 5500.0))
-                target_params["tint"] = float(exif.get("tint", 1.0))
+                target_params["color_temp"] = p_base_temp
+                target_params["tint"] = p_base_tint
+
+            # Synchronize crop state
+            crop_data = copy.deepcopy(target_params.get("crop")) if isinstance(target_params.get("crop"), dict) else dict(default_crop)
+            target_params["crop"] = dict(crop_data)
+            photo["crop"] = dict(crop_data)
+
+            # Recompute effective lens params for target photo focal length / aperture
+            lens_cfg = target_params.setdefault("lens", self._get_default_lens_params())
+            if isinstance(lens_cfg, dict):
+                from core.lens_correction import compute_effective_lens_params
+                eff_lens = compute_effective_lens_params(
+                    lens_cfg,
+                    focal_length=exif.get("focal_length"),
+                    aperture=exif.get("aperture")
+                )
+                lens_cfg.update(eff_lens)
 
             photo["film_profile"] = copied_film
             photo["paper_profile"] = copied_paper
@@ -6289,6 +6416,9 @@ class DarkroomMainWindow(QMainWindow):
             photo["params"] = target_params
             photo["is_dirty"] = True
             photo["is_edited"] = True
+
+            if pid == self.active_photo_id:
+                active_adapted_params = copy.deepcopy(target_params)
 
             # Apply and refresh thumbnail immediately via ThumbnailController
             raw_thumb = self.thumb_controller.get_raw_thumbnail(photo)
@@ -6314,18 +6444,46 @@ class DarkroomMainWindow(QMainWindow):
             except Exception:
                 pass
 
-            self.filmstrip.set_photo_dirty(pid, True)
+            if hasattr(self, "filmstrip"):
+                self.filmstrip.set_photo_crop(pid, dict(crop_data))
+                self.filmstrip.set_photo_dirty(pid, True)
             affected_count += 1
 
-        # If current active photo is in selected targets, apply immediately to viewport
-        if self.active_photo_id in selected_ids:
+        # If only a single photo was targeted (e.g. via right-click context menu on a new filmstrip item)
+        # and it is not yet the active photo, switch to it so the canvas and right-hand sliders reflect it immediately
+        if len(selected_ids) == 1 and selected_ids[0] != self.active_photo_id:
+            self.on_switch_photo(selected_ids[0])
+        elif self.active_photo_id in selected_ids:
             self.current_film_stock = copied_film
             self.current_paper_stock = copied_paper
             self.current_print_mode = copied_print_mode
-            self.current_params = copy.deepcopy(copied_params)
+            if active_adapted_params is not None:
+                self.current_params.clear()
+                self.current_params.update(active_adapted_params)
+            else:
+                self.current_params = copy.deepcopy(copied_params)
             self.current_params["print_mode"] = copied_print_mode
 
-            self._update_all_sliders_from_params()
+            # Enable sidebar controls BEFORE updating slider/combo values so Qt schedules repaints properly
+            self._update_stock_mode_ui()
+
+            # Sync crop workspace and overlay
+            act_crop = dict(self.current_params.get("crop") or default_crop)
+            if getattr(self.canvas, "is_crop_editing", False):
+                self._exit_crop_workspace()
+            if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
+                if not self._is_crop_modified(act_crop):
+                    self.canvas.crop_overlay.reset_all_crop()
+                elif self.canvas.crop_overlay.isVisible():
+                    self.canvas.crop_overlay.start_crop_session(dict(act_crop))
+            if hasattr(self, "crop_sidebar") and self.crop_sidebar:
+                self.crop_sidebar.sync_from_overlay(dict(act_crop))
+
+            # Auto-detect lens profile for active photo if lens setup is auto
+            lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+            if isinstance(lens_cfg, dict) and lens_cfg.get("setup", "auto") == "auto":
+                self._auto_detect_lens_profile()
+
             self.on_switch_print_mode(self.current_print_mode, push_undo=False)
             self.on_switch_film(self.current_film_stock, push_undo=False)
             if self.current_print_mode == "optical":
@@ -6333,6 +6491,11 @@ class DarkroomMainWindow(QMainWindow):
             else:
                 for pid, card in self.paper_cards.items():
                     card.set_active(pid == "none")
+
+            # Refresh all sliders/combos/checkboxes AFTER stock & film switches so nothing overwrites them
+            self._update_all_sliders_from_params()
+            if hasattr(self, "sidebar_content") and self.sidebar_content:
+                self.sidebar_content.update()
 
             self._sync_full_params_to_pipeline(fit_crop_if_changed=True)
             self._mark_current_photo_dirty()
@@ -6343,11 +6506,13 @@ class DarkroomMainWindow(QMainWindow):
             photo = next((p for p in self.photos if p and p.get("id") == pid), None)
             if not photo:
                 continue
+            p_params_post = copy.deepcopy(photo.get("params") or {})
             post_photos[pid] = {
                 "film": photo.get("film_profile", copied_film),
                 "paper": photo.get("paper_profile", copied_paper),
                 "print_mode": photo.get("print_mode", copied_print_mode),
-                "params": dict(photo.get("params") or {}),
+                "params": p_params_post,
+                "crop": copy.deepcopy(photo.get("crop") or p_params_post.get("crop") or default_crop),
                 "is_dirty": True,
                 "is_edited": True,
                 "path": photo.get("path"),
@@ -6578,7 +6743,7 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, "crop_sidebar") and self.crop_sidebar:
                 self.crop_sidebar.sync_from_overlay(dict(act_crop))
 
-            self._update_all_sliders_from_params()
+            self._update_stock_mode_ui()
             self.on_switch_print_mode(self.current_print_mode, push_undo=False)
             self.on_switch_film(self.current_film_stock, push_undo=False)
             if self.current_print_mode == "optical":
@@ -6586,6 +6751,9 @@ class DarkroomMainWindow(QMainWindow):
             else:
                 for pid_card, card in self.paper_cards.items():
                     card.set_active(pid_card == "none")
+            self._update_all_sliders_from_params()
+            if hasattr(self, "sidebar_content") and self.sidebar_content:
+                self.sidebar_content.update()
 
             self._sync_full_params_to_pipeline(fit_crop_if_changed=True)
             self._update_reset_buttons_state()
@@ -7450,7 +7618,7 @@ class DarkroomMainWindow(QMainWindow):
         lut_params["print_mode"] = self.current_print_mode
         lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
         self.canvas.set_lut(lut_3d)
-        self.canvas.update_params(paper_profile=stock_id, print_mode=self.current_print_mode)
+        self.canvas.update_params(paper_profile=self.current_paper_stock, print_mode=self.current_print_mode)
         hal_preset = self.engine.get_film_halation_preset(stock_id) if hasattr(self.engine, 'get_film_halation_preset') else None
         grain_preset = self.engine.get_film_grain_preset(stock_id) if hasattr(self.engine, 'get_film_grain_preset') else None
         self.canvas.update_params(film_stock=stock_id, _halation_preset=hal_preset, _grain_preset=grain_preset)
@@ -7624,32 +7792,41 @@ class DarkroomMainWindow(QMainWindow):
     def action_open_files(self):
         filt = FILE_DIALOG_IMAGE_FILTER
         last_d = config_manager.get_last_dialog_dir("photo")
-        files, _ = QFileDialog.getOpenFileNames(self, "导入照片 / RAW 负片", last_d, filt)
+        # Decouple native dialog parent from frameless HWND to prevent ghost window artifacts
+        files, _ = QFileDialog.getOpenFileNames(None, "导入照片 / RAW 底片", last_d, filt)
         if files:
             config_manager.set_last_dialog_dir("photo", files[0])
-            self._import_files_list(files)
+            QTimer.singleShot(20, lambda fl=list(files): self._import_files_list(fl))
 
     def action_open_folder(self):
         last_d = config_manager.get_last_dialog_dir("photo")
-        folder = QFileDialog.getExistingDirectory(self, "选择导入照片文件夹", last_d)
+        # Decouple native dialog parent from frameless HWND to prevent ghost window artifacts
+        folder = QFileDialog.getExistingDirectory(None, "选择导入照片文件夹", last_d)
         if folder:
             config_manager.set_last_dialog_dir("photo", folder)
-            valid_exts = ALL_SUPPORTED_IMAGE_EXTENSIONS
-            files = []
-            for root, _, fnames in os.walk(folder):
-                for f in fnames:
-                    if os.path.splitext(f)[1].lower() in valid_exts:
-                        files.append(os.path.join(root, f))
-            if files:
-                self._import_files_list(files)
-            else:
-                self._show_info_dialog("提示", "所选文件夹中未找到受支持的图像文件。")
+            QTimer.singleShot(20, lambda f=folder: self._scan_and_import_folder(f))
+
+    def _scan_and_import_folder(self, folder):
+        if not folder or not os.path.exists(folder):
+            return
+        valid_exts = ALL_SUPPORTED_IMAGE_EXTENSIONS
+        files = []
+        for root, _, fnames in os.walk(folder):
+            for f in fnames:
+                if os.path.splitext(f)[1].lower() in valid_exts:
+                    files.append(os.path.join(root, f))
+        if files:
+            self._import_files_list(files)
+        else:
+            self._show_info_dialog("提示", "所选文件夹中未找到受支持的图像文件。")
 
     def open_single_file(self, file_path):
         if os.path.exists(file_path):
             self._import_files_list([file_path])
 
     def _import_files_list(self, file_paths):
+        if hasattr(self, "_pending_startup_restore_timer") and self._pending_startup_restore_timer is not None:
+            self._pending_startup_restore_timer.stop()
         # 1. Three-tier deduplication:
         # Tier 1: Photos already loaded in library
         existing_norm_paths = {os.path.normcase(os.path.abspath(p["path"])) for p in self.photos if p and "path" in p}
@@ -7672,10 +7849,15 @@ class DarkroomMainWindow(QMainWindow):
                 seen_in_batch.add(norm_p)
                 new_paths.append(os.path.abspath(fp))
 
-        # Duplicate detection dialog
+        # Duplicate detection dialog (non-blocking status notifications)
         if dup_names:
-            dlg = DuplicateFilesDialog(dup_names, self)
-            dlg.exec()
+            if not new_paths:
+                logger.info(f"All {len(dup_names)} selected files are already in library")
+                self.set_app_status(f"所选的 {len(dup_names)} 个底片已在底片库中，无需重复导入", timeout_ms=3000)
+                return
+            else:
+                logger.info(f"Skipping {len(dup_names)} duplicate files already in library")
+                self.set_app_status(f"已自动跳过 {len(dup_names)} 个重复底片，正在导入新底片...", timeout_ms=3000)
 
         if not new_paths:
             return
@@ -7739,10 +7921,11 @@ class DarkroomMainWindow(QMainWindow):
         start_idx = max(getattr(self, "_photo_id_counter", 0), len(self.photos))
         self._photo_id_counter = start_idx + len(new_paths)
 
+        self._import_filmstrip_buffer = []
         self._import_worker = BatchImportWorker(new_paths, self.engine, start_idx=start_idx, parent=self)
         self._import_worker.photoLoaded.connect(self._on_single_photo_imported)
         self._import_worker.importFinished.connect(self._on_all_photos_imported)
-        self._import_worker.start()
+        self._import_worker.start(QThread.Priority.LowPriority)
 
     def _start_next_pending_import_batch(self):
         """Dispatches the next queued batch of photos from _pending_import_queue to a new BatchImportWorker."""
@@ -7764,7 +7947,7 @@ class DarkroomMainWindow(QMainWindow):
         self._import_worker = BatchImportWorker(next_batch, self.engine, start_idx=start_idx, parent=self)
         self._import_worker.photoLoaded.connect(self._on_single_photo_imported)
         self._import_worker.importFinished.connect(self._on_all_photos_imported)
-        self._import_worker.start()
+        self._import_worker.start(QThread.Priority.LowPriority)
         return True
 
     def _on_single_photo_imported(self, photo_entry, current_idx, total_count):
@@ -7846,18 +8029,35 @@ class DarkroomMainWindow(QMainWindow):
         self.photos.append(photo_entry)
         is_first = (len(self.photos) == 1) or (self.active_photo_id is None)
 
-        # Incrementally stream into bottom filmstrip
-        self.filmstrip.append_photo(photo_entry, is_active=is_first)
-        if photo_entry.get("is_dirty") or photo_entry.get("is_edited"):
-            self.filmstrip.set_photo_dirty(photo_entry["id"], True)
-
-        # If this is the first photo, display it immediately on the canvas!
         if is_first:
+            # Fast-lane for the very first photo: display it immediately on the canvas!
+            self.filmstrip.append_photo(photo_entry, is_active=True)
+            if photo_entry.get("is_dirty") or photo_entry.get("is_edited"):
+                self.filmstrip.set_photo_dirty(photo_entry["id"], True)
             self.on_switch_photo(photo_entry["id"])
+        else:
+            # Buffer for batch insertion to eliminate main-thread layout thrashing
+            if not hasattr(self, "_import_filmstrip_buffer") or self._import_filmstrip_buffer is None:
+                self._import_filmstrip_buffer = []
+            self._import_filmstrip_buffer.append(photo_entry)
+            import time as _t_mod
+            now_fl = _t_mod.time()
+            last_fl = getattr(self, "_last_filmstrip_flush_time", 0.0)
+            if len(self._import_filmstrip_buffer) >= 16 or (now_fl - last_fl >= 0.06 and len(self._import_filmstrip_buffer) >= 4):
+                self._last_filmstrip_flush_time = now_fl
+                self._flush_import_filmstrip_buffer()
+            else:
+                if not hasattr(self, "_import_buffer_timer") or self._import_buffer_timer is None:
+                    self._import_buffer_timer = QTimer(self)
+                    self._import_buffer_timer.setSingleShot(True)
+                    self._import_buffer_timer.timeout.connect(self._flush_import_filmstrip_buffer)
+                if not self._import_buffer_timer.isActive():
+                    self._import_buffer_timer.start(45)
 
-        # Synchronize with engine session photos for safe base_ev lookups
+        # Synchronize with engine session photos for safe base_ev lookups with O(1) map
         if hasattr(self, "engine") and hasattr(self.engine, "session_photos"):
-            matched_ep = next((ep for ep in self.engine.session_photos if ep.get("path") == photo_entry["path"]), None)
+            if not hasattr(self, "_engine_photos_path_map") or self._engine_photos_path_map is None:
+                self._engine_photos_path_map = {ep["path"]: idx for idx, ep in enumerate(self.engine.session_photos) if "path" in ep}
             ep_dict = {
                 "id": photo_entry["id"],
                 "path": photo_entry["path"],
@@ -7871,9 +8071,13 @@ class DarkroomMainWindow(QMainWindow):
                 "base_ev": photo_entry.get("base_ev", 0.0),
                 "auto_ev": photo_entry.get("auto_ev", 0.0)
             }
-            if matched_ep:
-                self.engine.session_photos[self.engine.session_photos.index(matched_ep)] = ep_dict
+            p_path = photo_entry["path"]
+            if p_path in self._engine_photos_path_map:
+                e_idx = self._engine_photos_path_map[p_path]
+                if e_idx < len(self.engine.session_photos):
+                    self.engine.session_photos[e_idx] = ep_dict
             else:
+                self._engine_photos_path_map[p_path] = len(self.engine.session_photos)
                 self.engine.session_photos.append(ep_dict)
 
         # Strictly synchronized progress: increment session completed count
@@ -7905,6 +8109,17 @@ class DarkroomMainWindow(QMainWindow):
             tot = max(getattr(self, "_import_session_target_total", cur), cur)
             self.set_app_status(f"正在导入底片 ({cur}/{tot})...", spinning=True, timeout_ms=0)
 
+    def _flush_import_filmstrip_buffer(self):
+        buf = getattr(self, "_import_filmstrip_buffer", None)
+        if not buf:
+            return
+        to_append = list(buf)
+        self._import_filmstrip_buffer.clear()
+        self.filmstrip.append_photos_batch(to_append)
+        for p in to_append:
+            if p.get("is_dirty") or p.get("is_edited"):
+                self.filmstrip.set_photo_dirty(p["id"], True)
+
     def _on_all_photos_imported(self, total_loaded):
         if getattr(self, "_import_worker", None):
             try:
@@ -7922,6 +8137,9 @@ class DarkroomMainWindow(QMainWindow):
         # All batches have finished: finalize session
         if hasattr(self, "_import_flush_timer") and self._import_flush_timer is not None:
             self._import_flush_timer.stop()
+        if hasattr(self, "_import_buffer_timer") and self._import_buffer_timer is not None:
+            self._import_buffer_timer.stop()
+        self._flush_import_filmstrip_buffer()
         self._is_importing = False
         self._current_import_batch = []
         self._pending_import_queue = []
@@ -7981,6 +8199,9 @@ class DarkroomMainWindow(QMainWindow):
 
         if hasattr(self, "_import_flush_timer") and self._import_flush_timer is not None:
             self._import_flush_timer.stop()
+        if hasattr(self, "_import_buffer_timer") and self._import_buffer_timer is not None:
+            self._import_buffer_timer.stop()
+        self._flush_import_filmstrip_buffer()
 
         # 2. Terminate and disconnect batch import worker
         if getattr(self, "_import_worker", None):
@@ -8128,24 +8349,37 @@ class DarkroomMainWindow(QMainWindow):
 
     def _sort_photos_by(self, sort_key):
         """Sort photos in filmstrip and session by criteria:
-        'time_asc'/'exif_asc', 'time_desc'/'exif_desc', 'name_asc', 'name_desc', 'import'
+        'time_asc'/'exif_asc', 'time_desc'/'exif_desc', 'name_asc', 'name_desc', 'import'.
+        Zero-blocking in-place widget reordering without undo/redo deep snapshots.
         """
         if not self.photos or len(self.photos) <= 1:
             return
 
-        pre_state = {
-            "type": "library_photos_state",
-            "action": "sort_photos",
-            "photos": [self._snapshot_photo_entry(p) for p in self.photos],
-            "active_photo_id": self.active_photo_id,
-            "session_path": self._current_session_path,
-            "session_is_dirty": getattr(self, "_session_is_dirty", False),
-        }
-        self._push_raw_state(pre_state)
+        from datetime import datetime
+        import re
+        _dt_regex = re.compile(rb"((?:19|20)\d{2}:(?:0[1-9]|1[0-2]):(?:0[1-9]|[12]\d|3[01]) (?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)")
+
+        def _parse_dt_str(dt_str):
+            if not dt_str or dt_str == "-":
+                return None
+            cleaned = str(dt_str).strip()
+            for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y:%m:%d", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(cleaned, fmt).timestamp()
+                except Exception:
+                    pass
+            try:
+                return float(cleaned)
+            except Exception:
+                return None
 
         def _get_photo_timestamp(photo):
             if not photo:
                 return 0.0
+            cached_ts = photo.get("_sort_timestamp")
+            if cached_ts is not None:
+                return float(cached_ts)
+
             exif = photo.get("exif") or {}
             dt_str = (
                 exif.get("capture_time")
@@ -8156,52 +8390,37 @@ class DarkroomMainWindow(QMainWindow):
                 or ""
             )
 
-            # If not in photo dict, check cached metadata
-            if (not dt_str or dt_str == "-") and photo.get("path"):
+            ts = _parse_dt_str(dt_str)
+
+            # Fast 64KB header scan for embedded EXIF DateTimeOriginal (no rawpy/exiftool overhead)
+            fpath = photo.get("path")
+            if ts is None and fpath:
                 try:
-                    from core import session_cache_manager
-                    cached = session_cache_manager.get_photo_cache(photo["path"], load_preview=False)
-                    if cached and cached.get("exif"):
-                        c_exif = cached["exif"]
-                        dt_str = (
-                            c_exif.get("capture_time")
-                            or c_exif.get("DateTimeOriginal")
-                            or c_exif.get("DateTimeDigitized")
-                            or c_exif.get("DateTime")
-                            or ""
-                        )
+                    with open(fpath, "rb") as _hfp:
+                        _hdr = _hfp.read(65536)
+                    _m = _dt_regex.search(_hdr)
+                    if _m:
+                        extracted_str = _m.group(1).decode("ascii", errors="ignore")
+                        exif["capture_time"] = extracted_str
+                        photo["exif"] = exif
+                        ts = _parse_dt_str(extracted_str)
                 except Exception:
                     pass
 
-            # If still missing, attempt direct EXIF extraction
-            if (not dt_str or dt_str == "-") and photo.get("path") and os.path.exists(photo["path"]):
-                try:
-                    meta = self.engine._extract_exif(photo["path"])
-                    dt_str = meta.get("capture_time", "")
-                except Exception:
-                    pass
-
-            # Convert date/time string to float epoch timestamp
-            if dt_str and dt_str != "-":
-                from datetime import datetime
-                cleaned = str(dt_str).strip()
-                for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y:%m:%d", "%Y-%m-%d"):
+            # Fallback to cached mtime or filesystem modification time
+            if ts is None:
+                if exif.get("_mtime"):
+                    ts = float(exif["_mtime"])
+                elif fpath:
                     try:
-                        return datetime.strptime(cleaned, fmt).timestamp()
+                        ts = float(os.path.getmtime(fpath))
                     except Exception:
-                        pass
-                try:
-                    return float(cleaned)
-                except Exception:
-                    pass
+                        ts = 0.0
+                else:
+                    ts = 0.0
 
-            # Fallback to filesystem modification time
-            if photo.get("path") and os.path.exists(photo["path"]):
-                try:
-                    return float(os.path.getmtime(photo["path"]))
-                except Exception:
-                    pass
-            return 0.0
+            photo["_sort_timestamp"] = float(ts)
+            return float(ts)
 
         if sort_key in ("time_asc", "exif_asc"):
             self.photos.sort(key=_get_photo_timestamp)
@@ -8232,26 +8451,10 @@ class DarkroomMainWindow(QMainWindow):
             return
 
         curr_active_id = self.active_photo_id
-        self.filmstrip.set_photos(self.photos, curr_active_id)
-        for p in self.photos:
-            if not p:
-                continue
-            if p.get("is_dirty") or p.get("is_edited"):
-                self.filmstrip.set_photo_dirty(p["id"], True)
-        self.filmstrip.scroll_to_active()
+        self.filmstrip.reorder_photos(self.photos, curr_active_id)
         self._session_is_dirty = True
         self._update_window_title()
         self.set_app_status(msg, timeout_ms=3000)
-
-        post_state = {
-            "type": "library_photos_state",
-            "action": "sort_photos",
-            "photos": [self._snapshot_photo_entry(p) for p in self.photos],
-            "active_photo_id": self.active_photo_id,
-            "session_path": self._current_session_path,
-            "session_is_dirty": getattr(self, "_session_is_dirty", False),
-        }
-        self._push_raw_state(post_state)
         self._update_menu_actions_state()
 
     def _on_step_photo(self, delta):
@@ -8895,8 +9098,9 @@ class DarkroomMainWindow(QMainWindow):
             return
 
         from core.lens_correction import LCPDatabase, read_lens_metadata, detect_lens_brand
-        exif = photo.get("exif", {})
-        meta = read_lens_metadata(photo["path"])
+        exif = photo.get("exif", {}) or {}
+        has_rich_exif = (exif.get("camera_model") and exif.get("camera_model") != "-") or (exif.get("lens_model") and exif.get("lens_model") != "-")
+        meta = {} if has_rich_exif else read_lens_metadata(photo["path"])
 
         # Prioritize rich EXIF from SpektraEngine._extract_exif stored in photo['exif']
         cam_make = (exif.get("camera_make") if exif.get("camera_make") != "-" else "") or meta.get("camera_make", "")
@@ -9033,8 +9237,11 @@ class DarkroomMainWindow(QMainWindow):
                 self.sidebar_scroll.verticalScrollBar().setValue(0)
 
             # 3. Ensure EXIF metadata (camera WB, model, etc.)
+            # If photo will be loaded asynchronously via SinglePhotoLoadWorker (not FAST_TEST and no float_img yet),
+            # defer heavy disk EXIF parsing to the background worker thread so switching/importing never blocks the GUI thread!
             exif_data = photo.get("exif")
-            if not exif_data or exif_data.get("camera_model", "-") == "-":
+            has_full_exif = bool(exif_data and exif_data.get("camera_model", "-") != "-")
+            if not has_full_exif and (photo.get("float_img") is not None or os.environ.get("FAST_TEST")):
                 try:
                     extracted = self.engine._extract_exif(photo["path"])
                     if photo.get("exif"):
@@ -9202,15 +9409,19 @@ class DarkroomMainWindow(QMainWindow):
             # Ensure lens configuration is present and auto-detected if in auto mode
             lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
             if lens_cfg.get("setup", "auto") == "auto":
-                self._auto_detect_lens_profile()
+                if photo.get("float_img") is not None or has_full_exif or os.environ.get("FAST_TEST"):
+                    self._auto_detect_lens_profile()
             fl = exif_data.get("focal_length") if exif_data else None
             ap = exif_data.get("aperture") if exif_data else None
             from core.lens_correction import compute_effective_lens_params
             eff_lens = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap)
             lens_cfg.update(eff_lens)
 
+            self._update_stock_mode_ui()
             self._sync_canvas_params()
             self._update_all_sliders_from_params()
+            if hasattr(self, "crop_sidebar") and self.crop_sidebar:
+                self.crop_sidebar.sync_from_overlay(dict(self.current_params.get("crop") or {}))
 
             # 6. Apply print mode, film & paper LUT in a single unified, instant pass
             eff_paper = self.current_paper_stock if self.current_print_mode == "optical" else "none"
@@ -9376,10 +9587,20 @@ class DarkroomMainWindow(QMainWindow):
             thumb_is_dark = (curr_thumb is None or not isinstance(curr_thumb, np.ndarray) or curr_thumb.size == 0 or curr_thumb.mean() < 1.0)
             if thumb_is_dark and res.get("thumbnail_rgb") is not None:
                 new_thumb = res.get("thumbnail_rgb")
-                target_photo["thumbnail_rgb"] = new_thumb
-                th_c = np.ascontiguousarray(new_thumb, dtype=np.uint8)
-                th_qimg = QImage(th_c.data, th_c.shape[1], th_c.shape[0], th_c.shape[1] * 3, QImage.Format.Format_RGB888).copy()
-                self.filmstrip.update_photo_thumbnail(photo_id, QPixmap.fromImage(th_qimg))
+                target_photo["raw_thumbnail_rgb"] = new_thumb
+                if target_photo.get("is_edited") or target_photo.get("film_profile", "none") != "none":
+                    graded_th = self.thumb_controller.grade_thumbnail_fast(
+                        new_thumb,
+                        target_photo.get("film_profile", "none"),
+                        target_photo.get("paper_profile", "none"),
+                        target_photo.get("params") or self.current_params
+                    )
+                    self.thumb_controller.update_graded_thumbnail(target_photo, graded_th, self.filmstrip)
+                else:
+                    target_photo["thumbnail_rgb"] = new_thumb
+                    th_c = np.ascontiguousarray(new_thumb, dtype=np.uint8)
+                    th_qimg = QImage(th_c.data, th_c.shape[1], th_c.shape[0], th_c.shape[1] * 3, QImage.Format.Format_RGB888).copy()
+                    self.filmstrip.update_photo_thumbnail(photo_id, QPixmap.fromImage(th_qimg))
             self.filmstrip.update_photo_data(photo_id, target_photo)
             try:
                 session_cache_manager.save_photo_cache(photo_path, target_photo, save_preview=False)
@@ -9397,6 +9618,10 @@ class DarkroomMainWindow(QMainWindow):
                         self.current_params["base_ev"] = new_bev
                 if res.get("exif"):
                     exif_meta = res["exif"]
+                    if hasattr(self, "exif_widget"):
+                        self.exif_widget.set_exif_data(exif_meta)
+                    if hasattr(self, "histogram_exif_bar"):
+                        self.histogram_exif_bar.set_exif_data(exif_meta)
                     self._active_base_temp = float(exif_meta.get("color_temp", 5500.0))
                     self._active_base_tint = float(exif_meta.get("tint", 1.0))
                     self.current_params["base_temp"] = self._active_base_temp
@@ -9420,6 +9645,16 @@ class DarkroomMainWindow(QMainWindow):
                                 self.slider_tint.set_value(self.current_params["tint"])
                             finally:
                                 self._is_updating_sliders = False
+                    lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
+                    if lens_cfg.get("setup", "auto") == "auto":
+                        self._auto_detect_lens_profile()
+                    from core.lens_correction import compute_effective_lens_params
+                    eff_lens = compute_effective_lens_params(
+                        lens_cfg,
+                        focal_length=exif_meta.get("focal_length"),
+                        aperture=exif_meta.get("aperture")
+                    )
+                    lens_cfg.update(eff_lens)
 
                 self._sync_canvas_params()
 

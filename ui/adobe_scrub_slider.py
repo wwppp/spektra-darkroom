@@ -549,6 +549,8 @@ class ParamScrubSlider(QWidget):
         self.current_val = val
         if sync_precise:
             self._precise_val = float(val)
+            if hasattr(self.slider, "clear_continuous"):
+                self.slider.clear_continuous()
         self.slider.setValue(self._val_to_slider(val))
         
         # Format text with +/- and unit
@@ -570,6 +572,9 @@ class ParamScrubSlider(QWidget):
                 self.reset_btn.setToolTip("默认值")
 
         self._is_updating = False
+        self.slider.update()
+        self.value_edit.update()
+        self.update()
 
     def _on_slider_changed(self, pos):
         if self._is_updating:
@@ -818,9 +823,12 @@ class DarkroomComboBox(QComboBox):
         self.setItemDelegate(self.combo_delegate)
         self.combo_view.setAutoFillBackground(True)
         if hasattr(self.combo_view, "window"):
-            self.combo_view.window().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-            self.combo_view.window().setAutoFillBackground(True)
-            self.combo_view.window().setWindowOpacity(0.0)
+            container = self.combo_view.window()
+            if container:
+                container.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+                container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+                container.setAutoFillBackground(True)
+                container.setWindowOpacity(0.0)
         self.wheelEvent = lambda ev: ev.ignore()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._popup_anim = None
@@ -1106,6 +1114,8 @@ class ComboBoxRow(QWidget):
             txt = self.combo.currentText()
             self.combo.setToolTip(txt if txt else self.default_tooltip)
             self.combo.blockSignals(False)
+            self.combo.update()
+            self.update()
 
     def reset_default(self):
         if self.default_val is not None:

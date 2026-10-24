@@ -231,10 +231,18 @@ class SmoothScrollArea(QScrollArea):
             self._sync_overlay()
 
     def _sync_overlay(self):
-        vp = self.viewport()
-        if vp and getattr(self, '_overlay', None) is not None:
-            self._overlay.setGeometry(vp.rect())
-            self._overlay.raise_()
+        if getattr(self, '_overlay', None) is not None:
+            if self.is_horizontal:
+                self._overlay.setGeometry(self.rect())
+                self._overlay.raise_()
+                hbar = self.horizontalScrollBar()
+                if hbar:
+                    hbar.raise_()
+            else:
+                vp = self.viewport()
+                if vp:
+                    self._overlay.setGeometry(vp.rect())
+                    self._overlay.raise_()
             self._overlay.update()
 
     def _on_scroll_value_changed(self, val):
@@ -420,7 +428,8 @@ class SmoothScrollArea(QScrollArea):
 class _ScrollEdgeOverlay(QWidget):
     """Transparent overlay widget floating above all viewport children to draw subtle edge fade shadows."""
     def __init__(self, parent_scroll_area: SmoothScrollArea):
-        super().__init__(parent_scroll_area.viewport())
+        parent_w = parent_scroll_area if getattr(parent_scroll_area, 'is_horizontal', False) else parent_scroll_area.viewport()
+        super().__init__(parent_w)
         self.scroll_area = parent_scroll_area
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
@@ -429,12 +438,10 @@ class _ScrollEdgeOverlay(QWidget):
     def paintEvent(self, event):
         if not getattr(self.scroll_area, 'enable_edge_fade', True):
             return
-        vp = self.scroll_area.viewport()
-        if not vp:
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0:
             return
-
-        w = vp.width()
-        h = vp.height()
         painter = QPainter(self)
         is_dark = theme_manager.is_dark()
         if is_dark:
@@ -465,23 +472,50 @@ class _ScrollEdgeOverlay(QWidget):
         else:
             sb = self.scroll_area.horizontalScrollBar()
             fade_w = 26.0
-            if is_dark:
-                h_fade_col = QColor(8, 9, 13, 235)
-                h_trans_col = QColor(8, 9, 13, 0)
-            else:
-                h_fade_col = QColor(224, 228, 236, 235)
-                h_trans_col = QColor(224, 228, 236, 0)
-
             if sb.maximum() > 0:
-                if sb.value() > 0:
-                    grad_left = QLinearGradient(0, 0, fade_w, 0)
-                    grad_left.setColorAt(0.0, h_fade_col)
-                    grad_left.setColorAt(1.0, h_trans_col)
-                    painter.fillRect(QRectF(0, 0, fade_w, h), grad_left)
+                from PySide6.QtGui import QPainterPath, QImage
+                fw = int(fade_w)
+                fh = max(1, int(h))
+                cache_key = (fw, fh, is_dark)
+                if getattr(self, "_h_fade_cache_key", None) != cache_key:
+                    self._h_fade_cache_key = cache_key
+                    left_img = QImage(fw, fh, QImage.Format.Format_ARGB32_Premultiplied)
+                    left_img.fill(Qt.GlobalColor.transparent)
+                    img_p = QPainter(left_img)
+                    v_grad = QLinearGradient(0.0, 0.0, 0.0, float(fh))
+                    if is_dark:
+                        v_grad.setColorAt(0.0, QColor(6, 7, 10, 255))
+                        v_grad.setColorAt(0.18, QColor(8, 9, 13, 255))
+                        v_grad.setColorAt(0.85, QColor(10, 11, 16, 255))
+                        v_grad.setColorAt(1.0, QColor(13, 14, 20, 255))
+                    else:
+                        v_grad.setColorAt(0.0, QColor(214, 219, 228, 255))
+                        v_grad.setColorAt(0.18, QColor(224, 228, 236, 255))
+                        v_grad.setColorAt(0.85, QColor(234, 238, 245, 255))
+                        v_grad.setColorAt(1.0, QColor(242, 245, 250, 255))
+                    img_p.fillRect(0, 0, fw, fh, v_grad)
+                    img_p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+                    h_mask = QLinearGradient(0.0, 0.0, float(fw), 0.0)
+                    h_mask.setColorAt(0.0, QColor(0, 0, 0, 255))
+                    h_mask.setColorAt(0.18, QColor(0, 0, 0, 235))
+                    h_mask.setColorAt(0.55, QColor(0, 0, 0, 115))
+                    h_mask.setColorAt(1.0, QColor(0, 0, 0, 0))
+                    img_p.fillRect(0, 0, fw, fh, h_mask)
+                    img_p.end()
+                    self._left_fade_img = left_img
+                    self._right_fade_img = left_img.mirrored(True, False)
 
+                clip_path = QPainterPath()
+                clip_path.addRoundedRect(QRectF(0.0, 0.0, float(w), float(h)), 4.5, 4.5)
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                painter.setClipPath(clip_path)
+
+                if sb.value() > 0:
+                    painter.drawImage(QRectF(0.0, 0.0, fade_w, float(h)), self._left_fade_img)
                 if sb.value() < sb.maximum():
-                    grad_right = QLinearGradient(w - fade_w, 0, w, 0)
-                    grad_right.setColorAt(0.0, h_trans_col)
-                    grad_right.setColorAt(1.0, h_fade_col)
-                    painter.fillRect(QRectF(w - fade_w, 0, fade_w, h), grad_right)
+                    painter.drawImage(QRectF(float(w) - fade_w, 0.0, fade_w, float(h)), self._right_fade_img)
+
+                painter.restore()
         painter.end()

@@ -397,6 +397,7 @@ def get_image_dimensions(file_path: str) -> tuple[int, int]:
 def extract_fast_thumbnail(file_path: str, target_h: int = 72) -> np.ndarray | None:
     """Extracts high-quality camera embedded JPEG thumbnail or loads image thumbnail in sub-15ms.
     Guarantees correct orientation and avoids expensive LibRaw demosaicing.
+    Includes multi-tier fallback for Sony ARW, Canon CR2/CR3, Nikon NEF, and DNG formats.
     """
     if not file_path or not os.path.isfile(file_path):
         return None
@@ -412,20 +413,97 @@ def extract_fast_thumbnail(file_path: str, target_h: int = 72) -> np.ndarray | N
                     w, h = rh, rw
                 else:
                     w, h = rw, rh
-                thumb = raw.extract_thumb()
-                if thumb.format == rawpy.ThumbFormat.JPEG:
-                    file_bytes = np.frombuffer(thumb.data, dtype=np.uint8)
-                    img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-                    if img_bgr is not None:
-                        th_h_raw, th_w_raw = img_bgr.shape[:2]
-                        if (h > w and th_w_raw > th_h_raw):
-                            img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
-                        elif (w > h and th_h_raw > th_w_raw):
-                            img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
-                        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+                th_u8 = None
+                # Tier 1: Try LibRaw thumb extractor (JPEG and BITMAP/PPM)
+                try:
+                    thumb = raw.extract_thumb()
+                    rgb = None
+                    if thumb.format == rawpy.ThumbFormat.JPEG:
+                        file_bytes = np.frombuffer(thumb.data, dtype=np.uint8) if not isinstance(thumb.data, np.ndarray) else thumb.data
+                        img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                        if img_bgr is not None:
+                            rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                    elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                        if isinstance(thumb.data, np.ndarray) and len(thumb.data.shape) >= 2:
+                            rgb = thumb.data
+                        else:
+                            try:
+                                file_bytes = np.frombuffer(thumb.data, dtype=np.uint8)
+                                img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                                if img_bgr is not None:
+                                    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                            except Exception:
+                                rgb = None
+                    if rgb is not None and rgb.size > 0:
+                        th_h_raw, th_w_raw = rgb.shape[:2]
+                        if (h > w and th_w_raw > th_h_raw) or (w > h and th_h_raw > th_w_raw):
+                            rgb = cv2.rotate(rgb, cv2.ROTATE_90_CLOCKWISE)
                         th_h = target_h
                         th_w = max(48, int(rgb.shape[1] * (th_h / float(rgb.shape[0]))))
-                        return cv2.resize(rgb, (th_w, th_h), interpolation=cv2.INTER_AREA)
+                        th_u8 = cv2.resize(rgb, (th_w, th_h), interpolation=cv2.INTER_AREA)
+                except Exception:
+                    th_u8 = None
+
+                # Tier 2: Direct raw file byte scanner for embedded camera JPEG preview (Sony ARW, etc.)
+                if th_u8 is None:
+                    try:
+                        with open(file_path, "rb") as fp:
+                            raw_bytes = fp.read(4 * 1024 * 1024)
+                        start = 0
+                        best_bgr = None
+                        best_area = 0
+                        checked = 0
+                        while start < len(raw_bytes) and checked < 3:
+                            idx = raw_bytes.find(b'\xff\xd8\xff', start)
+                            if idx == -1:
+                                break
+                            end_idx = raw_bytes.find(b'\xff\xd9', idx + 1024 * 10)
+                            if end_idx != -1:
+                                cand = raw_bytes[idx:end_idx + 2]
+                                cand_bgr = cv2.imdecode(np.frombuffer(cand, dtype=np.uint8), cv2.IMREAD_COLOR)
+                                checked += 1
+                                if cand_bgr is not None and cand_bgr.shape[0] >= 100:
+                                    area = cand_bgr.shape[0] * cand_bgr.shape[1]
+                                    if area > best_area:
+                                        best_area = area
+                                        best_bgr = cand_bgr
+                                        if cand_bgr.shape[0] >= 600:
+                                            break
+                                start = end_idx + 2
+                            else:
+                                start = idx + 1024
+                        if best_bgr is not None:
+                            th_h_raw, th_w_raw = best_bgr.shape[:2]
+                            if (h > w and th_w_raw > th_h_raw) or (w > h and th_h_raw > th_w_raw):
+                                best_bgr = cv2.rotate(best_bgr, cv2.ROTATE_90_CLOCKWISE)
+                            rgb = cv2.cvtColor(best_bgr, cv2.COLOR_BGR2RGB)
+                            th_h = target_h
+                            th_w = max(48, int(rgb.shape[1] * (th_h / float(rgb.shape[0]))))
+                            th_u8 = cv2.resize(rgb, (th_w, th_h), interpolation=cv2.INTER_AREA)
+                    except Exception:
+                        th_u8 = None
+
+                # Tier 3: Emergency fast 8-bit LINEAR demosaic (~40ms, uint8, avoids heavy 16-bit ProPhoto float32 math)
+                if th_u8 is None:
+                    try:
+                        rgb8 = raw.postprocess(
+                            demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
+                            half_size=True,
+                            output_color=rawpy.ColorSpace.sRGB,
+                            output_bps=8,
+                            use_camera_wb=False,
+                            no_auto_bright=True,
+                            no_auto_scale=False
+                        )
+                        if rgb8 is not None:
+                            th_h = target_h
+                            th_w = max(48, int(rgb8.shape[1] * (th_h / float(rgb8.shape[0]))))
+                            th_u8 = cv2.resize(rgb8, (th_w, th_h), interpolation=cv2.INTER_AREA)
+                    except Exception:
+                        th_u8 = None
+
+                return th_u8
         else:
             with open(file_path, "rb") as fp:
                 file_bytes = np.frombuffer(fp.read(), dtype=np.uint8)

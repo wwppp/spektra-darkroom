@@ -143,6 +143,7 @@ class FilmFilterHeader(QWidget):
 
         # Capsule Search Box
         self.search_box = QLineEdit()
+        self.search_box.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.search_box.setPlaceholderText("搜索胶卷...")
         self.search_box.setClearButtonEnabled(True)
         self.search_box.setFixedHeight(22)

@@ -5,8 +5,8 @@
 APP_NAME = "SpektraDarkroom"
 VERSION_MAJOR = 0
 VERSION_MINOR = 4
-VERSION_PATCH = 26
-BUILD_NUMBER = 188
+VERSION_PATCH = 41
+BUILD_NUMBER = 203
 RELEASE_DATE = "2026-10-24"
 
 VERSION_STRING = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
@@ -23,11 +23,4 @@ def get_app_title():
 
 
 def get_full_version_info():
-    return {
-        "app_name": APP_NAME,
-        "version": VERSION_STRING,
-        "build": BUILD_NUMBER,
-        "release_date": RELEASE_DATE,
-        "title": get_app_title(),
-        "engine": "Vulkan / GPU Real-Time Hardware Accelerated Pipeline"
-    }
+    return FULL_VERSION_STRING

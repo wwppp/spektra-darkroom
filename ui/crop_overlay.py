@@ -21,7 +21,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel,
-    QFrame, QSlider, QSizePolicy, QMenu
+    QFrame, QSlider, QSizePolicy, QMenu, QLineEdit
 )
 
 from ui.theme_manager import theme_manager
@@ -38,7 +38,19 @@ ASPECT_RATIOS = [
     ("3:2", "3:2"),
     ("16:9", "16:9"),
     ("2.39:1", "2.39:1"),
+    ("自定义...", "custom"),
 ]
+
+
+def _fmt_ratio(val: float) -> str:
+    """Format ratio value compactly: whole integer or up to 2 decimal places."""
+    try:
+        val = float(val)
+        if abs(val - round(val)) < 0.001:
+            return str(int(round(val)))
+        return f"{val:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "1" 
 
 GRID_TYPES = [
     ("三分法则", 0),
@@ -221,7 +233,9 @@ class CropOverlayWidget(QWidget):
         self.flip_h = False
         self.flip_v = False
         self.aspect_ratio_mode = "original"
-        self.is_portrait_orientation = False  # Track orientation (landscape vs portrait)
+        self.is_portrait_orientation = False
+        self.custom_ratio_w = 5.0
+        self.custom_ratio_h = 7.0  # Track orientation (landscape vs portrait)
         self.grid_type = 0  # 0: Rule-of-thirds, 1: Golden ratio, etc.
         self.show_guides = True
         self.grid_orientation = 0
@@ -293,6 +307,7 @@ class CropOverlayWidget(QWidget):
             "flip_h": bool(self.flip_h),
             "flip_v": bool(self.flip_v),
             "aspect_ratio": str(self.aspect_ratio_mode),
+            "custom_ratio": [float(getattr(self, "custom_ratio_w", 5.0)), float(getattr(self, "custom_ratio_h", 7.0))],
             "is_portrait": bool(getattr(self, "is_portrait_orientation", False)),
             "_user_crop_w": round(self._user_crop_w, 5),
             "_user_crop_h": round(self._user_crop_h, 5),
@@ -304,7 +319,7 @@ class CropOverlayWidget(QWidget):
     def _is_snapshot_equal(self, s1: dict, s2: dict) -> bool:
         if not s1 or not s2:
             return False
-        for k in ("x", "y", "w", "h", "angle", "rot_90", "flip_h", "flip_v", "aspect_ratio", "is_portrait", "pan_x", "pan_y", "zoom"):
+        for k in ("x", "y", "w", "h", "angle", "rot_90", "flip_h", "flip_v", "aspect_ratio", "custom_ratio", "is_portrait", "pan_x", "pan_y", "zoom"):
             if s1.get(k) != s2.get(k):
                 return False
         return True
@@ -351,6 +366,9 @@ class CropOverlayWidget(QWidget):
         self.flip_h = snap["flip_h"]
         self.flip_v = snap["flip_v"]
         self.aspect_ratio_mode = snap["aspect_ratio"]
+        if "custom_ratio" in snap and isinstance(snap["custom_ratio"], (list, tuple)) and len(snap["custom_ratio"]) == 2:
+            self.custom_ratio_w = float(snap["custom_ratio"][0])
+            self.custom_ratio_h = float(snap["custom_ratio"][1])
         self.is_portrait_orientation = snap["is_portrait"]
         self._user_crop_w = snap.get("_user_crop_w", self.crop_w)
         self._user_crop_h = snap.get("_user_crop_h", self.crop_h)
@@ -380,6 +398,12 @@ class CropOverlayWidget(QWidget):
             self.flip_h = bool(crop_dict.get("flip_h", False))
             self.flip_v = bool(crop_dict.get("flip_v", False))
             self.aspect_ratio_mode = str(crop_dict.get("aspect_ratio", "original"))
+            if "custom_ratio" in crop_dict and isinstance(crop_dict["custom_ratio"], (list, tuple)) and len(crop_dict["custom_ratio"]) == 2:
+                try:
+                    self.custom_ratio_w = float(crop_dict["custom_ratio"][0])
+                    self.custom_ratio_h = float(crop_dict["custom_ratio"][1])
+                except Exception:
+                    pass
         else:
             self.crop_x = 0.0
             self.crop_y = 0.0
@@ -440,6 +464,7 @@ class CropOverlayWidget(QWidget):
             "flip_h": self.flip_h,
             "flip_v": self.flip_v,
             "aspect_ratio": self.aspect_ratio_mode,
+            "custom_ratio": [float(getattr(self, "custom_ratio_w", 5.0)), float(getattr(self, "custom_ratio_h", 7.0))],
             "is_portrait": getattr(self, "is_portrait_orientation", False)
         }
 
@@ -564,6 +589,9 @@ class CropOverlayWidget(QWidget):
         self.flip_h = bool(init_crop.get("flip_h", False))
         self.flip_v = bool(init_crop.get("flip_v", False))
         self.aspect_ratio_mode = str(init_crop.get("aspect_ratio", "original"))
+        if "custom_ratio" in init_crop and isinstance(init_crop["custom_ratio"], (list, tuple)) and len(init_crop["custom_ratio"]) == 2:
+            self.custom_ratio_w = float(init_crop["custom_ratio"][0])
+            self.custom_ratio_h = float(init_crop["custom_ratio"][1])
         self.is_portrait_orientation = bool(init_crop.get("is_portrait", False))
         self._user_crop_w = self.crop_w
         self._user_crop_h = self.crop_h
@@ -590,6 +618,9 @@ class CropOverlayWidget(QWidget):
         self.flip_h = bool(init_crop.get("flip_h", False))
         self.flip_v = bool(init_crop.get("flip_v", False))
         self.aspect_ratio_mode = str(init_crop.get("aspect_ratio", "original"))
+        if "custom_ratio" in init_crop and isinstance(init_crop["custom_ratio"], (list, tuple)) and len(init_crop["custom_ratio"]) == 2:
+            self.custom_ratio_w = float(init_crop["custom_ratio"][0])
+            self.custom_ratio_h = float(init_crop["custom_ratio"][1])
         self.is_portrait_orientation = bool(init_crop.get("is_portrait", False))
         self._crop_undo_stack = []
         self._crop_redo_stack = []
@@ -627,6 +658,10 @@ class CropOverlayWidget(QWidget):
 
         if self.aspect_ratio_mode == "free":
             target_phys_ratio = 1.0 / max(0.001, cur_phys_ratio)
+        elif self.aspect_ratio_mode == "custom":
+            self.custom_ratio_w, self.custom_ratio_h = self.custom_ratio_h, self.custom_ratio_w
+            target_phys_ratio = float(self.custom_ratio_w) / max(0.001, float(self.custom_ratio_h))
+            self.is_portrait_orientation = bool(self.custom_ratio_w < self.custom_ratio_h)
         else:
             base_r = self._get_base_preset_ratio(self.aspect_ratio_mode)
             if base_r is None:
@@ -708,19 +743,28 @@ class CropOverlayWidget(QWidget):
             return 16.0 / 9.0
         elif mode == "2.39:1":
             return 2.39
+        elif mode == "custom":
+            cw = float(getattr(self, "custom_ratio_w", 5.0))
+            ch = float(getattr(self, "custom_ratio_h", 7.0))
+            return cw / max(0.001, ch)
         return None
 
     def _apply_preset_ratio(self, mode: str):
-        base_r = self._get_base_preset_ratio(mode)
-        if base_r is None:
-            return
         img_w, img_h = self._get_effective_image_size()
+        if mode == "custom":
+            cw = float(getattr(self, "custom_ratio_w", 5.0))
+            ch = float(getattr(self, "custom_ratio_h", 7.0))
+            target_phys_ratio = cw / max(0.001, ch)
+            self.is_portrait_orientation = bool(cw < ch)
+        else:
+            base_r = self._get_base_preset_ratio(mode)
+            if base_r is None:
+                return
+            cur_is_portrait = (self.crop_w * img_w < self.crop_h * img_h)
+            self.is_portrait_orientation = cur_is_portrait
 
-        cur_is_portrait = (self.crop_w * img_w < self.crop_h * img_h)
-        self.is_portrait_orientation = cur_is_portrait
-
-        r_land = max(base_r, 1.0 / base_r)
-        target_phys_ratio = (1.0 / r_land) if self.is_portrait_orientation else r_land
+            r_land = max(base_r, 1.0 / base_r)
+            target_phys_ratio = (1.0 / r_land) if self.is_portrait_orientation else r_land
 
         K = target_phys_ratio * (float(img_h) / float(img_w))
         S = max(self.crop_w, self.crop_h)
@@ -801,6 +845,10 @@ class CropOverlayWidget(QWidget):
             base_r = 16.0 / 9.0
         elif mode == "2.39:1":
             base_r = 2.39
+        elif mode == "custom":
+            cw = float(getattr(self, "custom_ratio_w", 5.0))
+            ch = float(getattr(self, "custom_ratio_h", 7.0))
+            return cw / max(0.001, ch)
 
         if base_r is None:
             return None
@@ -1785,7 +1833,12 @@ class CropOverlayWidget(QWidget):
         menu_presets = menu.addMenu("画幅预设")
         grp_ratio = QActionGroup(self)
         for label, mode in ASPECT_RATIOS:
-            act_r = menu_presets.addAction(label)
+            act_label = label
+            if mode == "custom":
+                cw = getattr(self, "custom_ratio_w", 5.0)
+                ch = getattr(self, "custom_ratio_h", 7.0)
+                act_label = f"自定义 ({_fmt_ratio(cw)}:{_fmt_ratio(ch)})"
+            act_r = menu_presets.addAction(act_label)
             act_r.setCheckable(True)
             if self.aspect_ratio_mode == mode:
                 act_r.setChecked(True)
@@ -2157,6 +2210,51 @@ class CropSidebarWidget(QFrame):
         ratio_row.addWidget(self.btn_swap_aspect)
 
         self.sec_ratio.addLayout(ratio_row)
+
+        # Custom ratio row (expandable inline row under 画幅预设)
+        self.custom_ratio_row = QWidget()
+        custom_layout = QHBoxLayout(self.custom_ratio_row)
+        custom_layout.setContentsMargins(0, 2, 0, 4)
+        custom_layout.setSpacing(6)
+
+        self.lbl_custom_ratio = QLabel("自定义比例")
+        self.lbl_custom_ratio.setFixedWidth(74)
+        self.lbl_custom_ratio.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        custom_layout.addWidget(self.lbl_custom_ratio)
+
+        self.edit_ratio_w = QLineEdit("5")
+        self.edit_ratio_w.setFixedHeight(24)
+        self.edit_ratio_w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.edit_ratio_w.setToolTip("宽度比 (例如 5、65、16 或 2.39)")
+
+        self.lbl_ratio_colon = QLabel(":")
+        self.lbl_ratio_colon.setFixedWidth(8)
+        self.lbl_ratio_colon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.edit_ratio_h = QLineEdit("7")
+        self.edit_ratio_h.setFixedHeight(24)
+        self.edit_ratio_h.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.edit_ratio_h.setToolTip("高度比 (例如 7、24、9 或 1)")
+
+        self.btn_apply_custom = QPushButton("应用")
+        self.btn_apply_custom.setFixedSize(42, 24)
+        self.btn_apply_custom.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_apply_custom.setToolTip("应用自定义长宽比")
+
+        self.edit_ratio_w.returnPressed.connect(self._on_apply_custom_ratio)
+        self.edit_ratio_h.returnPressed.connect(self._on_apply_custom_ratio)
+        self.btn_apply_custom.clicked.connect(self._on_apply_custom_ratio)
+        self.edit_ratio_w.editingFinished.connect(self._on_apply_custom_ratio)
+        self.edit_ratio_h.editingFinished.connect(self._on_apply_custom_ratio)
+
+        custom_layout.addWidget(self.edit_ratio_w, 1)
+        custom_layout.addWidget(self.lbl_ratio_colon)
+        custom_layout.addWidget(self.edit_ratio_h, 1)
+        custom_layout.addWidget(self.btn_apply_custom)
+
+        self.custom_ratio_row.setVisible(False)
+        self.sec_ratio.addWidget(self.custom_ratio_row)
+
         layout.addWidget(self.sec_ratio)
 
         # 2. Section: 角度 (Item 6: Renamed to 角度, Item 7: Merged reference lines)
@@ -2268,6 +2366,79 @@ class CropSidebarWidget(QFrame):
         # Update icons to match theme
         if hasattr(self, 'btn_swap_aspect'):
             self.btn_swap_aspect.setIcon(get_icon("aspect_swap.png", is_dark=is_dark))
+
+        label_fg = "#c8c8c8" if is_dark else "#334155"
+        input_bg = "#141414" if is_dark else "#ffffff"
+        input_fg = "#e0e0e0" if is_dark else "#1e293b"
+        input_border = "#363636" if is_dark else "#cbd5e1"
+        colon_fg = "#64748b" if is_dark else "#94a3b8"
+        btn_apply_bg = "#20222a" if is_dark else "#f1f5f9"
+        btn_apply_fg = "#cbd5e1" if is_dark else "#334155"
+        btn_apply_border = "#333647" if is_dark else "#cbd5e1"
+        btn_hover_bg = "#2a2d39" if is_dark else "#e2e8f0"
+
+        if hasattr(self, 'lbl_custom_ratio') and self.lbl_custom_ratio:
+            self.lbl_custom_ratio.setStyleSheet(f"""
+                QLabel {{
+                    background: transparent;
+                    border: none;
+                    color: {label_fg};
+                    font-size: 11px;
+                    font-weight: 500;
+                    padding: 1px 0px;
+                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+                }}
+            """)
+        if hasattr(self, 'lbl_ratio_colon') and self.lbl_ratio_colon:
+            self.lbl_ratio_colon.setStyleSheet(f"""
+                QLabel {{
+                    background: transparent;
+                    border: none;
+                    color: {colon_fg};
+                    font-size: 13px;
+                    font-weight: bold;
+                }}
+            """)
+        edit_ss = f"""
+            QLineEdit {{
+                background: {input_bg};
+                color: {input_fg};
+                border: 1px solid {input_border};
+                border-radius: 3px;
+                padding: 1px 3px;
+                font-size: 11px;
+                font-family: "Segoe UI", "Microsoft YaHei UI", Consolas, monospace;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid #f59e0b;
+                background: {input_bg};
+            }}
+        """
+        if hasattr(self, 'edit_ratio_w') and self.edit_ratio_w:
+            self.edit_ratio_w.setStyleSheet(edit_ss)
+        if hasattr(self, 'edit_ratio_h') and self.edit_ratio_h:
+            self.edit_ratio_h.setStyleSheet(edit_ss)
+
+        btn_app_ss = f"""
+            QPushButton {{
+                background: {btn_apply_bg};
+                color: {btn_apply_fg};
+                border: 1px solid {btn_apply_border};
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background: {btn_hover_bg};
+                border-color: #f59e0b;
+                color: #f59e0b;
+            }}
+            QPushButton:pressed {{
+                background: {'#14151b' if is_dark else '#cbd5e1'};
+            }}
+        """
+        if hasattr(self, 'btn_apply_custom') and self.btn_apply_custom:
+            self.btn_apply_custom.setStyleSheet(btn_app_ss)
         if hasattr(self, 'btn_rot_left'):
             self.btn_rot_left.setIcon(get_icon("rotate_left.png", is_dark=is_dark))
         if hasattr(self, 'btn_rot_right'):
@@ -2367,13 +2538,57 @@ class CropSidebarWidget(QFrame):
             }
         """)
 
+    def _update_custom_combo_label(self, w_val: float, h_val: float):
+        w_str = _fmt_ratio(w_val)
+        h_str = _fmt_ratio(h_val)
+        combo = self.combo_ratio.combo
+        idx = combo.findData("custom")
+        if idx >= 0:
+            combo.setItemText(idx, f"自定义 ({w_str}:{h_str})")
+
     def _on_ratio_changed(self, val):
         if self._is_updating:
             return
-        self.overlay.set_aspect_ratio_mode(val)
+        if val == "custom":
+            self.custom_ratio_row.setVisible(True)
+            cw = getattr(self.overlay, "custom_ratio_w", 5.0)
+            ch = getattr(self.overlay, "custom_ratio_h", 7.0)
+            self.edit_ratio_w.setText(_fmt_ratio(cw))
+            self.edit_ratio_h.setText(_fmt_ratio(ch))
+            self._update_custom_combo_label(cw, ch)
+            self.edit_ratio_w.setFocus()
+            self.edit_ratio_w.selectAll()
+            self.overlay.set_aspect_ratio_mode("custom")
+        else:
+            self.custom_ratio_row.setVisible(False)
+            self.overlay.set_aspect_ratio_mode(val)
+
+    def _on_apply_custom_ratio(self):
+        if self._is_updating:
+            return
+        w_text = self.edit_ratio_w.text().strip()
+        h_text = self.edit_ratio_h.text().strip()
+        try:
+            w_val = float(w_text)
+            h_val = float(h_text)
+            if w_val <= 0 or h_val <= 0 or math.isnan(w_val) or math.isnan(h_val):
+                return
+        except ValueError:
+            return
+
+        w_val = max(0.01, min(9999.0, round(w_val, 3)))
+        h_val = max(0.01, min(9999.0, round(h_val, 3)))
+
+        self.overlay.custom_ratio_w = w_val
+        self.overlay.custom_ratio_h = h_val
+        self._update_custom_combo_label(w_val, h_val)
+        self.combo_ratio.set_value("custom")
+        self.overlay.set_aspect_ratio_mode("custom")
 
     def _on_reset_ratio(self):
         self.combo_ratio.set_value("original")
+        if hasattr(self, 'custom_ratio_row'):
+            self.custom_ratio_row.setVisible(False)
         self.overlay.aspect_ratio_mode = "original"
         img_w, img_h = self.overlay._get_effective_image_size()
         self.overlay.is_portrait_orientation = bool(img_w < img_h)
@@ -2425,7 +2640,21 @@ class CropSidebarWidget(QFrame):
         try:
             # Sync ratio combo
             mode = crop_dict.get("aspect_ratio", "original")
-            self.combo_ratio.set_value(mode)
+            if mode == "custom":
+                if hasattr(self, 'custom_ratio_row'):
+                    self.custom_ratio_row.setVisible(True)
+                cw = getattr(self.overlay, "custom_ratio_w", 5.0)
+                ch = getattr(self.overlay, "custom_ratio_h", 7.0)
+                if hasattr(self, 'edit_ratio_w') and not self.edit_ratio_w.hasFocus():
+                    self.edit_ratio_w.setText(_fmt_ratio(cw))
+                if hasattr(self, 'edit_ratio_h') and not self.edit_ratio_h.hasFocus():
+                    self.edit_ratio_h.setText(_fmt_ratio(ch))
+                self._update_custom_combo_label(cw, ch)
+                self.combo_ratio.set_value("custom")
+            else:
+                if hasattr(self, 'custom_ratio_row'):
+                    self.custom_ratio_row.setVisible(False)
+                self.combo_ratio.set_value(mode)
 
             # Sync angle slider
             angle = float(crop_dict.get("angle", 0.0))
