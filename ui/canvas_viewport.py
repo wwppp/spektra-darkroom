@@ -11,6 +11,7 @@ from PySide6.QtOpenGL import (
 )
 from core.path_utils import get_resource_dir
 from core import config_manager
+from core.darkroom_math import grain_scale_px, grain_colour_rho
 from OpenGL import GL
 
 
@@ -49,6 +50,7 @@ uniform float u_shadows;
 uniform vec3 u_cmy;
 uniform float u_print_exposure;
 uniform float u_preflash;
+uniform float u_black_lift;
 
 // Halation physics (Official Spektrafilm Model)
 uniform float u_halation;           // halation_amount (1.0 = physical default)
@@ -81,6 +83,14 @@ uniform float u_dir_samelayer;
 // Chemistry Morph
 uniform float u_morph_gamma;
 uniform float u_developer_exhaustion;
+
+// Values already baked into the current 3D LUT (only the delta is approximated post-LUT)
+uniform float u_lut_dir_interlayer;
+uniform float u_lut_dir_samelayer;
+uniform float u_lut_morph_gamma;
+uniform float u_lut_dev_exh;
+uniform float u_grain_rho;
+uniform float u_film_width_um;
 
 // Lens Optical & Geometric Correction
 uniform int u_lens_enabled;
@@ -232,10 +242,11 @@ vec3 compute_scene_radiance(vec3 raw_c) {
     vec3 col = raw_c * exp2(u_exposure);
     float b_temp = (u_base_temp > 1000.0) ? u_base_temp : 5500.0;
     float b_tint = (u_base_tint > 0.1) ? u_base_tint : 1.0;
-    float temp_factor = (u_temp - b_temp) / 3000.0;
-    col.r *= (1.0 + temp_factor * 0.22);
-    col.b *= (1.0 - temp_factor * 0.22);
-    col.g *= (u_tint / b_tint);
+    // Exponential, luminance-preserving white balance (mirrors core/darkroom_math.wb_gains)
+    float wb_s = log2(max(1000.0, u_temp) / b_temp);
+    vec3 wb_g = vec3(exp2(0.40 * wb_s), u_tint / b_tint, exp2(-0.40 * wb_s));
+    wb_g /= max(1e-4, dot(wb_g, vec3(0.2880, 0.7119, 0.0001)));
+    col *= wb_g;
 
     if (abs(u_highlights) > 0.001 || abs(u_shadows) > 0.001) {
         float y_lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
@@ -648,7 +659,7 @@ void main() {
         float max_dim = max(tex_sz_hal.x, tex_sz_hal.y);
 
         // Physical sigma scaled by 35mm film baseline (35000 um)
-        float base_hal_rad = max(0.0005, (u_hal_sigma_um / 35000.0) * max(0.2, u_hal_spatial_scale));
+        float base_hal_rad = max(0.0005, (u_hal_sigma_um / max(5000.0, u_film_width_um)) * max(0.2, u_hal_spatial_scale));
         vec2 hal_spread = vec2(base_hal_rad * 2.5, base_hal_rad * 2.5 * aspect_hal);
 
         // 1. In-Emulsion Forward Scatter: Energy-preserving micro-diffusion
@@ -724,7 +735,9 @@ void main() {
         vec2 g_dx = rot * (d_sample_dx * master_res / scale);
         vec2 g_dy = rot * (d_sample_dy * master_res / scale);
         float footprint = max(length(g_dx), length(g_dy));
-        float grain_att = 1.0 / sqrt(1.0 + 2.5 * max(0.0, footprint - 1.0));
+        // Box-filter averaging of spatially correlated grain over a footprint of f grain cells
+        // reduces its std ~ 1/f (2D: f^2 cells, sqrt averaging) - matches downscaled export.
+        float grain_att = 1.0 / max(1.0, footprint);
 
         // Multi-scale organic dye cloud clusters & micro-crystals:
         // 1. High-frequency micro-crystals (~1.2 master px, ~7 um) with continuous subpixel continuity
@@ -741,7 +754,9 @@ void main() {
         float w_fine = max(0.15, 0.45 - 0.22 * blur_t);
         float w_cloud = 0.50 + 0.20 * blur_t;
         float w_mottle = 0.28 + 0.12 * blur_t;
-        vec3 raw_noise = fine_rgb * w_fine + cloud_rgb * w_cloud + mottle_rgb * w_mottle;
+        // Per-layer (chroma) component: dye-cloud mottle is spatially coarser than the luminance
+        // grain, so the independent part excludes the fine micro-crystal octave (no RGB pixel speckle).
+        vec3 raw_noise = (cloud_rgb * w_cloud + mottle_rgb * w_mottle) * 1.15;
 
         // Shared luminance grain stream across coupled emulsion layers
         float shared_fine = (smooth_cloud_noise(gcoord * 0.75 + vec2(53.2, 19.8)) - 0.5) * 2.0;
@@ -753,12 +768,14 @@ void main() {
         // Fotufilm inter-channel correlation is ~0.72.
         // When u_grain_colour = 1.0 (Color Film): rho = 0.72 (rich organic dye clouds, no digital noise)
         // When u_grain_colour = 0.0 (B&W Film): rho = 1.0 (pure monochrome silver grain)
-        float colour_val = clamp(u_grain_colour, 0.0, 1.0);
-        float rho = mix(1.0, 0.72, colour_val);
-        vec3 final_noise = sqrt(1.0 - rho) * raw_noise + sqrt(rho) * vec3(shared_noise);
-
-        // Apply film stock layer weights (e.g. [0.70, 1.0, 1.35] or [0.90, 1.0, 2.71])
-        vec3 layer_grain = final_noise * u_stock_layer_weights;
+        // rho is computed on the CPU (core/darkroom_math.grain_colour_rho): coarser stocks are more correlated
+        float rho = clamp(u_grain_rho, 0.0, 1.0);
+        // Apply film stock layer weights (e.g. [0.70, 1.0, 1.35] or [0.90, 1.0, 2.71]).
+        // The shared (luminance) stream uses the mean weight so it stays neutral; the per-layer
+        // spread only shapes the independent chroma mottle (avoids blue/yellow pixel speckle).
+        float lw_mean = dot(u_stock_layer_weights, vec3(1.0 / 3.0));
+        vec3 layer_grain = sqrt(1.0 - rho) * raw_noise * u_stock_layer_weights
+                         + sqrt(rho) * vec3(shared_noise * lw_mean);
 
         // Stock strength & user slider modulation
         float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
@@ -769,11 +786,15 @@ void main() {
         // which physically block optical transmittance through the negative onto the print paper (T -> 0).
         // Consequently, highlight print regions naturally roll off to smooth, silky paper base white,
         // while midtones produce maximum tactile dye cloud relief, and shadows roll off smoothly.
-        float lin_luma = dot(linear_rgb, vec3(0.2126, 0.7152, 0.0722));
-        float dens_mod = (1.0 - exp(-lin_luma * 15.0)) / (1.0 + pow(lin_luma / 0.28, 2.2));
+        // Negative-only granularity per emulsion layer (log-exposure domain): flat across the
+        // straight-line section, toe roll-off to a base+fog floor, gentle decline at very high
+        // density. Print toe/shoulder compression is left to the film+paper LUT.
+        vec3 lin_c = max(linear_rgb, vec3(0.0));
+        vec3 dens_mod = 0.72 * (vec3(0.15) + 0.85 * (vec3(1.0) - exp(-lin_c / 0.010)))
+                      / (vec3(1.0) + pow(lin_c / 2.0, vec3(1.5)));
 
         // Transmittance modulation: T = T_in * 10^(-dD) = T_in * exp(-dD * 2.3025851)
-        vec3 dD = layer_grain * (eff_strength * 0.35 * grain_att * dens_mod);
+        vec3 dD = layer_grain * (eff_strength * 0.35 * grain_att) * dens_mod;
         linear_rgb = max(vec3(0.0), linear_rgb * exp(-dD * 2.3025851));
     }
 
@@ -788,26 +809,39 @@ void main() {
         film_rgb = prophoto_to_srgb(linear_rgb);
     }
     
-    // 5. DIR Coupler inhibition response (Color separation & samelayer contrast)
-    if (abs(u_dir_interlayer - 1.0) > 0.01 || abs(u_dir_samelayer - 1.0) > 0.01) {
+    // 5. DIR Coupler inhibition response - only the delta not yet baked into the LUT
+    //    (live preview while dragging; becomes identity once the LUT is rebuilt)
+    float dir_ri = u_dir_interlayer / max(0.05, u_lut_dir_interlayer);
+    float dir_rs = u_dir_samelayer / max(0.05, u_lut_dir_samelayer);
+    if (abs(dir_ri - 1.0) > 0.01 || abs(dir_rs - 1.0) > 0.01) {
         float luma_f = dot(film_rgb, vec3(0.299, 0.587, 0.114));
         vec3 chroma = film_rgb - vec3(luma_f);
-        film_rgb = vec3(luma_f) + chroma * u_dir_interlayer;
-        film_rgb = pow(clamp(film_rgb, 0.0001, 1.0), vec3(1.0 / max(0.2, u_dir_samelayer)));
+        film_rgb = vec3(luma_f) + chroma * dir_ri;
+        film_rgb = pow(clamp(film_rgb, 0.0001, 1.0), vec3(1.0 / max(0.2, dir_rs)));
     }
 
-    // 6. Enlarger Color Timing (CMY filters & print exposure)
-    vec3 cmy_factor = vec3(1.0) - u_cmy * 0.015;
-    film_rgb = pow(clamp(film_rgb, 0.0001, 1.0), cmy_factor) * u_print_exposure;
-    film_rgb += vec3(u_preflash);
-    
-    // 7. Paper Chemistry Morph & Developer Exhaustion
-    if (abs(u_morph_gamma - 1.0) > 0.01) {
-        film_rgb = pow(clamp(film_rgb, 0.0001, 1.0), vec3(u_morph_gamma));
+    // 6. Enlarger CMY filtration, print exposure & pre-flash in paper-exposure domain
+    //    print = 1 / (1 + E^2.5)  ->  E' = E * 10^(-0.004 * cmy) / print_exposure + preflash
+    //    (mirrors core/darkroom_math.paper_domain_adjust)
+    if (any(greaterThan(abs(u_cmy), vec3(0.01))) || abs(u_print_exposure - 1.0) > 0.005 || u_preflash > 0.0005) {
+        vec3 pv = clamp(film_rgb, 1e-4, 1.0 - 1e-4);
+        vec3 e_paper = pow(vec3(1.0) / pv - vec3(1.0), vec3(0.4));
+        e_paper = e_paper * pow(vec3(10.0), -0.004 * u_cmy) / max(0.05, u_print_exposure) + vec3(max(0.0, u_preflash));
+        film_rgb = vec3(1.0) / (vec3(1.0) + pow(e_paper, vec3(2.5)));
     }
-    if (u_developer_exhaustion > 0.005) {
-        film_rgb = mix(film_rgb, film_rgb * 0.88 + vec3(0.03), u_developer_exhaustion * 0.6);
+
+    // 7. Paper Chemistry Morph & Developer Exhaustion - delta vs. LUT-baked values only
+    float morph_r = u_morph_gamma / max(0.05, u_lut_morph_gamma);
+    if (abs(morph_r - 1.0) > 0.01) {
+        film_rgb = pow(clamp(film_rgb, 0.0001, 1.0), vec3(morph_r));
     }
+    float exh_d = u_developer_exhaustion - u_lut_dev_exh;
+    if (abs(exh_d) > 0.005) {
+        film_rgb = mix(film_rgb, film_rgb * 0.88 + vec3(0.03), exh_d * 0.6);
+    }
+
+    // 8. Black lift (output-side additive fade): greys shadows, shifts histogram right
+    film_rgb += vec3(u_black_lift);
 
     fragColor = vec4(clamp(film_rgb, 0.0, 1.0), 1.0);
 }
@@ -942,6 +976,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             "enlarger_yellow": 0.0,
             "print_exposure": 1.0,
             "pre_flash": 0.0,
+            "black_lift": 0.0,
             "morph_gamma": 1.0,
             "developer_exhaustion": 0.0,
             "halation": 1.0,
@@ -1226,10 +1261,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_3f("u_cmy", 0.0, 0.0, 0.0)
             u_1f("u_print_exposure", 1.0)
             u_1f("u_preflash", 0.0)
+            u_1f("u_black_lift", float(self.params.get("black_lift", 0.0)))
         else:
             u_3f("u_cmy", float(self.params.get("enlarger_cyan", 0.0)), float(self.params.get("enlarger_magenta", 0.0)), float(self.params.get("enlarger_yellow", 0.0)))
             u_1f("u_print_exposure", float(self.params.get("print_exposure", 1.0)))
             u_1f("u_preflash", float(self.params.get("pre_flash", 0.0)))
+            u_1f("u_black_lift", float(self.params.get("black_lift", 0.0)))
 
         # Lens correction uniforms
         lens_cfg = self.params.get("lens", {})
@@ -1319,8 +1356,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # Grain physics & format
         u_1f("u_grain", self.params.get("grain", 0.4))
         fmt_mm = float(self.params.get("film_format_mm", 35.0))
-        grain_scale = 35.0 / max(5.0, fmt_mm)
-        u_1f("u_grain_scale", grain_scale)
+        _mw = float(getattr(self, "_master_width", 0) or self._image_width or 6024)
+        _mh = float(getattr(self, "_master_height", 0) or self._image_height or 4024)
+        u_1f("u_grain_scale", grain_scale_px(fmt_mm, max(_mw, _mh)))
+        u_1f("u_film_width_um", max(5.0, fmt_mm) * 1000.0)
+        u_1f("u_grain_rho", grain_colour_rho(st_strength, float(self.params.get("grain_colour", 1.0))))
         u_1f("u_grain_size", float(self.params.get("grain_size", 1.0)))
         u_1f("u_grain_blur", self.params.get("grain_cloud_blur", 1.0))
         u_1f("u_grain_colour", float(self.params.get("grain_colour", 1.0)))
@@ -1344,6 +1384,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # DIR Couplers
         u_1f("u_dir_interlayer", self.params.get("dir_interlayer", 1.0))
         u_1f("u_dir_samelayer", self.params.get("dir_samelayer", 1.0))
+        _bk = getattr(self, "_lut_baked", None) or self._lookup_lut_baked(None)
+        u_1f("u_lut_dir_interlayer", float(_bk.get("dir_interlayer", 1.0)))
+        u_1f("u_lut_dir_samelayer", float(_bk.get("dir_samelayer", 1.0)))
+        u_1f("u_lut_morph_gamma", float(_bk.get("morph_gamma", 1.0)))
+        u_1f("u_lut_dev_exh", float(_bk.get("developer_exhaustion", 0.0)))
 
         # Chemistry Morph (neutralized for positive slide film)
         if is_pos:
@@ -1561,8 +1606,19 @@ class DarkroomGLCanvas(QOpenGLWidget):
         GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
         self._has_image = True
 
+    def _lookup_lut_baked(self, lut_array_3d):
+        """Chemistry values (DIR / paper morph) already baked into a LUT produced by the engine."""
+        eng = getattr(self, "engine", None)
+        if eng is not None and hasattr(eng, "get_lut_baked_params") and lut_array_3d is not None:
+            try:
+                return eng.get_lut_baked_params(lut_array_3d)
+            except Exception:
+                pass
+        return {"dir_interlayer": 1.0, "dir_samelayer": 1.0, "morph_gamma": 1.0, "developer_exhaustion": 0.0}
+
     def set_3d_lut(self, lut_array_3d):
         """Upload 3D LUT array (float32 [N, N, N, 3]) to 3D texture."""
+        self._lut_baked = self._lookup_lut_baked(lut_array_3d)
         if not getattr(self, "_gl_initialized", False) or not self.isValid():
             self._pending_lut = lut_array_3d
             return
@@ -2348,10 +2404,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 u_3f("u_cmy", 0.0, 0.0, 0.0)
                 u_1f("u_print_exposure", 1.0)
                 u_1f("u_preflash", 0.0)
+                u_1f("u_black_lift", float(eff_params.get("black_lift", 0.0)))
             else:
                 u_3f("u_cmy", float(eff_params.get("enlarger_cyan", 0.0)), float(eff_params.get("enlarger_magenta", 0.0)), float(eff_params.get("enlarger_yellow", 0.0)))
                 u_1f("u_print_exposure", float(eff_params.get("print_exposure", 1.0)))
                 u_1f("u_preflash", float(eff_params.get("pre_flash", 0.0)))
+                u_1f("u_black_lift", float(eff_params.get("black_lift", 0.0)))
 
             def u_4f(name, x, y, z, w):
                 loc = self.shader_program.uniformLocation(name)
@@ -2441,8 +2499,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             else:
                 u_1f("u_grain", eff_params.get("grain", 0.4))
             fmt_mm = float(eff_params.get("film_format_mm", 35.0))
-            grain_scale = 35.0 / max(5.0, fmt_mm)
-            u_1f("u_grain_scale", grain_scale)
+            u_1f("u_grain_scale", grain_scale_px(fmt_mm, max(float(target_w), float(target_h))))
+            u_1f("u_film_width_um", max(5.0, fmt_mm) * 1000.0)
+            u_1f("u_grain_rho", grain_colour_rho(st_strength, float(eff_params.get("grain_colour", 1.0))))
             u_1f("u_grain_size", float(eff_params.get("grain_size", 1.0)))
             u_1f("u_grain_blur", eff_params.get("grain_cloud_blur", 1.0))
             u_1f("u_grain_colour", float(eff_params.get("grain_colour", 1.0)))
@@ -2456,6 +2515,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
             u_1f("u_dir_interlayer", eff_params.get("dir_interlayer", 1.0))
             u_1f("u_dir_samelayer", eff_params.get("dir_samelayer", 1.0))
+            _bk = self._lookup_lut_baked(lut_override) if lut_override is not None else (getattr(self, "_lut_baked", None) or self._lookup_lut_baked(None))
+            u_1f("u_lut_dir_interlayer", float(_bk.get("dir_interlayer", 1.0)))
+            u_1f("u_lut_dir_samelayer", float(_bk.get("dir_samelayer", 1.0)))
+            u_1f("u_lut_morph_gamma", float(_bk.get("morph_gamma", 1.0)))
+            u_1f("u_lut_dev_exh", float(_bk.get("developer_exhaustion", 0.0)))
             if is_pos_off:
                 u_1f("u_morph_gamma", 1.0)
                 u_1f("u_developer_exhaustion", 0.0)

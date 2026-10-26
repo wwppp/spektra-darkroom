@@ -534,26 +534,34 @@ def extract_exif_bundle(source_path):
                                     pass
 
                 # Ensure DateTime is present in IFD0 if available in sub_exif, and vice-versa
-                if 0x0132 not in loaded_exif and 0x9003 in sub_exif:
+                if 0x0132 not in loaded_exif and 0x9003 in sub_exif and sub_exif[0x9003] is not None:
                     loaded_exif[0x0132] = str(sub_exif[0x9003]).strip('\x00')
-                elif 0x9003 not in sub_exif and 0x0132 in loaded_exif:
+                elif 0x9003 not in sub_exif and 0x0132 in loaded_exif and loaded_exif[0x0132] is not None:
                     sub_exif[0x9003] = str(loaded_exif[0x0132]).strip('\x00')
                 if 0x9004 not in sub_exif:
-                    sub_exif[0x9004] = sub_exif.get(0x9003) or loaded_exif.get(0x0132)
+                    dt_fallback = sub_exif.get(0x9003) or loaded_exif.get(0x0132)
+                    if dt_fallback is not None:
+                        sub_exif[0x9004] = dt_fallback
 
-                # Ensure string tags are clean strings without internal or trailing NUL
-                for target_ifd in (loaded_exif, sub_exif):
+                # Purge any None values and ensure string tags are clean without internal/trailing NUL
+                for target_ifd in (loaded_exif, sub_exif, gps_exif):
                     for k, val in list(target_ifd.items()):
-                        if isinstance(val, str):
+                        if val is None:
+                            del target_ifd[k]
+                        elif isinstance(val, str):
                             target_ifd[k] = val.strip('\x00')
                         elif isinstance(val, (bytes, bytearray)):
-                            if k not in (0x927C, 0x9286, 0x9101, 0x9000, 0x02BC) and b'\x00' in val:
+                            if k not in (0x927C, 0x9286, 0x9101, 0x9000, 0x02BC, 0, 27, 28) and b'\x00' in val:
                                 try:
                                     dec = val.decode('utf-8', errors='ignore').strip('\x00')
                                     if dec:
                                         target_ifd[k] = dec
                                 except Exception:
                                     pass
+
+                if len(gps_exif) == 0 and hasattr(loaded_exif, "_ifds") and isinstance(loaded_exif._ifds, dict):
+                    loaded_exif._ifds.pop(0x8825, None)
+                    loaded_exif.pop(0x8825, None)
 
                 if 0x9000 in sub_exif:
                     v_ver = sub_exif[0x9000]
@@ -701,6 +709,93 @@ def extract_exif_bundle(source_path):
     return loaded_exif, exif_bytes, tiff_tags
 
 
+def _inject_tiff_subifds(tiff_path, pil_exif, strip_gps=True):
+    """Inject standard ExifIFD (0x8769) and GPSInfo IFD (0x8825) sub-directories into a ClassicTIFF file.
+    Since tifffile filters out 34665 (ExifIFD) and 34853 (GPSIFD) in extratags, this appends serialized
+    sub-IFDs and an updated IFD0 directory table to the end of the file while preserving all existing tag offsets.
+    """
+    if pil_exif is None or not tiff_path or not os.path.exists(tiff_path):
+        return
+    try:
+        import struct
+        from PIL import TiffImagePlugin
+        with open(tiff_path, "r+b") as f:
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                return
+            endian = "<" if hdr[:2] == b"II" else (">" if hdr[:2] == b"MM" else None)
+            if not endian or struct.unpack(endian + "H", hdr[2:4])[0] != 42:
+                return
+            ifd0_off = struct.unpack(endian + "I", hdr[4:8])[0]
+            f.seek(ifd0_off)
+            num_bytes = f.read(2)
+            if len(num_bytes) < 2:
+                return
+            num_tags = struct.unpack(endian + "H", num_bytes)[0]
+            entries_raw = f.read(num_tags * 12)
+            if len(entries_raw) < num_tags * 12:
+                return
+            next_ifd_bytes = f.read(4)
+            next_ifd_off = struct.unpack(endian + "I", next_ifd_bytes)[0] if len(next_ifd_bytes) == 4 else 0
+
+            entries = []
+            for i in range(num_tags):
+                eb = entries_raw[i * 12:(i + 1) * 12]
+                code = struct.unpack(endian + "H", eb[:2])[0]
+                if code not in (0x8769, 0x8825):
+                    entries.append((code, eb))
+
+            ifh_prefix = b"II*\x00\x08\x00\x00\x00" if endian == "<" else b"MM\x00*\x00\x00\x00\x08"
+            f.seek(0, 2)
+            added_any = False
+            for ifd_code in (0x8769, 0x8825):
+                if ifd_code == 0x8825 and strip_gps:
+                    continue
+                try:
+                    sub_dict = pil_exif.get_ifd(ifd_code)
+                except Exception:
+                    sub_dict = None
+                if not sub_dict:
+                    continue
+                clean_sub = {k: v for k, v in sub_dict.items() if v is not None}
+                if not clean_sub:
+                    continue
+                pos = f.tell()
+                if pos % 2:
+                    f.write(b"\x00")
+                    pos += 1
+                sub_ifd = TiffImagePlugin.ImageFileDirectory_v2(ifh=ifh_prefix)
+                for k, v in clean_sub.items():
+                    try:
+                        sub_ifd[k] = v
+                    except Exception:
+                        pass
+                if len(sub_ifd) == 0:
+                    continue
+                sub_bytes = sub_ifd.tobytes(pos)
+                f.write(sub_bytes)
+                eb = struct.pack(endian + "HHII", ifd_code, 4, 1, pos)
+                entries.append((ifd_code, eb))
+                added_any = True
+
+            if not added_any:
+                return
+
+            entries.sort(key=lambda x: x[0])
+            pos = f.tell()
+            if pos % 2:
+                f.write(b"\x00")
+                pos += 1
+            f.write(struct.pack(endian + "H", len(entries)))
+            for _, eb in entries:
+                f.write(eb)
+            f.write(struct.pack(endian + "I", next_ifd_off))
+            f.seek(4)
+            f.write(struct.pack(endian + "I", pos))
+    except Exception as e_sub:
+        logger.debug(f"_inject_tiff_subifds: {e_sub}")
+
+
 def save_encoded_image(rendered_data, output_path, params_dict):
     """Canonical image encoding & file writer for SpektraDarkroom.
     Saves float or integer image arrays to disk with full camera EXIF and ICC profile embedding.
@@ -751,6 +846,8 @@ def save_encoded_image(rendered_data, output_path, params_dict):
                 g.clear()
             except Exception:
                 pass
+            if hasattr(pil_exif, "_ifds") and isinstance(pil_exif._ifds, dict):
+                pil_exif._ifds.pop(0x8825, None)
             if 0x8825 in pil_exif:
                 try:
                     del pil_exif[0x8825]
@@ -772,6 +869,8 @@ def save_encoded_image(rendered_data, output_path, params_dict):
                         temp_exif.get_ifd(0x8825).clear()
                     except Exception:
                         pass
+                    if hasattr(temp_exif, "_ifds") and isinstance(temp_exif._ifds, dict):
+                        temp_exif._ifds.pop(0x8825, None)
                     if 0x8825 in temp_exif:
                         del temp_exif[0x8825]
                     if 34853 in temp_exif:
@@ -821,6 +920,7 @@ def save_encoded_image(rendered_data, output_path, params_dict):
             for attempt in [comp_val, "deflate", None]:
                 try:
                     tifffile.imwrite(path, data, compression=attempt, resolution=(dpi_val, dpi_val, 'INCH'), photometric='rgb', extratags=extratags if extratags else None)
+                    _inject_tiff_subifds(path, pil_exif, strip_gps=strip_gps)
                     return
                 except Exception:
                     continue
@@ -833,11 +933,13 @@ def save_encoded_image(rendered_data, output_path, params_dict):
                         cv2.IMWRITE_TIFF_XDPI, int(dpi_val),
                         cv2.IMWRITE_TIFF_YDPI, int(dpi_val)
                     ])
+                    _inject_tiff_subifds(path, pil_exif, strip_gps=strip_gps)
                     return
                 except Exception:
                     pass
             try:
                 tifffile.imwrite(path, data, resolution=(dpi_val, dpi_val, 'INCH'), photometric='rgb', extratags=extratags if extratags else None)
+                _inject_tiff_subifds(path, pil_exif, strip_gps=strip_gps)
             except Exception:
                 im = Image.fromarray(data if data.dtype == np.uint8 else (data / 256).astype(np.uint8))
                 save_kw = {'dpi': (dpi_val, dpi_val)}
@@ -1723,6 +1825,25 @@ class SpektraEngine:
         ).astype(np.float32)
         return np.clip(lut_out, 0.0, 1.0)
 
+    def _record_lut_baked(self, lut_3d, baked):
+        """Remember which chemistry values (DIR / paper morph) were baked into a generated LUT."""
+        import weakref
+        if not hasattr(self, "_lut_baked_meta"):
+            self._lut_baked_meta = {}
+        meta = self._lut_baked_meta
+        if len(meta) > 256:
+            for k in [k for k, (ref, _) in meta.items() if ref() is None]:
+                meta.pop(k, None)
+        meta[id(lut_3d)] = (weakref.ref(lut_3d), dict(baked))
+
+    def get_lut_baked_params(self, lut_3d):
+        """Chemistry values already incorporated in `lut_3d` (neutral if unknown / not baked)."""
+        from .darkroom_math import neutral_baked
+        entry = getattr(self, "_lut_baked_meta", {}).get(id(lut_3d)) if lut_3d is not None else None
+        if entry is not None and entry[0]() is lut_3d:
+            return dict(entry[1])
+        return neutral_baked()
+
     def get_3d_lut(self, film_stock="kodak_portra_400", paper_stock="kodak_2383", lut_size=33, params_dict=None, print_mode=None):
         """Build and cache a 3D LUT (N x N x N x 3 float32) for the film + paper combination."""
         params_dict = params_dict or {}
@@ -1894,6 +2015,15 @@ class SpektraEngine:
             lut_3d[..., 2] = luma
         elif is_pos:
             lut_3d = self._postprocess_positive_lut(lut_3d, film_stock)
+
+        dir_baked = has_dir and dir_amt > 0.01
+        morph_baked = params.print is not None
+        self._record_lut_baked(lut_3d, {
+            "dir_interlayer": dir_intl if dir_baked else 1.0,
+            "dir_samelayer": dir_same if dir_baked else 1.0,
+            "morph_gamma": morph_gamma if morph_baked else 1.0,
+            "developer_exhaustion": dev_exh if morph_baked else 0.0,
+        })
 
         with self._render_lock:
             self._lut_cache[cache_key] = lut_3d
@@ -3159,6 +3289,7 @@ class SpektraEngine:
                 y_val = float(params_dict.get("enlarger_yellow", 0.0))
                 print_exp = float(params_dict.get("print_exposure", 1.0))
                 preflash = float(params_dict.get("pre_flash", 0.0))
+            black_lift = float(params_dict.get("black_lift", 0.0))
             halation = float(params_dict.get("halation_amount", params_dict.get("halation", 1.0)))
             hal_spatial_scale = float(params_dict.get("halation_spatial_scale", 1.0))
             scatter_amount = float(params_dict.get("scatter_amount", 1.0))
@@ -3202,10 +3333,9 @@ class SpektraEngine:
 
             base_temp = float(params_dict.get("base_temp", 5500.0))
             base_tint = float(params_dict.get("base_tint", 1.0))
-            temp_factor = (temp_val - base_temp) / 3000.0
-            tint_factor = tint_val / max(0.001, base_tint)
-            cmy_arr = np.array([c_val, m_val, y_val], dtype=np.float32)
-            cmy_factor = 1.0 - cmy_arr * 0.015
+            from .darkroom_math import wb_gains, paper_domain_adjust, chemistry_delta, grain_colour_rho, grain_scale_px
+            wb_g = wb_gains(temp_val, base_temp, tint_val, base_tint)
+            lut_baked = self.get_lut_baked_params(lut_3d)
 
             if progress_cb:
                 progress_cb(10, "正在计算全局线性曝光与基准白平衡...")
@@ -3214,9 +3344,7 @@ class SpektraEngine:
             base_ev = float(params_dict.get("base_ev", 0.0))
             eff_exp = exp_val + base_ev
             linear_full = (raw_target * float(np.exp2(eff_exp))).astype(np.float32)
-            linear_full[..., 0] *= (1.0 + temp_factor * 0.22)
-            linear_full[..., 2] *= (1.0 - temp_factor * 0.22)
-            linear_full[..., 1] *= tint_factor
+            linear_full *= wb_g
 
             # 1.5. Pre-LUT Scene-Linear Highlights & Shadows Tone Shaping (Zone System EV Hermite Spline)
             hl_val = float(params_dict.get("highlights", 0.0))
@@ -3301,11 +3429,19 @@ class SpektraEngine:
             dir_same = float(params_dict.get("dir_samelayer", 1.0))
             morph_gamma = float(params_dict.get("morph_gamma", 1.0))
             dev_exh = float(params_dict.get("developer_exhaustion", 0.0))
+            chem_params = {"dir_interlayer": dir_intl, "dir_samelayer": dir_same,
+                           "morph_gamma": morph_gamma, "developer_exhaustion": dev_exh}
+            if is_pos:
+                chem_params["morph_gamma"] = 1.0
+                chem_params["developer_exhaustion"] = 0.0
 
             grain_preset = self.get_film_grain_preset(film_stock)
             st_size = float(grain_preset.get("size_mm", 0.005))
             st_strength = float(grain_preset.get("strength", 0.010))
             st_lw = np.array(grain_preset.get("layer_weights", [0.70, 1.0, 1.35]), dtype=np.float32)
+            grain_rho = grain_colour_rho(st_strength, float(params_dict.get("grain_colour", 1.0)))
+            # Gaussian sigma (px) approximating the shader's multi-octave dye-cloud scale
+            grain_sigma_px = 0.6 * grain_scale_px(fmt_mm, max(H, W), grain_size, st_size)
 
             def _process_chunk(y_range):
                 y0, y1 = y_range
@@ -3314,11 +3450,24 @@ class SpektraEngine:
                 # Pre-LUT physical transmittance grain (matches GPU shader)
                 if grain > 0.01:
                     eff_strength = (grain / 0.40) * (st_strength / 0.010)
-                    lin_luma = 0.2126 * chunk_linear[..., 0] + 0.7152 * chunk_linear[..., 1] + 0.0722 * chunk_linear[..., 2]
-                    dens_mod = (1.0 - np.exp(-lin_luma * 15.0)) / (1.0 + (lin_luma / 0.28) ** 2.2)
-                    noise = (np.random.randn(chunk_linear.shape[0], chunk_linear.shape[1], 3).astype(np.float32)) * 0.5
-                    noise = noise * st_lw
-                    dD = noise * (eff_strength * 0.35 * grain_scale * dens_mod[..., None])
+                    lin_c = np.maximum(chunk_linear, 0.0)  # per-layer negative granularity (matches GPU shader)
+                    dens_mod = 0.72 * (0.15 + 0.85 * (1.0 - np.exp(-lin_c / 0.010))) / (1.0 + (lin_c / 2.0) ** 1.5)
+                    ch_h, ch_w = chunk_linear.shape[0], chunk_linear.shape[1]
+                    indep = np.random.randn(ch_h, ch_w, 3).astype(np.float32)
+                    shared = np.random.randn(ch_h, ch_w, 1).astype(np.float32)
+                    if grain_sigma_px > 0.35:
+                        # Spatially correlated grain at physical scale (renormalised to unit variance)
+                        indep = cv2.GaussianBlur(indep, (0, 0), grain_sigma_px)
+                        shared = cv2.GaussianBlur(shared[..., 0], (0, 0), grain_sigma_px)[..., None]
+                        indep /= max(1e-6, float(indep.std()))
+                        shared /= max(1e-6, float(shared.std()))
+                    if grain_sigma_px > 0.35:
+                        # Chroma mottle is coarser than luminance grain (matches GPU shader)
+                        indep = cv2.GaussianBlur(indep, (0, 0), grain_sigma_px * 0.8)
+                        indep /= max(1e-6, float(indep.std()))
+                    lw_mean = float(st_lw.mean())
+                    noise = (np.sqrt(1.0 - grain_rho) * indep * st_lw + np.sqrt(grain_rho) * shared * lw_mean) * 0.5
+                    dD = noise * (eff_strength * 0.35) * dens_mod
                     chunk_linear = np.maximum(0.0, chunk_linear * np.exp(-dD * 2.3025851))
 
                 coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
@@ -3352,22 +3501,17 @@ class SpektraEngine:
 
                 chunk_film = c0 * (1.0 - db) + c1 * db
 
-                # DIR Coupler
-                if abs(dir_intl - 1.0) > 0.01 or abs(dir_same - 1.0) > 0.01:
-                    luma_f = 0.299 * chunk_film[..., 0] + 0.587 * chunk_film[..., 1] + 0.114 * chunk_film[..., 2]
-                    chroma = chunk_film - luma_f[..., None]
-                    chunk_film = luma_f[..., None] + chroma * dir_intl
-                    chunk_film = np.power(np.clip(chunk_film, 0.0001, 1.0), 1.0 / max(0.2, dir_same))
+                # DIR Coupler - only the delta not already baked into the LUT
+                chunk_film = chemistry_delta(chunk_film, chem_params, lut_baked, apply_morph=False)
 
-                # Enlarger Color Timing (CMY filters & print exposure)
-                chunk_film = np.power(np.clip(chunk_film, 0.0001, 1.0), cmy_factor) * print_exp
-                chunk_film += preflash
+                # Enlarger CMY, print exposure & pre-flash in paper-exposure domain (matches GPU shader)
+                chunk_film = paper_domain_adjust(chunk_film, (c_val, m_val, y_val), print_exp, preflash)
 
-                # Paper Chemistry Morph & Developer Exhaustion
-                if abs(morph_gamma - 1.0) > 0.01:
-                    chunk_film = np.power(np.clip(chunk_film, 0.0001, 1.0), morph_gamma)
-                if dev_exh > 0.005:
-                    chunk_film = chunk_film * (1.0 - dev_exh * 0.6) + (chunk_film * 0.88 + 0.03) * (dev_exh * 0.6)
+                # Paper Chemistry Morph & Developer Exhaustion - delta vs. LUT-baked values only
+                chunk_film = chemistry_delta(chunk_film, chem_params, lut_baked, apply_dir=False)
+
+                # Black lift (output-side additive fade)
+                chunk_film = chunk_film + black_lift
 
                 rendered_float[y0:y1] = np.clip(chunk_film, 0.0, 1.0)
 

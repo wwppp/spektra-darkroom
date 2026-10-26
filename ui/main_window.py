@@ -1951,6 +1951,7 @@ class DarkroomMainWindow(QMainWindow):
             "enlarger_yellow": 0.0,
             "print_exposure": 1.0,
             "pre_flash": 0.0,
+            "black_lift": 0.0,
             "morph_gamma": 1.0,
             "developer_exhaustion": 0.0,
             "halation": 1.0,
@@ -4247,6 +4248,14 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_preflash.sliderReleased.connect(self._on_slider_committed)
         self.sec_enlarger.addWidget(self.slider_preflash)
 
+        self.slider_black_lift = AdobeScrubSlider(
+            "黑位提升", 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
+            tooltip="在输出端整体加亮，抬起黑位使暗部发灰，直方图整体右移（旧版预闪效果）"
+        )
+        self.slider_black_lift.valueChanged.connect(lambda v: self._on_slider_live("black_lift", v))
+        self.slider_black_lift.sliderReleased.connect(self._on_slider_committed)
+        self.sec_enlarger.addWidget(self.slider_black_lift)
+
         self.slider_morph_gamma = AdobeScrubSlider(
             "显影形态反差", 0.70, 1.30, 1.0, step=0.02, unit="", decimals=2,
             tooltip="相纸 D-logH 显影曲线斜率形态，影响中间调与暗部陡峭度"
@@ -5830,7 +5839,8 @@ class DarkroomMainWindow(QMainWindow):
             return
 
         fmt = last_cfg.get("format", "jpeg")
-        ext = ".tif" if "tif" in str(fmt).lower() else (".png" if "png" in str(fmt).lower() else ".jpg")
+        fmt_str = str(fmt).lower()
+        ext = ".tif" if "tif" in fmt_str else (".jxl" if "jxl" in fmt_str else (".png" if "png" in fmt_str else ".jpg"))
         out_dir = config_manager.get_last_export_dir()
         if not out_dir or not os.path.isdir(out_dir):
             if self._current_photo_path:
@@ -6915,6 +6925,7 @@ class DarkroomMainWindow(QMainWindow):
             "enlarger_yellow": 0.0,
             "print_exposure": 1.0,
             "pre_flash": 0.0,
+            "black_lift": 0.0,
             "morph_gamma": 1.0,
             "developer_exhaustion": 0.0,
             "halation": 1.0,
@@ -6948,7 +6959,8 @@ class DarkroomMainWindow(QMainWindow):
             self.current_params["boost_ev"] = val
         if param_key in ("color_temp", "tint"):
             self.current_params["custom_wb"] = True
-        if param_key in ("dir_amount", "dir_interlayer", "dir_samelayer", "morph_gamma", "developer_exhaustion", "pre_flash", "print_exposure", "enlarger_cyan", "enlarger_magenta", "enlarger_yellow"):
+        # Only parameters that are baked into the 3D LUT require a rebuild
+        if param_key in ("dir_amount", "dir_interlayer", "dir_samelayer", "morph_gamma", "developer_exhaustion"):
             self._pending_lut_refresh = True
         self.canvas.update_params(**{param_key: val})
         self._schedule_histogram_update()
@@ -7120,7 +7132,7 @@ class DarkroomMainWindow(QMainWindow):
             "enlarger": {
                 "enlarger_illuminant": "TH-KG3",
                 "enlarger_cyan": 0.0, "enlarger_magenta": 0.0, "enlarger_yellow": 0.0,
-                "print_exposure": 1.0, "pre_flash": 0.0,
+                "print_exposure": 1.0, "pre_flash": 0.0, "black_lift": 0.0,
                 "morph_gamma": 1.0, "developer_exhaustion": 0.0
             },
             "halation": {
@@ -7370,6 +7382,7 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, 'slider_cyan'): self.slider_cyan.set_value(p.get("enlarger_cyan", 0.0))
             if hasattr(self, 'slider_print_exp'): self.slider_print_exp.set_value(p.get("print_exposure", 1.0))
             if hasattr(self, 'slider_preflash'): self.slider_preflash.set_value(p.get("pre_flash", 0.0))
+            if hasattr(self, 'slider_black_lift'): self.slider_black_lift.set_value(p.get("black_lift", 0.0))
             if hasattr(self, 'slider_morph_gamma'): self.slider_morph_gamma.set_value(p.get("morph_gamma", 1.0))
             if hasattr(self, 'slider_exhaustion'): self.slider_exhaustion.set_value(p.get("developer_exhaustion", 0.0))
 
@@ -7584,6 +7597,7 @@ class DarkroomMainWindow(QMainWindow):
             self.current_params["enlarger_yellow"] = 0.0
             self.current_params["print_exposure"] = 1.0
             self.current_params["pre_flash"] = 0.0
+            self.current_params["black_lift"] = 0.0
             self.current_params["developer_exhaustion"] = 0.0
             self.current_params["morph_gamma"] = 1.0
             for pid, card in self.paper_cards.items():
@@ -8721,6 +8735,7 @@ class DarkroomMainWindow(QMainWindow):
             getattr(self, 'slider_yellow', getattr(self, 'slider_enlarger_y', None)),
             getattr(self, 'slider_print_exp', None),
             getattr(self, 'slider_preflash', None),
+            getattr(self, 'slider_black_lift', None),
         ]
         for s in enlarger_sliders:
             if s is not None:
@@ -10502,19 +10517,24 @@ class DarkroomMainWindow(QMainWindow):
             "bit_depth": cfg.get("bit_depth", 8),
             "colorspace": cfg.get("colorspace", "sRGB"),
             "dpi": cfg.get("dpi", 300),
+            "strip_gps": cfg.get("strip_gps", True),
             "quality": cfg.get("quality", 9),
             "scale_pct": cfg.get("scale_pct", 100),
             "subsampling": cfg.get("subsampling", "4:4:4"),
             "progressive": cfg.get("progressive", True),
             "tiff_compression": cfg.get("tiff_compression", "lzw"),
-            "png_level": cfg.get("png_level", 6)
+            "png_level": cfg.get("png_level", 6),
+            "jxl_mode": cfg.get("jxl_mode", "visual_10"),
+            "jxl_lossless": cfg.get("jxl_lossless", False),
+            "jxl_distance": cfg.get("jxl_distance", 1.0),
+            "jxl_effort": cfg.get("jxl_effort", 7),
         })
 
         out_path = cfg["path"].strip() if cfg.get("path") else ""
         if not out_path or os.path.isdir(out_path) or out_path.endswith(('/', '\\')):
             base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0] if self._current_photo_path else "image"
             fmt_str = str(cfg.get("format", "jpeg")).lower()
-            ext = ".tif" if "tif" in fmt_str else (".png" if "png" in fmt_str else ".jpg")
+            ext = ".tif" if "tif" in fmt_str else (".jxl" if "jxl" in fmt_str else (".png" if "png" in fmt_str else ".jpg"))
             fallback_dir = out_path if out_path else (os.path.dirname(self._current_photo_path) if self._current_photo_path else os.path.expanduser("~"))
             out_path = os.path.join(fallback_dir, f"{base_name}{ext}")
 
@@ -10679,6 +10699,7 @@ class DarkroomMainWindow(QMainWindow):
                 "enlarger_yellow": params.get("enlarger_yellow", 0.0),
                 "print_exposure": params.get("print_exposure", 1.0),
                 "pre_flash": params.get("pre_flash", 0.0),
+                "black_lift": params.get("black_lift", 0.0),
                 "halation": params.get("halation_amount", params.get("halation", 1.0)),
                 "halation_amount": params.get("halation_amount", params.get("halation", 1.0)),
                 "halation_spatial_scale": params.get("halation_spatial_scale", 1.0),
@@ -10693,12 +10714,17 @@ class DarkroomMainWindow(QMainWindow):
                 "format": fmt,
                 "quality": cfg.get("quality", 9),
                 "dpi": cfg.get("dpi", 300),
+                "strip_gps": cfg.get("strip_gps", True),
                 "bit_depth": cfg.get("bit_depth", 8),
                 "colorspace": cfg.get("colorspace", "sRGB"),
                 "subsampling": cfg.get("subsampling", "4:4:4"),
                 "progressive": cfg.get("progressive", True),
                 "tiff_compression": cfg.get("tiff_compression", "lzw"),
                 "png_level": cfg.get("png_level", 6),
+                "jxl_mode": cfg.get("jxl_mode", "visual_10"),
+                "jxl_lossless": cfg.get("jxl_lossless", False),
+                "jxl_distance": cfg.get("jxl_distance", 1.0),
+                "jxl_effort": cfg.get("jxl_effort", 7),
                 "scale_pct": cfg.get("scale_pct", 100)
             }
 

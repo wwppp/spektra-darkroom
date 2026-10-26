@@ -11,11 +11,12 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal, QThread, Qt
 from PySide6.QtGui import QImage, QPixmap
 from core import session_cache_manager
+from core.darkroom_math import wb_gains, paper_domain_adjust, chemistry_delta
 import logging
 logger = logging.getLogger("SpektraDarkroom.ThumbnailController")
 
 
-def apply_post_lut_adjustments_f32(img_f32: np.ndarray, params: dict) -> np.ndarray:
+def apply_post_lut_adjustments_f32(img_f32: np.ndarray, params: dict, baked: dict = None) -> np.ndarray:
     """Vectorized CPU post-LUT adjustments strictly aligned with GLSL shader & export pipeline:
     - DIR Coupler inhibition response (Color separation & samelayer contrast)
     - Enlarger Color Timing (CMY filters, print exposure, preflash)
@@ -26,14 +27,8 @@ def apply_post_lut_adjustments_f32(img_f32: np.ndarray, params: dict) -> np.ndar
 
     out = img_f32.copy()
 
-    # 1. DIR Coupler inhibition response (Color separation & samelayer contrast)
-    dir_intl = float(params.get("dir_interlayer", 1.0))
-    dir_same = float(params.get("dir_samelayer", 1.0))
-    if abs(dir_intl - 1.0) > 0.01 or abs(dir_same - 1.0) > 0.01:
-        luma_f = 0.299 * out[..., 0] + 0.587 * out[..., 1] + 0.114 * out[..., 2]
-        chroma = out - luma_f[..., None]
-        out = luma_f[..., None] + chroma * dir_intl
-        out = np.power(np.clip(out, 0.0001, 1.0), 1.0 / max(0.2, dir_same))
+    # 1. DIR Coupler inhibition response - only the part not already baked into the LUT
+    out = chemistry_delta(out, params, baked, apply_morph=False)
 
     # 2. Enlarger Color Timing (CMY filters, print exposure, preflash) - bypassed only for positive slide film
     film = str(params.get("film_stock", "")).lower()
@@ -44,17 +39,16 @@ def apply_post_lut_adjustments_f32(img_f32: np.ndarray, params: dict) -> np.ndar
         y_val = float(params.get("enlarger_yellow", 0.0))
         print_exp = float(params.get("print_exposure", 1.0))
         preflash = float(params.get("pre_flash", 0.0))
-        if abs(c_val) > 0.01 or abs(m_val) > 0.01 or abs(y_val) > 0.01 or abs(print_exp - 1.0) > 0.01 or abs(preflash) > 0.001:
-            cmy_factor = 1.0 - np.array([c_val, m_val, y_val], dtype=np.float32) * 0.015
-            out = np.power(np.clip(out, 0.0001, 1.0), cmy_factor) * print_exp + preflash
+        # Paper-exposure domain (matches GPU shader / core.darkroom_math)
+        out = paper_domain_adjust(out, (c_val, m_val, y_val), print_exp, preflash)
 
-        # 3. Paper Chemistry Morph & Developer Exhaustion
-        morph_gamma = float(params.get("morph_gamma", 1.0))
-        dev_exh = float(params.get("developer_exhaustion", 0.0))
-        if abs(morph_gamma - 1.0) > 0.01:
-            out = np.power(np.clip(out, 0.0001, 1.0), morph_gamma)
-        if dev_exh > 0.005:
-            out = out * (1.0 - dev_exh * 0.6) + (out * 0.88 + 0.03) * (dev_exh * 0.6)
+        # 3. Paper Chemistry Morph & Developer Exhaustion - delta vs. LUT-baked values only
+        out = chemistry_delta(out, params, baked, apply_dir=False)
+
+    # 4. Black lift (output-side additive fade, applies to all stocks like the GPU shader)
+    black_lift = float(params.get("black_lift", 0.0))
+    if black_lift > 0.0005:
+        out = out + black_lift
 
     return np.clip(out, 0.0, 1.0)
 
@@ -142,11 +136,7 @@ class StockThumbnailWorker(QThread):
         temp_val = float(self.params_dict.get("color_temp", base_temp))
         tint_val = float(self.params_dict.get("tint", base_tint))
         if abs(temp_val - base_temp) > 0.1 or abs(tint_val - base_tint) > 0.001:
-            temp_factor = (temp_val - base_temp) / 3000.0
-            tint_factor = tint_val / max(0.001, base_tint)
-            small_linear[..., 0] *= (1.0 + temp_factor * 0.22)
-            small_linear[..., 2] *= (1.0 - temp_factor * 0.22)
-            small_linear[..., 1] *= tint_factor
+            small_linear = small_linear * wb_gains(temp_val, base_temp, tint_val, base_tint)
 
         # 3. Apply Highlights & Shadows tone curve
         hl_val = float(self.params_dict.get("highlights", self.highlights))
@@ -196,7 +186,7 @@ class StockThumbnailWorker(QThread):
                             p_dict["print_mode"] = "scan"
                         lut = self.engine.get_3d_lut(sid, ref_paper, lut_size=17, params_dict=p_dict)
                         graded_f32 = self.engine.apply_lut_to_linear(small_linear, lut, as_float=True)
-                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, self.params_dict)
+                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, self.params_dict, self.engine.get_lut_baked_params(lut))
                         graded_u8 = (np.clip(graded_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
                         gh, gw, gc = graded_u8.shape
                         qimg = QImage(graded_u8.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
@@ -221,7 +211,7 @@ class StockThumbnailWorker(QThread):
                         # Paper "none" represents Digital Film Scan (print_mode="scan") using negative scan inversion LUT
                         lut = self.engine.get_3d_lut(ref_film, "none", lut_size=17, params_dict=self.params_dict, print_mode="scan")
                         graded_f32 = self.engine.apply_lut_to_linear(small_linear, lut, as_float=True)
-                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, self.params_dict)
+                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, self.params_dict, self.engine.get_lut_baked_params(lut))
                         graded_u8 = (np.clip(graded_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
                         gh, gw, gc = graded_u8.shape
                         qimg = QImage(graded_u8.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
@@ -230,7 +220,7 @@ class StockThumbnailWorker(QThread):
                     else:
                         lut = self.engine.get_3d_lut(ref_film, sid, lut_size=17, params_dict=self.params_dict)
                         graded_f32 = self.engine.apply_lut_to_linear(small_linear, lut, as_float=True)
-                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, self.params_dict)
+                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, self.params_dict, self.engine.get_lut_baked_params(lut))
                         graded_u8 = (np.clip(graded_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
                         gh, gw, gc = graded_u8.shape
                         qimg = QImage(graded_u8.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
@@ -436,11 +426,7 @@ class ThumbnailController(QObject):
             temp_val = float(params.get("color_temp", base_temp))
             tint_val = float(params.get("tint", base_tint))
             if abs(temp_val - base_temp) > 0.1 or abs(tint_val - base_tint) > 0.001:
-                temp_factor = (temp_val - base_temp) / 3000.0
-                tint_factor = tint_val / max(0.001, base_tint)
-                small_linear[..., 0] *= (1.0 + temp_factor * 0.22)
-                small_linear[..., 2] *= (1.0 - temp_factor * 0.22)
-                small_linear[..., 1] *= tint_factor
+                small_linear = small_linear * wb_gains(temp_val, base_temp, tint_val, base_tint)
 
             hl = float(params.get("highlights", 0.0))
             sh = float(params.get("shadows", 0.0))
@@ -470,8 +456,11 @@ class ThumbnailController(QObject):
                     p_dict["print_mode"] = "scan"
                 lut = self.engine.get_3d_lut(film, paper, lut_size=17, params_dict=p_dict)
                 out_f32 = self.engine.apply_lut_to_linear(small_linear, lut, as_float=True)
+                baked = self.engine.get_lut_baked_params(lut)
+            if film == "none" and paper == "none":
+                baked = None
 
-            out_f32 = apply_post_lut_adjustments_f32(out_f32, params)
+            out_f32 = apply_post_lut_adjustments_f32(out_f32, params, baked)
             return (np.clip(out_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
         except Exception:
             return raw_thumb

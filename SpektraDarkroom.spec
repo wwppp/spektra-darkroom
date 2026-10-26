@@ -37,6 +37,7 @@ added_hidden = [
     'core.session_cache_manager',
     'core.sdc_manager',
     'core.format_constants',
+    'core.darkroom_math',
     'core.lens_correction',
     'core.version',
     'ui',
