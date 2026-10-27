@@ -57,7 +57,7 @@ namespace SpektraDarkroom
 
             // 2. Windows DPI awareness & AppUserModelID
             try { SetProcessDPIAware(); } catch { }
-            try { SetCurrentProcessExplicitAppUserModelID("SpektraDarkroom.Vulkan.App.1.0"); } catch { }
+            try { SetCurrentProcessExplicitAppUserModelID("SpektraDarkroom.App.1.0"); } catch { }
 
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             if (baseDir.TrimEnd('\\', '/').EndsWith("Scripts", StringComparison.OrdinalIgnoreCase))

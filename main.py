@@ -211,7 +211,7 @@ def main():
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SpektraDarkroom.Vulkan.App.1.0")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SpektraDarkroom.App.1.0")
             # Ghost windows: once the process stops answering messages for ~5 s, DWM draws a
             # system placeholder window carrying the classic (Win7-style) caption bar over our
             # frameless window. It is painted by the shell, not by our window procedure, so
