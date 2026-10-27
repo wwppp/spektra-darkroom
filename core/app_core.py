@@ -1707,7 +1707,9 @@ class SpektraEngine:
                 "strength": 0.010,
                 "layer_weights": [0.70, 1.0, 1.35],
                 "density_profile": None,
-                "density_law": 2
+                # No stock, so no declared law: grain_model then uses the P0 bell, which is the
+                # calibrated global curve.  A law here would be an invention.
+                "density_law": None,
             }
 
         if film_stock in self._grain_preset_cache:
@@ -1726,6 +1728,11 @@ class SpektraEngine:
                         cg = d["physical_extensions"].get("crystal_grain")
 
                     if cg and isinstance(cg, dict):
+                        # Density range of the stock's characteristic curves, which the density
+                        # law needs for its reading-density anchor and for the Dmax fade.  The
+                        # stored curves are baseline-zeroed net density, so the minimum is ~0 and
+                        # the span is what matters; see core/grain_model.bake_density_lut().
+                        d_min, d_max = self._profile_density_range(d)
                         preset = {
                             "size_mm": float(cg.get("size_mm", 0.005)),
                             "strength": float(cg.get("strength", 0.010)),
@@ -1741,6 +1748,8 @@ class SpektraEngine:
                             "fog_density": cg.get("fog_density"),
                             "reversal_profile": cg.get("reversal_profile"),
                             "population": cg.get("population"),
+                            "density_min": d_min,
+                            "density_max": d_max,
                         }
             except Exception as e:
                 print(f"[SpektraGrain] 提取胶片颗粒配置异常: {e}")
@@ -1781,11 +1790,38 @@ class SpektraEngine:
                 "strength": strength,
                 "layer_weights": layer_weights,
                 "density_profile": None,
-                "density_law": 2
+                # An uncatalogued stock declares no law, so the calibrated P0 bell is used.
+                "density_law": None,
+                "density_min": None,
+                "density_max": None,
             }
 
         self._grain_preset_cache[film_stock] = preset
         return preset
+
+    @staticmethod
+    def _profile_density_range(doc):
+        """Per-record ``(density_min, density_max)`` of a profile's baked density curves.
+
+        The density law normalises itself at the stock's reading density and fades out below its
+        Dmax, so it needs the stock's own density span.  The stored curves are baseline-zeroed
+        net density, so the minimum reads ~0 (the true base density is not recoverable from the
+        profile); only the span carries information, and the reading density is 1.0 above the
+        minimum either way, clamped into the span.  Returns ``(None, None)`` when a profile
+        carries no curves, which falls back to the model's defaults.
+        """
+        try:
+            data = doc.get("data") if isinstance(doc.get("data"), dict) else doc
+            curves = data.get("density_curves")
+            if not curves:
+                return None, None
+            arr = np.asarray(curves, dtype=np.float64)
+            if arr.ndim != 2 or arr.shape[1] < 3:
+                return None, None
+            return ([float(x) for x in arr.min(axis=0)[:3]],
+                    [float(x) for x in arr.max(axis=0)[:3]])
+        except Exception:
+            return None, None
 
     @staticmethod
     def _postprocess_positive_lut(lut_3d: np.ndarray, film_stock: str) -> np.ndarray:
@@ -3561,13 +3597,14 @@ class SpektraEngine:
                 stock_strength=st_strength,
                 layer_weights=st_lw,
                 cloud_blur=params_dict.get("grain_cloud_blur", 1.0),
-                # rho is solved inside derive() from the calibrated channel-correlation target
+                # rho is solved inside derive() from the stock's correlation target
                 rho=grain_colour_rho(st_strength, grain_colour),
                 fmt_mm=fmt_mm,
                 long_edge_px=max(H, W),
                 grain_size=grain_size,
                 stock_size_mm=st_size,
                 grain_colour=grain_colour,
+                density_preset=grain_preset,
             )
             grain_rng = np.random.default_rng(20260127)
 
@@ -3578,7 +3615,9 @@ class SpektraEngine:
                 # Pre-LUT physical transmittance grain (shared model with the GPU shader)
                 if grain_spec.active:
                     layer = grain_model.synthesize_layer_grain(grain_spec, y1 - y0, chunk_linear.shape[1], grain_rng)
-                    dD = layer * (grain_spec.strength * grain_model.STRENGTH_GAIN) * grain_model.density_response(chunk_linear)
+                    # The stock's density law is the same table the shader samples as a texture.
+                    response = grain_model.density_response(chunk_linear, grain_spec.density_lut)
+                    dD = layer * (grain_spec.strength * grain_model.STRENGTH_GAIN) * response
                     chunk_linear = np.maximum(0.0, chunk_linear * np.exp(-dD * grain_model.LOG10_E))
 
                 coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
