@@ -25,11 +25,48 @@ else:
         sys.path.insert(0, _app_root)
 
 import ctypes
+import time
 from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
 from PySide6.QtCore import Qt, QRect, QRectF
 from PySide6.QtGui import QFont, QFontMetrics, QPalette, QColor, QPainter, QPen, QBrush, QPixmap, QImage
 
 from core.version import VERSION_STRING, get_app_title
+
+
+# ---------------------------------------------------------------------------
+# Startup trace
+# ---------------------------------------------------------------------------
+# The packaged build uses runw.exe (no console), so every print() during startup is lost.  When a
+# launch stalls on another machine there is then nothing at all to look at.  This log is always on
+# and costs one append per stage: %%TEMP%%\spektra_startup.log.  It is truncated per launch.
+_STARTUP_LOG = os.path.join(os.environ.get("TEMP", "."), "spektra_startup.log")
+
+
+def startup_log(msg):
+    try:
+        now = time.time()
+        stamp = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
+        with open(_STARTUP_LOG, "a", encoding="utf-8") as fp:
+            fp.write(f"{stamp} {msg}\n")
+    except Exception:
+        pass
+
+
+def _truncate_startup_log():
+    """Start a new trace, but never shorter than the last one: append instead of truncating, so a
+    second launch (which forwards to the running instance and exits) cannot wipe the trace of the
+    launch that actually matters. Rotates at 256 KB."""
+    try:
+        if os.path.exists(_STARTUP_LOG) and os.path.getsize(_STARTUP_LOG) > 256 * 1024:
+            with open(_STARTUP_LOG, "w", encoding="utf-8-sig") as fp:
+                fp.write("")
+        elif not os.path.exists(_STARTUP_LOG):
+            with open(_STARTUP_LOG, "w", encoding="utf-8-sig") as fp:
+                fp.write("")
+        with open(_STARTUP_LOG, "a", encoding="utf-8") as fp:
+            fp.write("\n=== launch ===\n")
+    except Exception:
+        pass
 
 
 class DarkroomSplashScreen(QSplashScreen):
@@ -164,6 +201,9 @@ def select_splash_pixmap(resource_dir: str, app: QApplication, version_string: s
 
 
 def main():
+    _truncate_startup_log()
+    startup_log(f"launch pid={os.getpid()} frozen={getattr(sys, 'frozen', False)} argv={sys.argv[1:]}")
+
     launched_from_exe = "--launched-from-exe" in sys.argv
     if launched_from_exe:
         sys.argv.remove("--launched-from-exe")
@@ -179,12 +219,39 @@ def main():
             ctypes.windll.user32.DisableProcessWindowsGhosting()
         except Exception:
             pass
+    startup_log("win32 process setup done")
 
     # Enable High DPI scaling
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    
+
     app = QApplication(sys.argv)
     app.setApplicationName(get_app_title())
+    startup_log("QApplication created")
+
+    # Anything that escapes to the top level during startup goes to the log as well: in the
+    # windowed build there is no console to print it to.
+    def _log_unhandled(exc_type, exc, tb):
+        import traceback
+        startup_log("UNHANDLED " + "".join(traceback.format_exception(exc_type, exc, tb)).strip())
+    sys.excepthook = _log_unhandled
+
+    # Watchdog: a launch that never reaches a visible window is indistinguishable from "nothing
+    # happened" for the user (the process sits in Task Manager).  Rather than hang forever, write
+    # why to the log and exit, so the next double-click starts a clean instance.  SPEKTRA_STARTUP_TIMEOUT
+    # overrides the limit in seconds.
+    _startup_done = threading.Event()
+
+    def _startup_watchdog():
+        try:
+            limit = float(os.environ.get("SPEKTRA_STARTUP_TIMEOUT", "120"))
+        except ValueError:
+            limit = 120.0
+        if _startup_done.wait(limit):
+            return
+        startup_log(f"WATCHDOG: no window after {limit:.0f}s, exiting so the next launch is clean")
+        os._exit(3)
+
+    threading.Thread(target=_startup_watchdog, name="startup-watchdog", daemon=True).start()
 
     from core.path_utils import get_resource_dir
     from PySide6.QtGui import QIcon
@@ -196,12 +263,15 @@ def main():
 
     # Single-instance IPC: forward arguments to running instance or start local server
     from PySide6.QtNetwork import QLocalSocket, QLocalServer
-    ipc_name = "SpektraDarkroom_IPC_SingleInstance"
+    # SPEKTRA_IPC_NAME lets a second instance run on purpose (used when testing startup).
+    ipc_name = os.environ.get("SPEKTRA_IPC_NAME") or "SpektraDarkroom_IPC_SingleInstance"
+    startup_log("probing single-instance IPC")
 
     ipc_sock = QLocalSocket()
     ipc_sock.connectToServer(ipc_name)
     if ipc_sock.waitForConnected(400):
         # Already running: pass all path arguments to the primary instance and exit immediately
+        startup_log("another instance owns the IPC name -> forwarding args and exiting")
         args_to_send = [os.path.abspath(a) for a in sys.argv[1:] if a and not a.startswith("--")]
         payload = "\n".join(args_to_send).encode("utf-8")
         ipc_sock.write(payload)
@@ -210,10 +280,13 @@ def main():
         ipc_sock.close()
         sys.exit(0)
 
-    # Primary instance: create server
-    local_server = QLocalServer()
-    local_server.removeServer(ipc_name)
-    local_server.listen(ipc_name)
+    # NOTE: the local server is deliberately created *after* the main window is up (see below).
+    # While it lived here, a launch that stalled before showing its window kept the IPC name
+    # forever: every later double-click connected, found "an instance is running", forwarded
+    # nothing and exited silently - the user saw a process in Task Manager and no window, and
+    # had to kill it by hand.  Publishing the name only once we can actually show a window turns
+    # that dead end into a normal (if duplicated) start.
+    startup_log("no live instance -> acting as primary")
 
     # Set Adobe Pro Dark Theme Palette
     palette = QPalette()
@@ -260,14 +333,17 @@ def main():
 
     splash = None
     if not launched_from_exe:
+        startup_log("building splash pixmap")
         pix = select_splash_pixmap(get_resource_dir(), app, VERSION_STRING)
         if pix and not pix.isNull():
             splash = DarkroomSplashScreen(pix)
             splash.show()
             app.processEvents()
+            startup_log("splash shown")
 
     def notify_status(msg):
         print(f"[SPLASH] {msg}", flush=True)
+        startup_log(msg)
         if splash and not launched_from_exe:
             splash.set_status(msg)
             app.processEvents()
@@ -290,6 +366,7 @@ def main():
     from core.app_core import SpektraEngine
     resources_dir = get_resource_dir()
     engine = SpektraEngine(resources_dir=resources_dir)
+    startup_log("engine created")
 
     # Check CLI arguments for .sdss session file or image files passed via OS association
     target_session = None
@@ -304,20 +381,39 @@ def main():
     notify_status("正在构建暗房工作台界面...")
     from ui.main_window import DarkroomMainWindow
     win = DarkroomMainWindow(engine, initial_session=target_session, initial_files=target_files)
+    startup_log("main window constructed")
 
     notify_status("就绪")
+    startup_log("showing main window")
     win.show()
+
+    # Force the first frame *before* the splash goes away.  QSplashScreen.finish() only waits for
+    # the window to be shown, not painted, so it used to uncover an unpainted frameless window -
+    # a window-sized transparent rectangle for as long as the first layout/paint took.  repaint()
+    # is synchronous, so the splash stays up (carrying the status text) for exactly that time.
+    app.processEvents()
+    win.repaint()
+    startup_log("first paint done")
 
     # Warm the numba colour-space kernel off the main thread. Compilation costs ~1 s; doing
     # it here means the first wide-gamut export does not stall. Purely best-effort.
+    # SPEKTRA_NO_WARMUP=1 skips both warm-ups (the engine's own one included), which is what to
+    # use when diagnosing a startup stall on a machine where JIT behaves oddly.
     def _warm_colorspace():
         try:
+            # Queue behind the engine's own warm-up: two numba compilations running at once is
+            # the suspected startup stall on many-core machines.
+            engine._warmup_done.wait(30)
             from core import colorspace
             colorspace.warm_up()
+            startup_log("colorspace warm-up done")
         except Exception:
             pass
 
-    threading.Thread(target=_warm_colorspace, name="colorspace-warmup", daemon=True).start()
+    if os.environ.get("SPEKTRA_NO_WARMUP") == "1":
+        startup_log("warm-ups skipped (SPEKTRA_NO_WARMUP=1)")
+    else:
+        threading.Thread(target=_warm_colorspace, name="colorspace-warmup", daemon=True).start()
 
     def handle_ipc_connection():
         while local_server.hasPendingConnections():
@@ -369,12 +465,19 @@ def main():
             if client.bytesAvailable() > 0:
                 process_incoming_args()
 
+    # Publish the single-instance name only now that a window exists to hand arguments to.
+    local_server = QLocalServer()
+    local_server.removeServer(ipc_name)
+    listed = local_server.listen(ipc_name)
+    startup_log(f"IPC server listening={listed}")
     local_server.newConnection.connect(handle_ipc_connection)
     app._ipc_server = local_server
 
     if splash and not launched_from_exe:
         splash.finish(win)
 
+    _startup_done.set()
+    startup_log("ready, entering event loop")
     print("[READY]", flush=True)
     sys.exit(app.exec())
 
