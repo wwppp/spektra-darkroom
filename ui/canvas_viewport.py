@@ -18,12 +18,16 @@ from OpenGL import GL
 
 
 def grain_derive_spec(params, stock_strength, stock_layer_weights, stock_size_mm,
-                      fmt_mm, long_edge_px):
+                      fmt_mm, long_edge_px, grain_preset=None):
     """Build the shared GrainSpec for a shader draw.
 
     Everything the shader needs about grain amplitude, octave mixing, layer correlation and
     the density curve comes from core/grain_model.py; this helper is only the adapter between
     the parameter dict and the model (P1/P2).
+
+    ``grain_preset`` is the stock's crystal_grain dict: it selects the stock's own density law
+    and its declared luma correlation.  Without it the P0 bell and the global correlation target
+    are used, which is the behaviour every stock had before the law was wired up.
     """
     return grain_model_ref.derive(
         grain_slider=params.get("grain", 0.4),
@@ -36,6 +40,7 @@ def grain_derive_spec(params, stock_strength, stock_layer_weights, stock_size_mm
         grain_size=params.get("grain_size", 1.0),
         stock_size_mm=stock_size_mm,
         grain_colour=float(params.get("grain_colour", 1.0)),
+        density_preset=grain_preset,
     )
 
 
@@ -48,6 +53,11 @@ def _bind_density_uniforms(u_1f):
     u_1f("u_grain_dens_wshoulder", grain_model_ref.DENS_W_SHOULDER)
     u_1f("u_grain_dens_dmax", grain_model_ref.DENS_DMAX)
     u_1f("u_grain_dens_wsat", grain_model_ref.DENS_W_SAT)
+    u_1f("u_grain_density_scale", 1.0 / grain_model_ref.DENSITY_LUT_MAX)
+
+
+# The density-law ramp lives on its own texture unit, clear of the image (0) and the 3D LUT (1).
+GRAIN_DENSITY_TEX_UNIT = 2
 
 
 VERTEX_SHADER_SRC = """
@@ -117,6 +127,14 @@ uniform float u_grain_dens_wtoe;
 uniform float u_grain_dens_wshoulder;
 uniform float u_grain_dens_dmax;
 uniform float u_grain_dens_wsat;
+// Per-stock density law, baked by core/grain_model.bake_density_lut() into a 512x1 RGB ramp over
+// D = 0..4 and sampled here.  Keeping the law in a texture rather than in GLSL means a stock's
+// law is implemented exactly once (in Python) and both renderers read the same numbers.
+// u_grain_density_enable == 0 falls back to the P0 bell above, so a missing texture can never
+// blank the grain.
+uniform sampler2D u_grain_density_lut;
+uniform float u_grain_density_scale;
+uniform float u_grain_density_enable;
 uniform float u_stock_grain_size;
 uniform float u_stock_grain_strength;
 uniform vec3  u_stock_layer_weights;
@@ -833,25 +851,39 @@ void main() {
         float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
         float eff_strength = (u_grain / 0.40) * (base_stock_strength / 0.010);
 
-        // Granularity vs negative optical density: a bell curve fitted to the spektrafilm
-        // particle-model reference (plan item P0/P2). linear_rgb is read as the negative's
-        // transmittance, so D = -log10(lin). The constants arrive as uniforms, so the CPU
-        // export and the preview cannot disagree about the curve.
+        // Granularity vs negative optical density. linear_rgb is read as the negative's
+        // transmittance, so D = -log10(lin).  Two paths, and the choice is made on the CPU:
+        //   u_grain_density_enable == 1: the stock's own law, baked by
+        //     core/grain_model.bake_density_lut() and fetched from a 512x1 ramp.  The table is
+        //     normalised so that its value at the stock's reading density is exactly
+        //     u_grain_dens_gain, which is why adopting a law cannot change overall amplitude.
+        //   u_grain_density_enable == 0: the P0 bell, i.e. the global curve fitted to the
+        //     particle-model reference.  Used when no table could be uploaded.
         vec3 lin_c = clamp(linear_rgb, vec3(1e-4), vec3(1.0));
         vec3 dens_D = -log(lin_c) * (1.0 / 2.302585092994046);
-        vec3 dens_z = dens_D - vec3(u_grain_dens_peak);
-        vec3 dens_w = mix(vec3(u_grain_dens_wtoe), vec3(u_grain_dens_wshoulder),
-                          step(vec3(0.0), dens_z));
-        vec3 dens_bell = vec3(u_grain_dens_floor)
-                       + (vec3(1.0) - vec3(u_grain_dens_floor))
-                         * exp(-0.5 * (dens_z / dens_w) * (dens_z / dens_w));
-        // Film saturation: fade to zero just below the stock's Dmax. Above it the particle-model
-        // reference returns a constant saturated field (every crystal developed), so extending
-        // the Gaussian there would put grain into fully clipped highlights.
-        vec3 dens_t = clamp((dens_D - vec3(u_grain_dens_dmax - u_grain_dens_wsat))
-                            / vec3(u_grain_dens_wsat), 0.0, 1.0);
-        vec3 dens_roll = vec3(1.0) - (vec3(3.0) * dens_t * dens_t - vec3(2.0) * dens_t * dens_t * dens_t);
-        vec3 dens_mod = vec3(u_grain_dens_gain) * dens_bell * dens_roll;
+        vec3 dens_mod;
+        if (u_grain_density_enable > 0.5) {
+            // One fetch per record; the ramp is linear-filtered, and the CPU interpolates the
+            // same table the same way, so preview and export agree on the law.
+            dens_mod = vec3(
+                textureLod(u_grain_density_lut, vec2(dens_D.r * u_grain_density_scale, 0.5), 0.0).r,
+                textureLod(u_grain_density_lut, vec2(dens_D.g * u_grain_density_scale, 0.5), 0.0).g,
+                textureLod(u_grain_density_lut, vec2(dens_D.b * u_grain_density_scale, 0.5), 0.0).b);
+        } else {
+            vec3 dens_z = dens_D - vec3(u_grain_dens_peak);
+            vec3 dens_w = mix(vec3(u_grain_dens_wtoe), vec3(u_grain_dens_wshoulder),
+                              step(vec3(0.0), dens_z));
+            vec3 dens_bell = vec3(u_grain_dens_floor)
+                           + (vec3(1.0) - vec3(u_grain_dens_floor))
+                             * exp(-0.5 * (dens_z / dens_w) * (dens_z / dens_w));
+            // Film saturation: fade to zero just below the stock's Dmax. Above it the particle-model
+            // reference returns a constant saturated field (every crystal developed), so extending
+            // the Gaussian there would put grain into fully clipped highlights.
+            vec3 dens_t = clamp((dens_D - vec3(u_grain_dens_dmax - u_grain_dens_wsat))
+                                / vec3(u_grain_dens_wsat), 0.0, 1.0);
+            vec3 dens_roll = vec3(1.0) - (vec3(3.0) * dens_t * dens_t - vec3(2.0) * dens_t * dens_t * dens_t);
+            dens_mod = vec3(u_grain_dens_gain) * dens_bell * dens_roll;
+        }
 
         // Transmittance modulation: T = T_in * 10^(-dD) = T_in * exp(-dD * 2.3025851)
         vec3 dD = layer_grain * (eff_strength * 0.35 * grain_att) * dens_mod;
@@ -996,6 +1028,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # Texture state
         self._image_tex_id = None
         self._lut_tex_id = None
+        # 512x1 RGB ramp holding the current stock's density law (core/grain_model.py), plus the
+        # identity of the table it holds so switching stock re-uploads instead of re-baking.
+        self._grain_density_tex_id = None
+        self._grain_density_lut_id = None
         self._image_width = 0
         self._image_height = 0
         self._master_width = 0
@@ -1233,6 +1269,60 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def resizeGL(self, w, h):
         pass
 
+    def _upload_grain_density_lut(self, lut):
+        """Upload (or refresh) the 512x1 density-law ramp and return its texture id.
+
+        The table is baked once per stock by core/grain_model.bake_density_lut() and cached there,
+        so the same array object comes back every frame; ``id()`` is enough to notice a stock
+        change without re-uploading 6 KB of constants on every paint.
+        """
+        if lut is None:
+            return None
+        key = (id(lut), lut.shape)
+        tex = getattr(self, "_grain_density_tex_id", None)
+        if tex and getattr(self, "_grain_density_lut_id", None) == key:
+            return tex
+        data = np.ascontiguousarray(lut, dtype=np.float32).reshape(1, int(lut.shape[0]), 3)
+        height, width = data.shape[0], data.shape[1]
+        if not tex:
+            tex = GL.glGenTextures(1)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB16F, width, height, 0,
+                            GL.GL_RGB, GL.GL_FLOAT, data)
+            self._grain_density_tex_id = tex
+        else:
+            GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+            GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, width, height,
+                               GL.GL_RGB, GL.GL_FLOAT, data)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        self._grain_density_lut_id = key
+        return tex
+
+    def _bind_grain_density_lut(self, funcs, u_1f, u_1i, spec):
+        """Bind the stock's density law, or switch the shader back to the P0 bell."""
+        tex = None
+        lut = getattr(spec, "density_lut", None)
+        if lut is not None:
+            try:
+                tex = self._upload_grain_density_lut(lut)
+            except Exception as exc:                # noqa: BLE001 - never break a paint
+                print(f"[SpektraGrain] 密度律纹理上传失败，回退 P0 钟形: {exc}")
+                tex = None
+        if not tex:
+            # No table: the shader keeps the global P0 bell.  Both branches return the same
+            # quantity in the same units, so the grain stays continuous either way.
+            u_1f("u_grain_density_enable", 0.0)
+            return
+        funcs.glActiveTexture(0x84C0 + GRAIN_DENSITY_TEX_UNIT)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+        u_1i("u_grain_density_lut", GRAIN_DENSITY_TEX_UNIT)
+        u_1f("u_grain_density_enable", 1.0)
+        funcs.glActiveTexture(0x84C0)   # callers bind the image on unit 0 right after this
+
     def paintGL(self):
         if not self.shader_program or not self.vbo:
             return
@@ -1432,13 +1522,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_grain_blur", self.params.get("grain_cloud_blur", 1.0))
         u_1f("u_grain_colour", float(self.params.get("grain_colour", 1.0)))
         _spec = grain_derive_spec(self.params, st_strength, st_lw, st_size, fmt_mm,
-                                 max(_mw, _mh))
+                                 max(_mw, _mh), grain_preset)
         u_1f("u_grain_rho", _spec.rho)
         u_1f("u_grain_w_fine", _spec.w_fine)
         u_1f("u_grain_w_cloud", _spec.w_cloud)
         u_1f("u_grain_w_mottle", _spec.w_mottle)
         u_1f("u_grain_amplitude", _spec.amplitude)
         _bind_density_uniforms(u_1f)
+        self._bind_grain_density_lut(funcs, u_1f, u_1i, _spec)
         master_w = float(getattr(self, "_master_width", 0) or self._image_width)
         master_h = float(getattr(self, "_master_height", 0) or self._image_height)
         u_2f("u_master_resolution", master_w, master_h)
@@ -2583,13 +2674,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # The offscreen pass renders at the export resolution, so the spec is derived with
             # the target long edge -- that is what applies the physical amplitude law.
             _spec = grain_derive_spec(eff_params, st_strength, st_lw, st_size, fmt_mm,
-                                     max(float(target_w), float(target_h)))
+                                     max(float(target_w), float(target_h)), grain_preset)
             u_1f("u_grain_rho", _spec.rho)
             u_1f("u_grain_w_fine", _spec.w_fine)
             u_1f("u_grain_w_cloud", _spec.w_cloud)
             u_1f("u_grain_w_mottle", _spec.w_mottle)
             u_1f("u_grain_amplitude", _spec.amplitude)
             _bind_density_uniforms(u_1f)
+            self._bind_grain_density_lut(funcs, u_1f, u_1i, _spec)
             u_2f("u_master_resolution", float(target_w), float(target_h))
 
             diff_family = str(eff_params.get("diffusion_family", "none")).lower()
