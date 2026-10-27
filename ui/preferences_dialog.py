@@ -1,7 +1,7 @@
 """
 preferences_dialog.py - Professional Application Preferences Dialog
 Settings:
-- Hardware Acceleration (GPU OpenGL / Vulkan)
+- Hardware Acceleration (GPU OpenGL)
 - Default Film Format (35mm / 16mm / 120 / 4x5)
 - Exit confirmation on unsaved edits
 - Viewport Antialiasing & Default Color Space

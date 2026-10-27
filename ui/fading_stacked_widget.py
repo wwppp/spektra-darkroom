@@ -40,7 +40,7 @@ class FadeOverlay(QWidget):
 
 class FadingStackedWidget(QStackedWidget):
     """A QStackedWidget subclass that supports smooth cross-fade page transitions
-    without disrupting underlying GPU/Vulkan renderers or blurring text.
+    without disrupting underlying GPU renderers or blurring text.
     """
     transitionStarted = Signal(int, int)   # from_idx, to_idx
     transitionFinished = Signal(int)       # current_idx
