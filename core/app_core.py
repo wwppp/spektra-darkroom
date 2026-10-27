@@ -1156,13 +1156,23 @@ class SpektraEngine:
         # (DIR couplers / morph), so a preview-thread bake, a thumbnail bake and an export
         # bake must never interleave or they would bake each other's parameters.
         self._lut_bake_lock = threading.Lock()
+        # Set once the background numba warm-up (if any) has finished, so a second warm-up can
+        # queue behind it instead of compiling in parallel - concurrent JIT on a many-core box is
+        # exactly where startup stalls come from.
+        self._warmup_done = threading.Event()
         self._start_background_warmup()
 
-    @staticmethod
-    def _start_background_warmup():
+    def _start_background_warmup(self):
         """Pre-warm spektrafilm CAM16-UCS gamut envelope and Numba 3D LUT JIT in a daemon thread
         so the first interactive chemistry/DIR LUT bake completes in ~35ms with zero cold-start pause.
+
+        ``SPEKTRA_NO_WARMUP=1`` skips it, which is the first thing to try when a machine stalls at
+        launch (the work is then done lazily on first use instead).
         """
+        if os.environ.get("SPEKTRA_NO_WARMUP") == "1":
+            self._warmup_done.set()
+            return
+
         def _warm():
             try:
                 from spektrafilm.utils.lut import warmup_luts
@@ -1171,7 +1181,10 @@ class SpektraEngine:
                 compress_rgb(np.zeros((2, 2, 3)), OutputGamutCompressSpec(algorithm="cam16ucs"), output_color_space="sRGB")
             except Exception:
                 pass
-        threading.Thread(target=_warm, daemon=True).start()
+            finally:
+                self._warmup_done.set()
+
+        threading.Thread(target=_warm, name="engine-warmup", daemon=True).start()
 
     def _load_profile(self, stock_id):
         if not stock_id or stock_id == "none":
