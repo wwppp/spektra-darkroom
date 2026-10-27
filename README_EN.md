@@ -1,6 +1,6 @@
 <div align="center">
 
-# SpektraDarkroom Vulkan Edition
+# SpektraDarkroom
 
 ### Professional 35mm Physical Film Development and Optical Print Darkroom Workstation (Windows)
 
@@ -43,7 +43,7 @@ Built upon continuous spectral simulation and photochemical sensitometry/develop
 - **Photochemical Optics**: Non-linear red halation reflection diffusion, DIR development inhibitor coupler effects, darkroom pre-flashing, and film format grain scaling.
 
 ### 2. Low-Latency Viewport & GPU Hardware Acceleration
-- **OpenGL 3.3 Core Acceleration**: Qt OpenGL rendering path with shader-level 3D physical color-space mapping, driving 4K viewports at 60+ FPS (runs on Vulkan / OpenGL compatible drivers).
+- **OpenGL 3.3 Core Acceleration**: Qt OpenGL rendering path with shader-level 3D physical color-space mapping, driving 4K viewports at 60+ FPS.
 - **Smooth Zoom & Anchor Tracking**: Seamless zoom from fit-to-view up to 1:1 pixels and beyond (400%+ pixel inspection), with cursor anchor targeting on double-click magnification, and quick 1:1 / fit-to-view toggles.
 - **Inspection & Comparison Tools**: Split-screen draggable viewport slider, plus instant raw comparison by holding the left mouse button anywhere on the canvas (≥220ms) or the `\` key.
 - **Multi-Tier Export Engine**: Supports both high-precision off-screen CPU export and GPU framebuffer hardware-accelerated batch export.
@@ -70,7 +70,7 @@ Built upon continuous spectral simulation and photochemical sensitometry/develop
 
 * **Operating System**: Windows 10 / Windows 11 (64-bit)
 * **Python Version**: Python 3.10 - 3.13 (64-bit)
-* **Graphics Hardware**: Dedicated or integrated GPU supporting OpenGL 3.3+ and Vulkan compatible display drivers (NVIDIA / AMD / Intel)
+* **Graphics Hardware**: Dedicated or integrated GPU supporting OpenGL 3.3+ (NVIDIA / AMD / Intel)
 
 ---
 
