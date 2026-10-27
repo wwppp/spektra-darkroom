@@ -6,46 +6,36 @@
 
 ## [v0.5.0] - 2026-10-27 (Build 217)
 
-> 大版本：**每支胶卷用自己的颗粒密度律**。此前 54 支胶卷共用一条 P0 标定的全局钟形曲线、一个全局通道相关目标；现在每支按 fotufilm 档案声明的律与相关度渲染，预览与导出读同一张表。
+> 大版本：每支胶卷用自己的颗粒密度律与通道相关度（此前 54 支共用一条全局钟形 + 全局相关目标）。
 
-### 颗粒密度律：从"一条全局曲线"改为"每胶卷一张表"
-
-- **接线对象**（`crystal_grain` 里早已写入、但渲染器从未消费的字段）：`density_law`、`density_profile`、`luma_correlation`、`granularity_read_density`、`fog_density`、`reversal_profile`，加上按特征曲线算出的 `density_min/max`。
-- **四种律**（`core/grain_model.py`，逐式对齐 `fotufilm-engine/.../FilmStock.swift` 与 `Stages/Grain.h`）：
-  - `0 dyeCloud`：`σ²(D) ∝ (1−e^(−D/toe))·(1 + A·e^(−D/decay) + H·e^(−(D−hD)²/(2hW²)))`，每记录一行 6 系数；
-  - `1 silver`：`σ²(D) ∝ D·10^(0.21004D + 0.06114D²)`；
-  - `2 dyeCloudSelwyn`（legacy）：`σ²(D) ∝ D`；
-  - `3 dyeCloudReversal`：`σ²(D) ∝ D^(2p)/(1 + (D/Ds)^(2p))`，`p, Ds` 取自 `reversal_profile`。
-- **归一化是设计核心**：每支律除以它自己在**读数密度**处的值（`granularity_read_density` 决定 net/gross，再 clamp 进 `[0.05, 0.9]×密度跨度`）。于是任何胶卷、任何律在读数密度处都恰好等于 `DENS_GAIN`（0.72），**换律只改变形状、不改变中密度颗粒强度**。这也是与 P0 标定的衔接点：旧钟形在 D=1.0 处是 0.7157，差 0.6%。
-- **实现方式：烘焙成 512×1 RGB 查找纹理**（`bake_density_lut()`），D 归一化到 `[0, 4]`（`D = −log10(clamp(lin, 1e-4, 1))` 的上界）作 u 坐标。着色器用 `textureLod` 逐记录取样，CPU 用同一张表做线性插值——**律只在 Python 里实现一次**，以后加律不用改 GLSL。
-- **高密度端用每支自己的 Dmax**：曲线实测跨度 1.42–3.96（如 `lomography_lomochrome_metropolis` 1.42、`kodak_kodachrome_25` 3.96），不再统一沿用 2.24。越过各自 Dmax 后显式滚降到 0（乳剂全部显影，无起伏）。
-- **回退**：`u_grain_density_enable == 0` 时着色器仍走原 P0 钟形；"无胶卷"与未编录档位不声明律，继续用钟形（行为与 v0.4.54 一致，不会被塞进某个律）。
-
-### 通道相关：消费每支的 `luma_correlation`
-
-- 映射为 `corr = 2c − c²`（c=0 → 0 独立记录，c=1 → 1 纯亮度颗粒），再交给既有的 `rho_for_target_correlation()` 反解 rho。
-- **为什么不是 `1 − c²`**：fotufilm 对每支黑白都强制 `grainLumaCorrelation = 1`，而 `1 − c²` 在 c=1 处得 0——黑白会被判成三通道独立，出现彩色雪花。`2c − c²` 在同一实测点 c=0.5 处仍是 0.75（P0 参考实测 0.79），两端同时正确。
-- 实际效果：24 支声明了该字段的胶卷中，7 支黑白 → 1.00、10 支 CineStill/Eterna 系（c=0.6）→ 0.84、`lomography_lomochrome_*`（c=0.55）→ 0.80、`kodak_aerochrome_1443`（c=0.25）→ 0.44、`harman_phoenix_200`（c=0.0）→ 0.00。29 支未声明者沿用 0.79。
-
-### 观感变化（本版会看得见，按律说明）
-
-| 律 | 胶卷数 | 颗粒-密度形状 | 相对全局钟形 |
-|---|---|---|---|
-| dyeCloud | 30 | 趾部上方 D≈0.19 见峰（峰值 1.04 = 1.45× 锚点），随后缓降 | 峰值前移、趾部更重，肩部更轻 |
-| silver | 7 | 随密度单调上升，D≈1.96 最高（1.54 = 2.14× 锚点） | 高密度端显著更重 |
-| dyeCloudReversal | 15 | 上升后饱和，最高 1.75 = 2.43× 锚点（受各自 Dmax 滚降截断） | 高密度端更重、低端更轻 |
-| dyeCloudSelwyn | 1 | `√D` 上升，峰 0.90 = 1.24× 锚点 | 变化最温和 |
-
-### 验收（全部脚本化）
-
-- `tools/grain_parity.py` **33 → 54 项**：新增"每支律归一化到 `DENS_GAIN`"、"四律两两不同"、"CPU 采样 == 着色器线性取表（误差 4.1e-7）"、"着色器消费表且保留钟形回退分支"等。
-- `tools/grain_stats.py` 新增 **26 行门禁**（4 律各 5 行形状判据 + 6 行全档位汇总：全档位表有限、峰值响应有界、四律均有胶卷）。判据取自律本身而非实测（峰位窗口、单调方向、读数密度处响应）。
-- **GPU↔CPU 一致性**（新增 `scratch/gpu_grain_law_check.py`，走真实 `render_offscreen`）：同一密度下 GPU 与 CPU 的律/钟形幅度比，9 组全部 ≤2.8%，其中 D=1.0 处四律均为 1.00（这正是归一化锚点）。
-
-### 已知限制
-
-- 档案里的 `density_curves` 是**去基密度**存储的，真实 `dMin`（约 0.04–0.06）不可复原，因此 `gross` 读数的 `1 − dMin` 在本版退化为 `1`；锚点从此只差约 0.05D 的量级，且仍被 clamp 进跨度内。
-- 每支律的形状来自厂商数据，**没有逐支做过人工观感确认**；`tools/grain_visual.py` 的对照图仍只比较 P0 钟形与参考。
+- 渲染器开始消费档案里的 `density_law` / `density_profile` / `luma_correlation` / `granularity_read_density` / `fog_density` / `reversal_profile`（此前写入但无人读取）。
+- `core/grain_model.py` 实现四种律：`dyeCloud`（6 系数含趾部与二次上抬）、`silver`、`dyeCloudSelwyn`（legacy）、`dyeCloudReversal`（`p, Ds` 取自 `reversal_profile`）。
+- 每支律在**自己的读数密度**处归一化，故 `response(锚点) == DENS_GAIN(0.72)` 对所有胶卷成立，换律只改形状、不改中密度强度。
+- 与 P0 标定衔接：旧钟形在 D=1.0 处为 0.7157，仅差 0.6%。
+- 密度律烘焙为 512×1 RGB 查找纹理（D∈[0,4]），预览与 CPU 导出一同读表，律只在 Python 里实现一次。
+- 着色器新增 `u_grain_density_lut` / `_scale` / `_enable`，用 `textureLod` 逐记录取样；`_enable == 0` 回退到原 P0 钟形。
+- 纹理绑定放在独立纹理单元 2，仅在换胶卷时重传 6 KB 常量。
+- 高密度端改用每支自己的 Dmax（实测 1.42–3.96），不再统一 2.24；越过各自 Dmax 后滚降到 0。
+- `luma_correlation` 按 `corr = 2c − c²` 换算成通道相关目标，再由既有 `rho_for_target_correlation()` 反解 rho。
+- 未采用 `1 − c²`：它在 c=1 处为 0，而黑白胶卷的该字段恒为 1，会把黑白渲染成三通道独立（彩色雪花）。
+- 24 支声明该字段的胶卷实测：7 支黑白 → 1.00、10 支 CineStill/Eterna → 0.84、3 支 Lomochrome → 0.80、`kodak_aerochrome_1443` → 0.44、`harman_phoenix_200` → 0.00；29 支未声明者沿用 0.79。
+- `get_film_grain_preset()` 新增 `density_min/max`，由 `data.density_curves` 现算（`_profile_density_range`）。
+- "无胶卷"与未编录档位不声明律，继续走钟形，行为与 v0.4.54 完全一致。
+- CPU 回退导出改为读同一张表（`density_response(…, spec.density_lut)`）。
+- 观感变化·30 支彩色负片：峰值从 D≈0.84 前移到趾部 D≈0.19（1.45× 锚点），趾部更重、肩部更轻。
+- 观感变化·7 支黑白：随密度单调上升，D≈1.96 最重（2.14× 锚点），高密度端显著更重。
+- 观感变化·15 支反转片：上升后饱和，最高 2.43× 锚点（受各自 Dmax 滚降截断）。
+- 观感变化·1 支 legacy Selwyn：`√D` 上升，峰 1.24× 锚点，变化最温和。
+- `tools/grain_parity.py` 33 → **54 项**（新增律归一化、四律两两不同、CPU 取表误差 4.1e-7、着色器保留钟形回退）。
+- `tools/grain_stats.py` 新增 **26 行**门禁（4 律 × 5 行形状判据 + 6 行全档位汇总）。
+- 新增 `scratch/gpu_grain_law_check.py`：真实 `render_offscreen` 下 GPU↔CPU 逐律幅度比 9 组误差 ≤2.8%，D=1.0 处四律均为 1.00。
+- 验收全绿：档案 759 / 颗粒 54 / 统计 26+7 / 色彩空间 41 / 导出格式 12 / 冒烟 0 异常。
+- 已知限制：档案曲线是去基密度存储，真实 `dMin`（0.04–0.06）不可复原，`gross` 读数的 `1 − dMin` 退化为 `1`（量级 0.05D）。
+- 已知限制：各律形状来自厂商数据，尚未逐支做人工观感确认。
+- 已知限制：`harman_phoenix_200` 的 `luma_correlation = 0.0`（三通道独立）系档案真实值，如观感异常应优先怀疑该档位。
+- 文档：CHANGELOG 记入本版；内部交接/计划/标定文档改为不入库（`.gitignore` 增 `docs/`）。
+- 更正早前误记：正片模式下的控件禁用（相纸锁"无"、放大机/相纸/DIR/光源置灰）早已实现，不是待办。
+- 版本 0.4.54 / Build 216 → **0.5.0 / Build 217**。
 
 ---
 
