@@ -32,7 +32,7 @@ Built upon continuous spectral simulation and photochemical sensitometry/develop
 
 ### 1. Physical Darkroom Continuous Spectral Simulation
 - **81-Band Continuous Spectral Sensitometry**: Computes physical film exposure and absorption across 81 spectral bands, eliminating color shifts and banding artifacts common to traditional 3D LUTs.
-- **51 Film Stock Profiles + 8 Print Paper & Projection Stock Profiles** (the stock library also ships "None (film bypass)" and "Digital Scan" modes, for 52 + 9 selectable slots in total):
+- **53 Film Stock Profiles + 8 Print Paper & Projection Stock Profiles** (the stock library also ships "None (film bypass)" and "Digital Scan" modes, for 54 + 9 selectable slots in total):
   - **Classic Color Negatives**: Kodak Portra 160 / 400 / 800 (including push-presets), Gold 200, UltraMax 400, Ektar 100; Fujifilm Pro 400H / 160NS, C200, Superia X-TRA 400, etc.
   - **Motion Picture Stocks**: Kodak Vision3 50D / 200T / 250D / 500T, CineStill 400D / 800T, Fujifilm Eterna 500T / Vivid 500T, F-64D, etc.
   - **Legendary Color Reversals (Slides)**: Fujifilm Velvia 50 / 100, Provia 100F, Astia 100F, Kodak Ektachrome E100, Kodachrome 25 / 64 / 200, Agfachrome CT 50 / 100 / 200, etc.
