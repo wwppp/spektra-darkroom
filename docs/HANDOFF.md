@@ -85,13 +85,22 @@ python scratch/gpu_paint_bind_ast_check.py  # 静态核对 paintGL/render_offscr
 
 ---
 
-## 4. 待办：正片模式下禁用无效控件（小改动、独立）
+## 4. 已完成：正片模式下禁用无效控件（**请勿重复实现**）
 
-用户反馈：选中 Instax / 任何正片时，界面上大量控件**能调但实际不生效**。建议规则（一致、可维护）：
+> 这项在某个更早的版本里就已经做完了。旧版本文档曾把它写成"待办"，是文档陈旧，不是代码缺失——2026-10-27 核对代码确认。
 
-> 选中任何正片 → 相纸锁定为"无"并禁用相纸区；印相/化学区（扩印 CMY、扩印曝光、预闪、DIR、显影形态、显影疲劳）整块禁用并挂悬停说明；**胶卷选择保持可用**（正片本身就是胶卷）。
+**实现位置**（`ui/main_window.py`）：
 
-现状：导出路径已为正片强制 `cmy=0 / print_exp=1 / preflash=0`，DIR 也已被 `dir_status()` 置灰，但 UI 上其余控件仍是可点的——界面与行为不一致。
+| 函数 | 行 | 做什么 |
+|---|---|---|
+| `_update_stock_mode_ui()` | 8969–9049 | 正片时：相纸卡片锁到只剩"无"（其余 `setEnabled(False)` + 提示"反转正片无需相纸放大环节"）；禁用相纸显影滑块（`morph_gamma`/`exhaustion`）、放大机滑块（C/M/Y、扩印曝光、预闪、黑位）、光源下拉；胶卷选择保持可用 |
+| `_update_chemistry_ui_state()` | 8943–8964 | DIR 三个滑块按 `engine.dir_status()` 置灰并挂原因文案；对置灰滑块设 `WA_TransparentForMouseEvents`，让悬停事件落到卡片上，hover 仍能解释为何不可用 |
+
+调用点 11 处（切胶卷 / 切相纸 / 切模式 / 重置等），不是单一路径生效。
+
+**为什么可信**：禁用的集合与导出端强制的集合同源——`core/app_core.py:1986` 把正片的 `eff_paper` 强制成 `"none"`，`:3581` 把 `morph_gamma`/`developer_exhaustion` 归零，CMY/预闪在正片 LUT 烘焙里不入账。所以置灰是"如实反映行为"，不是安慰性装饰。
+
+**回归验证**：`python scratch/dir_probe10.py` 会依次切到 `fujifilm_velvia_50`（正片）与 `kodak_tri_x_400`（黑白），看 `python exceptions: 0` 且无 `stale LUT`；若要验控件状态，在探针里读 `slider_cyan.isEnabled()` / `paper_cards[...].isEnabled()` 即可。
 
 ---
 
@@ -146,5 +155,5 @@ scratch/gpu_paint_bind_ast_check.py  paintGL / render_offscreen 绑定调用的�
 
 > 读 `docs/HANDOFF.md` 与 `docs/grain-rework-plan.md`。
 > 第一件事是跑第 0 节的四套脚本，确认 759 / 54 / 41 / 12 全绿、冒烟 0 异常，再动代码。
-> 然后做第 4 节「正片模式下禁用无效控件」：选中任何正片时相纸锁定"无"并禁用相纸区、
-> 印相/化学区整块禁用并挂悬停说明，**胶卷选择保持可用**。
+> 颗粒与导出两条线都已收尾；§4 的正片控件禁用也早已实现，**不要重做**。
+> 有新需求时先核对代码现状，本文件可能比代码陈旧一步。
