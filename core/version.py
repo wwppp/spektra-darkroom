@@ -29,5 +29,5 @@ def get_full_version_info():
         "build": BUILD_NUMBER,
         "release_date": RELEASE_DATE,
         "full_version": FULL_VERSION_STRING,
-        "engine": "OpenGL 3.3 Core（Vulkan 兼容驱动）",
+        "engine": "OpenGL 3.3 Core",
     }

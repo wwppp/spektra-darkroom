@@ -3900,7 +3900,7 @@ class SpektraEngine:
             lut_output = self._postprocess_positive_lut(lut_output, film_stock)
 
         with open(output_cube_path, "w", encoding="utf-8") as f:
-            f.write(f"# Created by SpektraDarkroom Vulkan Edition\n")
+            f.write(f"# Created by SpektraDarkroom\n")
             f.write(f"# Film: {film_stock}, Paper: {paper_stock}\n")
             f.write(f"LUT_3D_SIZE {lut_size}\n")
             f.write("DOMAIN_MIN 0.0 0.0 0.0\n")
