@@ -36,7 +36,7 @@ class ScrubLabel(QLabel):
         is_dark = theme_manager.is_dark()
         text_color = "#c8c8c8" if is_dark else "#334155"
         disabled_color = "#4b5563" if is_dark else "#94a3b8"
-        tt_ss = theme_manager.get_tooltip_stylesheet()
+        tt_ss = theme_manager.widget_tooltip_stylesheet()
         self.setStyleSheet(f"""
             QLabel {{
                 background: transparent;
@@ -383,7 +383,7 @@ class ParamScrubSlider(QWidget):
         self._init_ui(label_text)
 
     def _init_ui(self, label_text):
-        self.setStyleSheet(f"ParamScrubSlider, AdobeScrubSlider {{ background: transparent; border: none; }}\n{theme_manager.get_tooltip_stylesheet()}")
+        self.setStyleSheet(f"ParamScrubSlider, AdobeScrubSlider {{ background: transparent; border: none; }}\n{theme_manager.widget_tooltip_stylesheet()}")
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 3, 0, 4)
         main_layout.setSpacing(2)
@@ -467,7 +467,7 @@ class ParamScrubSlider(QWidget):
         input_dis_border = "#20222a" if is_dark else "#e2e8f0"
         btn_hover = "#282a36" if is_dark else "#e2e8f0"
         btn_pressed = "#1e202a" if is_dark else "#cbd5e1"
-        tt_ss = theme_manager.get_tooltip_stylesheet()
+        tt_ss = theme_manager.widget_tooltip_stylesheet()
 
         self.setStyleSheet(f"ParamScrubSlider, AdobeScrubSlider {{ background: transparent; border: none; }}\n{tt_ss}")
 
@@ -837,7 +837,7 @@ class DarkroomComboBox(QComboBox):
         theme_manager.themeChanged.connect(self.apply_theme)
 
     def apply_theme(self, theme_name=None):
-        tt_ss = theme_manager.get_tooltip_stylesheet()
+        tt_ss = theme_manager.widget_tooltip_stylesheet()
         if hasattr(self, "combo_view") and self.combo_view:
             self.combo_view.setStyleSheet(tt_ss)
 
@@ -988,7 +988,7 @@ class ComboBoxRow(QWidget):
         is_dark = theme_manager.is_dark()
         label_fg = "#c8c8c8" if is_dark else "#334155"
         label_dis_fg = "#4b5563" if is_dark else "#94a3b8"
-        tt_ss = theme_manager.get_tooltip_stylesheet()
+        tt_ss = theme_manager.widget_tooltip_stylesheet()
         self.setStyleSheet(f"ComboBoxRow {{ background: transparent; border: none; }}\n{tt_ss}")
         self.label.setStyleSheet(f"""
             QLabel {{

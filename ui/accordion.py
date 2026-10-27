@@ -21,6 +21,8 @@ class ParameterGroupCard(QWidget):
         self.title_text = title
         self.is_expanded = True
         self._is_reset_enabled = False
+        self._is_available = True
+        self._unavailable_reason = ""
         self._init_ui()
         theme_manager.themeChanged.connect(lambda _: self.apply_theme())
 
@@ -121,7 +123,33 @@ class ParameterGroupCard(QWidget):
                     color: #94a3b8;
                 }
             """)
+        if not self._is_available:
+            # Dim the title but keep it enabled, so its hover tooltip still fires.
+            dim_color = "#52525b" if is_dark else "#94a3b8"
+            self.title_label.setStyleSheet(f"""
+                QLabel {{
+                    background: transparent;
+                    border: none;
+                    color: {dim_color};
+                    font-size: 11px;
+                    font-weight: bold;
+                    letter-spacing: 0.5px;
+                }}
+            """)
         self.set_reset_enabled(self._is_reset_enabled)
+
+    def set_available(self, available: bool, reason: str = ""):
+        """Mark the section as inapplicable to the current stock (dimmed, reset off) while
+        keeping the header hoverable so it can explain why on hover."""
+        self._is_available = bool(available)
+        self._unavailable_reason = "" if available else (reason or "")
+        self.apply_theme()
+        tip = self._unavailable_reason
+        self.setToolTip(tip)
+        self.card.setToolTip(tip)
+        self.title_label.setToolTip(tip)
+        if not available:
+            self.set_reset_enabled(False)
 
     def addWidget(self, widget):
         self.content_layout.addWidget(widget)
@@ -134,7 +162,7 @@ class ParameterGroupCard(QWidget):
         self._is_reset_enabled = enabled
         self.reset_btn.setEnabled(enabled)
         is_dark = theme_manager.is_dark()
-        tt_ss = theme_manager.get_tooltip_stylesheet()
+        tt_ss = theme_manager.widget_tooltip_stylesheet()
         if enabled:
             self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.reset_btn.setStyleSheet(f"""

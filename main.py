@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import warnings
 
 # Suppress harmless third-party library warnings
@@ -171,6 +172,11 @@ def main():
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SpektraDarkroom.Vulkan.App.1.0")
+            # Ghost windows: once the process stops answering messages for ~5 s, DWM draws a
+            # system placeholder window carrying the classic (Win7-style) caption bar over our
+            # frameless window. It is painted by the shell, not by our window procedure, so
+            # WM_NC* interception cannot suppress it - the only fix is to opt out of ghosting.
+            ctypes.windll.user32.DisableProcessWindowsGhosting()
         except Exception:
             pass
 
@@ -247,6 +253,11 @@ def main():
     from ui.theme_manager import theme_manager
     app.setStyleSheet(theme_manager.get_tooltip_stylesheet())
 
+    # Self-rendered tooltip bubbles: deterministic size (no clipped text) and colours resolved at
+    # paint time from the live theme (no black flash). Replaces Qt's QTipLabel path entirely.
+    from ui.tooltip import install_tooltip_bubble
+    install_tooltip_bubble(app)
+
     splash = None
     if not launched_from_exe:
         pix = select_splash_pixmap(get_resource_dir(), app, VERSION_STRING)
@@ -296,6 +307,17 @@ def main():
 
     notify_status("就绪")
     win.show()
+
+    # Warm the numba colour-space kernel off the main thread. Compilation costs ~1 s; doing
+    # it here means the first wide-gamut export does not stall. Purely best-effort.
+    def _warm_colorspace():
+        try:
+            from core import colorspace
+            colorspace.warm_up()
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm_colorspace, name="colorspace-warmup", daemon=True).start()
 
     def handle_ipc_connection():
         while local_server.hasPendingConnections():

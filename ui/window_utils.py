@@ -274,26 +274,11 @@ def setup_solid_combobox(combo):
         combo.wheelEvent = lambda ev: ev.ignore()
 
     def _apply_solid_combo_tooltip():
-        try:
-            from ui.theme_manager import theme_manager
-            is_dark = theme_manager.is_dark()
-        except Exception:
-            is_dark = True
-        t_bg = "#ffffff" if not is_dark else "rgba(22, 24, 30, 0.95)"
-        t_fg = "#1e293b" if not is_dark else "#f1f5f9"
-        t_border = "#cbd5e1" if not is_dark else "#333644"
+        # Tooltip styling is global now (theme_manager.get_tooltip_stylesheet applied on
+        # QApplication). A QToolTip rule on the popup view would shadow that global rule and
+        # keep the previous theme's colours after a theme switch.
         if combo.view():
-            combo.view().setStyleSheet(f"""
-                QToolTip {{
-                    background-color: {t_bg};
-                    color: {t_fg};
-                    border: 1px solid {t_border};
-                    border-radius: 6px;
-                    padding: 6px 10px;
-                    font-size: 11px;
-                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
-                }}
-            """)
+            combo.view().setStyleSheet("")
 
     _apply_solid_combo_tooltip()
     try:
@@ -416,7 +401,7 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
     from core.path_utils import get_resource_dir
     chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_amber.png").replace("\\", "/")
     from ui.theme_manager import theme_manager
-    tt_ss = theme_manager.get_tooltip_stylesheet()
+    tt_ss = theme_manager.widget_tooltip_stylesheet()
 
     if is_dark:
         return f"""

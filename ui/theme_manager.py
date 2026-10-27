@@ -185,10 +185,18 @@ class ThemeManager(QObject):
             palette.setColor(QPalette.ColorRole.HighlightedText, QColor(17, 17, 17))
         app.setPalette(palette)
         if hasattr(app, "setStyleSheet"):
+            # Kept for the few tooltips Qt still renders itself (menu item tips); widget tooltips
+            # are painted by ui.tooltip.TooltipBubble, which reads the theme at paint time.
             app.setStyleSheet(self.get_tooltip_stylesheet())
 
     def get_tooltip_stylesheet(self) -> str:
-        """Universal floating tooltip bubble stylesheet matching active theme."""
+        """Universal floating tooltip bubble stylesheet matching active theme.
+
+        Apply this once to QApplication only (done automatically in _apply_app_palette) and
+        never inject it into a child widget's stylesheet: Qt resolves QToolTip styling from the
+        hovered widget's stylesheet chain, so a widget-level copy shadows the refreshed global
+        rule and keeps the previous theme's colours after a theme switch.
+        """
         is_dark = self.is_dark()
         tooltip_bg = "rgba(22, 24, 30, 0.95)" if is_dark else "#ffffff"
         tooltip_fg = "#f1f5f9" if is_dark else "#1e293b"
@@ -206,6 +214,15 @@ class ThemeManager(QObject):
                 font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
             }}
         """
+
+    def widget_tooltip_stylesheet(self) -> str:
+        """Legacy no-op for widget-level call sites - returns an empty fragment.
+
+        Tooltip styling is global now. Injecting QToolTip rules into individual widget
+        stylesheets made them shadow the theme-refreshed global rule, which left tooltips
+        stuck in the old theme's colours.
+        """
+        return ""
 
     def _on_system_scheme_changed(self):
         if self._mode == "system":

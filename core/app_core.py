@@ -28,6 +28,8 @@ from .format_constants import (
     STANDARD_IMAGE_EXTENSIONS,
     ALL_SUPPORTED_IMAGE_EXTENSIONS
 )
+from . import colorspace as color_space
+from . import grain_model
 
 
 # Color matrices for accurate gamut transitions
@@ -208,54 +210,34 @@ def apply_diffusion_np(linear_img, diff_family="none", diff_strength=0.0, diff_w
     return out
 
 
-def convert_image_colorspace(img_rgb_float, target_colorspace="sRGB"):
-    """Convert an image in sRGB non-linear color space [0, 1] to target color space."""
-    target = str(target_colorspace).strip()
-    if target in ("sRGB", "srgb", "", None):
-        return np.clip(img_rgb_float, 0.0, 1.0)
+def convert_image_colorspace(img_rgb_float, target_colorspace="sRGB", bit_depth=8):
+    """Convert an image in sRGB non-linear color space [0, 1] to target color space.
 
-    try:
-        import colour
-        t_low = target.lower()
-        if "p3" in t_low:
-            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'Display P3', apply_cctf_decoding=True, apply_cctf_encoding=True)
-        elif "adobe" in t_low:
-            lin = colour.models.eotf_sRGB(np.clip(img_rgb_float, 0.0, 1.0))
-            xyz = colour.RGB_to_XYZ(lin, 'sRGB', apply_cctf_decoding=False)
-            lin_adobe = colour.XYZ_to_RGB(xyz, 'Adobe RGB (1998)', apply_cctf_encoding=False)
-            out = colour.RGB_COLOURSPACES['Adobe RGB (1998)'].cctf_encoding(np.clip(lin_adobe, 0.0, 1.0))
-        elif "2020" in t_low or "rec2020" in t_low or "bt2020" in t_low:
-            out = colour.RGB_to_RGB(img_rgb_float, 'sRGB', 'ITU-R BT.2020', apply_cctf_decoding=True, apply_cctf_encoding=True)
-        elif "prophoto" in t_low:
-            lin = colour.models.eotf_sRGB(np.clip(img_rgb_float, 0.0, 1.0))
-            xyz = colour.RGB_to_XYZ(lin, 'sRGB', apply_cctf_decoding=False)
-            lin_pro = colour.XYZ_to_RGB(xyz, 'ProPhoto RGB', apply_cctf_encoding=False)
-            out = colour.RGB_COLOURSPACES['ProPhoto RGB'].cctf_encoding(np.clip(lin_pro, 0.0, 1.0))
-        else:
-            out = img_rgb_float
-        return np.clip(out.astype(np.float32), 0.0, 1.0)
-    except Exception as e:
-        print(f"[SpektraEngine] Colorspace conversion error ({target}): {e}")
-        return np.clip(img_rgb_float, 0.0, 1.0)
+    Backwards-compatible wrapper that returns only the pixels.  Prefer
+    :func:`convert_image_colorspace_checked`, which also reports the space the result is
+    actually in -- that is what the ICC profile must be looked up from.
+    """
+    out, _effective = color_space.convert(img_rgb_float, target_colorspace, bit_depth=bit_depth)
+    return out
+
+
+def convert_image_colorspace_checked(img_rgb_float, target_colorspace="sRGB", bit_depth=8):
+    """Convert to ``target_colorspace``, returning ``(pixels, effective_colorspace)``.
+
+    ``effective_colorspace`` can differ from the requested one when the conversion is
+    unavailable; it then falls back to sRGB.  Callers must embed the ICC profile of the
+    *effective* space so pixels and profile can never disagree.
+    """
+    return color_space.convert(img_rgb_float, target_colorspace, bit_depth=bit_depth)
 
 
 def get_icc_profile_bytes(target_colorspace="sRGB"):
     """Retrieve standard embedded ICC profile bytes for target colorspace."""
     from .path_utils import get_resource_dir
-    target = str(target_colorspace).strip().lower()
+    # resolve() is the single source of truth shared with the pixel conversion, so the
+    # profile we embed always describes the space the pixels were converted into.
     icc_dir = os.path.join(get_resource_dir(), "icc")
-
-    cand_file = None
-    if "p3" in target:
-        cand_file = os.path.join(icc_dir, "DisplayP3.icc")
-    elif "adobe" in target:
-        cand_file = os.path.join(icc_dir, "AdobeRGB1998.icc")
-    elif "2020" in target or "rec2020" in target or "bt2020" in target:
-        cand_file = os.path.join(icc_dir, "Rec2020.icc")
-    elif "prophoto" in target:
-        cand_file = os.path.join(icc_dir, "ProPhotoRGB.icc")
-    else:
-        cand_file = os.path.join(icc_dir, "sRGB.icc")
+    cand_file = os.path.join(icc_dir, color_space.icc_filename(target_colorspace))
 
     if cand_file and os.path.exists(cand_file):
         try:
@@ -829,12 +811,25 @@ def save_encoded_image(rendered_data, output_path, params_dict):
     else:
         rendered_float = np.clip(rendered_data.astype(np.float32), 0.0, 1.0)
 
-    # 1. Colorspace conversion (rendered_float is in sRGB non-linear)
-    if colorspace and colorspace.lower() not in ("srgb", "srgb"):
-        rendered_float = convert_image_colorspace(rendered_float, colorspace)
+    # 1. Colorspace conversion.  `colorspace` is what the user asked for; the pixels end
+    #    up in `effective_colorspace`, which falls back to sRGB if the transform fails.
+    #    Everything downstream (ICC embedding, EXIF ColorSpace tag, JXL CICP) must use the
+    #    *effective* space, otherwise the file claims a wide gamut it does not contain.
+    #    sRGB is skipped entirely: rendered_float is already clamped to 0..1 above, and a
+    #    no-op transform would still copy the whole image (0.7 GB at 64 MP).
+    requested_colorspace = color_space.resolve(colorspace)[0]
+    if requested_colorspace == "sRGB":
+        effective_colorspace = "sRGB"
+    else:
+        rendered_float, effective_colorspace = convert_image_colorspace_checked(
+            rendered_float, colorspace, bit_depth=bit_depth)
+        if effective_colorspace != requested_colorspace:
+            logger.warning(
+                "Colorspace conversion unavailable for %r; writing sRGB pixels with an sRGB "
+                "profile instead of a mismatched wide-gamut tag", colorspace)
 
     # 2. Extract ICC profile bytes and EXIF bundle from source image / RAW negative
-    icc_bytes = get_icc_profile_bytes(colorspace)
+    icc_bytes = get_icc_profile_bytes(effective_colorspace)
     pil_exif, exif_bytes, tiff_tags = extract_exif_bundle(source_path)
 
     # 2.0 Optional GPS privacy stripping (defaults to True for photographer location security)
@@ -888,10 +883,10 @@ def save_encoded_image(rendered_data, output_path, params_dict):
             pil_exif[296] = 2
 
             sub_ifd = pil_exif.get_ifd(0x8769)
-            if "srgb" in str(colorspace).lower():
+            if effective_colorspace == "sRGB":
                 sub_ifd[0xA001] = 1  # Standard sRGB
             else:
-                sub_ifd[0xA001] = 65535  # Uncalibrated (Wide-gamut P3 / AdobeRGB with embedded ICC)
+                sub_ifd[0xA001] = 65535  # Uncalibrated (wide gamut, described by the ICC profile)
 
             new_exif_bytes = pil_exif.tobytes()
             if new_exif_bytes:
@@ -1015,16 +1010,20 @@ def save_encoded_image(rendered_data, output_path, params_dict):
             lossless_arg = False
             distance_arg = max(0.0, dist_val)
 
-        # Map color spaces to standard CICP Primaries & Transfer characteristics
-        cs_low = str(colorspace).lower()
-        if "p3" in cs_low:
+        # Map color spaces to standard CICP Primaries & Transfer characteristics.
+        # Derived from the *effective* space so a downgraded export is labelled sRGB.
+        if effective_colorspace == "Display P3":
             prim_arg = 11  # Display P3
             tr_arg = 13    # sRGB transfer
-        elif "2020" in cs_low or "rec2020" in cs_low or "bt2020" in cs_low:
+        elif effective_colorspace == "Rec. 2020":
             prim_arg = 9   # BT.2100 / BT.2020
-            tr_arg = 1     # BT.709 OETF
-        elif "adobe" in cs_low:
-            prim_arg = 1
+            # Our pixels use the BT.2020 OETF (CICP 14), which differs from BT.709's OETF
+            # only in the alpha/beta constants. imagecodecs' JPEGXL.TRANSFER_FUNCTION enum
+            # exposes {1,2,8,13,16,17,18} only, so 14 is not representable and 1 (BT.709)
+            # is the closest legal tag.
+            tr_arg = 1
+        elif effective_colorspace == "Adobe RGB (1998)":
+            prim_arg = 1   # no CICP code for Adobe RGB; 1 = BT.709 primaries, roughly analogous
             tr_arg = 13
         else:
             prim_arg = 1   # sRGB
@@ -1153,6 +1152,26 @@ class SpektraEngine:
         self._cached_sim = None
         self._cached_config = None
         self._render_lock = threading.Lock()
+        # Serialises full 3D LUT builds. The cached Simulator's pipeline is mutated per call
+        # (DIR couplers / morph), so a preview-thread bake, a thumbnail bake and an export
+        # bake must never interleave or they would bake each other's parameters.
+        self._lut_bake_lock = threading.Lock()
+        self._start_background_warmup()
+
+    @staticmethod
+    def _start_background_warmup():
+        """Pre-warm spektrafilm CAM16-UCS gamut envelope and Numba 3D LUT JIT in a daemon thread
+        so the first interactive chemistry/DIR LUT bake completes in ~35ms with zero cold-start pause.
+        """
+        def _warm():
+            try:
+                from spektrafilm.utils.lut import warmup_luts
+                from spektrafilm.utils.gamut_compression import OutputGamutCompressSpec, compress_rgb
+                warmup_luts()
+                compress_rgb(np.zeros((2, 2, 3)), OutputGamutCompressSpec(algorithm="cam16ucs"), output_color_space="sRGB")
+            except Exception:
+                pass
+        threading.Thread(target=_warm, daemon=True).start()
 
     def _load_profile(self, stock_id):
         if not stock_id or stock_id == "none":
@@ -1490,12 +1509,23 @@ class SpektraEngine:
                         try:
                             with open(os.path.join(self.profiles_dir, f), "r", encoding="utf-8") as fp:
                                 meta = json.load(fp)
-                            if meta.get("type") == "paper" or "paper" in sid.lower():
+                            info_obj = meta.get("info", {}) or {}
+                            # A profile belongs here when it is a print medium, which the
+                            # `info.support` field states directly.  Relying only on
+                            # `type == "paper"` or a "paper" id missed instant films such as
+                            # Instax (type=positive, support=paper, stage=printing): they are
+                            # excluded from the film list for exactly that reason, so they used
+                            # to appear in neither list and could not be selected at all.
+                            is_paper = (meta.get("type") == "paper"
+                                        or "paper" in sid.lower()
+                                        or info_obj.get("support") == "paper"
+                                        or info_obj.get("stage") == "printing")
+                            if is_paper:
                                 papers.append({
                                     "id": sid,
                                     "name": meta.get("name", sid),
                                     "badge": "自定义相纸",
-                                    "desc": meta.get("desc") or (meta.get("info", {}).get("desc", "")) or "用户自定义相纸配置",
+                                    "desc": meta.get("desc") or (info_obj.get("desc", "")) or "用户自定义相纸配置",
                                     "is_custom": True
                                 })
                         except Exception:
@@ -1575,6 +1605,38 @@ class SpektraEngine:
             (hasattr(prof, 'is_positive') and prof.is_positive) or
             (hasattr(prof, 'info') and getattr(prof.info, 'type', None) == 'positive')
         )
+
+    def dir_status(self, film_stock):
+        """Whether DIR couplers can act on this stock, plus the reason when they cannot.
+
+        Single source of truth for both the LUT bake and the UI: the three DIR sliders are
+        baked exclusively into the LUT, so a stock without coupler chemistry would leave the
+        controls silently inert. Returns (available, reason) with reason in
+        "" | "bypass" | "positive" | "bw" | "no_data".
+        """
+        if not film_stock or film_stock == "none":
+            return False, "bypass"
+        try:
+            prof = self._load_profile(film_stock)
+        except Exception:
+            prof = None
+        if prof is None:
+            return False, "no_data"
+
+        info = getattr(prof, "info", None)
+        if getattr(prof, "is_positive", False) or getattr(info, "type", None) == "positive":
+            return False, "positive"
+        if getattr(info, "channel_model", "color") == "bw":
+            return False, "bw"
+
+        phys = getattr(getattr(prof, "data", None), "physical_extensions", None) or {}
+        couplers = phys.get("couplers") if isinstance(phys, dict) else None
+        if isinstance(couplers, dict):
+            cinh = couplers.get("coupler_inhibition")
+            if cinh is not None and float(np.sum(np.abs(np.asarray(cinh, dtype=np.float64)))) < 1e-6 \
+                    and not couplers.get("coupler_geometry"):
+                return False, "no_data"
+        return True, ""
 
     def get_film_halation_preset(self, film_stock):
         """Query official spektrafilm halation preset from film profile's (use, antihalation) tags."""
@@ -1669,7 +1731,16 @@ class SpektraEngine:
                             "strength": float(cg.get("strength", 0.010)),
                             "layer_weights": [float(x) for x in cg.get("layer_weights", [0.70, 1.0, 1.35])],
                             "density_profile": cg.get("density_profile"),
-                            "density_law": int(cg.get("density_law", 2))
+                            "density_law": int(cg.get("density_law", 2)),
+                            # Per-stock grain law inputs.  These come straight from the profile
+                            # (fotufilm-engine data, see tools/validate_fotufilm_port.py); a
+                            # missing value means "use the model's global default", which is
+                            # different from a zero.
+                            "luma_correlation": cg.get("luma_correlation"),
+                            "granularity_read_density": cg.get("granularity_read_density"),
+                            "fog_density": cg.get("fog_density"),
+                            "reversal_profile": cg.get("reversal_profile"),
+                            "population": cg.get("population"),
                         }
             except Exception as e:
                 print(f"[SpektraGrain] 提取胶片颗粒配置异常: {e}")
@@ -1845,7 +1916,16 @@ class SpektraEngine:
         return neutral_baked()
 
     def get_3d_lut(self, film_stock="kodak_portra_400", paper_stock="kodak_2383", lut_size=33, params_dict=None, print_mode=None):
-        """Build and cache a 3D LUT (N x N x N x 3 float32) for the film + paper combination."""
+        """Build and cache a 3D LUT (N x N x N x 3 float32) for the film + paper combination.
+
+        Thread-safe: builds are serialised because the cached Simulator's pipeline carries
+        the DIR / morph parameters of the bake in progress.
+        """
+        with self._lut_bake_lock:
+            return self._build_3d_lut(film_stock, paper_stock, lut_size, params_dict, print_mode)
+
+    def _build_3d_lut(self, film_stock="kodak_portra_400", paper_stock="kodak_2383", lut_size=33, params_dict=None, print_mode=None):
+        """Unlocked LUT build body - call get_3d_lut() instead."""
         params_dict = params_dict or {}
         if print_mode is None:
             print_mode = str(params_dict.get("print_mode", "optical")).lower()
@@ -1900,6 +1980,13 @@ class SpektraEngine:
             if load_target:
                 try:
                     lut_3d = np.load(load_target)
+                    self._record_lut_baked(lut_3d, {
+                        "dir_amount": 1.0,
+                        "dir_interlayer": 1.0,
+                        "dir_samelayer": 1.0,
+                        "morph_gamma": 1.0,
+                        "developer_exhaustion": 0.0,
+                    })
                     with self._render_lock:
                         self._lut_cache[cache_key] = lut_3d
                         self._lut_cache.move_to_end(cache_key)
@@ -1911,44 +1998,43 @@ class SpektraEngine:
 
         print(f"[SpektraEngine] 正在为 GPU 生成物理对数 3D LUT: {film_stock} + {eff_paper} (模式: {print_mode}, 光源: {illuminant}, DIR: {dir_intl}, 尺寸: {lut_size})...")
         t0 = time.time()
-        
-        flat_input = lattice.reshape(-1, 1, 3)
 
-        params = init_params()
-        params.film = self._load_profile(film_stock)
+        # Shape lattice as 2D image (N, N*N, 3) for optimal Numba prange parallelization
+        flat_input = lattice.reshape(lut_size, lut_size * lut_size, 3)
+
+        from spektrafilm.runtime.params_schema import RuntimePhotoParams
+        film_prof = self._load_profile(film_stock)
 
         # Check if positive (slide/reversal), B&W (monochrome), or negative film
-        is_pos = (params.film and hasattr(params.film, 'is_positive') and params.film.is_positive) or \
-                 (params.film and hasattr(params.film, 'info') and getattr(params.film.info, 'type', None) == 'positive')
-        is_bw = (params.film and hasattr(params.film, 'info') and getattr(params.film.info, 'channel_model', None) == 'bw')
+        is_pos = (film_prof and hasattr(film_prof, 'is_positive') and film_prof.is_positive) or \
+                 (film_prof and hasattr(film_prof, 'info') and getattr(film_prof.info, 'type', None) == 'positive')
+        is_bw = (film_prof and hasattr(film_prof, 'info') and getattr(film_prof.info, 'channel_model', None) == 'bw')
 
         if is_pos:
             # Positive slide film: inherently positive, no photographic print paper
-            params.io.scan_film = True
-            params.print = None
-            params.settings.neutral_print_filters_from_database = False
+            print_prof = None
             base_paper = "none"
         elif is_bw:
             # Monochrome negative film: print through neutral enlarger without color filtration
-            params.io.scan_film = False
             opt_paper = "kodak_2383" if paper_stock == "none" else paper_stock
-            params.print = self._load_profile(opt_paper)
-            params.settings.neutral_print_filters_from_database = False
+            print_prof = self._load_profile(opt_paper)
             base_paper = opt_paper
         elif print_mode == "scan":
             # Negative film in digital scan mode: digital lab scanner inversion paper (Kodak Ektacolor Edge)
-            params.io.scan_film = False
             scan_paper = "kodak_ektacolor_edge"
-            params.print = self._load_profile(scan_paper)
-            params.settings.neutral_print_filters_from_database = True
+            print_prof = self._load_profile(scan_paper)
             base_paper = scan_paper
         else:
             # Negative film in optical print mode: optical enlarger onto positive photographic paper
-            params.io.scan_film = False
             opt_paper = "kodak_2383" if paper_stock == "none" else paper_stock
-            params.print = self._load_profile(opt_paper)
-            params.settings.neutral_print_filters_from_database = True
+            print_prof = self._load_profile(opt_paper)
             base_paper = opt_paper
+
+        dummy_print = print_prof if print_prof is not None else self._load_profile("kodak_2383")
+        params = RuntimePhotoParams(film=film_prof, print=dummy_print)
+        params.print = print_prof
+        params.io.scan_film = bool(is_pos)
+        params.settings.neutral_print_filters_from_database = False
 
         # CRITICAL: Enable lut_mode for deterministic, un-biased 3D LUT generation
         # This completely disables auto_exposure on the synthetic cube lattice,
@@ -1958,25 +2044,19 @@ class SpektraEngine:
         params.camera.exposure_compensation_ev = 0.0
 
         params.settings.preview_mode = True
-        params.settings.use_enlarger_lut = True
-        params.settings.use_scanner_lut = True
+        # For small interactive LUT sizes (<= 17), direct spectral computation is faster
+        # than building and PCHIP-interpolating a 17^3 sub-LUT; for 33^3, sub-LUTs win.
+        use_sub_lut = (lut_size > 17)
+        params.settings.use_enlarger_lut = use_sub_lut
+        params.settings.use_scanner_lut = use_sub_lut
         params.settings.lut_resolution = 17
 
         # Enlarger illuminant
         params.enlarger.illuminant = illuminant
 
         # DIR Couplers: only active for color negative films that actually possess DIR chemistry
-        has_dir = True
-        if is_bw or is_pos:
-            has_dir = False
-        else:
-            phys_ext = getattr(params.film.data, "physical_extensions", None) or {}
-            c_ext = phys_ext.get("couplers") if isinstance(phys_ext, dict) else None
-            if isinstance(c_ext, dict):
-                cinh = c_ext.get("coupler_inhibition")
-                cgeom = c_ext.get("coupler_geometry")
-                if cinh is not None and np.sum(np.abs(cinh)) < 1e-6 and not cgeom:
-                    has_dir = False
+        # (dir_status() is the shared source of truth so the bake and the UI never disagree)
+        has_dir = self.dir_status(film_stock)[0]
 
         params.film_render.dir_couplers.active = (dir_amt > 0.01 and has_dir)
         params.film_render.dir_couplers.amount = dir_amt
@@ -2002,9 +2082,39 @@ class SpektraEngine:
         params.film_render.halation.active = False
         params.film_render.grain.active = False
 
-        digested = digest_params(params)
-        sim = Simulator(digested)
-        lut_output = sim.process(flat_input)
+        from spektrafilm.runtime.topology import Tap
+        sim_key = (film_stock, base_paper, illuminant, is_pos, is_bw)
+        if not hasattr(self, "_lut_sim_cache"):
+            self._lut_sim_cache = {}
+        if not hasattr(self, "_lut_loge_cache"):
+            self._lut_loge_cache = {}
+
+        sim = self._lut_sim_cache.get(sim_key)
+        if sim is None:
+            digested = digest_params(params)
+            sim = Simulator(digested)
+            if len(self._lut_sim_cache) >= 8:
+                self._lut_sim_cache.pop(next(iter(self._lut_sim_cache)))
+            self._lut_sim_cache[sim_key] = sim
+        else:
+            p_pipe = sim._pipeline
+            p_pipe.settings.use_enlarger_lut = use_sub_lut
+            p_pipe.settings.use_scanner_lut = use_sub_lut
+            p_pipe.film_render.dir_couplers.active = (dir_amt > 0.01 and has_dir)
+            p_pipe.film_render.dir_couplers.amount = dir_amt
+            p_pipe.film_render.dir_couplers.inhibition_interlayer = dir_intl
+            p_pipe.film_render.dir_couplers.inhibition_samelayer = dir_same
+            p_pipe.print_render.density_curves_morph = params.print_render.density_curves_morph
+
+        loge_key = (film_stock, lut_size)
+        log_e_film = self._lut_loge_cache.get(loge_key)
+        if log_e_film is None:
+            log_e_film = sim._pipeline.process(flat_input, collect=Tap.LOG_E_FILM)
+            if len(self._lut_loge_cache) >= 16:
+                self._lut_loge_cache.pop(next(iter(self._lut_loge_cache)))
+            self._lut_loge_cache[loge_key] = log_e_film
+
+        lut_output = sim._pipeline.process(log_e_film, inject=Tap.LOG_E_FILM, collect=Tap.RGB_OUT)
         lut_3d = np.clip(lut_output.reshape(lut_size, lut_size, lut_size, 3), 0.0, 1.0).astype(np.float32)
 
         if is_bw:
@@ -2016,9 +2126,10 @@ class SpektraEngine:
         elif is_pos:
             lut_3d = self._postprocess_positive_lut(lut_3d, film_stock)
 
-        dir_baked = has_dir and dir_amt > 0.01
+        dir_baked = has_dir
         morph_baked = params.print is not None
         self._record_lut_baked(lut_3d, {
+            "dir_amount": dir_amt if dir_baked else 1.0,
             "dir_interlayer": dir_intl if dir_baked else 1.0,
             "dir_samelayer": dir_same if dir_baked else 1.0,
             "morph_gamma": morph_gamma if morph_baked else 1.0,
@@ -3297,7 +3408,6 @@ class SpektraEngine:
             grain = float(params_dict.get("grain", 0.4))
             grain_size = float(params_dict.get("grain_size", 1.0))
             fmt_mm = float(params_dict.get("film_format_mm", 35.0))
-            grain_scale = (35.0 / max(5.0, fmt_mm)) * max(0.2, grain_size)
             diff_family = str(params_dict.get("diffusion_family", "none")).lower()
             diff_strength = float(params_dict.get("diffusion_strength", 0.0))
             diff_warmth = float(params_dict.get("diffusion_warmth", 0.0))
@@ -3333,7 +3443,7 @@ class SpektraEngine:
 
             base_temp = float(params_dict.get("base_temp", 5500.0))
             base_tint = float(params_dict.get("base_tint", 1.0))
-            from .darkroom_math import wb_gains, paper_domain_adjust, chemistry_delta, grain_colour_rho, grain_scale_px
+            from .darkroom_math import wb_gains, paper_domain_adjust, chemistry_delta, grain_colour_rho, apply_black_point
             wb_g = wb_gains(temp_val, base_temp, tint_val, base_tint)
             lut_baked = self.get_lut_baked_params(lut_3d)
 
@@ -3425,11 +3535,12 @@ class SpektraEngine:
             chunk_size = 256
             chunks = [(y0, min(y0 + chunk_size, H)) for y0 in range(0, H, chunk_size)]
 
+            dir_amt = float(params_dict.get("dir_amount", 1.0))
             dir_intl = float(params_dict.get("dir_interlayer", 1.0))
             dir_same = float(params_dict.get("dir_samelayer", 1.0))
             morph_gamma = float(params_dict.get("morph_gamma", 1.0))
             dev_exh = float(params_dict.get("developer_exhaustion", 0.0))
-            chem_params = {"dir_interlayer": dir_intl, "dir_samelayer": dir_same,
+            chem_params = {"dir_amount": dir_amt, "dir_interlayer": dir_intl, "dir_samelayer": dir_same,
                            "morph_gamma": morph_gamma, "developer_exhaustion": dev_exh}
             if is_pos:
                 chem_params["morph_gamma"] = 1.0
@@ -3439,36 +3550,36 @@ class SpektraEngine:
             st_size = float(grain_preset.get("size_mm", 0.005))
             st_strength = float(grain_preset.get("strength", 0.010))
             st_lw = np.array(grain_preset.get("layer_weights", [0.70, 1.0, 1.35]), dtype=np.float32)
-            grain_rho = grain_colour_rho(st_strength, float(params_dict.get("grain_colour", 1.0)))
-            # Gaussian sigma (px) approximating the shader's multi-octave dye-cloud scale
-            grain_sigma_px = 0.6 * grain_scale_px(fmt_mm, max(H, W), grain_size, st_size)
+            # Grain weights, density response and amplitude normalisation all come from
+            # core/grain_model.py -- the same module the preview shader takes its uniforms
+            # from. Scaling the long edge to the *output* size keeps the physical grain size
+            # tied to the film plane, and grain_model's octave floor stops small exports from
+            # degenerating into unfiltered white noise.
+            grain_colour = float(params_dict.get("grain_colour", 1.0))
+            grain_spec = grain_model.derive(
+                grain_slider=grain,
+                stock_strength=st_strength,
+                layer_weights=st_lw,
+                cloud_blur=params_dict.get("grain_cloud_blur", 1.0),
+                # rho is solved inside derive() from the calibrated channel-correlation target
+                rho=grain_colour_rho(st_strength, grain_colour),
+                fmt_mm=fmt_mm,
+                long_edge_px=max(H, W),
+                grain_size=grain_size,
+                stock_size_mm=st_size,
+                grain_colour=grain_colour,
+            )
+            grain_rng = np.random.default_rng(20260127)
 
             def _process_chunk(y_range):
                 y0, y1 = y_range
                 chunk_linear = linear_full[y0:y1].copy()
 
-                # Pre-LUT physical transmittance grain (matches GPU shader)
-                if grain > 0.01:
-                    eff_strength = (grain / 0.40) * (st_strength / 0.010)
-                    lin_c = np.maximum(chunk_linear, 0.0)  # per-layer negative granularity (matches GPU shader)
-                    dens_mod = 0.72 * (0.15 + 0.85 * (1.0 - np.exp(-lin_c / 0.010))) / (1.0 + (lin_c / 2.0) ** 1.5)
-                    ch_h, ch_w = chunk_linear.shape[0], chunk_linear.shape[1]
-                    indep = np.random.randn(ch_h, ch_w, 3).astype(np.float32)
-                    shared = np.random.randn(ch_h, ch_w, 1).astype(np.float32)
-                    if grain_sigma_px > 0.35:
-                        # Spatially correlated grain at physical scale (renormalised to unit variance)
-                        indep = cv2.GaussianBlur(indep, (0, 0), grain_sigma_px)
-                        shared = cv2.GaussianBlur(shared[..., 0], (0, 0), grain_sigma_px)[..., None]
-                        indep /= max(1e-6, float(indep.std()))
-                        shared /= max(1e-6, float(shared.std()))
-                    if grain_sigma_px > 0.35:
-                        # Chroma mottle is coarser than luminance grain (matches GPU shader)
-                        indep = cv2.GaussianBlur(indep, (0, 0), grain_sigma_px * 0.8)
-                        indep /= max(1e-6, float(indep.std()))
-                    lw_mean = float(st_lw.mean())
-                    noise = (np.sqrt(1.0 - grain_rho) * indep * st_lw + np.sqrt(grain_rho) * shared * lw_mean) * 0.5
-                    dD = noise * (eff_strength * 0.35) * dens_mod
-                    chunk_linear = np.maximum(0.0, chunk_linear * np.exp(-dD * 2.3025851))
+                # Pre-LUT physical transmittance grain (shared model with the GPU shader)
+                if grain_spec.active:
+                    layer = grain_model.synthesize_layer_grain(grain_spec, y1 - y0, chunk_linear.shape[1], grain_rng)
+                    dD = layer * (grain_spec.strength * grain_model.STRENGTH_GAIN) * grain_model.density_response(chunk_linear)
+                    chunk_linear = np.maximum(0.0, chunk_linear * np.exp(-dD * grain_model.LOG10_E))
 
                 coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
                 idx0 = coords.astype(np.int32)
@@ -3510,8 +3621,8 @@ class SpektraEngine:
                 # Paper Chemistry Morph & Developer Exhaustion - delta vs. LUT-baked values only
                 chunk_film = chemistry_delta(chunk_film, chem_params, lut_baked, apply_dir=False)
 
-                # Black lift (output-side additive fade)
-                chunk_film = chunk_film + black_lift
+                # Bidirectional Black Point calibration (white-point preserving: >0 lifts shadows/fades, <0 subtracts base fog/deepens blacks)
+                chunk_film = apply_black_point(chunk_film, black_lift)
 
                 rendered_float[y0:y1] = np.clip(chunk_film, 0.0, 1.0)
 

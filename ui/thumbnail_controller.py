@@ -11,7 +11,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal, QThread, Qt
 from PySide6.QtGui import QImage, QPixmap
 from core import session_cache_manager
-from core.darkroom_math import wb_gains, paper_domain_adjust, chemistry_delta
+from core.darkroom_math import wb_gains, paper_domain_adjust, chemistry_delta, apply_black_point
 import logging
 logger = logging.getLogger("SpektraDarkroom.ThumbnailController")
 
@@ -45,10 +45,10 @@ def apply_post_lut_adjustments_f32(img_f32: np.ndarray, params: dict, baked: dic
         # 3. Paper Chemistry Morph & Developer Exhaustion - delta vs. LUT-baked values only
         out = chemistry_delta(out, params, baked, apply_dir=False)
 
-    # 4. Black lift (output-side additive fade, applies to all stocks like the GPU shader)
+    # 4. Bidirectional Black Point calibration (applies to all stocks like the GPU shader)
     black_lift = float(params.get("black_lift", 0.0))
-    if black_lift > 0.0005:
-        out = out + black_lift
+    if abs(black_lift) > 0.0005:
+        out = apply_black_point(out, black_lift)
 
     return np.clip(out, 0.0, 1.0)
 

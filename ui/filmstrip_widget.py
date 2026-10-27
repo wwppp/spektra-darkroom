@@ -288,7 +288,7 @@ class FilmstripItemWidget(QFrame):
         self.update_tooltip()
 
     def _apply_theme_style(self, _theme=None):
-        self.setStyleSheet(f"FilmstripItemWidget {{ background: transparent; border: none; }}\n{theme_manager.get_tooltip_stylesheet()}")
+        self.setStyleSheet(f"FilmstripItemWidget {{ background: transparent; border: none; }}\n{theme_manager.widget_tooltip_stylesheet()}")
 
     def update_tooltip(self):
         """Dynamically build tooltip ensuring resolution is accurate and never 0 x 0."""
@@ -971,7 +971,7 @@ class FilmstripWidget(QWidget):
         is_dark = theme_manager.is_dark()
         top_border = "#1c1e28" if is_dark else "#c2c8d4"
         bg = theme_manager.color('filmstrip_bg')
-        self.setStyleSheet(f"FilmstripWidget {{ background: {bg}; border: none; border-top: 1px solid {top_border}; }}\n{theme_manager.get_tooltip_stylesheet()}")
+        self.setStyleSheet(f"FilmstripWidget {{ background: {bg}; border: none; border-top: 1px solid {top_border}; }}\n{theme_manager.widget_tooltip_stylesheet()}")
 
         # 1. Long Concave Film Track Channel (长条凹形胶片条槽路)
         self.track_container = FilmTrackContainer(self)
@@ -1145,7 +1145,7 @@ class FilmstripWidget(QWidget):
         is_dark = theme_manager.is_dark()
         top_border = "#1c1e28" if is_dark else "#c2c8d4"
         bg = theme_manager.color('filmstrip_bg')
-        tt_ss = theme_manager.get_tooltip_stylesheet()
+        tt_ss = theme_manager.widget_tooltip_stylesheet()
         self.setStyleSheet(f"FilmstripWidget {{ background: {bg}; border: none; border-top: 1px solid {top_border}; }}\n{tt_ss}")
         if hasattr(self, "track_container") and self.track_container:
             self.track_container.setStyleSheet(f"background: transparent; border: none;\n{tt_ss}")

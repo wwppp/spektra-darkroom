@@ -57,6 +57,7 @@ from .app_core import (
     save_encoded_image,
     extract_exif_bundle,
     get_icc_profile_bytes,
+    convert_image_colorspace_checked,
 )
 
 # Register top-level aliases in sys.modules for flawless backward compatibility
@@ -116,4 +117,5 @@ __all__ = [
     "save_encoded_image",
     "extract_exif_bundle",
     "get_icc_profile_bytes",
+    "convert_image_colorspace_checked",
 ]
