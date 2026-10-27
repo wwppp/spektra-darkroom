@@ -48,7 +48,13 @@ def paper_domain_adjust(img, cmy=(0.0, 0.0, 0.0), print_exp=1.0, preflash=0.0):
 
 
 def neutral_baked():
-    return {"dir_interlayer": 1.0, "dir_samelayer": 1.0, "morph_gamma": 1.0, "developer_exhaustion": 0.0}
+    return {
+        "dir_amount": 1.0,
+        "dir_interlayer": 1.0,
+        "dir_samelayer": 1.0,
+        "morph_gamma": 1.0,
+        "developer_exhaustion": 0.0,
+    }
 
 
 def chemistry_delta(img, params, baked=None, apply_dir=True, apply_morph=True):
@@ -58,21 +64,52 @@ def chemistry_delta(img, params, baked=None, apply_dir=True, apply_morph=True):
     between the requested value and the baked value is approximated here.
     """
     b = baked or neutral_baked()
-    ri = float(params.get("dir_interlayer", 1.0)) / max(0.05, float(b.get("dir_interlayer", 1.0)))
-    rs = float(params.get("dir_samelayer", 1.0)) / max(0.05, float(b.get("dir_samelayer", 1.0)))
+    cur_amt = float(params.get("dir_amount", 1.0))
+    bak_amt = float(b.get("dir_amount", 1.0))
+    eff_inter = cur_amt * float(params.get("dir_interlayer", 1.0))
+    bak_inter = bak_amt * float(b.get("dir_interlayer", 1.0))
+    eff_same = cur_amt * float(params.get("dir_samelayer", 1.0))
+    bak_same = bak_amt * float(b.get("dir_samelayer", 1.0))
+    d_inter = eff_inter - bak_inter
+    d_same = eff_same - bak_same
     out = img
-    if apply_dir and (abs(ri - 1.0) > 0.01 or abs(rs - 1.0) > 0.01):
-        luma_f = 0.299 * out[..., 0] + 0.587 * out[..., 1] + 0.114 * out[..., 2]
-        out = luma_f[..., None] + (out - luma_f[..., None]) * ri
-        out = np.power(np.clip(out, 0.0001, 1.0), 1.0 / max(0.2, rs))
+    if apply_dir and (abs(d_inter) > 0.01 or abs(d_same) > 0.01):
+        # Asymmetric cross-layer coupler inhibition in paper log-exposure domain
+        # Mirrors spektrafilm's M_inter (R/G layers strongly inhibit G/B layers) + M_self
+        pv = np.clip(out, PAPER_CLIP, 1.0 - PAPER_CLIP)
+        le = np.log10(1.0 / pv - 1.0) / PAPER_GAMMA
+        # Linear regression of spektrafilm negative-film DIR coupler response in log10(E_paper):
+        a_inter = np.array([
+            [-0.0766, -0.2029, -0.2196],
+            [-0.0977, -0.0508, -0.0269],
+            [-0.1714, -0.2069, -0.1958],
+        ], dtype=np.float32)
+        b_inter = np.array([0.0370, 0.0558, 0.0753], dtype=np.float32)
+        a_same = np.array([
+            [-0.0195, -0.0597, -0.0596],
+            [-0.0039,  0.0227, -0.0057],
+            [-0.0537, -0.0568, -0.0212],
+        ], dtype=np.float32)
+        b_same = np.array([0.0105, 0.0167, 0.0197], dtype=np.float32)
+        dle = d_inter * (le @ a_inter + b_inter) + d_same * (le @ a_same + b_same)
+        e_new = 10.0 ** ((le + dle) * PAPER_GAMMA)
+        out = (1.0 / (1.0 + e_new)).astype(np.float32)
     if apply_morph:
         rg = float(params.get("morph_gamma", 1.0)) / max(0.05, float(b.get("morph_gamma", 1.0)))
         if abs(rg - 1.0) > 0.01:
-            out = np.power(np.clip(out, 0.0001, 1.0), rg)
+            # S-curve contrast around paper mid-grey pivot (0.42), matching spektrafilm s023 coupled-gamma morph
+            pivot = 0.42
+            c = np.clip(out, 1e-4, 1.0 - 1e-4)
+            ratio = (c / pivot) / ((1.0 - c) / (1.0 - pivot))
+            odds = ratio ** rg
+            out = (odds * pivot) / (odds * pivot + (1.0 - pivot))
         d_exh = float(params.get("developer_exhaustion", 0.0)) - float(b.get("developer_exhaustion", 0.0))
         if abs(d_exh) > 0.005:
-            out = out * (1.0 - d_exh * 0.6) + (out * 0.88 + 0.03) * (d_exh * 0.6)
-    return out
+            # Mirrors spektrafilm s023 Gumbel-max CDF morph: D(0) and D_max fixed,
+            # asymmetrically softens print high-density shoulder and lifts upper-midtones
+            c = np.clip(out, 0.0, 1.0)
+            out = np.clip(out + d_exh * c * (1.0 - c) * (c - 0.42) * 0.35, 0.0, 1.0)
+    return out.astype(np.float32)
 
 
 def grain_colour_rho(stock_strength, grain_colour=1.0):
@@ -89,3 +126,17 @@ def grain_scale_px(fmt_mm, master_long_px, grain_size=1.0, stock_size_mm=0.005):
     Calibrated so 35mm @ 6024 px (~5.98 um/px) gives 1.0 for a 5 um stock."""
     um_per_px = (max(5.0, float(fmt_mm)) * 1000.0) / max(1.0, float(master_long_px))
     return max(0.20, (5.976 / um_per_px) * max(0.2, float(grain_size)) * (float(stock_size_mm) / 0.005))
+
+
+def apply_black_point(img, black_lift=0.0):
+    """Bidirectional black-point calibration preserving the white point (1.0).
+    - black_lift > 0: lifts Dmax black point toward grey (vintage fade / airy shadows) without clipping highlights.
+    - black_lift < 0: subtracts base fog and deepens shadows toward pure black (dehaze / solid blacks).
+    """
+    b = float(black_lift)
+    if abs(b) <= 1e-4:
+        return img
+    if b > 0.0:
+        return b + img * (1.0 - b)
+    c = min(0.95, -b)
+    return np.maximum(0.0, (img - c) / (1.0 - c)).astype(np.float32)

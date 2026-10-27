@@ -17,6 +17,7 @@ import os
 import sys
 import copy
 import ctypes
+import threading
 from ctypes import c_int, byref
 from datetime import datetime
 import logging
@@ -110,6 +111,42 @@ from ui.spinner_widget import SpinnerWidget
 from ui.histogram_widget import HistogramWidget, HistogramExifBar
 from ui.fading_stacked_widget import FadingStackedWidget
 from ui.theme_manager import theme_manager
+
+
+# Opt-in window-frame diagnostics: set SPEKTRA_FRAME_DEBUG=1 to log every non-client message and
+# window-state transition to %TEMP%\spektra_frame.log. Used to pin down the classic-titlebar
+# flash if it ever comes back.
+_FRAME_DEBUG = bool(os.environ.get("SPEKTRA_FRAME_DEBUG"))
+_FRAME_LOG = os.path.join(os.environ.get("TEMP", "."), "spektra_frame.log")
+# Window frame strategy (SPEKTRA_FRAME_MODE):
+#   anim (default) - keep WS_CAPTION so DWM keeps animating minimise/maximise, but disable DWM
+#                    non-client rendering so the caption itself is never painted. Trade-off: the
+#                    native drop shadow is dropped as well.
+#   legacy         - keep WS_CAPTION with DWM non-client rendering on: keeps the shadow, relies
+#                    only on the message interception and one-shot style/icon setup.
+#   clean          - drop WS_CAPTION entirely: no caption can ever be drawn, but the DWM zoom
+#                    animation is gone too (it needs a frame).
+_FRAME_MODE = os.environ.get("SPEKTRA_FRAME_MODE", "anim").strip().lower()
+
+
+def _frame_log(line):
+    if not _FRAME_DEBUG:
+        return
+    try:
+        with open(_FRAME_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {line}\n")
+    except Exception:
+        pass
+
+
+class _LutBakeBridge(QObject):
+    """Carries a finished background LUT build back to the GUI thread.
+
+    Emitted from a plain worker thread, delivered as a queued connection, so the canvas
+    texture upload always happens on the GUI thread.
+    """
+
+    baked = Signal(object, object, object)  # lut_3d, key, chem_snapshot
 
 
 class WindowCaptionButton(QPushButton):
@@ -1179,7 +1216,7 @@ class FilmGridCard(QFrame):
 
     def _update_appearance(self):
         is_dark = theme_manager.is_dark()
-        tooltip_bubble_style = theme_manager.get_tooltip_stylesheet()
+        tooltip_bubble_style = theme_manager.widget_tooltip_stylesheet()
         thumb_bg = "transparent"
 
         if hasattr(self, "lbl_thumb") and self.lbl_thumb:
@@ -2299,9 +2336,33 @@ class DarkroomMainWindow(QMainWindow):
         else:
             worker.start()
 
+    def _extend_dwm_frame(self):
+        """Ask DWM to composite the whole window (smooth maximise/restore animation + native
+        drop shadow). Kept separate from the style setup so it can be re-asserted cheaply."""
+        if sys.platform != "win32":
+            return
+        try:
+            class MARGINS(ctypes.Structure):
+                _fields_ = [
+                    ("cxLeftWidth", ctypes.c_int),
+                    ("cxRightWidth", ctypes.c_int),
+                    ("cyTopHeight", ctypes.c_int),
+                    ("cyBottomHeight", ctypes.c_int),
+                ]
+            margins = MARGINS(1, 1, 1, 1)
+            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(int(self.winId()), byref(margins))
+        except Exception:
+            pass
+
     def _setup_native_window_frame(self):
         """Configure Win32 window styles, DWM client frame extension, and Aero Snap once on show."""
         if sys.platform != "win32":
+            return
+        # One-shot: re-applying GWL_STYLE / SWP_FRAMECHANGED on every show (restore from
+        # minimise, re-show) makes Windows recompute and repaint the non-client area, which is
+        # what flashes the classic WS_CAPTION title bar over the custom one.
+        if getattr(self, "_native_frame_ready", False):
+            self._extend_dwm_frame()
             return
         try:
             hwnd = int(self.winId())
@@ -2312,9 +2373,28 @@ class DarkroomMainWindow(QMainWindow):
             WS_MAXIMIZEBOX = 0x00010000
             WS_MINIMIZEBOX = 0x00020000
             WS_SYSMENU = 0x00080000
-            ctypes.windll.user32.SetWindowLongW(
-                hwnd, GWL_STYLE, style | WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU
-            )
+            # Frame strategy (see _FRAME_MODE at module level):
+            # WS_CAPTION is what lets DWM animate minimise/maximise, but it is also the single
+            # piece of state that lets DWM / the shell paint the classic title bar on every frame
+            # re-validation - a paint that never reaches our window procedure, so no WM_NC*
+            # interception can stop it. "clean" removes the style bit (no animation);
+            # "anim" keeps it but turns off DWM non-client rendering (no caption, keeps zoom).
+            if _FRAME_MODE == "clean":
+                new_style = (style | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU) & ~WS_CAPTION
+            else:
+                new_style = style | WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, new_style)
+            if _FRAME_MODE == "anim":
+                # DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED: DWM keeps compositing the window
+                # (and animating it) but never renders its non-client frame / caption.
+                policy = ctypes.c_int(1)
+                try:
+                    ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, 2, ctypes.byref(policy), ctypes.sizeof(policy))
+                except Exception:
+                    pass
+            _frame_log(f"frame mode={_FRAME_MODE} style=0x{new_style & 0xFFFFFFFF:08X} "
+                       f"caption={int((new_style & WS_CAPTION) != 0)}")
             GWL_EXSTYLE = -20
             WS_EX_APPWINDOW = 0x00040000
             ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
@@ -2322,21 +2402,30 @@ class DarkroomMainWindow(QMainWindow):
 
             # Extend DWM frame into client area so DWM composites entire window smoothly during
             # maximize/restore animation without black borders and provides native drop shadow
-            class MARGINS(ctypes.Structure):
-                _fields_ = [
-                    ("cxLeftWidth", ctypes.c_int),
-                    ("cxRightWidth", ctypes.c_int),
-                    ("cyTopHeight", ctypes.c_int),
-                    ("cyBottomHeight", ctypes.c_int),
-                ]
-            margins = MARGINS(1, 1, 1, 1)
-            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(hwnd, byref(margins))
+            self._extend_dwm_frame()
 
             SWP_NOZORDER = 0x0004
             SWP_NOMOVE = 0x0002
             SWP_NOSIZE = 0x0001
             SWP_FRAMECHANGED = 0x0020
             ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+            self._native_frame_ready = True
+        except Exception:
+            pass
+
+    def _set_native_caption(self, enabled: bool):
+        """Add/remove WS_CAPTION at runtime (used while closing, see closeEvent)."""
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())
+            GWL_STYLE = -16
+            WS_CAPTION = 0x00C00000
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+            new_style = (style | WS_CAPTION) if enabled else (style & ~WS_CAPTION)
+            if new_style != style:
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, new_style)
+            _frame_log(f"caption set to {int(enabled)}")
         except Exception:
             pass
 
@@ -2357,6 +2446,12 @@ class DarkroomMainWindow(QMainWindow):
 
     def _apply_native_window_icon(self):
         if sys.platform != "win32":
+            return
+        # One-shot: WM_SETICON / SetClassLongPtr make Windows invalidate and repaint the
+        # non-client caption (the icon lives in the caption). Running this on every activation
+        # change - as it used to - is exactly what made the classic title bar flash when
+        # switching to or from another application.
+        if getattr(self, "_native_icon_ready", False):
             return
         try:
             hwnd = int(self.winId())
@@ -2391,20 +2486,18 @@ class DarkroomMainWindow(QMainWindow):
                     except Exception:
                         pass
 
-            # Ensure OS recognizes this as a standard top-level application window with Taskbar/Task Manager identity
-            GWL_STYLE = -16
-            WS_SYSMENU = 0x00080000
-            WS_MINIMIZEBOX = 0x00020000
-            WS_MAXIMIZEBOX = 0x00010000
-            WS_CAPTION = 0x00C00000
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CAPTION)
-
-            GWL_EXSTYLE = -20
-            WS_EX_APPWINDOW = 0x00040000
-            WS_EX_TOOLWINDOW = 0x00000080
-            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW)
+            # Ensure OS recognises this as a standard top-level application window (Taskbar /
+            # Task Manager identity). WS_CAPTION and friends are set once in
+            # _setup_native_window_frame: re-applying them on every activation change made
+            # Windows recompute the non-client area, which flashed the classic title bar.
+            if not getattr(self, "_taskbar_identity_ready", False):
+                GWL_EXSTYLE = -20
+                WS_EX_APPWINDOW = 0x00040000
+                WS_EX_TOOLWINDOW = 0x00000080
+                ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW)
+                self._taskbar_identity_ready = True
+            self._native_icon_ready = True
         except Exception:
             pass
 
@@ -2413,6 +2506,7 @@ class DarkroomMainWindow(QMainWindow):
         self._setup_native_window_frame()
         self._apply_win11_corners(self.isMaximized())
         self._apply_native_window_icon()
+        _frame_log(f"showEvent visible={int(self.isVisible())} max={int(self.isMaximized())}")
         if self._saved_normal_geo is None and not self.isMaximized():
             self._saved_normal_geo = self.geometry()
         if getattr(self, '_restore_as_maximized', False):
@@ -2426,6 +2520,7 @@ class DarkroomMainWindow(QMainWindow):
         """Keep maximize/restore button state in 100% sync with window state."""
         if event.type() == QEvent.Type.WindowStateChange:
             is_max = self.isMaximized()
+            _frame_log(f"changeEvent WindowStateChange max={int(is_max)}")
             if hasattr(self, 'btn_max'):
                 self.btn_max.set_maximized_state(is_max)
                 if hasattr(self, 'btn_close'):
@@ -2434,6 +2529,7 @@ class DarkroomMainWindow(QMainWindow):
             # Defer root style update and icon recheck to avoid blocking the GUI thread during DWM maximize animation
             QTimer.singleShot(0, lambda: self._on_window_state_changed_deferred(is_max))
         elif event.type() == QEvent.Type.ActivationChange:
+            _frame_log(f"changeEvent ActivationChange active={int(self.isActiveWindow())}")
             self._apply_native_window_icon()
         super().changeEvent(event)
 
@@ -2459,6 +2555,17 @@ class DarkroomMainWindow(QMainWindow):
                         ("pt", wintypes.POINT)
                     ]
                 msg = MSG.from_address(int(message))
+
+                if _FRAME_DEBUG and msg.message in (0x0047, 0x007D, 0x0083, 0x0085, 0x0086, 0x00AE, 0x00AF,
+                                                    0x0014, 0x001A, 0x001C, 0x0024, 0x031E):
+                    try:
+                        st = ctypes.windll.user32.GetWindowLongW(msg.hwnd, -16)
+                        _frame_log(f"nc msg=0x{msg.message:04X} wparam={msg.wParam} "
+                                   f"style=0x{st & 0xFFFFFFFF:08X} caption={int(bool(st & 0x00C00000))} "
+                                   f"zoomed={int(ctypes.windll.user32.IsZoomed(msg.hwnd))} "
+                                   f"visible={int(ctypes.windll.user32.IsWindowVisible(msg.hwnd))}")
+                    except Exception:
+                        pass
 
                 # Suppress GDI background erase to prevent black flash during window resizing/animation
                 if msg.message == 0x0014:  # WM_ERASEBKGND
@@ -2495,6 +2602,12 @@ class DarkroomMainWindow(QMainWindow):
                     return True, 1
                 if msg.message in (0x00AE, 0x00AF):  # WM_NCUAHDRAWCAPTION, WM_NCUAHDRAWFRAME
                     return True, 0
+
+                # 0x031E WM_DWMCOMPOSITIONCHANGED: composition toggled -> re-assert the DWM
+                # frame extension, otherwise Windows falls back to painting the classic
+                # non-client title bar. Fall through to Qt afterwards.
+                if msg.message == 0x031E:
+                    self._extend_dwm_frame()
 
                 # 1. WM_NCCALCSIZE (0x0083): Remove standard title bar and frame while keeping DWM animations
                 if msg.message == 0x0083:
@@ -2646,9 +2759,6 @@ class DarkroomMainWindow(QMainWindow):
         tb_bg = "#141518" if is_dark else "#f0f2f6"
         scroll_handle = "#3f4350" if is_dark else "#94a3b8"
         scroll_hover = "#cbd5e1" if is_dark else "#64748b"
-        tooltip_bg = "rgba(22, 24, 30, 0.95)" if is_dark else "#ffffff"
-        tooltip_fg = "#f1f5f9" if is_dark else "#1e293b"
-        tooltip_border = "1px solid #333644" if is_dark else "1px solid #cbd5e1"
 
         radius = "0px" if is_max else "8px"
         border = "none" if is_max else f"1px solid {root_border_color}"
@@ -2722,17 +2832,6 @@ class DarkroomMainWindow(QMainWindow):
                 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
                     background: none;
                     border: none;
-                }}
-                QToolTip {{
-                    background-color: {tooltip_bg};
-                    color: {tooltip_fg};
-                    border: {tooltip_border};
-                    border-radius: 6px;
-                    padding: 6px 10px;
-                    font-size: 11px;
-                    font-weight: 400;
-                    line-height: 1.4;
-                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
                 }}
             """)
         if hasattr(self, 'title_bar'):
@@ -2829,7 +2928,7 @@ class DarkroomMainWindow(QMainWindow):
         btn_border = colors['view_toolbar_btn_border']
         btn_hover = colors['view_toolbar_btn_hover']
         btn_pressed = "#14151a" if is_dark else "#cbd5e1"
-        tt_ss = theme_manager.get_tooltip_stylesheet()
+        tt_ss = theme_manager.widget_tooltip_stylesheet()
         btn_style = f"""
             QPushButton {{
                 background: {btn_bg};
@@ -2871,7 +2970,7 @@ class DarkroomMainWindow(QMainWindow):
 
     def _update_optics_ui_style(self):
         is_dark = theme_manager.is_dark()
-        tt_ss = theme_manager.get_tooltip_stylesheet()
+        tt_ss = theme_manager.widget_tooltip_stylesheet()
         chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_amber.png").replace("\\", "/")
 
         chk_ss = get_standard_checkbox_style(is_dark)
@@ -3959,7 +4058,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # 3. Profile Panel Container
         self.panel_lens_profile = QWidget()
-        self.panel_lens_profile.setStyleSheet(f"background: transparent; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
+        self.panel_lens_profile.setStyleSheet(f"background: transparent; border: none;\n{theme_manager.widget_tooltip_stylesheet()}")
         self.panel_lens_profile.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         profile_layout = QVBoxLayout(self.panel_lens_profile)
         profile_layout.setContentsMargins(0, 2, 0, 0)
@@ -4049,7 +4148,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # 4. Manual Panel Container
         self.panel_lens_manual = QWidget()
-        self.panel_lens_manual.setStyleSheet(f"background: transparent; border: none;\n{theme_manager.get_tooltip_stylesheet()}")
+        self.panel_lens_manual.setStyleSheet(f"background: transparent; border: none;\n{theme_manager.widget_tooltip_stylesheet()}")
         self.panel_lens_manual.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.panel_lens_manual.setVisible(False)
         manual_layout = QVBoxLayout(self.panel_lens_manual)
@@ -4150,6 +4249,13 @@ class DarkroomMainWindow(QMainWindow):
 
         self.sidebar_layout.addWidget(self.sec_optics)
 
+    DIR_UNAVAILABLE_TEXT = {
+        "bypass": "旁路模式下不可用",
+        "positive": "正片下不可用",
+        "bw": "黑白下不可用",
+        "no_data": "该胶卷档案无 DIR 数据",
+    }
+
     def _init_chemistry_section(self):
         self.sec_chemistry = AccordionSection("胶片乳剂与化学 (DIR)")
         self.sec_chemistry.resetClicked.connect(lambda: self.reset_track("chemistry"))
@@ -4179,6 +4285,7 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_chemistry.addWidget(self.slider_dir_samelayer)
 
         self.sidebar_layout.addWidget(self.sec_chemistry)
+        self._update_chemistry_ui_state()
 
     def _init_enlarger_section(self):
         self.sec_enlarger = AccordionSection("放大机与相纸显影")
@@ -4231,10 +4338,10 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_enlarger.addWidget(self.slider_cyan)
 
         self.slider_print_exp = AdobeScrubSlider(
-            "相纸曝光", 0.5, 2.5, 1.0, step=0.02, unit="x", decimals=2,
+            "相纸曝光", 0.5, 1.5, 1.0, step=0.02, unit="x", decimals=2,
             tooltip="放大机相纸曝光时间，调节相纸整体显影浓度",
             track_gradient=[(0.0, QColor("#14161d")), (1.0, QColor("#f1f5f9"))],
-            has_center_detent=False
+            has_center_detent=True
         )
         self.slider_print_exp.valueChanged.connect(lambda v: self._on_slider_live("print_exposure", v))
         self.slider_print_exp.sliderReleased.connect(self._on_slider_committed)
@@ -4242,15 +4349,16 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_preflash = AdobeScrubSlider(
             "预闪反差", 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
-            tooltip="暗房预闪光技术 (Pre-flash)，降低相纸反差并显现极暗部细节"
+            tooltip="在相纸曝光域叠加微量基础底光，柔化高光反差并保留亮部层次"
         )
         self.slider_preflash.valueChanged.connect(lambda v: self._on_slider_live("pre_flash", v))
         self.slider_preflash.sliderReleased.connect(self._on_slider_committed)
         self.sec_enlarger.addWidget(self.slider_preflash)
 
         self.slider_black_lift = AdobeScrubSlider(
-            "黑位提升", 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
-            tooltip="在输出端整体加亮，抬起黑位使暗部发灰，直方图整体右移（旧版预闪效果）"
+            "黑位", -0.25, 0.25, 0.0, step=0.01, unit="", decimals=2,
+            tooltip="向左扣除片基灰雾、压实暗部纯黑；向右抬高黑位呈现空气褪色感",
+            has_center_detent=True
         )
         self.slider_black_lift.valueChanged.connect(lambda v: self._on_slider_live("black_lift", v))
         self.slider_black_lift.sliderReleased.connect(self._on_slider_committed)
@@ -4265,8 +4373,8 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_enlarger.addWidget(self.slider_morph_gamma)
 
         self.slider_exhaustion = AdobeScrubSlider(
-            "显影液疲劳度", 0.0, 0.50, 0.0, step=0.02, unit="", decimals=2,
-            tooltip="模拟显影液氧化衰老，柔化死黑黑位并呈现复古相纸暗部质感"
+            "显影液疲劳度", 0.0, 1.00, 0.0, step=0.02, unit="", decimals=2,
+            tooltip="相纸显影液耗尽效应 (Gumbel 极值分布混合)：锁定纸白与最大黑度，柔化高光与深暗部过渡斜率"
         )
         self.slider_exhaustion.valueChanged.connect(lambda v: self._on_slider_live("developer_exhaustion", v))
         self.slider_exhaustion.sliderReleased.connect(self._on_slider_committed)
@@ -6959,13 +7067,126 @@ class DarkroomMainWindow(QMainWindow):
             self.current_params["boost_ev"] = val
         if param_key in ("color_temp", "tint"):
             self.current_params["custom_wb"] = True
-        # Only parameters that are baked into the 3D LUT require a rebuild
+        # DIR / morph / exhaustion are baked into the 3D LUT: preview them by rebaking the same
+        # full-resolution LUT in the background, everything else is applied post-LUT by the shader.
         if param_key in ("dir_amount", "dir_interlayer", "dir_samelayer", "morph_gamma", "developer_exhaustion"):
             self._pending_lut_refresh = True
-        self.canvas.update_params(**{param_key: val})
+            self._schedule_live_lut_preview()
+        else:
+            self.canvas.update_params(**{param_key: val})
         self._schedule_histogram_update()
         self._mark_current_photo_dirty()
         self._update_reset_buttons_state()
+
+    LUT_CHEM_KEYS = ("dir_amount", "dir_interlayer", "dir_samelayer",
+                     "morph_gamma", "developer_exhaustion")
+
+    def _apply_lut(self, lut_3d):
+        """Upload a committed LUT and record which parameter key it represents, so the live
+        preview can tell "already showing this" from "still stale"."""
+        self.canvas.set_lut(lut_3d)
+        self._lut_applied_key = self._current_lut_key()
+        queued = getattr(self, "_lut_job", None)
+        if queued is not None and queued[0] != self._lut_applied_key:
+            self._lut_job = None       # superseded: never spend a bake on outdated parameters
+
+    def _ensure_lut_bake_bridge(self):
+        if hasattr(self, "_lut_bake_bridge"):
+            return
+        self._lut_bake_bridge = _LutBakeBridge()
+        self._lut_bake_bridge.baked.connect(self._on_async_lut_ready)
+        self._lut_worker_busy = False
+        self._lut_job = None            # (key, snapshot, film, paper, mode) awaiting a worker
+        self._lut_inflight_key = None
+        self._lut_applied_key = getattr(self, "_lut_applied_key", None)
+        self._live_lut_timer = QTimer(self)
+        self._live_lut_timer.setSingleShot(True)
+        self._live_lut_timer.timeout.connect(self._request_async_lut)
+
+    def _current_lut_key(self):
+        """Everything that changes the baked LUT, rounded to the engine's own cache precision."""
+        p = self.current_params
+        return (
+            getattr(self, "current_film_stock", "none"),
+            getattr(self, "current_paper_stock", "none"),
+            getattr(self, "current_print_mode", "optical"),
+            round(float(p.get("dir_amount", 1.0)), 2),
+            round(float(p.get("dir_interlayer", 1.0)), 2),
+            round(float(p.get("dir_samelayer", 1.0)), 2),
+            round(float(p.get("morph_gamma", 1.0)), 2),
+            round(float(p.get("developer_exhaustion", 0.0)), 2),
+        )
+
+    def _schedule_live_lut_preview(self):
+        """Live preview of LUT-baked parameters (DIR / morph / exhaustion).
+
+        Uses the exact same 33^3 build as the committed bake, on a worker thread, so the
+        image shown while dragging is what the user keeps on release. The previous 17^3
+        preview was a different approximation and produced a visible jump on release.
+        """
+        if getattr(self, "current_film_stock", "none") == "none":
+            return
+        self._ensure_lut_bake_bridge()
+        if not self._live_lut_timer.isActive():
+            self._live_lut_timer.start(60)
+
+    def _request_async_lut(self):
+        if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
+            return
+        if getattr(self, "current_film_stock", "none") == "none":
+            return
+        self._ensure_lut_bake_bridge()
+        key = self._current_lut_key()
+        if key == self._lut_applied_key:
+            return
+        self._lut_job = (
+            key,
+            dict(self.current_params),
+            getattr(self, "current_film_stock", "none"),
+            getattr(self, "current_paper_stock", "none"),
+            getattr(self, "current_print_mode", "optical"),
+        )
+        self._pump_lut_worker()
+
+    def _pump_lut_worker(self):
+        """At most one background bake at a time; a newer request replaces the queued job."""
+        if getattr(self, "_lut_worker_busy", False) or getattr(self, "_lut_job", None) is None:
+            return
+        key, snapshot, film, paper, mode = self._lut_job
+        self._lut_job = None
+        self._lut_worker_busy = True
+        self._lut_inflight_key = key
+        engine = self.engine
+        bridge = self._lut_bake_bridge
+        chem = {k: snapshot.get(k, 1.0) for k in self.LUT_CHEM_KEYS}
+
+        def _run():
+            try:
+                lut = engine.get_3d_lut(film, paper, lut_size=33, params_dict=snapshot, print_mode=mode)
+            except Exception:
+                lut = None
+            try:
+                bridge.baked.emit(lut, key, chem)
+            except RuntimeError:
+                pass  # window already destroyed
+
+        threading.Thread(target=_run, name="SpektraLutBake", daemon=True).start()
+
+    def _on_async_lut_ready(self, lut, key, chem):
+        self._lut_worker_busy = False
+        self._lut_inflight_key = None
+        # Drop results whose parameters are no longer current (slider moved on, photo
+        # switched, undo/redo, preset applied): the same key always yields the same LUT.
+        if lut is not None and key == self._current_lut_key():
+            try:
+                if isinstance(getattr(self.canvas, "params", None), dict):
+                    for k, v in chem.items():
+                        self.canvas.params[k] = v
+                self.canvas.set_lut(lut)
+            except RuntimeError:
+                return  # canvas / window already torn down
+            self._lut_applied_key = key
+        self._pump_lut_worker()
 
     def _on_combo_changed(self, param_key, val):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
@@ -7070,20 +7291,47 @@ class DarkroomMainWindow(QMainWindow):
 
     def _refresh_lut(self):
         import time
+        self._ensure_lut_bake_bridge()
+        if self._live_lut_timer.isActive():
+            self._live_lut_timer.stop()
+        self._lut_job = None          # a committed bake supersedes any queued preview
         t0 = time.time()
         lut_3d = self.engine.get_3d_lut(
             self.current_film_stock,
             self.current_paper_stock,
             lut_size=33,
-            params_dict=self.current_params
+            params_dict=self.current_params,
+            print_mode=getattr(self, "current_print_mode", "optical"),
         )
-        self.canvas.set_lut(lut_3d)
+        for k in self.LUT_CHEM_KEYS:
+            if k in self.current_params:
+                self.canvas.params[k] = self.current_params[k]
+        self._apply_lut(lut_3d)
         dur = (time.time() - t0) * 1000.0
         self.set_app_status(f"LUT 烘焙完成 ({dur:.0f}ms)", timeout_ms=2000)
+
+    def _commit_lut_preview(self):
+        """Finish a DIR / morph drag.
+
+        If a preview of exactly these parameters is already queued or running, let it land
+        (it is the same 33^3 bake); otherwise bake synchronously so the committed image is
+        exact and never a leftover approximation.
+        """
+        self._ensure_lut_bake_bridge()
+        key = self._current_lut_key()
+        if key == self._lut_applied_key:
+            return
+        if key == self._lut_inflight_key:
+            return
+        if self._lut_job is not None and self._lut_job[0] == key:
+            return
+        self._refresh_lut()
 
     def _on_slider_committed(self, action: str = None):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
             return
+        if hasattr(self, '_live_lut_timer') and self._live_lut_timer.isActive():
+            self._live_lut_timer.stop()
         if hasattr(self, '_live_thumb_timer') and self._live_thumb_timer.isActive():
             self._live_thumb_timer.stop()
         if hasattr(self, '_cards_debounce_timer') and self._cards_debounce_timer.isActive():
@@ -7091,7 +7339,7 @@ class DarkroomMainWindow(QMainWindow):
         if getattr(self, "_pending_lut_refresh", False):
             self._pending_lut_refresh = False
             if getattr(self, "current_film_stock", "none") != "none":
-                self._refresh_lut()
+                self._commit_lut_preview()
         self.push_undo_state(action=action)
         self._mark_current_photo_dirty()
         self._update_active_thumbnails()
@@ -7186,6 +7434,8 @@ class DarkroomMainWindow(QMainWindow):
                     )
                     if is_lens_modified:
                         is_default = False
+            if track_name == "chemistry" and not self._dir_available():
+                is_default = True   # stock carries no DIR chemistry: keep the section's reset off
             sec.set_reset_enabled(not is_default)
 
     def reset_track(self, track_name):
@@ -7211,7 +7461,10 @@ class DarkroomMainWindow(QMainWindow):
             self._update_reset_buttons_state()
             return
 
-        if "enlarger_illuminant" in defaults[track_name]:
+        # Tracks that carry LUT-baked chemistry (DIR / morph / exhaustion) must rebake, not just
+        # move uniforms - the shader no longer approximates DIR.
+        lut_keys_changed = any(k in self.LUT_CHEM_KEYS for k in defaults[track_name])
+        if "enlarger_illuminant" in defaults[track_name] or lut_keys_changed:
             self._refresh_lut()
         self._update_all_sliders_from_params()
         self._schedule_histogram_update()
@@ -7460,7 +7713,7 @@ class DarkroomMainWindow(QMainWindow):
             lut_params["print_mode"] = self.current_print_mode
             eff_paper = self.current_paper_stock if self.current_print_mode == "optical" else "none"
             lut_3d = self.engine.get_3d_lut(self.current_film_stock, eff_paper, lut_size=33, params_dict=lut_params)
-            self.canvas.set_lut(lut_3d)
+            self._apply_lut(lut_3d)
         self._schedule_histogram_update()
         self._update_diffusion_ui_state()
         self._update_stock_mode_ui()
@@ -7622,7 +7875,7 @@ class DarkroomMainWindow(QMainWindow):
         lut_params = dict(self.current_params)
         lut_params["print_mode"] = self.current_print_mode
         lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
-        self.canvas.set_lut(lut_3d)
+        self._apply_lut(lut_3d)
         self.canvas.update_params(paper_profile=self.current_paper_stock, print_mode=self.current_print_mode)
         hal_preset = self.engine.get_film_halation_preset(stock_id) if hasattr(self.engine, 'get_film_halation_preset') else None
         grain_preset = self.engine.get_film_grain_preset(stock_id) if hasattr(self.engine, 'get_film_grain_preset') else None
@@ -7656,7 +7909,7 @@ class DarkroomMainWindow(QMainWindow):
         lut_params = dict(self.current_params)
         lut_params["print_mode"] = mode
         lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
-        self.canvas.set_lut(lut_3d)
+        self._apply_lut(lut_3d)
         self._schedule_histogram_update()
         if push_undo and self._current_photo_path:
             self._update_active_thumbnails()
@@ -7707,7 +7960,7 @@ class DarkroomMainWindow(QMainWindow):
         lut_params = dict(self.current_params)
         lut_params["print_mode"] = self.current_print_mode
         lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
-        self.canvas.set_lut(lut_3d)
+        self._apply_lut(lut_3d)
         self.canvas.update_params(paper_profile=stock_id, print_mode=self.current_print_mode)
         self._schedule_histogram_update()
         if push_undo and self._current_photo_path:
@@ -8681,8 +8934,41 @@ class DarkroomMainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"_update_active_thumbnails error: {e}")
 
+    def _dir_available(self):
+        try:
+            return bool(self.engine.dir_status(self.current_film_stock)[0])
+        except Exception:
+            return True
+
+    def _update_chemistry_ui_state(self):
+        """Grey out the DIR controls when the current stock carries no coupler chemistry and
+        explain why on hover. DIR is baked into the LUT only, so without this the three sliders
+        would simply look broken on reversal / B&W stocks (they are genuinely inert there)."""
+        try:
+            available, reason = self.engine.dir_status(getattr(self, "current_film_stock", "none"))
+        except Exception:
+            available, reason = True, ""
+        hint = "" if available else self.DIR_UNAVAILABLE_TEXT.get(reason, "当前胶卷下不可用")
+        for slider in (getattr(self, "slider_dir_amount", None),
+                       getattr(self, "slider_dir_interlayer", None),
+                       getattr(self, "slider_dir_samelayer", None)):
+            if slider is None:
+                continue
+            slider.setEnabled(available)
+            slider.setToolTip(getattr(slider, "default_tooltip", "") if available else hint)
+            # Disabled Qt widgets do not reliably receive hover events, so let them fall through
+            # to the card behind - the section's own tooltip then explains the state on hover.
+            for w in [slider] + slider.findChildren(QWidget):
+                w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not available)
+        section = getattr(self, "sec_chemistry", None)
+        if section is not None and hasattr(section, "set_available"):
+            section.set_available(available, hint)
+            if not available:
+                section.set_reset_enabled(False)
+
     def _update_stock_mode_ui(self):
         """Update parameter availability based on film type (negative vs slide/reversal vs none/bypass) and print mode."""
+        self._update_chemistry_ui_state()
         is_none = (self.current_film_stock == "none")
         if hasattr(self, 'sidebar_content') and self.sidebar_content is not None:
             self.sidebar_content.setEnabled(not is_none)
@@ -8714,9 +9000,8 @@ class DarkroomMainWindow(QMainWindow):
             return
 
         is_pos = self.engine.is_positive_film(self.current_film_stock) if hasattr(self.engine, 'is_positive_film') else False
-        is_scan = (getattr(self, "current_print_mode", "optical") == "scan") or (self.current_paper_stock == "none")
 
-        disable_paper_sliders = is_pos or is_scan
+        disable_paper_sliders = is_pos
         paper_sliders = [
             getattr(self, 'slider_morph_gamma', None),
             getattr(self, 'slider_exhaustion', None),
@@ -8725,7 +9010,7 @@ class DarkroomMainWindow(QMainWindow):
             if s is not None:
                 s.setEnabled(not disable_paper_sliders)
                 if disable_paper_sliders:
-                    s.setToolTip("当前选用反转正片或数码扫描模式，相纸显影特性自动旁路")
+                    s.setToolTip("当前选用反转正片，无相纸显影环节")
                 else:
                     s.setToolTip(getattr(s, "default_tooltip", ""))
 
@@ -9434,7 +9719,7 @@ class DarkroomMainWindow(QMainWindow):
             lut_params = dict(self.current_params)
             lut_params["print_mode"] = self.current_print_mode
             lut_3d = self.engine.get_3d_lut(self.current_film_stock, eff_paper, lut_size=33, params_dict=lut_params)
-            self.canvas.set_lut(lut_3d)
+            self._apply_lut(lut_3d)
 
             hal_preset = self.engine.get_film_halation_preset(self.current_film_stock) if hasattr(self.engine, 'get_film_halation_preset') else None
             grain_preset = self.engine.get_film_grain_preset(self.current_film_stock) if hasattr(self.engine, 'get_film_grain_preset') else None
@@ -11030,10 +11315,36 @@ class DarkroomMainWindow(QMainWindow):
         super().showMinimized()
 
     def closeEvent(self, event):
+        _frame_log("closeEvent enter")
+        # Drop the caption for the whole closing sequence (prompt included). Window teardown is
+        # when Windows repaints the frame; without the style bit there is nothing to paint, so
+        # the classic title bar cannot flash while the save prompt / .sdc writes / worker
+        # teardown run. Restored if the user cancels the close.
+        caption_was_enabled = _FRAME_MODE != "clean"
+        if caption_was_enabled:
+            self._set_native_caption(False)
+
         # Prompt user to save if current session has unsaved modifications
         if not self._prompt_save_if_session_dirty():
+            if caption_was_enabled:
+                self._set_native_caption(True)
             event.ignore()
             return
+
+        # Capture the closing state and hide IMMEDIATELY. Every step below (.sdc writes for each
+        # dirty photo including thumbnails, worker teardown with 1 s waits, config/session
+        # writes) runs synchronously on the GUI thread. A still-visible window that stops
+        # answering messages for ~5 s makes DWM draw its ghost placeholder - the classic
+        # "Win7 style" caption bar that no WM_NC* interception can suppress, because the shell
+        # paints it, not our window procedure.
+        try:
+            self._close_is_maximized = self.isMaximized()
+            self._close_geometry = self.geometry()
+            self.hide()
+            QApplication.processEvents()
+            _frame_log("closeEvent hidden")
+        except Exception:
+            pass
 
         # Silently ensure any modified parameters are saved to .sdc
         try:
@@ -11076,17 +11387,20 @@ class DarkroomMainWindow(QMainWindow):
             pass
 
         try:
-            is_max = self.isMaximized()
+            # Prefer the snapshot taken before hide(): windowState/geometry can change once the
+            # window is hidden.
+            is_max = getattr(self, "_close_is_maximized", self.isMaximized())
+            geo = getattr(self, "_close_geometry", None) or self.geometry()
             if is_max and self._saved_normal_geo:
                 norm_w = self._saved_normal_geo.width()
                 norm_h = self._saved_normal_geo.height()
                 norm_x = self._saved_normal_geo.x()
                 norm_y = self._saved_normal_geo.y()
             else:
-                norm_w = self.width()
-                norm_h = self.height()
-                norm_x = self.x()
-                norm_y = self.y()
+                norm_w = geo.width()
+                norm_h = geo.height()
+                norm_x = geo.x()
+                norm_y = geo.y()
 
             if hasattr(self, "main_splitter") and self.stack.currentIndex() == 1 and sum(self.main_splitter.sizes()) > 500:
                 splitter_main = self.main_splitter.sizes()

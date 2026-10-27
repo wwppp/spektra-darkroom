@@ -7053,10 +7053,17 @@
                 ],
                 "layer_weights": [
                     0.68,
-                    1,
+                    1.0,
                     1.28
                 ],
-                "density_law": 2
+                "density_law": 0,
+                "luma_correlation": 0.58,
+                "granularity_read_density": "net",
+                "fog_density": 0.03,
+                "reversal_profile": [
+                    1.1,
+                    3.0
+                ]
             },
             "layered_transport": {
                 "angularExponent": [

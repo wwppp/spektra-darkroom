@@ -12,7 +12,42 @@ from PySide6.QtOpenGL import (
 from core.path_utils import get_resource_dir
 from core import config_manager
 from core.darkroom_math import grain_scale_px, grain_colour_rho
+from core import grain_model as grain_model_ref
+from core.grain_model import octave_weights as grain_octave_weights
 from OpenGL import GL
+
+
+def grain_derive_spec(params, stock_strength, stock_layer_weights, stock_size_mm,
+                      fmt_mm, long_edge_px):
+    """Build the shared GrainSpec for a shader draw.
+
+    Everything the shader needs about grain amplitude, octave mixing, layer correlation and
+    the density curve comes from core/grain_model.py; this helper is only the adapter between
+    the parameter dict and the model (P1/P2).
+    """
+    return grain_model_ref.derive(
+        grain_slider=params.get("grain", 0.4),
+        stock_strength=stock_strength,
+        layer_weights=stock_layer_weights,
+        cloud_blur=params.get("grain_cloud_blur", 1.0),
+        rho=grain_colour_rho(stock_strength, float(params.get("grain_colour", 1.0))),
+        fmt_mm=fmt_mm,
+        long_edge_px=long_edge_px,
+        grain_size=params.get("grain_size", 1.0),
+        stock_size_mm=stock_size_mm,
+        grain_colour=float(params.get("grain_colour", 1.0)),
+    )
+
+
+def _bind_density_uniforms(u_1f):
+    """Density-response constants, from the single definition in core/grain_model.py."""
+    u_1f("u_grain_dens_gain", grain_model_ref.DENS_GAIN)
+    u_1f("u_grain_dens_floor", grain_model_ref.DENS_FLOOR)
+    u_1f("u_grain_dens_peak", grain_model_ref.DENS_PEAK)
+    u_1f("u_grain_dens_wtoe", grain_model_ref.DENS_W_TOE)
+    u_1f("u_grain_dens_wshoulder", grain_model_ref.DENS_W_SHOULDER)
+    u_1f("u_grain_dens_dmax", grain_model_ref.DENS_DMAX)
+    u_1f("u_grain_dens_wsat", grain_model_ref.DENS_W_SAT)
 
 
 VERTEX_SHADER_SRC = """
@@ -66,6 +101,22 @@ uniform float u_grain_scale;
 uniform float u_grain_size;
 uniform float u_grain_blur;
 uniform float u_grain_colour;
+// Derived once on the CPU by core/grain_model.py and shared with the CPU export renderer:
+// per-octave mixing weights.  Keeping these out of the shader is what stops preview and
+// export drifting apart (P1).
+uniform float u_grain_w_fine;
+uniform float u_grain_w_cloud;
+uniform float u_grain_w_mottle;
+// Density response (bell in negative optical density) and the physical amplitude law.
+// Values come from core/grain_model.py so the CPU export uses exactly the same numbers (P2).
+uniform float u_grain_amplitude;
+uniform float u_grain_dens_gain;
+uniform float u_grain_dens_floor;
+uniform float u_grain_dens_peak;
+uniform float u_grain_dens_wtoe;
+uniform float u_grain_dens_wshoulder;
+uniform float u_grain_dens_dmax;
+uniform float u_grain_dens_wsat;
 uniform float u_stock_grain_size;
 uniform float u_stock_grain_strength;
 uniform vec3  u_stock_layer_weights;
@@ -76,17 +127,16 @@ uniform int u_diffusion_type;
 uniform float u_diffusion_strength;
 uniform float u_diffusion_warmth;
 
-// DIR Couplers
-uniform float u_dir_interlayer;
-uniform float u_dir_samelayer;
+// DIR Couplers: fully baked into the 3D LUT only. There is deliberately no shader-side
+// DIR approximation - it is a strongly non-linear cross-layer response and a linear
+// extrapolation over the slider range is off by up to ~90/255 (it made the drag preview
+// disagree with the committed bake).
 
 // Chemistry Morph
 uniform float u_morph_gamma;
 uniform float u_developer_exhaustion;
 
 // Values already baked into the current 3D LUT (only the delta is approximated post-LUT)
-uniform float u_lut_dir_interlayer;
-uniform float u_lut_dir_samelayer;
 uniform float u_lut_morph_gamma;
 uniform float u_lut_dev_exh;
 uniform float u_grain_rho;
@@ -747,13 +797,12 @@ void main() {
         // 3. Low-frequency organic dye mottle (~3.5 master px, ~21 um)
         vec3 mottle_rgb = (smooth_cloud_noise_rgb(gcoord * 0.22 + vec2(17.3, 31.7)) - vec3(0.5)) * 1.6;
 
-        // Additive physical mixture governed by "染料云团柔化 (u_grain_blur)":
-        // Low blur: sharp silver crystal edges bite through.
-        // High blur: organic dye cloud mottle dominates.
-        float blur_t = clamp(u_grain_blur * 0.45, 0.1, 1.2);
-        float w_fine = max(0.15, 0.45 - 0.22 * blur_t);
-        float w_cloud = 0.50 + 0.20 * blur_t;
-        float w_mottle = 0.28 + 0.12 * blur_t;
+        // Additive physical mixture governed by "染料云团柔化 (u_grain_blur)".
+        // Weights come from core/grain_model.octave_weights() so the CPU export renderer uses
+        // exactly the same numbers (P1: single source of truth).
+        float w_fine = u_grain_w_fine;
+        float w_cloud = u_grain_w_cloud;
+        float w_mottle = u_grain_w_mottle;
         // Per-layer (chroma) component: dye-cloud mottle is spatially coarser than the luminance
         // grain, so the independent part excludes the fine micro-crystal octave (no RGB pixel speckle).
         vec3 raw_noise = (cloud_rgb * w_cloud + mottle_rgb * w_mottle) * 1.15;
@@ -764,34 +813,45 @@ void main() {
         float shared_mottle = (smooth_cloud_noise(gcoord * 0.22 + vec2(91.2, 53.4)) - 0.5) * 1.6;
         float shared_noise = shared_fine * w_fine + shared_cloud * w_cloud + shared_mottle * w_mottle;
 
-        // Coupled C-41 emulsion layer correlation (organic dye clouds vs digital chroma noise)
-        // Fotufilm inter-channel correlation is ~0.72.
-        // When u_grain_colour = 1.0 (Color Film): rho = 0.72 (rich organic dye clouds, no digital noise)
-        // When u_grain_colour = 0.0 (B&W Film): rho = 1.0 (pure monochrome silver grain)
-        // rho is computed on the CPU (core/darkroom_math.grain_colour_rho): coarser stocks are more correlated
+        // Coupled C-41 emulsion layer correlation (organic dye clouds vs digital chroma noise).
+        // u_grain_rho is not a literal: core/grain_model.rho_for_target_correlation() solves it
+        // so the *measured* mean inter-channel correlation lands on the calibrated target
+        // (0.79 at colour_grain = 1.0, from the P0 reference), whatever the stock's layer
+        // weights are. colour_grain = 0 (B&W) collapses rho to 1.0 (pure monochrome grain).
         float rho = clamp(u_grain_rho, 0.0, 1.0);
         // Apply film stock layer weights (e.g. [0.70, 1.0, 1.35] or [0.90, 1.0, 2.71]).
         // The shared (luminance) stream uses the mean weight so it stays neutral; the per-layer
         // spread only shapes the independent chroma mottle (avoids blue/yellow pixel speckle).
         float lw_mean = dot(u_stock_layer_weights, vec3(1.0 / 3.0));
-        vec3 layer_grain = sqrt(1.0 - rho) * raw_noise * u_stock_layer_weights
-                         + sqrt(rho) * vec3(shared_noise * lw_mean);
+        // u_grain_amplitude is the physical amplitude law from core/grain_model.py: per-pixel
+        // density noise is proportional to the long edge (fewer crystals per pixel as sampling
+        // gets finer). It is 1.0 at the calibration size, so the preview is unchanged there.
+        vec3 layer_grain = (sqrt(1.0 - rho) * raw_noise * u_stock_layer_weights
+                          + sqrt(rho) * vec3(shared_noise * lw_mean)) * u_grain_amplitude;
 
         // Stock strength & user slider modulation
         float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
         float eff_strength = (u_grain / 0.40) * (base_stock_strength / 0.010);
 
-        // Kodak sensitometric density modulation:
-        // In physical negative film, exposure produces dense silver halide deposits in highlights,
-        // which physically block optical transmittance through the negative onto the print paper (T -> 0).
-        // Consequently, highlight print regions naturally roll off to smooth, silky paper base white,
-        // while midtones produce maximum tactile dye cloud relief, and shadows roll off smoothly.
-        // Negative-only granularity per emulsion layer (log-exposure domain): flat across the
-        // straight-line section, toe roll-off to a base+fog floor, gentle decline at very high
-        // density. Print toe/shoulder compression is left to the film+paper LUT.
-        vec3 lin_c = max(linear_rgb, vec3(0.0));
-        vec3 dens_mod = 0.72 * (vec3(0.15) + 0.85 * (vec3(1.0) - exp(-lin_c / 0.010)))
-                      / (vec3(1.0) + pow(lin_c / 2.0, vec3(1.5)));
+        // Granularity vs negative optical density: a bell curve fitted to the spektrafilm
+        // particle-model reference (plan item P0/P2). linear_rgb is read as the negative's
+        // transmittance, so D = -log10(lin). The constants arrive as uniforms, so the CPU
+        // export and the preview cannot disagree about the curve.
+        vec3 lin_c = clamp(linear_rgb, vec3(1e-4), vec3(1.0));
+        vec3 dens_D = -log(lin_c) * (1.0 / 2.302585092994046);
+        vec3 dens_z = dens_D - vec3(u_grain_dens_peak);
+        vec3 dens_w = mix(vec3(u_grain_dens_wtoe), vec3(u_grain_dens_wshoulder),
+                          step(vec3(0.0), dens_z));
+        vec3 dens_bell = vec3(u_grain_dens_floor)
+                       + (vec3(1.0) - vec3(u_grain_dens_floor))
+                         * exp(-0.5 * (dens_z / dens_w) * (dens_z / dens_w));
+        // Film saturation: fade to zero just below the stock's Dmax. Above it the particle-model
+        // reference returns a constant saturated field (every crystal developed), so extending
+        // the Gaussian there would put grain into fully clipped highlights.
+        vec3 dens_t = clamp((dens_D - vec3(u_grain_dens_dmax - u_grain_dens_wsat))
+                            / vec3(u_grain_dens_wsat), 0.0, 1.0);
+        vec3 dens_roll = vec3(1.0) - (vec3(3.0) * dens_t * dens_t - vec3(2.0) * dens_t * dens_t * dens_t);
+        vec3 dens_mod = vec3(u_grain_dens_gain) * dens_bell * dens_roll;
 
         // Transmittance modulation: T = T_in * 10^(-dD) = T_in * exp(-dD * 2.3025851)
         vec3 dD = layer_grain * (eff_strength * 0.35 * grain_att) * dens_mod;
@@ -809,16 +869,9 @@ void main() {
         film_rgb = prophoto_to_srgb(linear_rgb);
     }
     
-    // 5. DIR Coupler inhibition response - only the delta not yet baked into the LUT
-    //    (live preview while dragging; becomes identity once the LUT is rebuilt)
-    float dir_ri = u_dir_interlayer / max(0.05, u_lut_dir_interlayer);
-    float dir_rs = u_dir_samelayer / max(0.05, u_lut_dir_samelayer);
-    if (abs(dir_ri - 1.0) > 0.01 || abs(dir_rs - 1.0) > 0.01) {
-        float luma_f = dot(film_rgb, vec3(0.299, 0.587, 0.114));
-        vec3 chroma = film_rgb - vec3(luma_f);
-        film_rgb = vec3(luma_f) + chroma * dir_ri;
-        film_rgb = pow(clamp(film_rgb, 0.0001, 1.0), vec3(1.0 / max(0.2, dir_rs)));
-    }
+    // 5. DIR Coupler inhibition is already fully baked into the LUT above (film development
+    //    stage). No post-LUT approximation is applied: dragging the DIR sliders rebakes the
+    //    LUT at full resolution through the same code path, so preview == commit.
 
     // 6. Enlarger CMY filtration, print exposure & pre-flash in paper-exposure domain
     //    print = 1 / (1 + E^2.5)  ->  E' = E * 10^(-0.004 * cmy) / print_exposure + preflash
@@ -833,15 +886,23 @@ void main() {
     // 7. Paper Chemistry Morph & Developer Exhaustion - delta vs. LUT-baked values only
     float morph_r = u_morph_gamma / max(0.05, u_lut_morph_gamma);
     if (abs(morph_r - 1.0) > 0.01) {
-        film_rgb = pow(clamp(film_rgb, 0.0001, 1.0), vec3(morph_r));
+        vec3 c_m = clamp(film_rgb, 1e-4, 1.0 - 1e-4);
+        vec3 odds = pow((c_m / 0.42) / ((vec3(1.0) - c_m) / 0.58), vec3(morph_r));
+        film_rgb = (odds * 0.42) / (odds * 0.42 + vec3(0.58));
     }
     float exh_d = u_developer_exhaustion - u_lut_dev_exh;
     if (abs(exh_d) > 0.005) {
-        film_rgb = mix(film_rgb, film_rgb * 0.88 + vec3(0.03), exh_d * 0.6);
+        vec3 c_exh = clamp(film_rgb, 0.0, 1.0);
+        film_rgb = clamp(film_rgb + exh_d * c_exh * (vec3(1.0) - c_exh) * (c_exh - vec3(0.42)) * 0.35, 0.0, 1.0);
     }
 
-    // 8. Black lift (output-side additive fade): greys shadows, shifts histogram right
-    film_rgb += vec3(u_black_lift);
+    // 8. Bidirectional Black Point calibration (white-point preserving: >0 lifts shadows/fades, <0 subtracts base fog/deepens blacks)
+    if (u_black_lift > 0.0001) {
+        film_rgb = vec3(u_black_lift) + film_rgb * (1.0 - u_black_lift);
+    } else if (u_black_lift < -0.0001) {
+        float c_blk = min(0.95, -u_black_lift);
+        film_rgb = max(vec3(0.0), (film_rgb - vec3(c_blk)) / (1.0 - c_blk));
+    }
 
     fragColor = vec4(clamp(film_rgb, 0.0, 1.0), 1.0);
 }
@@ -1176,6 +1237,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if not self.shader_program or not self.vbo:
             return
 
+        if self._pending_image is not None:
+            self._do_upload_image(self._pending_image)
+            self._pending_image = None
+        if self._pending_lut is not None:
+            self._do_upload_lut(self._pending_lut)
+            self._pending_lut = None
+
         funcs = QOpenGLContext.currentContext().functions()
         GL.glClearColor(self._bg_color[0], self._bg_color[1], self._bg_color[2], 1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
@@ -1360,10 +1428,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
         _mh = float(getattr(self, "_master_height", 0) or self._image_height or 4024)
         u_1f("u_grain_scale", grain_scale_px(fmt_mm, max(_mw, _mh)))
         u_1f("u_film_width_um", max(5.0, fmt_mm) * 1000.0)
-        u_1f("u_grain_rho", grain_colour_rho(st_strength, float(self.params.get("grain_colour", 1.0))))
         u_1f("u_grain_size", float(self.params.get("grain_size", 1.0)))
         u_1f("u_grain_blur", self.params.get("grain_cloud_blur", 1.0))
         u_1f("u_grain_colour", float(self.params.get("grain_colour", 1.0)))
+        _spec = grain_derive_spec(self.params, st_strength, st_lw, st_size, fmt_mm,
+                                 max(_mw, _mh))
+        u_1f("u_grain_rho", _spec.rho)
+        u_1f("u_grain_w_fine", _spec.w_fine)
+        u_1f("u_grain_w_cloud", _spec.w_cloud)
+        u_1f("u_grain_w_mottle", _spec.w_mottle)
+        u_1f("u_grain_amplitude", _spec.amplitude)
+        _bind_density_uniforms(u_1f)
         master_w = float(getattr(self, "_master_width", 0) or self._image_width)
         master_h = float(getattr(self, "_master_height", 0) or self._image_height)
         u_2f("u_master_resolution", master_w, master_h)
@@ -1381,12 +1456,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_diffusion_strength", float(self.params.get("diffusion_strength", 0.0)))
         u_1f("u_diffusion_warmth", float(self.params.get("diffusion_warmth", 0.0)))
 
-        # DIR Couplers
-        u_1f("u_dir_interlayer", self.params.get("dir_interlayer", 1.0))
-        u_1f("u_dir_samelayer", self.params.get("dir_samelayer", 1.0))
+        # Chemistry Morph / Developer Exhaustion deltas (DIR is fully baked in the LUT)
         _bk = getattr(self, "_lut_baked", None) or self._lookup_lut_baked(None)
-        u_1f("u_lut_dir_interlayer", float(_bk.get("dir_interlayer", 1.0)))
-        u_1f("u_lut_dir_samelayer", float(_bk.get("dir_samelayer", 1.0)))
         u_1f("u_lut_morph_gamma", float(_bk.get("morph_gamma", 1.0)))
         u_1f("u_lut_dev_exh", float(_bk.get("developer_exhaustion", 0.0)))
 
@@ -1614,32 +1685,34 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 return eng.get_lut_baked_params(lut_array_3d)
             except Exception:
                 pass
-        return {"dir_interlayer": 1.0, "dir_samelayer": 1.0, "morph_gamma": 1.0, "developer_exhaustion": 0.0}
+        return {"dir_amount": 1.0, "dir_interlayer": 1.0, "dir_samelayer": 1.0, "morph_gamma": 1.0, "developer_exhaustion": 0.0}
 
     def set_3d_lut(self, lut_array_3d):
         """Upload 3D LUT array (float32 [N, N, N, 3]) to 3D texture."""
         self._lut_baked = self._lookup_lut_baked(lut_array_3d)
-        if not getattr(self, "_gl_initialized", False) or not self.isValid():
-            self._pending_lut = lut_array_3d
-            return
-        self.makeCurrent()
-        try:
-            self._do_upload_lut(lut_array_3d)
-        finally:
-            self.doneCurrent()
+        self._pending_lut = lut_array_3d
         self.update()
 
     set_lut = set_3d_lut
 
     def _do_upload_lut(self, lut_array_3d):
         size = lut_array_3d.shape[0]
+        data = np.ascontiguousarray(lut_array_3d, dtype=np.float32)
+
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        if self._lut_tex_id and getattr(self, "_lut_tex_size", 0) == size:
+            GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
+            GL.glTexSubImage3D(GL.GL_TEXTURE_3D, 0, 0, 0, 0, size, size, size, GL.GL_RGB, GL.GL_FLOAT, data)
+            GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+            self._has_lut = True
+            return
 
         if self._lut_tex_id:
             GL.glDeleteTextures([self._lut_tex_id])
             self._lut_tex_id = None
 
-        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
         self._lut_tex_id = GL.glGenTextures(1)
+        self._lut_tex_size = size
         GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
@@ -1647,7 +1720,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
 
-        data = np.ascontiguousarray(lut_array_3d, dtype=np.float32)
         GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGB16F, size, size, size, 0, GL.GL_RGB, GL.GL_FLOAT, data)
         GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
         self._has_lut = True
@@ -2306,6 +2378,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if not active_tex_id:
                 return None
 
+            if getattr(self, "_pending_lut", None) is not None:
+                self._do_upload_lut(self._pending_lut)
+                self._pending_lut = None
+
             if lut_override is not None:
                 size = lut_override.shape[0]
                 GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
@@ -2501,10 +2577,19 @@ class DarkroomGLCanvas(QOpenGLWidget):
             fmt_mm = float(eff_params.get("film_format_mm", 35.0))
             u_1f("u_grain_scale", grain_scale_px(fmt_mm, max(float(target_w), float(target_h))))
             u_1f("u_film_width_um", max(5.0, fmt_mm) * 1000.0)
-            u_1f("u_grain_rho", grain_colour_rho(st_strength, float(eff_params.get("grain_colour", 1.0))))
             u_1f("u_grain_size", float(eff_params.get("grain_size", 1.0)))
             u_1f("u_grain_blur", eff_params.get("grain_cloud_blur", 1.0))
             u_1f("u_grain_colour", float(eff_params.get("grain_colour", 1.0)))
+            # The offscreen pass renders at the export resolution, so the spec is derived with
+            # the target long edge -- that is what applies the physical amplitude law.
+            _spec = grain_derive_spec(eff_params, st_strength, st_lw, st_size, fmt_mm,
+                                     max(float(target_w), float(target_h)))
+            u_1f("u_grain_rho", _spec.rho)
+            u_1f("u_grain_w_fine", _spec.w_fine)
+            u_1f("u_grain_w_cloud", _spec.w_cloud)
+            u_1f("u_grain_w_mottle", _spec.w_mottle)
+            u_1f("u_grain_amplitude", _spec.amplitude)
+            _bind_density_uniforms(u_1f)
             u_2f("u_master_resolution", float(target_w), float(target_h))
 
             diff_family = str(eff_params.get("diffusion_family", "none")).lower()
@@ -2513,11 +2598,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_diffusion_strength", float(eff_params.get("diffusion_strength", 0.0)))
             u_1f("u_diffusion_warmth", float(eff_params.get("diffusion_warmth", 0.0)))
 
-            u_1f("u_dir_interlayer", eff_params.get("dir_interlayer", 1.0))
-            u_1f("u_dir_samelayer", eff_params.get("dir_samelayer", 1.0))
             _bk = self._lookup_lut_baked(lut_override) if lut_override is not None else (getattr(self, "_lut_baked", None) or self._lookup_lut_baked(None))
-            u_1f("u_lut_dir_interlayer", float(_bk.get("dir_interlayer", 1.0)))
-            u_1f("u_lut_dir_samelayer", float(_bk.get("dir_samelayer", 1.0)))
             u_1f("u_lut_morph_gamma", float(_bk.get("morph_gamma", 1.0)))
             u_1f("u_lut_dev_exh", float(_bk.get("developer_exhaustion", 0.0)))
             if is_pos_off:

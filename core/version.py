@@ -1,13 +1,13 @@
-"""SpektraDarkroom Version Configuration
+﻿"""SpektraDarkroom Version Configuration
 规范：每次小修复/优化后，自动修改版本号，末位 Patch 递增 1 位（例如 v0.1.0 -> v0.1.1 -> v0.1.2）。
 """
 
 APP_NAME = "SpektraDarkroom"
 VERSION_MAJOR = 0
 VERSION_MINOR = 4
-VERSION_PATCH = 44
-BUILD_NUMBER = 206
-RELEASE_DATE = "2026-10-26"
+VERSION_PATCH = 54
+BUILD_NUMBER = 216
+RELEASE_DATE = "2026-10-27"
 
 VERSION_STRING = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
 VERSION_BUILD = BUILD_NUMBER
@@ -29,5 +29,5 @@ def get_full_version_info():
         "build": BUILD_NUMBER,
         "release_date": RELEASE_DATE,
         "full_version": FULL_VERSION_STRING,
-        "engine": "Vulkan / Modern OpenGL 3.3 Core",
+        "engine": "OpenGL 3.3 Core（Vulkan 兼容驱动）",
     }

@@ -10,7 +10,7 @@
 [![Profiles: CC BY-SA 4.0](https://img.shields.io/badge/Profiles-CC%20BY--SA%204.0-orange.svg)](https://creativecommons.org/licenses/by-sa/4.0/)
 [![Platform: Windows 10 / 11](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(64--bit)-0078D6.svg?logo=windows)](https://www.microsoft.com)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python)](https://www.python.org)
-[![Hardware Acceleration: Modern OpenGL / Vulkan](https://img.shields.io/badge/Hardware%20Acceleration-OpenGL%20%2F%20Vulkan-ED1B24.svg?logo=vulkan)](https://www.vulkan.org)
+[![Hardware Acceleration: OpenGL 3.3 Core](https://img.shields.io/badge/Hardware%20Acceleration-OpenGL%203.3%20Core-ED1B24.svg?logo=opengl)](https://www.opengl.org)
 
 <br/>
 
@@ -32,20 +32,20 @@
 
 ### 1. 物理暗房连续光谱仿真
 - **81 波段物理光谱测定**：基于真实感光度与吸收率计算，彻底告别普通 3D LUT 的断阶与偏色。
-- **52 款胶卷预设 + 9 款相纸/拷贝片档案**：
-  - **经典彩色负片**：Kodak Portra 160 / 400 / 800，Gold 200，ColorPlus 200，UltraMax 400，Ektar 100；Fujifilm Pro 400H / 160NS，C200，Superia X-TRA 400 等；
-  - **电影工业底片**：Kodak Vision3 50D / 200T / 250D / 500T，CineStill 50D / 400D / 800T，Fujifilm Eterna 500T / Vivid 500T，F-64D 等；
+- **51 款胶卷档案 + 8 款相纸/拷贝片档案**（档案库另含“无（胶卷旁路）”与“数码扫描”两个模式，合计 52 + 9 个可选槽位）：
+  - **经典彩色负片**：Kodak Portra 160 / 400 / 800（含 ±迫冲预设），Gold 200，UltraMax 400，Ektar 100；Fujifilm Pro 400H / 160NS，C200，Superia X-TRA 400 等；
+  - **电影工业底片**：Kodak Vision3 50D / 200T / 250D / 500T，CineStill 400D / 800T，Fujifilm Eterna 500T / Vivid 500T，F-64D 等；
   - **传奇反转片**：Fujifilm Velvia 50 / 100，Provia 100F，Astia 100F，Kodak Ektachrome E100，Kodachrome 25 / 64 / 200，Agfachrome CT 50 / 100 / 200 等；
   - **经典黑白负片**：Kodak Tri-X 400，T-Max 100，Ilford HP5 Plus 400，FP4 Plus 125，Delta 3200，Fujifilm Neopan Acros 100，Kodak Double-X 5222 等；
-  - **彩色相纸与放映拷贝片**：Kodak Vision 2383 / 2393 电影拷贝片，Kodak Endura Premier，Portra Endura，Ultra Endura，Supra Endura，Ektacolor Edge，Fujifilm Crystal Archive II 水晶相纸，以及数码扫描反演模式。
+  - **彩色相纸与放映拷贝片**：Kodak Vision 2383 / 2393 电影拷贝片，Kodak Endura Premier，Portra Endura，Ultra Endura，Supra Endura，Ektacolor Edge，Fujifilm Crystal Archive II 水晶相纸。
 - **减色法放大机滤色头 (Dichroic Filter Pack)**：精确模拟 Cyan、Magenta、Yellow 连续无极滤光片微调，内置全套组合的中性灰平衡（Neutral Print Filters Table）自动校准。
 - **真实胶片微粒与染料云团 (CLT Dye Clouds)**：基于中心极限定理（CLT）视口积分衰减模型，模拟真实 35mm C-41 染料云团与 RGB 乳剂层厚度解耦采样，适应全图柔和细腻，1:1 放大微晶锐利咬合。
 - **显影物理光学质感**：非线性物理边界红光晕反射弥散（Halation）、显影抑制剂层内/层间扩散（DIR Couplers）、暗房预闪光（Pre-flash）以及画幅微粒比例缩放。
 
 ### 2. 毫秒级视口与 GPU 硬件加速管线
-- **Modern OpenGL / Vulkan 硬件加速**：着色器级 3D 物理色彩空间映射，支持 4K 高分辨率实时视口渲染与 60+ FPS 交互。
-- **平滑变焦与锚点对齐**：支持 10% 至 800% 无级缩放，双击放大时以光标物理落点为对准锚点，支持 1:1 像素与全貌适应快捷切换。
-- **对比与检查工具**：支持双视口可拖拽分割线对比，以及长按快捷键（`\`）瞬间原片对比。
+- **OpenGL 3.3 Core 硬件加速**：Qt OpenGL 渲染路径 + 着色器级 3D 物理色彩空间映射，支持 4K 高分辨率实时视口渲染与 60+ FPS 交互（可在 Vulkan / OpenGL 兼容驱动上运行）。
+- **平滑变焦与锚点对齐**：支持从全图适屏到逐像素 1:1，并可继续放大至 400% 以上像素级检视的无级缩放，双击放大时以光标物理落点为对准锚点，支持 1:1 像素与全貌适应快捷切换。
+- **对比与检查工具**：支持双视口可拖拽分割线对比，以及在画布任意区域长按左键（≥220ms）或长按快捷键（`\`）瞬间原片对比。
 - **多档导出管线**：提供全 CPU 精确离屏渲染与离屏帧缓冲 GPU 硬件加速并行导出。
 
 ### 3. 专业批量暗房生产力
@@ -55,6 +55,14 @@
 - **底片栏多选与批量批处理**：支持 Ctrl+Click、Shift+Click 区间连选及全选，支持整套暗房参数跨照片复制粘贴与批量多线程流水线导出。
 - **内存保护与两级缓存体系**：内置 Tier 1 微缩图与 Tier 2 视口纹理高速缓存，搭配严密的 LRU 内存回收控制，多底片大图连续切换内存平稳可控。
 - **平滑微调滑块**：横向拖拽数值标签即可微步步进，支持键盘微调与完整的撤销/重做（Ctrl+Z / Ctrl+Y）历史栈。
+
+### 4. 专业影像工程与元数据
+- **光学镜头校正（Adobe LCP）**：依据相机与镜头匹配的 LCP 配置文件，在着色器内实时校正桶形/枕形畸变、暗角失光与横向色差（CA）。
+- **裁切与多角度旋转**：ACR 风格浮动裁切框，支持自由比例、预设画幅比例与自定义宽高比，旋转状态下画幅比例自动贴边适配安全包络。
+- **广色域导出**：导出色彩空间可选 sRGB / Display P3 / Adobe RGB (1998) / Rec. 2020 / ProPhoto RGB；格式覆盖 JPEG、JPEG XL，8/16 位 PNG，以及 16 位整数 / 32 位浮点 TIFF。
+- **EXIF 隐私脱敏**：导出时默认抹除 GPS 经纬度与海拔坐标，完整保留相机、镜头、光圈、快门与拍摄时间等创作参数。
+- **星标评分与色标**：0–5 星评分与色标随会话工程（`.sdss`）持久化，与调色配方解耦，重置或清除 `.sdc` 不影响选片结果。
+- **脱机媒体管理**：源文件丢失时集中提示并支持重新关联，可一键移除脱机底片并同步会话与自动恢复缓存。
 
 ---
 
