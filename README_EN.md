@@ -4,7 +4,7 @@
 
 ### Professional 35mm Physical Film Development and Optical Print Darkroom Workstation (Windows)
 
-[**中文文档**](README.md) | [**English Documentation**](README_EN.md) | [**Changelog**](CHANGELOG.md)
+[**中文文档**](README.md) | [**English Documentation**](README_EN.md)
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Profiles: CC BY-SA 4.0](https://img.shields.io/badge/Profiles-CC%20BY--SA%204.0-orange.svg)](https://creativecommons.org/licenses/by-sa/4.0/)

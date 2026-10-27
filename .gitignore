@@ -90,3 +90,6 @@ fotufilm-engine/
 瀵规瘮/
 
 spektrafilm.exe/
+
+# 仓库只收源码与资源：更新日志留在工作区，不入库
+CHANGELOG.md
