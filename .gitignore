@@ -80,6 +80,8 @@ PROFILES_MANIFEST.md
 更新日志.txt
 SpektraDarkroom_缺陷分析与修复计划.md
 SpektraDarkroom_缺陷分析报告.mhtml
+# 仓库只收源码与资源：内部交接/计划/标定文档留在工作区，不入库
+docs/
 
 # Development & debug tools
 tools/
