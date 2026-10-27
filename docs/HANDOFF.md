@@ -74,12 +74,12 @@ python scratch/gpu_paint_bind_ast_check.py  # 静态核对 paintGL/render_offscr
 
 ### 实测外形（`tools/grain_stats.py` 打印）
 
-| 律 | 支数 | 峰位 D | 峰值/锚点 | 方向 |
+| 律 | 支数 | 峰位 D | 峰值（=×锚点） | 方向 |
 |---|---|---|---|---|
-| dyeCloud | 30 | 0.19 | 1.45× | 趾部上方见峰后缓降 |
-| silver | 7 | 1.96 | 2.14× | 单调上升 |
-| dyeCloudReversal | 15 | 视 Dmax（如 3.05） | 最高 2.43× | 上升后饱和 |
-| dyeCloudSelwyn | 1 | 1.57 | 1.24× | `√D` |
+| dyeCloud | 30 | 0.19 | 1.04（1.45×） | 趾部上方见峰后缓降 |
+| silver | 7 | 1.96 | 1.54（2.14×） | 单调上升 |
+| dyeCloudReversal | 15 | 视 Dmax（如 3.05） | 最高 1.75（2.43×） | 上升后饱和 |
+| dyeCloudSelwyn | 1 | 1.57 | 0.90（1.24×） | `√D` |
 
 **GPU↔CPU 一致性**（`scratch/gpu_grain_law_check.py`，真实 `render_offscreen`）：9 组律/钟形幅度比全部 ≤2.8%；D=1.0（锚点）处四律均为 1.00。
 
