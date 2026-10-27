@@ -237,7 +237,7 @@ class AboutDialog(QDialog):
             <p style="margin-bottom: 4px; color: {col_bold}; font-weight: bold;">核心特性：</p>
             <ul style="margin-top: 2px; margin-bottom: 12px; padding-left: 18px; color: {col_text};">
                 <li><b>81 波段连续光谱物理模拟</b>：基于真实物理光谱测定，彻底告别普通 3D LUT 断阶。</li>
-                <li><b>51 款胶卷 + 8 款相纸档案</b>：涵盖经典彩负、电影卷、反转片、黑白银盐与相纸/拷贝片（另含“无”与“数码扫描”两个旁路模式）。</li>
+                <li><b>53 款胶卷 + 8 款相纸档案</b>：涵盖经典彩负、电影卷、反转片、黑白银盐与相纸/拷贝片（另含“无”与“数码扫描”两个旁路模式）。</li>
                 <li><b>物理暗房全模拟管线</b>：支持 CMY 减色滤色曝光、暗房预闪、相纸显影衰退与光晕扩散。</li>
                 <li><b>真实染料云团微粒 (CLT)</b>：视口积分衰减模型，模拟微观 35mm 银盐染料云团真实颗粒。</li>
                 <li><b>OpenGL 3.3 Core 硬件加速</b>：4K 实时交互反馈，支持无级缩放与快速对比。</li>

@@ -32,7 +32,7 @@
 
 ### 1. 物理暗房连续光谱仿真
 - **81 波段物理光谱测定**：基于真实感光度与吸收率计算，彻底告别普通 3D LUT 的断阶与偏色。
-- **51 款胶卷档案 + 8 款相纸/拷贝片档案**（档案库另含“无（胶卷旁路）”与“数码扫描”两个模式，合计 52 + 9 个可选槽位）：
+- **53 款胶卷档案 + 8 款相纸/拷贝片档案**（档案库另含“无（胶卷旁路）”与“数码扫描”两个模式，合计 54 + 9 个可选槽位）：
   - **经典彩色负片**：Kodak Portra 160 / 400 / 800（含 ±迫冲预设），Gold 200，UltraMax 400，Ektar 100；Fujifilm Pro 400H / 160NS，C200，Superia X-TRA 400 等；
   - **电影工业底片**：Kodak Vision3 50D / 200T / 250D / 500T，CineStill 400D / 800T，Fujifilm Eterna 500T / Vivid 500T，F-64D 等；
   - **传奇反转片**：Fujifilm Velvia 50 / 100，Provia 100F，Astia 100F，Kodak Ektachrome E100，Kodachrome 25 / 64 / 200，Agfachrome CT 50 / 100 / 200 等；
