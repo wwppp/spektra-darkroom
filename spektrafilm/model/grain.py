@@ -104,6 +104,23 @@ def mix_chroma_grain(fluctuations_cmy, colour=0.5):
     return own * fluctuations_cmy + shared * mean_fluc
 
 
+def _channel_seeds(fixed_seed):
+    """The three per-record seeds handed to ``layer_particle_model``.
+
+    A caller-supplied ``fixed_seed`` must actually reach the sampler.  Both call sites used to
+    invert this test - they set ``seed = None`` whenever ``fixed_seed`` was given - so every call
+    that passed a seed raised ``TypeError`` on ``seed[ch]`` below.  Nothing in the tree exercised
+    the branch, which is why it survived: keep this one implementation so the two functions cannot
+    disagree again.
+    """
+    if fixed_seed is None:
+        return [0, 1, 2]
+    seeds = [int(x) for x in np.atleast_1d(fixed_seed)]
+    while len(seeds) < 3:
+        seeds.append(seeds[-1] + 1 if seeds else 0)
+    return seeds[:3]
+
+
 def apply_grain_to_density(density_cmy,
                            pixel_size_um=10,
                            particle_area_um2=0.2,
@@ -123,12 +140,10 @@ def apply_grain_to_density(density_cmy,
     n_particles_per_pixel = pixel_area_um2/particle_area_um2
     sigma_blur_pixel = grain_blur
     
-    if fixed_seed is not None:
-        seed = None
-    else:
-        seed = [0, 1, 2]
-    
-    if n_sub_layers>1:
+    # A caller-supplied seed must reach the per-layer sampler (see _channel_seeds).
+    seed = _channel_seeds(fixed_seed)
+
+    if n_sub_layers > 1:
         n_particles_per_pixel /= n_sub_layers
     
     density_cmy_base = density_cmy.copy()
@@ -183,11 +198,9 @@ def apply_grain_to_density_layers(density_cmy_layers, # x,y,sublayers,rgb
                                     np.array(particle_scale_layers)[:,None]) # layers, rgb
     n_particles_per_pixel = pixel_area_um2*density_max_fractions/particle_area_um2_layers
 
-    if fixed_seed is not None:
-        seed = None
-    else:
-        seed = [0, 1, 2]
-    
+    # Same seed handling as apply_grain_to_density (see _channel_seeds).
+    seed = _channel_seeds(fixed_seed)
+
     density_cmy_base = np.sum(density_cmy_layers.copy(), axis=2)
     density_cmy_layers += density_min_layers
     n_sl = min(density_cmy_layers.shape[2], density_max_layers.shape[0])
