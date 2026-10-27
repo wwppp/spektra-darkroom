@@ -1,4 +1,4 @@
-"""SpektraDarkroom Main Window - Vulkan GPU Real-Time Accelerated Darkroom
+"""SpektraDarkroom Main Window - GPU Real-Time Accelerated Darkroom
 Provides:
 - Windows 11 Fluent frameless UI with native DWM rounded corners and native WM_NCHITTEST dragging
 - Non-destructive .sdc sidecar parameter management per image file

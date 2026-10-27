@@ -995,7 +995,7 @@ def get_bg_color_circle_icon(key: str, is_dark: bool = True) -> QIcon:
 
 
 class DarkroomGLCanvas(QOpenGLWidget):
-    """Hardware-accelerated OpenGL / Vulkan-compatible viewport:
+    """Hardware-accelerated OpenGL viewport:
     - 60+ FPS real-time GLSL rendering of 3D LUT, Exposure, Enlarger CMY, Halation, Grain
     - Smooth pan & zoom
     - Draggable Before/After split screen
