@@ -39,20 +39,55 @@ EXPORT_SIZE_PRESETS = (
 )
 
 EXPORT_SIZE_PREF_KEY = "export_size_long_edge"
+EXPORT_SIZE_MODE_KEY = "export_size_preset"
 
 # JPEG quality tiers, highest first: (slider/config value, human label)
 EXPORT_QUALITY_LEVELS = (
-    (10, "极高画质 (体积最大)"),
+    (10, "极高画质"),
     (9, "高画质 (推荐)"),
     (8, "较高画质"),
     (7, "标准偏上"),
     (6, "标准"),
-    (5, "中等 (体积适中)"),
+    (5, "中等"),
     (4, "偏低"),
-    (3, "低 (体积小)"),
+    (3, "低"),
     (2, "很低"),
-    (1, "最低 (体积最小)"),
+    (1, "最低"),
 )
+
+
+def crop_source_pixels(src_w, src_h, crop=None):
+    """Pixel rectangle a 100 % export produces: crop fractions applied, 90 deg swaps axes."""
+    w, h = int(src_w or 0), int(src_h or 0)
+    if isinstance(crop, dict) and crop.get("enabled"):
+        try:
+            w = int(round(w * float(crop.get("w", 1.0))))
+            h = int(round(h * float(crop.get("h", 1.0))))
+        except (TypeError, ValueError):
+            pass
+        if int(crop.get("rot_90", 0)) % 180 == 90:
+            w, h = h, w
+    return max(1, w), max(1, h)
+
+
+def resolve_output_pixels(preset_key, custom_edge, src_w, src_h, crop=None):
+    """(width, height) for a size preset, never upscaling past the source.
+
+    Mirrors ExportSizeWidget.output_pixels() for callers that have no dialog (quick export).
+    The preset pins the *long* edge, whichever axis that is.
+    """
+    w, h = crop_source_pixels(src_w, src_h, crop)
+    edge = int(custom_edge or 0) if preset_key == "custom" else 0
+    if preset_key != "custom":
+        for name, _label, long_edge, _paper in EXPORT_SIZE_PRESETS:
+            if name == preset_key:
+                edge = long_edge
+                break
+    long_edge = max(w, h)
+    if edge <= 0 or edge >= long_edge:
+        return w, h
+    scale = edge / float(long_edge)
+    return max(1, int(round(w * scale))), max(1, int(round(h * scale)))
 
 
 class ExportSizeWidget(QWidget):
@@ -162,10 +197,11 @@ class ExportSizeWidget(QWidget):
 
     def scale_pct(self):
         src_w, src_h = self.source_pixels()
-        out_w, _out_h = self.output_pixels()
-        if max(src_w, src_h) <= 0:
+        out_w, out_h = self.output_pixels()
+        src_long = max(src_w, src_h)
+        if src_long <= 0:
             return 100
-        return max(1, min(100, int(round(out_w * 100.0 / max(src_w, src_h)))))
+        return max(1, min(100, int(round(max(out_w, out_h) * 100.0 / src_long))))
 
     # --- state ---------------------------------------------------------------------------
     def _preset_row(self, key):
@@ -313,6 +349,16 @@ class ExportSizeWidget(QWidget):
         edge = max(1, int(round(max(src_w, src_h) * pct / 100.0)))
         self.set_custom_edge(edge)
 
+    def select_preset(self, key):
+        """Select a preset by its key (source-independent, used when restoring settings)."""
+        row = self._preset_row(key)
+        if row is None or self.combo.itemData(row) != key:
+            return
+        self.combo.setCurrentIndex(row)
+        if self.combo.isEditable():
+            self.combo.setEditable(False)
+        self._update_summary()
+
     def restore_long_edge(self, edge):
         """Restore by absolute long edge (everything saved from now on)."""
         try:
@@ -343,6 +389,7 @@ class BaseExportDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._match_option_widths()
         is_dark = theme_manager.is_dark()
         apply_dark_titlebar(self, is_dark=is_dark)
         from ui.window_utils import setup_solid_combobox, get_icon
@@ -472,7 +519,7 @@ class BaseExportDialog(QDialog):
             self.combo_quality.addItem(f"{q} · {desc}", q)
         self.combo_quality.setCurrentIndex(self.combo_quality.findData(9))
         self.combo_quality.setToolTip("JPEG 画质档位 1–10，数字越大画质越高、体积越大")
-        grid_jpeg.addWidget(self.combo_quality, 0, 1)
+        grid_jpeg.addWidget(self.combo_quality, 0, 1, Qt.AlignmentFlag.AlignLeft)
 
         self.chk_progressive = QCheckBox("渐进式")
         self.chk_progressive.setObjectName("chkProgressive")
@@ -493,10 +540,10 @@ class BaseExportDialog(QDialog):
 
         self.combo_tiff_comp = QComboBox()
         setup_solid_combobox(self.combo_tiff_comp)
-        self.combo_tiff_comp.addItem("LZW 压缩 (无损推荐)", "lzw")
-        self.combo_tiff_comp.addItem("Zip / Deflate 压缩", "deflate")
-        self.combo_tiff_comp.addItem("无压缩 (Raw TIFF)", "none")
-        grid_tiff.addWidget(self.combo_tiff_comp, 0, 1)
+        self.combo_tiff_comp.addItem("LZW 压缩", "lzw")
+        self.combo_tiff_comp.addItem("Zip / Deflate", "deflate")
+        self.combo_tiff_comp.addItem("无压缩", "none")
+        grid_tiff.addWidget(self.combo_tiff_comp, 0, 1, Qt.AlignmentFlag.AlignLeft)
 
         self.stack_settings.addWidget(page_tiff)
 
@@ -510,10 +557,10 @@ class BaseExportDialog(QDialog):
 
         self.combo_png_level = QComboBox()
         setup_solid_combobox(self.combo_png_level)
-        self.combo_png_level.addItem("标准压缩 (Level 6)", 6)
-        self.combo_png_level.addItem("极限压缩 (Level 9)", 9)
-        self.combo_png_level.addItem("快速存储 (Level 1)", 1)
-        grid_png.addWidget(self.combo_png_level, 0, 1)
+        self.combo_png_level.addItem("标准 (Level 6)", 6)
+        self.combo_png_level.addItem("极限 (Level 9)", 9)
+        self.combo_png_level.addItem("快速 (Level 1)", 1)
+        grid_png.addWidget(self.combo_png_level, 0, 1, Qt.AlignmentFlag.AlignLeft)
 
         self.stack_settings.addWidget(page_png)
 
@@ -527,11 +574,11 @@ class BaseExportDialog(QDialog):
 
         self.combo_jxl_mode = QComboBox()
         setup_solid_combobox(self.combo_jxl_mode)
-        self.combo_jxl_mode.addItem("视觉无损 (距离 1.0)", "visual_10")
-        self.combo_jxl_mode.addItem("超高保真 (距离 0.5)", "visual_05")
-        self.combo_jxl_mode.addItem("高质量平衡 (距离 1.5)", "visual_15")
-        self.combo_jxl_mode.addItem("完全无损 (Lossless)", "lossless")
-        grid_jxl.addWidget(self.combo_jxl_mode, 0, 1)
+        self.combo_jxl_mode.addItem("视觉无损 (1.0)", "visual_10")
+        self.combo_jxl_mode.addItem("超高保真 (0.5)", "visual_05")
+        self.combo_jxl_mode.addItem("高质量 (1.5)", "visual_15")
+        self.combo_jxl_mode.addItem("完全无损", "lossless")
+        grid_jxl.addWidget(self.combo_jxl_mode, 0, 1, Qt.AlignmentFlag.AlignLeft)
 
         # Sits in the right-hand column pair, exactly under 色彩抽样 above.
         lbl_jxl_effort = QLabel("编码精度:")
@@ -541,9 +588,9 @@ class BaseExportDialog(QDialog):
         self.combo_jxl_effort = QComboBox()
         setup_solid_combobox(self.combo_jxl_effort)
         self.combo_jxl_effort.addItem("标准 (Effort 7)", 7)
-        self.combo_jxl_effort.addItem("极限压缩 (Effort 9)", 9)
-        self.combo_jxl_effort.addItem("极速导出 (Effort 5)", 5)
-        grid_jxl.addWidget(self.combo_jxl_effort, 0, 3)
+        self.combo_jxl_effort.addItem("极限 (9)", 9)
+        self.combo_jxl_effort.addItem("极速 (5)", 5)
+        grid_jxl.addWidget(self.combo_jxl_effort, 0, 3, Qt.AlignmentFlag.AlignLeft)
 
         self.stack_settings.addWidget(page_jxl)
 
@@ -571,7 +618,33 @@ class BaseExportDialog(QDialog):
         spacer = QLabel("")
         spacer.setFixedWidth(72)
         grid.addWidget(spacer, 0, 2)
+        # Reserve the same width the right-hand control column takes, so column 1 keeps exactly
+        # the width of the 输出尺寸 combo instead of growing over both halves.
+        right = QLabel("")
+        try:
+            right.setFixedWidth(max(120, self.combo_subsampling.sizeHint().width()))
+        except Exception:
+            right.setFixedWidth(217)
+        grid.addWidget(right, 0, 3)
         return page
+
+    def _match_option_widths(self):
+        """Give the format options the same width as the 输出尺寸 combo.
+
+        Applied at show time, after the stylesheet is in place: the format pages are separate
+        layouts, so without this their single combo is sized by its own text and ends up a few
+        pixels wider or narrower than the control above it.
+        """
+        if not hasattr(self, "size_widget"):
+            return
+        width = self.size_widget.combo.width()
+        if width < 120:
+            return
+        for name in ("combo_quality", "combo_tiff_comp", "combo_png_level",
+                     "combo_jxl_mode", "combo_jxl_effort"):
+            widget = getattr(self, name, None)
+            if widget is not None and widget.width() != width:
+                widget.setFixedWidth(width)
 
     def _on_dpi_changed(self, _index):
         if hasattr(self, "size_widget"):
@@ -636,10 +709,15 @@ class BaseExportDialog(QDialog):
                 if idx_q >= 0:
                     self.combo_quality.setCurrentIndex(idx_q)
 
-            sc = last.get(EXPORT_SIZE_PREF_KEY, None)
             if hasattr(self, "size_widget"):
-                if sc:
-                    self.size_widget.restore_long_edge(sc)
+                mode = last.get(EXPORT_SIZE_MODE_KEY)
+                edge = last.get(EXPORT_SIZE_PREF_KEY)
+                if mode == "custom":
+                    self.size_widget.set_custom_edge(edge or 0)
+                elif mode:
+                    self.size_widget.select_preset(mode)
+                elif edge:
+                    self.size_widget.restore_long_edge(edge)
                 else:
                     # Older configs only stored a percentage of the long edge.
                     self.size_widget.set_scale_pct(last.get("scale_pct", 100))
@@ -726,6 +804,7 @@ class BaseExportDialog(QDialog):
             "out_long_edge": max(self.size_widget.output_pixels()) if hasattr(self, "size_widget") else 0,
             "scale_pct": self.size_widget.scale_pct() if hasattr(self, "size_widget") else 100,
             EXPORT_SIZE_PREF_KEY: self.size_widget._target_long_edge() if hasattr(self, "size_widget") else 0,
+            EXPORT_SIZE_MODE_KEY: self.size_widget.combo.currentData() if hasattr(self, "size_widget") else "original",
             "overwrite": self.chk_overwrite.isChecked() if hasattr(self, "chk_overwrite") else True,
         }
 
