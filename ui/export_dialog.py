@@ -22,6 +22,224 @@ from ui.theme_manager import theme_manager
 from core import config_manager
 
 
+# Output size presets. A preset pins the *long edge*; the short edge follows the source
+# aspect ratio. Percentages were dropped because their physical meaning differs from file to
+# file (50% of a 45 MP frame is 6000 px, of a 24 MP frame 3000 px) while photographers size an
+# export by use: print at a paper size, or fit a pixel budget for the web.
+#   key, label, long edge in px (0 = keep the source resolution), paper mm (w, h) or None
+EXPORT_SIZE_PRESETS = (
+    ("original", "原始尺寸", 0, None),
+    ("print_a4", "打印 A4 · 300dpi", 3508, (210, 297)),
+    ("print_a3", "打印 A3 · 300dpi", 4961, (297, 420)),
+    ("print_a2", "打印 A2 · 300dpi", 7016, (420, 594)),
+    ("web_4k", "屏幕 4K · 3840 px", 3840, None),
+    ("web_2k", "网页 2K · 2048 px", 2048, None),
+    ("share_1080", "分享 1080 px", 1080, None),
+    ("custom", "自定义长边…", -1, None),
+)
+
+EXPORT_SIZE_PREF_KEY = "export_size_long_edge"
+
+
+class ExportSizeWidget(QWidget):
+    """Size selector shared by the single and batch dialogs.
+
+    Shows the real output pixel dimensions for the photo being exported instead of a bare
+    percentage, plus the physical print size at the chosen DPI, so the choice is concrete.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._src_w = 0
+        self._src_h = 0
+        self._crop = None
+        self._dpi = 300
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        self.combo = QComboBox()
+        setup_solid_combobox(self.combo)
+        for key, label, edge, _paper in EXPORT_SIZE_PRESETS:
+            self.combo.addItem(label, key)
+        lay.addWidget(self.combo, 1)
+
+        self.spin = QLineEdit()
+        self.spin.setFixedWidth(72)
+        self.spin.setPlaceholderText("长边 px")
+        self.spin.setVisible(False)
+        self.spin.editingFinished.connect(self._on_custom_edited)
+        lay.addWidget(self.spin)
+
+        self.combo.currentIndexChanged.connect(self._on_preset_changed)
+
+    # --- source context ------------------------------------------------------------------
+    def set_source(self, width=None, height=None, crop=None):
+        """Tell the widget the master pixel size and the crop rect (fractions of the master)."""
+        try:
+            w = int(width or 0)
+            h = int(height or 0)
+        except (TypeError, ValueError):
+            w = h = 0
+        if w > 0 and h > 0:
+            self._src_w, self._src_h = w, h
+        self._crop = crop if isinstance(crop, dict) and crop.get("enabled") else None
+        self.refresh()
+
+    def set_dpi(self, dpi):
+        try:
+            self._dpi = max(1, int(dpi))
+        except (TypeError, ValueError):
+            self._dpi = 300
+        self._update_summary()
+        self.combo.setItemText(self._preset_row("print_a4"), self._print_label("print_a4"))
+        self.combo.setItemText(self._preset_row("print_a3"), self._print_label("print_a3"))
+        self.combo.setItemText(self._preset_row("print_a2"), self._print_label("print_a2"))
+
+    def _print_label(self, key):
+        for name, _label, long_edge, paper in EXPORT_SIZE_PRESETS:
+            if name == key and paper:
+                return (f"打印 {name.split('_')[-1].upper()} · "
+                        f"{self._max_short_edge_dpi(long_edge, paper)}dpi")
+        return ""
+
+    def _max_short_edge_dpi(self, long_edge, paper):
+        """DPI the *short* edge can sustain at this long edge (the binding constraint)."""
+        pw, ph = paper
+        short_mm = min(pw, ph)
+        if short_mm <= 0 or long_edge <= 0:
+            return 300
+        return max(36, int(round(long_edge * short_mm / max(pw, ph) / (short_mm / 25.4))))
+
+    # --- geometry ------------------------------------------------------------------------
+    def source_pixels(self):
+        """The pixel rectangle the renderer will actually produce at 100 % (crop applied)."""
+        w, h = self._src_w, self._src_h
+        if self._crop:
+            try:
+                w = int(round(w * float(self._crop.get("w", 1.0))))
+                h = int(round(h * float(self._crop.get("h", 1.0))))
+            except (TypeError, ValueError):
+                pass
+        if int(self._crop.get("rot_90", 0) if self._crop else 0) % 180 == 90:
+            w, h = h, w
+        return max(1, w), max(1, h)
+
+    def _target_long_edge(self):
+        key = self.combo.currentData()
+        for name, _label, long_edge, _paper in EXPORT_SIZE_PRESETS:
+            if name == key:
+                if name == "custom":
+                    try:
+                        return max(1, int(self.spin.text().strip() or 0))
+                    except ValueError:
+                        return 0
+                return long_edge
+        return 0
+
+    def output_pixels(self):
+        """(width, height) the file will have, never upscaling past the source."""
+        src_w, src_h = self.source_pixels()
+        edge = self._target_long_edge()
+        if edge <= 0 or edge >= max(src_w, src_h):
+            return src_w, src_h
+        scale = edge / float(max(src_w, src_h))
+        return max(1, int(edge)), max(1, int(round(src_h * scale)))
+
+    def scale_pct(self):
+        src_w, src_h = self.source_pixels()
+        out_w, _out_h = self.output_pixels()
+        if max(src_w, src_h) <= 0:
+            return 100
+        return max(1, min(100, int(round(out_w * 100.0 / max(src_w, src_h)))))
+
+    # --- state ---------------------------------------------------------------------------
+    def _preset_row(self, key):
+        for idx, (name, _label, _edge, _paper) in enumerate(EXPORT_SIZE_PRESETS):
+            if name == key:
+                return idx
+        return 0
+
+    def _on_preset_changed(self, _idx):
+        is_custom = self.combo.currentData() == "custom"
+        self.spin.setVisible(is_custom)
+        if is_custom and not self.spin.text().strip():
+            w, _h = self.output_pixels()
+            self.spin.setText(str(max(1, w)))
+        self._update_summary()
+
+    def _on_custom_edited(self):
+        try:
+            val = max(64, min(30000, int(self.spin.text().strip())))
+        except ValueError:
+            val = 0
+        if val:
+            self.spin.setText(str(val))
+        self._update_summary()
+
+    def _update_summary(self):
+        """Fold the real pixel size into the combo text so it is visible without hovering."""
+        out_w, out_h = self.output_pixels()
+        summary = f"{out_w} × {out_h} px"
+        if self._dpi > 0 and self._src_w > 0:
+            cm_w = out_w / self._dpi * 2.54
+            cm_h = out_h / self._dpi * 2.54
+            summary += f"  ·  {cm_w:.1f} × {cm_h:.1f} cm @ {self._dpi}dpi"
+        self.setToolTip(summary)
+        self.combo.setToolTip(summary)
+        self.spin.setToolTip(summary)
+        self.setProperty("summary", summary)
+        # The owning dialogs render their own label; walk up the parent chain because Qt
+        # re-parents the widget onto an internal page container.
+        node = self.parent()
+        for _ in range(6):
+            if node is None:
+                break
+            if hasattr(node, "_on_export_size_changed"):
+                node._on_export_size_changed(out_w, out_h)
+                break
+            node = node.parent()
+
+    def set_scale_pct(self, pct):
+        """Restore a previously used size (older configs stored a percentage)."""
+        try:
+            pct = int(pct)
+        except (TypeError, ValueError):
+            pct = 100
+        if pct >= 100:
+            self.combo.setCurrentIndex(self._preset_row("original"))
+            return
+        src_w, src_h = self.source_pixels()
+        edge = max(1, int(round(max(src_w, src_h) * pct / 100.0)))
+        row = self._preset_row("custom")
+        if row >= 0:
+            self.combo.setCurrentIndex(row)
+            self.spin.setText(str(edge))
+        self._update_summary()
+
+    def restore_long_edge(self, edge):
+        """Restore by absolute long edge (everything saved from now on)."""
+        try:
+            edge = int(edge or 0)
+        except (TypeError, ValueError):
+            edge = 0
+        if edge <= 0:
+            self.combo.setCurrentIndex(self._preset_row("original"))
+            return
+        for name, _label, preset_edge, _paper in EXPORT_SIZE_PRESETS:
+            if name not in ("original", "custom") and preset_edge == edge:
+                self.combo.setCurrentIndex(self._preset_row(name))
+                return
+        self.combo.setCurrentIndex(self._preset_row("custom"))
+        self.spin.setText(str(edge))
+        self.spin.setVisible(True)
+        self._update_summary()
+
+    def refresh(self):
+        self._update_summary()
+
+
 class BaseExportDialog(QDialog):
     """Base dialog encapsulating shared darkroom rendering and color management settings."""
 
@@ -112,7 +330,7 @@ class BaseExportDialog(QDialog):
 
         # Row 3: Format-Specific Settings Stack
         self.stack_settings = QStackedWidget()
-        self.stack_settings.setFixedHeight(64)
+        self.stack_settings.setFixedHeight(96)
 
         # --- Stack Page 0: JPEG Options ---
         page_jpeg = QWidget()
@@ -125,21 +343,24 @@ class BaseExportDialog(QDialog):
         grid_jpeg.setColumnStretch(2, 0)
         grid_jpeg.setColumnStretch(3, 1)
 
-        # Row 0: Scale & Subsampling
+        # Row 0: Output size (with the resolved pixel size underneath) & Subsampling
         lbl_scale = QLabel("输出尺寸:")
         lbl_scale.setFixedWidth(72)
-        grid_jpeg.addWidget(lbl_scale, 0, 0)
+        grid_jpeg.addWidget(lbl_scale, 0, 0, 1, 1, Qt.AlignmentFlag.AlignTop)
 
-        self.combo_scale = QComboBox()
-        setup_solid_combobox(self.combo_scale)
-        self.combo_scale.addItem("100% (原始尺寸)", 100)
-        self.combo_scale.addItem("80%", 80)
-        self.combo_scale.addItem("60%", 60)
-        self.combo_scale.addItem("50%", 50)
-        self.combo_scale.addItem("33%", 33)
-        self.combo_scale.addItem("25%", 25)
-        self.combo_scale.setCurrentIndex(0)
-        grid_jpeg.addWidget(self.combo_scale, 0, 1)
+        size_box = QVBoxLayout()
+        size_box.setContentsMargins(0, 0, 0, 0)
+        size_box.setSpacing(3)
+
+        self.size_widget = ExportSizeWidget(self)
+        size_box.addWidget(self.size_widget)
+
+        # Real output pixels + physical print size, so the choice is never a blind percentage
+        self.lbl_size_summary = QLabel("")
+        self.lbl_size_summary.setStyleSheet("color: #f59e0b; font-size: 11px;")
+        size_box.addWidget(self.lbl_size_summary)
+
+        grid_jpeg.addLayout(size_box, 0, 1)
 
         lbl_sub = QLabel("色彩抽样:")
         lbl_sub.setFixedWidth(65)
@@ -280,8 +501,30 @@ class BaseExportDialog(QDialog):
 
         card_layout.addWidget(self.stack_settings)
         self.combo_format.currentIndexChanged.connect(self._on_format_changed)
+        if hasattr(self, "combo_dpi"):
+            self.combo_dpi.currentIndexChanged.connect(self._on_dpi_changed)
 
         return card, card_layout
+
+    def _on_dpi_changed(self, _index):
+        if hasattr(self, "size_widget"):
+            self.size_widget.set_dpi(self.combo_dpi.currentData() or 300)
+
+    def _on_export_size_changed(self, out_w, out_h):
+        """Called by ExportSizeWidget whenever the resulting pixel size changes."""
+        if not hasattr(self, "lbl_size_summary"):
+            return
+        src_w, src_h = self.size_widget.source_pixels() if hasattr(self, "size_widget") else (0, 0)
+        if src_w <= 0:
+            self.lbl_size_summary.setText("")
+            return
+        mp = out_w * out_h / 1_000_000.0
+        # Keep it short: the label sits under the combo and gets clipped at the column width.
+        if out_w < src_w:
+            text = f"{out_w}×{out_h} px · {mp:.1f}MP · 颗粒按此重算"
+        else:
+            text = f"{out_w}×{out_h} px · {mp:.1f}MP"
+        self.lbl_size_summary.setText(text)
 
     def _on_format_changed(self, index):
         fmt = self.combo_format.currentData()
@@ -335,11 +578,13 @@ class BaseExportDialog(QDialog):
             if hasattr(self, "slider_quality"):
                 self.slider_quality.setValue(min(10, max(1, int(q))))
 
-            sc = last.get("scale_pct", 100)
-            if hasattr(self, "combo_scale"):
-                idx_sc = self.combo_scale.findData(sc)
-                if idx_sc >= 0:
-                    self.combo_scale.setCurrentIndex(idx_sc)
+            sc = last.get(EXPORT_SIZE_PREF_KEY, None)
+            if hasattr(self, "size_widget"):
+                if sc:
+                    self.size_widget.restore_long_edge(sc)
+                else:
+                    # Older configs only stored a percentage of the long edge.
+                    self.size_widget.set_scale_pct(last.get("scale_pct", 100))
 
             sub = last.get("subsampling", "4:4:4")
             if hasattr(self, "combo_subsampling"):
@@ -367,6 +612,8 @@ class BaseExportDialog(QDialog):
                 idx_dpi = self.combo_dpi.findData(dpi_val)
                 if idx_dpi >= 0:
                     self.combo_dpi.setCurrentIndex(idx_dpi)
+            if hasattr(self, "size_widget"):
+                self.size_widget.set_dpi(dpi_val)
 
             if hasattr(self, "chk_strip_gps"):
                 self.chk_strip_gps.setChecked(bool(last.get("strip_gps", True)))
@@ -411,7 +658,11 @@ class BaseExportDialog(QDialog):
             "jxl_lossless": is_lossless,
             "jxl_distance": dist_val,
             "jxl_effort": effort_val,
-            "scale_pct": int(self.combo_scale.currentData()) if hasattr(self, "combo_scale") and self.combo_format.currentData() in ("jpeg", "jxl") else 100,
+            # Output size: the widget resolves the long edge to the exact pixel width the
+            # renderer must produce, so no post-hoc percentage rounding is applied.
+            "out_long_edge": self.size_widget.output_pixels()[0] if hasattr(self, "size_widget") else 0,
+            "scale_pct": self.size_widget.scale_pct() if hasattr(self, "size_widget") else 100,
+            EXPORT_SIZE_PREF_KEY: self.size_widget._target_long_edge() if hasattr(self, "size_widget") else 0,
         }
 
     def _apply_style(self):
@@ -745,6 +996,12 @@ class SingleExportDialog(BaseExportDialog):
             new_ext = ".tif" if fmt == "tiff" else (".jxl" if fmt == "jxl" else (".png" if fmt == "png" else ".jpg"))
             self.edit_path.setText(base + new_ext)
 
+    def set_source_context(self, width=None, height=None, crop=None):
+        """Size the output selector from the photo about to be scanned."""
+        if hasattr(self, "size_widget"):
+            self.size_widget.set_dpi(self.combo_dpi.currentData() or 300)
+            self.size_widget.set_source(width, height, crop)
+
     def _browse_save_path(self):
         fmt = self.combo_format.currentData()
         if fmt == "tiff":
@@ -947,6 +1204,11 @@ class BatchExportDialog(BaseExportDialog):
         dir_chosen = QFileDialog.getExistingDirectory(self, "选择目标输出文件夹", start_dir)
         if dir_chosen:
             self.edit_path.setText(normalize_path(dir_chosen))
+
+    def set_source_context(self, width=None, height=None, crop=None):
+        """Size the output selector from a representative photo of the batch."""
+        self.size_widget.set_dpi(self.combo_dpi.currentData() or 300)
+        self.size_widget.set_source(width, height, crop)
 
     def get_export_config(self) -> dict:
         cfg = self.get_common_export_config()

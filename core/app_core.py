@@ -895,6 +895,23 @@ def save_encoded_image(rendered_data, output_path, params_dict):
             logger.debug(f"save_encoded_image EXIF tag sync: {e_sync}")
 
     # 3. Format-specific encoding
+    # Output size: honour the exact long edge resolved by the export dialog, so TIFF and PNG
+    # resize too (previously only JPEG/JXL were scaled and the dropdown silently did nothing).
+    out_long_edge = int(params_dict.get("out_long_edge", 0) or 0)
+    legacy_pct = int(params_dict.get("scale_pct", 100) or 100)
+    if out_long_edge <= 0 and 0 < legacy_pct < 100:
+        # Older callers only pass a percentage; resolve it here so no format ignores it.
+        out_long_edge = int(round(max(rendered_float.shape[:2]) * legacy_pct / 100.0))
+    if out_long_edge > 0:
+        cur_h, cur_w = rendered_float.shape[:2]
+        if out_long_edge < max(cur_h, cur_w):
+            scale = out_long_edge / float(max(cur_h, cur_w))
+            target_w = max(1, int(out_long_edge))
+            target_h = max(1, int(round(cur_h * scale)))
+            rendered_float = cv2.resize(rendered_float, (target_w, target_h),
+                                        interpolation=cv2.INTER_AREA)
+            params_dict["scale_pct"] = 100  # already applied; the encoders must not rescale
+
     if "tif" in fmt_lower:
         comp = str(params_dict.get("tiff_compression", "lzw")).lower()
         if comp in ("none", "uncompressed"):
@@ -3739,6 +3756,9 @@ class SpektraEngine:
             enc_params["format"] = format_type
             enc_params["quality"] = quality
             enc_params["source_path"] = target_src
+            # Resolve the export-size preset to a concrete pixel width here, so every format
+            # (TIFF / PNG included) honours the size the dialog showed the user.
+            enc_params["out_long_edge"] = int(params_dict.get("out_long_edge", 0) or 0)
             save_encoded_image(rendered_float, output_path, enc_params)
 
             if progress_cb:

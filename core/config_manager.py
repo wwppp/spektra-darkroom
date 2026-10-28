@@ -415,6 +415,7 @@ def get_last_export_settings() -> dict:
         "bit_depth": 8,
         "quality": 95,
         "scale_pct": 100,
+        "out_long_edge": 0,
         "color_space": "sRGB",
         "sharpen": False,
         "sharpen_strength": 0.5,
