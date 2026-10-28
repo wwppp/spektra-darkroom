@@ -46,8 +46,11 @@ from PySide6.QtWidgets import (
 from core.path_utils import get_icon_path, get_resource_dir, normalize_path
 from core.format_constants import (
     RAW_EXTENSIONS,
-    ALL_SUPPORTED_IMAGE_EXTENSIONS,
-    FILE_DIALOG_IMAGE_FILTER
+    IMPORTABLE_IMAGE_EXTENSIONS,
+    LOSSY_IMAGE_EXTENSIONS,
+    FILE_DIALOG_IMAGE_FILTER,
+    is_importable_image,
+    is_lossy_image
 )
 from core.version import get_app_title, get_full_version_info
 from core.app_core import SpektraEngine
@@ -2639,7 +2642,7 @@ class DarkroomMainWindow(QMainWindow):
             return
 
         from core.path_utils import normalize_path
-        valid_exts = ALL_SUPPORTED_IMAGE_EXTENSIONS
+        valid_exts = IMPORTABLE_IMAGE_EXTENSIONS
         sdss_files = []
         img_files = []
 
@@ -8123,16 +8126,29 @@ class DarkroomMainWindow(QMainWindow):
     def _scan_and_import_folder(self, folder):
         if not folder or not os.path.exists(folder):
             return
-        valid_exts = ALL_SUPPORTED_IMAGE_EXTENSIONS
         files = []
+        skipped_lossy = 0
         for root, _, fnames in os.walk(folder):
             for f in fnames:
-                if os.path.splitext(f)[1].lower() in valid_exts:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in IMPORTABLE_IMAGE_EXTENSIONS:
                     files.append(os.path.join(root, f))
+                elif ext in LOSSY_IMAGE_EXTENSIONS:
+                    skipped_lossy += 1
         if files:
             self._import_files_list(files)
+            if skipped_lossy:
+                self.set_app_status(
+                    f"已静默跳过 {skipped_lossy} 个有损压缩文件（JPG/WebP），仅支持 RAW 与无损位图",
+                    timeout_ms=4000,
+                )
         else:
-            self._show_info_dialog("提示", "所选文件夹中未找到受支持的图像文件。")
+            # Silent by policy: no dialog for rejected formats, only a status-bar note.
+            self.set_app_status(
+                f"该文件夹内 {skipped_lossy} 个文件均为有损压缩（JPG/WebP），未导入" if skipped_lossy
+                else "所选文件夹中未找到受支持的图像文件",
+                timeout_ms=4000,
+            )
 
     def open_single_file(self, file_path):
         if os.path.exists(file_path):
@@ -8141,6 +8157,29 @@ class DarkroomMainWindow(QMainWindow):
     def _import_files_list(self, file_paths):
         if hasattr(self, "_pending_startup_restore_timer") and self._pending_startup_restore_timer is not None:
             self._pending_startup_restore_timer.stop()
+
+        # 0. Lossless-only gate, applied once for every entry point (dialog, drag & drop,
+        # folder scan, CLI args, recent files). Lossy containers are dropped silently and
+        # reported only in the status bar -- no dialog, no per-file prompt.
+        # Session restore does NOT pass through here (it resolves paths by existence), so
+        # old .sdss projects that still reference JPEG files keep loading untouched.
+        if file_paths:
+            importable = []
+            dropped_lossy = 0
+            for p in file_paths:
+                if is_importable_image(p):
+                    importable.append(p)
+                elif is_lossy_image(p):
+                    dropped_lossy += 1
+            if dropped_lossy:
+                self.set_app_status(
+                    f"已静默忽略 {dropped_lossy} 个有损压缩文件（JPG/WebP），仅支持 RAW 与无损位图",
+                    timeout_ms=4000,
+                )
+            file_paths = importable
+            if not file_paths:
+                return
+
         # 1. Three-tier deduplication:
         # Tier 1: Photos already loaded in library
         existing_norm_paths = {os.path.normcase(os.path.abspath(p["path"])) for p in self.photos if p and "path" in p}

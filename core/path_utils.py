@@ -180,9 +180,13 @@ def send_to_recycle_bin(paths) -> bool:
 from .format_constants import (
     RAW_EXTENSIONS,
     STANDARD_IMAGE_EXTENSIONS,
-    ALL_SUPPORTED_IMAGE_EXTENSIONS,
+    LOSSLESS_IMAGE_EXTENSIONS,
+    LOSSY_IMAGE_EXTENSIONS,
+    IMPORTABLE_IMAGE_EXTENSIONS,
     FILE_DIALOG_IMAGE_FILTER,
     get_file_extension,
     is_raw_file,
+    is_lossy_image,
+    is_importable_image,
     is_supported_image
 )
