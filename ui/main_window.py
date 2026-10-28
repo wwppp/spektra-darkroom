@@ -6023,6 +6023,10 @@ class DarkroomMainWindow(QMainWindow):
         new_tasks = []
         import uuid
         used_targets = set()
+        from ui.export_dialog import (
+            EXPORT_SIZE_MODE_KEY, EXPORT_SIZE_PREF_KEY, resolve_output_pixels)
+        overwrite = bool(last_cfg.get("overwrite", True))
+
         for p in photos_to_export:
             src = p["path"]
             base_name = os.path.splitext(os.path.basename(src))[0]
@@ -6030,13 +6034,17 @@ class DarkroomMainWindow(QMainWindow):
             out_file = os.path.join(out_dir, out_fn)
 
             norm_src = os.path.abspath(src).lower()
-            counter = 1
-            while (out_file.lower() in used_targets) or (
-                os.path.exists(out_file) and os.path.abspath(out_file).lower() != norm_src
-            ):
-                out_fn = f"{base_name}_{counter}{ext}"
-                out_file = os.path.join(out_dir, out_fn)
-                counter += 1
+            if not overwrite:
+                out_file = self._unique_export_path(out_file)
+                out_fn = os.path.basename(out_file)
+            else:
+                counter = 1
+                while (out_file.lower() in used_targets) or (
+                    os.path.exists(out_file) and os.path.abspath(out_file).lower() != norm_src
+                ):
+                    out_fn = f"{base_name}_{counter}{ext}"
+                    out_file = os.path.join(out_dir, out_fn)
+                    counter += 1
             used_targets.add(out_file.lower())
 
             task_params = dict(self.current_params)
@@ -6058,6 +6066,20 @@ class DarkroomMainWindow(QMainWindow):
                 paper = "none" 
 
             task_params.update(last_cfg)
+            # Drop the geometry captured for a *different* photo, then resolve it again here.
+            task_params.pop("out_size", None)
+            task_params.pop("out_long_edge", None)
+            task_params.pop("path", None)
+            crop_cfg = (p.get("params") or {}).get("crop") if isinstance(p.get("params"), dict) else None
+            if crop_cfg is None and src == self._current_photo_path:
+                crop_cfg = self.current_params.get("crop")
+            out_size = resolve_output_pixels(
+                last_cfg.get(EXPORT_SIZE_MODE_KEY, "original"),
+                last_cfg.get(EXPORT_SIZE_PREF_KEY, 0),
+                p.get("width") or 0, p.get("height") or 0, crop_cfg)
+            task_params["out_size"] = list(out_size)
+            task_params["out_long_edge"] = max(out_size)
+            task_params["scale_pct"] = 100
             task_params["source_path"] = src
             task_params["film_stock"] = film
             task_params["paper_stock"] = paper
