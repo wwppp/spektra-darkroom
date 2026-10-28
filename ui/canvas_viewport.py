@@ -244,16 +244,33 @@ vec3 smooth_cloud_noise_rgb(vec2 p) {
     return mix(nx0, nx1, s.y);
 }
 
+// Digital (no-film) display transform - must stay in step with core.app_core:
+// DIGITAL_TOE_LINEAR / DIGITAL_KNEE_LINEAR / DIGITAL_WHITE_LINEAR / DIGITAL_WHITE_COMP /
+// DIGITAL_TAIL_SCALE. Identity below 18% grey, C1 Hermite shoulder to paper white,
+// exponential headroom tail. Changing one side without the other moves the bypass preview
+// away from what export_image() writes.
+const float DIG_TOE = 0.002;
+const float DIG_KNEE = 0.18;
+const float DIG_WHITE = 1.0;
+const float DIG_WHITE_COMP = 0.97;
+const float DIG_TAIL = 0.6;
+
+vec3 digital_display_comp(vec3 x) {
+    vec3 xn = max(x - vec3(DIG_TOE), vec3(0.0)) / (1.0 - DIG_TOE);
+    vec3 t = clamp((xn - vec3(DIG_KNEE)) / (DIG_WHITE - DIG_KNEE), 0.0, 1.0);
+    vec3 shoulder = vec3(DIG_KNEE) + (DIG_WHITE_COMP - DIG_KNEE) * (t + t * t - t * t * t);
+    vec3 tail = vec3(DIG_WHITE_COMP)
+              + (1.0 - DIG_WHITE_COMP) * (vec3(1.0) - exp(-max(xn - vec3(DIG_WHITE), vec3(0.0)) / DIG_TAIL));
+    return mix(xn, mix(shoulder, tail, step(DIG_WHITE, xn)), step(xn, vec3(DIG_KNEE)));
+}
+
 // Accurate Linear ProPhoto RGB to Display sRGB color space conversion
 vec3 prophoto_to_srgb(vec3 c) {
     vec3 lin;
     lin.r =  2.03649172 * c.r - 0.73759065 * c.g - 0.29925987 * c.b;
     lin.g = -0.22571798 * c.r + 1.22317653 * c.g + 0.00272522 * c.b;
     lin.b = -0.01054513 * c.r - 0.13487985 * c.g + 1.14521015 * c.b;
-    lin = max(vec3(0.0), lin);
-    // Smooth highlight compression knee before display transfer
-    vec3 over = max(vec3(0.0), lin - vec3(0.8));
-    lin = min(lin, vec3(0.8)) + 0.2 * (over / (0.2 + over * 0.5));
+    lin = digital_display_comp(max(vec3(0.0), lin));
     vec3 higher = 1.055 * pow(lin, vec3(1.0 / 2.4)) - 0.055;
     vec3 lower = lin * 12.92;
     vec3 cutoff = step(vec3(0.0031308), lin);
@@ -619,10 +636,10 @@ void main() {
         return;
     }
 
-    // 1: Pure Bypass Mode: When no film is selected (film_stock == "none")
+    // 1: Pure Bypass Mode: When no film is selected, pipeline continues to apply exposure & optics
+    // and displays through filmic sRGB curve.
     if (u_is_bypass == 1) {
-        fragColor = vec4(before_color, 1.0);
-        return;
+        // Handled through normal radiance & filmic transform pipeline
     }
     
     // 1 & 2. Exposure, White Balance, and Highlights & Shadows Tone Shaping
@@ -1219,7 +1236,36 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.shader_program = None
         self.vbo = None
 
+    def _release_gl_resources(self):
+        """Drop GL objects from a previous initialisation.
+
+        `render_offscreen()` may call `initializeGL()` before the widget is ever shown, and
+        Qt calls it a second time on the first real paint. Without this the first program
+        and VBO were orphaned on the GPU for the lifetime of the process.
+        """
+        prog = getattr(self, "shader_program", None)
+        if prog is not None:
+            try:
+                prog.removeAllShaders()
+            except Exception:
+                pass
+            try:
+                prog.deleteLater()
+            except Exception:
+                pass
+            self.shader_program = None
+
+        vbo = getattr(self, "vbo", None)
+        if vbo is not None:
+            try:
+                if vbo.isCreated():
+                    vbo.destroy()
+            except Exception:
+                pass
+            self.vbo = None
+
     def initializeGL(self):
+        self._release_gl_resources()
         self.shader_program = QOpenGLShaderProgram(self)
         self.shader_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, VERTEX_SHADER_SRC)
         self.shader_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Fragment, FRAGMENT_SHADER_SRC)
@@ -1402,7 +1448,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if getattr(self, "_is_placeholder", False):
             is_bypass = 2
         else:
-            is_bypass = 1 if str(self.params.get("film_stock", "none")).lower() in ("none", "") else 0
+            is_bypass = 0
         u_1i("u_is_bypass", is_bypass)
 
         eff_exposure = float(self.params.get("exposure_ev", 0.0)) + float(self.params.get("base_ev", 0.0))
@@ -1415,7 +1461,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_shadows", float(self.params.get("shadows", 0.0)))
         film_id = self.params.get("film_stock", getattr(self, "current_film_stock", "none"))
         is_pos = self.engine.is_positive_film(film_id) if hasattr(self.engine, 'is_positive_film') else False
-        if is_pos:
+        # 数码原片旁通 (no film media): exposure / WB / highlights-shadows / optics stay live,
+        # every film-medium stage (halation, scatter, grain, paper chemistry) must be inert.
+        is_film_none = str(film_id).lower() in ("none", "")
+        paper_id = self.params.get("paper_profile", getattr(self, "current_paper_stock", "none"))
+        pmode = self.params.get("print_mode", getattr(self, "current_print_mode", "optical"))
+        is_scan = (paper_id == "none" or pmode == "scan")
+        if is_pos or is_scan:
             u_3f("u_cmy", 0.0, 0.0, 0.0)
             u_1f("u_print_exposure", 1.0)
             u_1f("u_preflash", 0.0)
@@ -1479,10 +1531,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         strength = hal_preset.get("strength", [0.08, 0.02, 0.0])
         sigma_um = float(hal_preset.get("sigma_h", 65.0))
 
-        hal_amt = float(self.params.get("halation_amount", self.params.get("halation", 1.0)))
+        hal_amt = 0.0 if is_film_none else float(self.params.get("halation_amount", self.params.get("halation", 1.0)))
         hal_scale = float(self.params.get("halation_spatial_scale", 1.0))
-        scatter_amt = float(self.params.get("scatter_amount", 1.0))
-        boost_ev = float(self.params.get("boost_ev", self.params.get("halation_boost", 0.0)))
+        scatter_amt = 0.0 if is_film_none else float(self.params.get("scatter_amount", 1.0))
+        boost_ev = 0.0 if is_film_none else float(self.params.get("boost_ev", self.params.get("halation_boost", 0.0)))
 
         u_1f("u_halation", hal_amt)
         u_1f("u_hal_spatial_scale", hal_scale)
@@ -1512,7 +1564,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_3f("u_stock_layer_weights", float(st_lw[0]), float(st_lw[1]), float(st_lw[2]))
 
         # Grain physics & format
-        u_1f("u_grain", self.params.get("grain", 0.4))
+        u_1f("u_grain", 0.0 if is_film_none else self.params.get("grain", 0.4))
         fmt_mm = float(self.params.get("film_format_mm", 35.0))
         _mw = float(getattr(self, "_master_width", 0) or self._image_width or 6024)
         _mh = float(getattr(self, "_master_height", 0) or self._image_height or 4024)
@@ -1552,8 +1604,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_lut_morph_gamma", float(_bk.get("morph_gamma", 1.0)))
         u_1f("u_lut_dev_exh", float(_bk.get("developer_exhaustion", 0.0)))
 
-        # Chemistry Morph (neutralized for positive slide film)
-        if is_pos:
+        # Chemistry Morph (neutralized for positive slide film and film-less bypass)
+        if is_pos or is_film_none:
             u_1f("u_morph_gamma", 1.0)
             u_1f("u_developer_exhaustion", 0.0)
         else:
@@ -2436,6 +2488,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 self.initializeGL()
             except Exception:
                 pass
+            finally:
+                # Release the context grabbed just for this bootstrap; Qt will make its own
+                # current again when it first paints. Leaving it current kept a stale
+                # context bound to the calling thread.
+                try:
+                    self.doneCurrent()
+                except Exception:
+                    pass
         if not getattr(self, "_gl_initialized", False) or not self.isValid():
             return None
 
@@ -2554,7 +2614,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if getattr(self, "_is_placeholder", False):
                 is_bypass = 2
             else:
-                is_bypass = 1 if str(eff_params.get("film_stock", "none")).lower() in ("none", "") else 0
+                is_bypass = 0
             u_1i("u_is_bypass", is_bypass)
 
             eff_exp = float(eff_params.get("exposure_ev", 0.0)) + float(eff_params.get("base_ev", 0.0))
@@ -2567,7 +2627,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_shadows", float(eff_params.get("shadows", 0.0)))
             film_id_off = eff_params.get("film_stock", getattr(self, "current_film_stock", "none"))
             is_pos_off = self.engine.is_positive_film(film_id_off) if hasattr(self.engine, 'is_positive_film') else False
-            if is_pos_off:
+            # Mirror paintGL: film-less bypass must drop every film-medium stage offscreen too,
+            # otherwise thumbnails / histogram / GPU export would disagree with the viewport.
+            is_film_none_off = str(film_id_off).lower() in ("none", "")
+            paper_id_off = eff_params.get("paper_profile", getattr(self, "current_paper_stock", "none"))
+            pmode_off = eff_params.get("print_mode", getattr(self, "current_print_mode", "optical"))
+            is_scan_off = (paper_id_off == "none" or pmode_off == "scan")
+            if is_pos_off or is_scan_off:
                 u_3f("u_cmy", 0.0, 0.0, 0.0)
                 u_1f("u_print_exposure", 1.0)
                 u_1f("u_preflash", 0.0)
@@ -2628,10 +2694,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             strength = hal_preset.get("strength", [0.08, 0.02, 0.0])
             sigma_um = float(hal_preset.get("sigma_h", 65.0))
 
-            hal_amt = float(eff_params.get("halation_amount", eff_params.get("halation", 1.0)))
+            hal_amt = 0.0 if is_film_none_off else float(eff_params.get("halation_amount", eff_params.get("halation", 1.0)))
             hal_scale = float(eff_params.get("halation_spatial_scale", 1.0))
-            scatter_amt = float(eff_params.get("scatter_amount", 1.0))
-            boost_ev = float(eff_params.get("boost_ev", eff_params.get("halation_boost", 0.0)))
+            scatter_amt = 0.0 if is_film_none_off else float(eff_params.get("scatter_amount", 1.0))
+            boost_ev = 0.0 if is_film_none_off else float(eff_params.get("boost_ev", eff_params.get("halation_boost", 0.0)))
 
             u_1f("u_halation", hal_amt)
             u_1f("u_hal_spatial_scale", hal_scale)
@@ -2660,8 +2726,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_stock_grain_strength", st_strength)
             u_3f("u_stock_layer_weights", float(st_lw[0]), float(st_lw[1]), float(st_lw[2]))
 
-            is_thumbnail = (max(target_w, target_h) <= 512) or bool(eff_params.get("is_thumbnail", False)) or (params_override and params_override.get("grain") == 0.0)
-            if is_thumbnail:
+            # Grain is a property of the film, never of the output size. The old
+            # `max(w, h) <= 512` heuristic silently stripped grain from small exports;
+            # callers that want a clean thumbnail (strip, histogram) say so explicitly.
+            is_thumbnail = bool(eff_params.get("is_thumbnail", False)) or bool(
+                params_override and params_override.get("grain") == 0.0)
+            if is_thumbnail or is_film_none_off:
                 u_1f("u_grain", 0.0)
             else:
                 u_1f("u_grain", eff_params.get("grain", 0.4))
@@ -2693,7 +2763,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             _bk = self._lookup_lut_baked(lut_override) if lut_override is not None else (getattr(self, "_lut_baked", None) or self._lookup_lut_baked(None))
             u_1f("u_lut_morph_gamma", float(_bk.get("morph_gamma", 1.0)))
             u_1f("u_lut_dev_exh", float(_bk.get("developer_exhaustion", 0.0)))
-            if is_pos_off:
+            if is_pos_off or is_film_none_off:
                 u_1f("u_morph_gamma", 1.0)
                 u_1f("u_developer_exhaustion", 0.0)
             else:

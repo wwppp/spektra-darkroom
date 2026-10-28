@@ -33,15 +33,24 @@ def is_dummy_or_corrupted_thumbnail(arr) -> bool:
         return True
     if len(arr.shape) < 2 or min(arr.shape[:2]) < 8:
         return True
-    if arr.max() <= 1:
-        return True
-    if arr.mean() < 0.5 and arr.max() < 3:
-        return True
+    # Thresholds must follow the array's own value range: a float thumbnail normalised to
+    # [0, 1] is legitimate, but "max <= 1" and "std < 0.5" both flagged every one of them.
+    is_float = np.issubdtype(arr.dtype, np.floating)
+    if is_float:
+        if float(arr.max()) <= 1e-6:
+            return True
+        flat_std = 0.5 / 255.0
+    else:
+        if arr.max() <= 1:
+            return True
+        if arr.mean() < 0.5 and arr.max() < 3:
+            return True
+        flat_std = 0.5
     # Catch any solid uniform placeholder color (e.g. 0, 45, 100, 255)
     if arr.min() == arr.max():
         return True
-    # Catch near-zero variance flat noise (std < 0.5)
-    if float(arr.std()) < 0.5:
+    # Catch near-zero variance flat noise (std < 0.5 on the 0-255 scale)
+    if float(arr.std()) < flat_std:
         return True
     return False
 
@@ -162,6 +171,26 @@ def _migrate_preview_from_index(norm_path: str, primary_prev: str, cache_dir: st
                 pass
 
 
+def _entry_matches_file(entry_path: str, file_path: str) -> bool:
+    """True when a cached entry was produced from the file currently on disk.
+
+    The cache key already embeds mtime|size, but the path-index fallback below migrates
+    an *older* entry onto the new key. Without this check, overwriting a source file
+    outside the app (external edit, re-export) kept serving the previous pixels.
+    """
+    try:
+        with np.load(entry_path, allow_pickle=False) as npz:
+            meta = json.loads(str(npz["meta"]))
+        cached_path = meta.get("path")
+        if not cached_path:
+            return False
+        if os.path.normcase(os.path.abspath(cached_path)) != os.path.normcase(os.path.abspath(file_path)):
+            return False
+        return os.path.getmtime(entry_path) + 1e-6 >= os.stat(file_path).st_mtime
+    except Exception:
+        return False
+
+
 def _get_entry_path_with_fallback(file_path: str) -> tuple[str | None, str | None]:
     """Returns (entry_path, key) for a file, supporting seamless fallback to legacy/alternate keys."""
     if not file_path or not os.path.isfile(file_path):
@@ -196,7 +225,7 @@ def _get_entry_path_with_fallback(file_path: str) -> tuple[str | None, str | Non
     old_key = _path_cache_index.get(norm_path)
     if old_key:
         old_entry = os.path.join(cache_dir, f"{old_key}_entry.npz")
-        if os.path.isfile(old_entry):
+        if os.path.isfile(old_entry) and _entry_matches_file(old_entry, file_path):
             try:
                 shutil.copy2(old_entry, primary_entry)
                 old_prev = os.path.join(cache_dir, f"{old_key}_preview.npy")
@@ -204,6 +233,7 @@ def _get_entry_path_with_fallback(file_path: str) -> tuple[str | None, str | Non
                     shutil.copy2(old_prev, primary_prev)
             except Exception:
                 pass
+            _path_cache_index[norm_path] = key
             return primary_entry, key
 
     return None, None
@@ -879,23 +909,42 @@ def save_session_file(file_path: str, session_data: dict) -> bool:
             os.makedirs(dir_name, exist_ok=True)
 
         clean_photos = []
+        skipped = 0
         raw_photos = session_data.get("photos", [])
         for item in raw_photos:
-            if isinstance(item, str):
-                clean_photos.append({
-                    "path": os.path.abspath(item),
-                    "filename": os.path.basename(item),
-                    "rating": 0
-                })
-            elif isinstance(item, dict) and "path" in item:
-                entry = {
-                    "path": os.path.abspath(item["path"]),
-                    "filename": item.get("filename") or os.path.basename(item["path"]),
-                    "rating": max(0, min(5, int(item.get("rating", 0) or 0)))
-                }
-                if "rel_path" in item and item["rel_path"]:
-                    entry["rel_path"] = item["rel_path"]
-                clean_photos.append(entry)
+            # One malformed record must never take the whole session file down with it.
+            try:
+                if isinstance(item, str):
+                    if not item:
+                        skipped += 1
+                        continue
+                    clean_photos.append({
+                        "path": os.path.abspath(item),
+                        "filename": os.path.basename(item),
+                        "rating": 0
+                    })
+                elif isinstance(item, dict) and isinstance(item.get("path"), str) and item.get("path"):
+                    rating = item.get("rating", 0)
+                    try:
+                        rating = max(0, min(5, int(rating or 0)))
+                    except (TypeError, ValueError):
+                        rating = 0
+                    entry = {
+                        "path": os.path.abspath(item["path"]),
+                        "filename": item.get("filename") or os.path.basename(item["path"]),
+                        "rating": rating
+                    }
+                    if "rel_path" in item and item["rel_path"]:
+                        entry["rel_path"] = item["rel_path"]
+                    clean_photos.append(entry)
+                else:
+                    skipped += 1
+            except Exception as entry_err:
+                skipped += 1
+                logger.warning(f"Skipped malformed session photo entry: {entry_err}")
+
+        if skipped:
+            logger.warning(f"Session save dropped {skipped} malformed photo entries (kept {len(clean_photos)})")
 
         clean_data = {
             "format": "SpektraDarkroomSession",
@@ -910,8 +959,11 @@ def save_session_file(file_path: str, session_data: dict) -> bool:
             "photos": clean_photos
         }
 
-        with open(file_path, "w", encoding="utf-8") as f:
+        # Atomic write: a crash or a full disk must not leave a truncated session file.
+        tmp_path = f"{file_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(clean_data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, file_path)
         return True
     except Exception as e:
         logger.error(f"Failed to save session file to {file_path}: {e}")
@@ -938,33 +990,47 @@ def load_session_file(file_path: str) -> dict | None:
         from . import sdc_manager
 
         for item in raw_photos:
-            if isinstance(item, str):
-                norm_photos.append({
-                    "path": os.path.abspath(item),
-                    "filename": os.path.basename(item),
-                    "rating": 0
-                })
-            elif isinstance(item, dict) and "path" in item:
-                photo_path = os.path.abspath(item["path"])
-                # Migration: If session has recipe params and .sdc does not exist, save sidecar
-                params = item.get("params")
-                film = item.get("film_profile") or item.get("film_stock", "none")
-                paper = item.get("paper_profile") or item.get("paper_stock", "none")
-                pmode = item.get("print_mode", "optical")
-                base_ev = item.get("base_ev", 0.0)
-                if (params or film != "none" or paper != "none") and not sdc_manager.has_sdc(photo_path):
+            # Tolerate individual broken records: a single null path must not make the
+            # whole session unreadable (and then get overwritten with an empty library).
+            try:
+                if isinstance(item, str):
+                    if not item:
+                        logger.warning("Skipped empty session photo path")
+                        continue
+                    norm_photos.append({
+                        "path": os.path.abspath(item),
+                        "filename": os.path.basename(item),
+                        "rating": 0
+                    })
+                elif isinstance(item, dict) and isinstance(item.get("path"), str) and item.get("path"):
+                    photo_path = os.path.abspath(item["path"])
+                    # Migration: If session has recipe params and .sdc does not exist, save sidecar
+                    params = item.get("params")
+                    film = item.get("film_profile") or item.get("film_stock", "none")
+                    paper = item.get("paper_profile") or item.get("paper_stock", "none")
+                    pmode = item.get("print_mode", "optical")
+                    if (params or film != "none" or paper != "none") and not sdc_manager.has_sdc(photo_path):
+                        try:
+                            sdc_manager.save_sdc(photo_path, film, paper, params or {}, print_mode=pmode)
+                        except Exception:
+                            pass
+                    rating = item.get("rating", 0)
                     try:
-                        sdc_manager.save_sdc(photo_path, film, paper, params or {}, print_mode=pmode)
-                    except Exception:
-                        pass
-                entry = {
-                    "path": photo_path,
-                    "filename": item.get("filename") or os.path.basename(photo_path),
-                    "rating": max(0, min(5, int(item.get("rating", 0) or 0)))
-                }
-                if "rel_path" in item and item["rel_path"]:
-                    entry["rel_path"] = item["rel_path"]
-                norm_photos.append(entry)
+                        rating = max(0, min(5, int(rating or 0)))
+                    except (TypeError, ValueError):
+                        rating = 0
+                    entry = {
+                        "path": photo_path,
+                        "filename": item.get("filename") or os.path.basename(photo_path),
+                        "rating": rating
+                    }
+                    if "rel_path" in item and item["rel_path"]:
+                        entry["rel_path"] = item["rel_path"]
+                    norm_photos.append(entry)
+                else:
+                    logger.warning(f"Skipped malformed session photo record: {str(item)[:120]}")
+            except Exception as entry_err:
+                logger.warning(f"Skipped unreadable session photo record: {entry_err}")
 
         data["photos"] = norm_photos
         return data

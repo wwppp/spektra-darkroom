@@ -373,6 +373,113 @@ class ExportSizeWidget(QWidget):
         self._update_summary()
 
 
+class ExportPathCombo(QComboBox):
+    """输出位置下拉框：把"路径输入框"换成两档选择，同时保留手输路径的能力。
+
+    - 源文件路径：输出到每个源文件所在目录（批量时各张回各自的文件夹），字段只读。
+    - 自定义路径：字段即编辑器，默认填上次使用的目录；上次为空则填源路径。
+
+    保留 ``text()`` / ``setText()``，调用方不必知道自己拿到的其实是一个下拉框——
+    格式切换时改写扩展名的那几处逻辑照旧可用。
+    """
+
+    MODE_SOURCE = "source"
+    MODE_CUSTOM = "custom"
+    LABEL_SOURCE = "源文件路径"
+    LABEL_CUSTOM = "自定义路径"
+
+    modeChanged = Signal(str)
+
+    def __init__(self, source_path: str = "", custom_path: str = "", parent=None):
+        super().__init__(parent)
+        self._source_path = normalize_path(source_path) if source_path else ""
+        # 上次为空则回落到源路径
+        self._custom_path = normalize_path(custom_path) if custom_path else self._source_path
+        self._syncing = False
+
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setFixedHeight(26)
+        self.addItem(self.LABEL_SOURCE, self.MODE_SOURCE)
+        self.addItem(self.LABEL_CUSTOM, self.MODE_CUSTOM)
+        setup_solid_combobox(self)
+
+        self.setCurrentIndex(max(0, self.findData(self.MODE_CUSTOM)))
+        self._sync_field()
+        self.currentIndexChanged.connect(self._on_index_changed)
+        self.lineEdit().textEdited.connect(self._on_text_edited)
+
+    # --- public -----------------------------------------------------------
+    def mode(self) -> str:
+        data = self.currentData()
+        return data if data in (self.MODE_SOURCE, self.MODE_CUSTOM) else self.MODE_CUSTOM
+
+    def is_source_mode(self) -> bool:
+        return self.mode() == self.MODE_SOURCE
+
+    def custom_path(self) -> str:
+        return self._custom_path
+
+    def text(self) -> str:
+        """当前生效的路径。源文件模式下返回源路径（调用方通常还会按实际照片再算一次）。"""
+        if self.is_source_mode():
+            return self._source_path
+        raw = self.lineEdit().text().strip()
+        return normalize_path(raw) if raw else ""
+
+    def setText(self, value: str):
+        """写入路径 = 切到自定义模式。浏览对话框和扩展名改写都走这里。"""
+        path = normalize_path(value) if value else ""
+        self._custom_path = path
+        if self.mode() != self.MODE_CUSTOM:
+            self._syncing = True
+            self.setCurrentIndex(max(0, self.findData(self.MODE_CUSTOM)))
+            self._syncing = False
+        self.lineEdit().setReadOnly(False)
+        self.lineEdit().setText(path)
+        self.modeChanged.emit(self.mode())
+
+    def set_mode(self, mode: str):
+        idx = self.findData(mode)
+        if idx < 0:
+            return
+        self._syncing = True
+        self.setCurrentIndex(idx)
+        self._sync_field()
+        self._syncing = False
+        self.modeChanged.emit(self.mode())
+
+    def set_source_path(self, source_path: str):
+        self._source_path = normalize_path(source_path) if source_path else ""
+        if self.is_source_mode():
+            self._sync_field()
+        elif not self._custom_path:
+            self._custom_path = self._source_path
+            self._sync_field()
+
+    # --- internals --------------------------------------------------------
+    def _sync_field(self):
+        is_source = self.is_source_mode()
+        edit = self.lineEdit()
+        edit.setReadOnly(is_source)
+        if is_source:
+            edit.setText(self.LABEL_SOURCE)
+        else:
+            edit.setText(self._custom_path or self._source_path)
+
+    def _on_index_changed(self, _index):
+        if self._syncing:
+            return
+        self._syncing = True
+        self._sync_field()
+        self._syncing = False
+        self.modeChanged.emit(self.mode())
+
+    def _on_text_edited(self, text):
+        # 源文件模式下字段是只读的，能走到这里说明用户在自定义模式里敲字。
+        self._custom_path = normalize_path(text.strip()) if text.strip() else ""
+
+
 class BaseExportDialog(QDialog):
     """Base dialog encapsulating shared darkroom rendering and color management settings."""
 
@@ -646,6 +753,12 @@ class BaseExportDialog(QDialog):
                 self.combo_format.setCurrentIndex(idx)
                 self._on_format_changed(idx)
 
+            # 输出位置模式也沿用上次的选择；之前没有记录过就保持"自定义路径"。
+            pm = last.get("path_mode")
+            if pm and isinstance(getattr(self, "edit_path", None), ExportPathCombo):
+                if pm == ExportPathCombo.MODE_SOURCE:
+                    self.edit_path.set_mode(ExportPathCombo.MODE_SOURCE)
+
             cs = last.get("colorspace", "sRGB")
             idx_cs = self.combo_colorspace.findData(cs)
             if idx_cs >= 0:
@@ -836,6 +949,18 @@ class BaseExportDialog(QDialog):
                 QLineEdit:focus {{
                     border: 1px solid #f59e0b;
                 }}
+                /* 可编辑下拉框内嵌的输入行：去掉自身边框，避免出现"框中框" */
+                QComboBox QLineEdit {{
+                    background: transparent;
+                    border: none;
+                    padding: 0px;
+                    margin: 0px;
+                    color: #e2e8f0;
+                    font-size: 11px;
+                }}
+                QComboBox QLineEdit:read-only {{
+                    color: #94a3b8;
+                }}
                 QSlider::groove:horizontal {{
                     height: 4px;
                     background: #2b2e3b;
@@ -875,6 +1000,11 @@ class BaseExportDialog(QDialog):
                     background: #181920;
                     color: #d97706;
                     border-color: #d97706;
+                }}
+                QPushButton:disabled {{
+                    background: #1c1d23;
+                    color: #5b5d68;
+                    border-color: #2a2c36;
                 }}
             """)
         else:
@@ -946,6 +1076,18 @@ class BaseExportDialog(QDialog):
                 QLineEdit:focus {{
                     border: 1px solid #f59e0b;
                 }}
+                /* 可编辑下拉框内嵌的输入行：去掉自身边框，避免出现"框中框" */
+                QComboBox QLineEdit {{
+                    background: transparent;
+                    border: none;
+                    padding: 0px;
+                    margin: 0px;
+                    color: #1e293b;
+                    font-size: 11px;
+                }}
+                QComboBox QLineEdit:read-only {{
+                    color: #64748b;
+                }}
                 QSlider::groove:horizontal {{
                     height: 4px;
                     background: #cbd5e1;
@@ -986,18 +1128,25 @@ class BaseExportDialog(QDialog):
                     background: #e2e8f0;
                     color: #b45309;
                 }}
+                QPushButton:disabled {{
+                    background: #f1f3f7;
+                    color: #a2a9b6;
+                    border-color: #e2e8f0;
+                }}
             """)
 
 
 class SingleExportDialog(BaseExportDialog):
     """Export dialog for single photo development with precise file destination."""
 
-    def __init__(self, default_file_path: str, parent=None):
+    def __init__(self, default_file_path: str, parent=None, source_path: str = ""):
         super().__init__(parent)
         self.setWindowTitle("单片扫描")
         self.setFixedSize(620, 360)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
+        # 源文件路径模式需要知道底片落在哪；缺省时按默认输出路径反推目录。
+        self._source_path = normalize_path(source_path) if source_path else self._default_file_path
         self._init_ui()
         self._apply_style()
         self._apply_last_settings()
@@ -1014,22 +1163,34 @@ class SingleExportDialog(BaseExportDialog):
         row_path = QVBoxLayout()
         row_path.setContentsMargins(0, 2, 0, 0)
         row_path.setSpacing(6)
-        lbl_path = QLabel("保存路径:")
+        lbl_path = QLabel("输出位置:")
         lbl_path.setStyleSheet("font-size: 12px; background: transparent;")
         row_path.addWidget(lbl_path)
 
         path_box = QHBoxLayout()
         path_box.setSpacing(8)
-        self.edit_path = QLineEdit(self._default_file_path)
-        self.edit_path.setFixedHeight(26)
+        self.edit_path = ExportPathCombo(
+            source_path=self._source_path,
+            custom_path=self._default_file_path,
+            parent=self,
+        )
         path_box.addWidget(self.edit_path, 1)
 
         btn_browse = QPushButton("浏览...")
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse.clicked.connect(self._browse_save_path)
         path_box.addWidget(btn_browse)
+        self._btn_browse = btn_browse
 
         row_path.addLayout(path_box)
+
+        self.lbl_path_hint = QLabel("")
+        self.lbl_path_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        row_path.addWidget(self.lbl_path_hint)
+
+        self.edit_path.modeChanged.connect(self._on_path_mode_changed)
+        self._on_path_mode_changed(self.edit_path.mode())
+
         card_layout.addLayout(row_path)
 
         # Row 5: GPS Privacy Checkbox directly below path input box inside the card
@@ -1096,9 +1257,23 @@ class SingleExportDialog(BaseExportDialog):
 
         main_layout.addLayout(btn_row)
 
+    def _on_path_mode_changed(self, mode):
+        is_source = mode == ExportPathCombo.MODE_SOURCE
+        if hasattr(self, "_btn_browse"):
+            self._btn_browse.setEnabled(not is_source)
+            self._btn_browse.setCursor(
+                Qt.CursorShape.PointingHandCursor if not is_source else Qt.CursorShape.ForbiddenCursor)
+        if hasattr(self, "lbl_path_hint"):
+            self.lbl_path_hint.setText(
+                "输出到源文件所在目录，文件名沿用原文件名，扩展名随格式自动修正"
+                if is_source else "可手动输入路径，或点“浏览...”选择保存位置")
+
     def _on_format_changed(self, index):
         super()._on_format_changed(index)
         fmt = self.combo_format.currentData()
+        # 源文件模式下路径不归用户管，扩展名在导出时按格式派发，别在这里改写文本。
+        if isinstance(self.edit_path, ExportPathCombo) and self.edit_path.is_source_mode():
+            return
         cur_path = self.edit_path.text()
         if cur_path:
             base, _ = os.path.splitext(cur_path)
@@ -1134,6 +1309,14 @@ class SingleExportDialog(BaseExportDialog):
 
     def get_export_config(self) -> dict:
         cfg = self.get_common_export_config()
+        path_mode = self.edit_path.mode() if isinstance(self.edit_path, ExportPathCombo) else "custom"
+        cfg["path_mode"] = path_mode
+        if path_mode == ExportPathCombo.MODE_SOURCE:
+            # 目标由调用方按真实源文件算（对话框只知道一个副本），这里不猜路径。
+            cfg["path"] = ""
+            cfg["is_batch"] = False
+            return cfg
+
         raw_path = normalize_path(self.edit_path.text().strip())
         fmt = str(cfg.get("format", "jpeg")).lower()
         if raw_path and (os.path.isdir(raw_path) or raw_path.endswith(("/", "\\"))):
@@ -1176,19 +1359,33 @@ class SingleExportDialog(BaseExportDialog):
 class BatchExportDialog(BaseExportDialog):
     """Export dialog for multi-photo batch queue delivery with strictly directory destination."""
 
-    def __init__(self, default_dir: str, batch_count: int = 0, parent=None):
+    def __init__(self, default_dir: str, batch_count: int = 0, parent=None, default_stem: str = "",
+                 source_dir: str = ""):
         super().__init__(parent)
         self.batch_count = batch_count
-        self.setWindowTitle(f"批量扫描：{self.batch_count}张")
-        self.setFixedSize(620, 410)
+        self._default_stem = default_stem or ""
+        # One photo and many photos go through this same dialog on purpose: the batch
+        # command used to swap in SingleExportDialog for a single selection, so the naming
+        # fields silently changed meaning depending on how many frames were selected.
+        if batch_count == 1:
+            self.setWindowTitle("扫描当前底片")
+            self.setFixedSize(620, 410)
+        else:
+            self.setWindowTitle(f"批量扫描：{self.batch_count}张")
+            self.setFixedSize(620, 410)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
         if clean_dir and not os.path.isdir(clean_dir):
             clean_dir = os.path.dirname(clean_dir)
         if not clean_dir or not os.path.exists(clean_dir):
-            clean_dir = config_manager.get_last_export_dir() or os.path.expanduser("~")
+            clean_dir = config_manager.get_last_export_dir() or ""
+        if not clean_dir:
+            # 没有任何"上次路径"时回落到源文件目录，而不是家目录。
+            clean_dir = normalize_path(source_dir) if source_dir else os.path.expanduser("~")
         self._default_dir = clean_dir
+        # 源文件路径模式要把每张写回自己的目录；这里只留一个代表值给对话框显示。
+        self._source_dir = normalize_path(source_dir) if source_dir else clean_dir
 
         self._init_ui()
         self._apply_style()
@@ -1202,50 +1399,83 @@ class BatchExportDialog(BaseExportDialog):
         # 1. Shared Settings Card
         card, card_layout = self._init_settings_card()
 
-        # Row 4: File Naming Rules (Integrated directly into self.grid_top for pixel-perfect column alignment)
-        lbl_pre = QLabel("文件前缀:")
-        lbl_pre.setFixedWidth(72)
-        self.grid_top.addWidget(lbl_pre, 4, 0)
+        # Row 4: File naming. A single frame gets an exact filename; a real batch gets the
+        # prefix/suffix pair. Same dialog, same position, so switching selection size no
+        # longer changes what the fields mean without warning.
+        if self.batch_count == 1:
+            lbl_name = QLabel("文件名:")
+            lbl_name.setFixedWidth(72)
+            self.grid_top.addWidget(lbl_name, 4, 0)
 
-        self.edit_prefix = QLineEdit()
-        self.edit_prefix.setFixedHeight(26)
-        self.edit_prefix.setPlaceholderText("无")
-        self.grid_top.addWidget(self.edit_prefix, 4, 1)
+            self.edit_filename = QLineEdit(self._default_stem)
+            self.edit_filename.setFixedHeight(26)
+            self.edit_filename.setPlaceholderText("留空则使用原文件名")
+            self.grid_top.addWidget(self.edit_filename, 4, 1, 1, 3)
 
-        lbl_suf = QLabel("文件后缀:")
-        lbl_suf.setFixedWidth(72)
-        self.grid_top.addWidget(lbl_suf, 4, 2)
+            self.edit_prefix = None
+            self.edit_suffix = None
 
-        self.edit_suffix = QLineEdit()
-        self.edit_suffix.setFixedHeight(26)
-        self.edit_suffix.setPlaceholderText("无")
-        self.grid_top.addWidget(self.edit_suffix, 4, 3)
+            lbl_hint = QLabel("扩展名随格式自动修正")
+            lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+            self.grid_top.addWidget(lbl_hint, 5, 1, 1, 3)
+        else:
+            lbl_pre = QLabel("文件前缀:")
+            lbl_pre.setFixedWidth(72)
+            self.grid_top.addWidget(lbl_pre, 4, 0)
 
-        # Row 5: Naming hint on next line
-        lbl_hint = QLabel("留空则保持原文件名输出")
-        lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
-        self.grid_top.addWidget(lbl_hint, 5, 1, 1, 3)
+            self.edit_prefix = QLineEdit()
+            self.edit_prefix.setFixedHeight(26)
+            self.edit_prefix.setPlaceholderText("无")
+            self.grid_top.addWidget(self.edit_prefix, 4, 1)
+
+            lbl_suf = QLabel("文件后缀:")
+            lbl_suf.setFixedWidth(72)
+            self.grid_top.addWidget(lbl_suf, 4, 2)
+
+            self.edit_suffix = QLineEdit()
+            self.edit_suffix.setFixedHeight(26)
+            self.edit_suffix.setPlaceholderText("无")
+            self.grid_top.addWidget(self.edit_suffix, 4, 3)
+
+            self.edit_filename = None
+
+            # Row 5: Naming hint on next line
+            lbl_hint = QLabel("留空则保持原文件名输出")
+            lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+            self.grid_top.addWidget(lbl_hint, 5, 1, 1, 3)
 
         # Row 6: Strictly Destination Directory
         row_path = QVBoxLayout()
         row_path.setContentsMargins(0, 2, 0, 0)
         row_path.setSpacing(6)
-        lbl_path = QLabel("目标输出文件夹:")
+        lbl_path = QLabel("输出位置:")
         lbl_path.setStyleSheet("font-size: 12px; background: transparent;")
         row_path.addWidget(lbl_path)
 
         path_box = QHBoxLayout()
         path_box.setSpacing(8)
-        self.edit_path = QLineEdit(self._default_dir)
-        self.edit_path.setFixedHeight(26)
+        self.edit_path = ExportPathCombo(
+            source_path=self._source_dir,
+            custom_path=self._default_dir,
+            parent=self,
+        )
         path_box.addWidget(self.edit_path, 1)
 
         btn_browse = QPushButton("浏览...")
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse.clicked.connect(self._browse_save_dir)
         path_box.addWidget(btn_browse)
+        self._btn_browse = btn_browse
 
         row_path.addLayout(path_box)
+
+        self.lbl_path_hint = QLabel("")
+        self.lbl_path_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        row_path.addWidget(self.lbl_path_hint)
+
+        self.edit_path.modeChanged.connect(self._on_path_mode_changed)
+        self._on_path_mode_changed(self.edit_path.mode())
+
         card_layout.addLayout(row_path)
 
         # Row 6: GPS Privacy Checkbox directly below destination path inside the card
@@ -1299,6 +1529,17 @@ class BatchExportDialog(BaseExportDialog):
 
         main_layout.addLayout(btn_row)
 
+    def _on_path_mode_changed(self, mode):
+        is_source = mode == ExportPathCombo.MODE_SOURCE
+        if hasattr(self, "_btn_browse"):
+            self._btn_browse.setEnabled(not is_source)
+            self._btn_browse.setCursor(
+                Qt.CursorShape.PointingHandCursor if not is_source else Qt.CursorShape.ForbiddenCursor)
+        if hasattr(self, "lbl_path_hint"):
+            self.lbl_path_hint.setText(
+                "每张输出到各自源文件所在目录，文件名沿用原名"
+                if is_source else "全部输出到同一个文件夹，可手动输入或点“浏览...”选择")
+
     def _browse_save_dir(self):
         start_dir = self.edit_path.text().strip()
         if not os.path.isdir(start_dir):
@@ -1314,13 +1555,29 @@ class BatchExportDialog(BaseExportDialog):
 
     def get_export_config(self) -> dict:
         cfg = self.get_common_export_config()
-        out_dir = normalize_path(self.edit_path.text().strip())
-        if out_dir and not os.path.isdir(out_dir):
-            # Strip accidental file suffix if user typed filename
-            out_dir = os.path.dirname(out_dir) if os.path.splitext(out_dir)[1] else out_dir
-        cfg["path"] = normalize_path(out_dir)
-        cfg["prefix"] = self.edit_prefix.text().strip()
-        cfg["suffix"] = self.edit_suffix.text().strip()
+        path_mode = self.edit_path.mode() if isinstance(self.edit_path, ExportPathCombo) else "custom"
+        cfg["path_mode"] = path_mode
+        if path_mode == ExportPathCombo.MODE_SOURCE:
+            # 目标目录按每张照片各自的源目录算，这里留空由调用方决定。
+            cfg["path"] = ""
+        else:
+            out_dir = normalize_path(self.edit_path.text().strip())
+            if out_dir and not os.path.isdir(out_dir):
+                # Strip accidental file suffix if user typed filename
+                out_dir = os.path.dirname(out_dir) if os.path.splitext(out_dir)[1] else out_dir
+            cfg["path"] = normalize_path(out_dir)
+        if self.batch_count == 1:
+            raw_name = self.edit_filename.text().strip() if self.edit_filename is not None else ""
+            if raw_name:
+                # Drop any extension the user typed: it is re-derived from the format below.
+                raw_name = os.path.splitext(os.path.basename(raw_name))[0]
+            cfg["filename"] = raw_name
+            cfg["prefix"] = ""
+            cfg["suffix"] = ""
+        else:
+            cfg["filename"] = ""
+            cfg["prefix"] = self.edit_prefix.text().strip()
+            cfg["suffix"] = self.edit_suffix.text().strip()
         cfg["is_batch"] = True
         cfg["batch_count"] = self.batch_count
         return cfg

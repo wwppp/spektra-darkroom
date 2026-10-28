@@ -73,9 +73,22 @@ def load_sdc(image_path: str) -> dict | None:
                         data["thumbnail_rgb"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 except Exception:
                     pass
+            # Type normalisation: consumers call sdc["params"].get(...) directly, so a
+            # null or a string here would raise AttributeError deep in the UI.
+            if not isinstance(data.get("params"), dict):
+                data["params"] = {}
             return data
     except Exception as e:
         logger.warning(f"Failed to read SDC sidecar {sdc_path}: {e}")
+        # Quarantine instead of silently pretending the photo was never edited: the next
+        # autosave would otherwise overwrite the user's recipe with defaults.
+        try:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            corrupt_path = f"{sdc_path}.corrupt-{stamp}"
+            os.replace(sdc_path, corrupt_path)
+            logger.warning(f"Corrupted SDC sidecar moved to {corrupt_path}")
+        except Exception as move_err:
+            logger.warning(f"Could not quarantine corrupted SDC sidecar {sdc_path}: {move_err}")
         return None
 
 
@@ -129,7 +142,25 @@ def save_sdc(
             except Exception as ex:
                 logger.debug(f"Failed encoding thumbnail for SDC {sdc_path}: {ex}")
 
-        # Atomic write with os.replace
+        # Carry over the previously embedded thumbnail when this save has none, so that
+        # routine parameter saves do not silently drop the offline preview.
+        if "thumbnail_b64" not in data and os.path.isfile(sdc_path):
+            try:
+                with open(sdc_path, "r", encoding="utf-8") as prev_f:
+                    prev_data = json.load(prev_f)
+                if isinstance(prev_data, dict) and prev_data.get("thumbnail_b64"):
+                    data["thumbnail_b64"] = prev_data["thumbnail_b64"]
+            except Exception:
+                pass
+
+        # Atomic write with os.replace. The previous version is kept as .bak so a bad
+        # save can always be rolled back by hand.
+        if os.path.isfile(sdc_path):
+            try:
+                import shutil
+                shutil.copy2(sdc_path, sdc_path + ".bak")
+            except Exception:
+                pass
         tmp_path = sdc_path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)

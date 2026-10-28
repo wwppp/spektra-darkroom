@@ -1936,9 +1936,20 @@ class FilmstripWidget(QWidget):
             if photo_id in self._selected_ids:
                 if len(self._selected_ids) > 1:
                     self._selected_ids.remove(photo_id)
-                    # If active photo was deselected, update internal pointer without emitting photoSelected
                     if self._active_id == photo_id:
-                        self._active_id = next(iter(self._selected_ids))
+                        # Pick a deterministic neighbour in strip order (not an arbitrary set
+                        # iteration), then tell the canvas about it: leaving the canvas on a
+                        # frame that is no longer selected desynced the two highlights.
+                        order = [p["id"] for p in self._photos_list if p and "id" in p]
+                        idx = order.index(photo_id) if photo_id in order else -1
+                        candidates = [pid for pid in order if pid in self._selected_ids]
+                        new_active = None
+                        if candidates:
+                            after = [pid for pid in candidates if idx >= 0 and order.index(pid) > idx]
+                            new_active = after[0] if after else candidates[-1]
+                        self._active_id = new_active
+                        if new_active:
+                            self._schedule_photo_selected(new_active)
             else:
                 self._selected_ids.add(photo_id)
                 # Keep active photo intact so canvas never switches

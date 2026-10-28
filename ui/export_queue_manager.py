@@ -282,14 +282,19 @@ class ExportQueueManager(QObject):
                                 self._current_worker.cancel()
                             except Exception:
                                 pass
-                        self._current_task = None
-                        self._current_worker = None
+                        # Deliberately keep _current_task / _current_worker bound until the
+                        # worker actually stops. Clearing them here let _process_next start
+                        # the next task while the cancelled one was still inside
+                        # export_image(), i.e. two threads mutating one engine at once.
                     self.task_progress.emit(task.task_id, task.progress)
                     self.queue_changed.emit()
                     self._update_overall_status()
                 break
         if cancelled_current:
-            QTimer.singleShot(20, self._process_next)
+            # The worker's own completion path advances the queue. This timer is only a
+            # safety net for a worker that ignores cancel() entirely, so the queue cannot
+            # stall forever behind a cancelled task.
+            QTimer.singleShot(2000, self._process_next)
 
     def cancel_all(self):
         cancelled_any_current = False
@@ -306,8 +311,9 @@ class ExportQueueManager(QObject):
             except Exception:
                 pass
         if cancelled_any_current:
-            self._current_task = None
-            self._current_worker = None
+            # Same rule as cancel_task: wait for the worker to come to rest instead of
+            # dropping the reference and letting a second thread enter the engine.
+            QTimer.singleShot(2000, self._process_next)
         self.queue_changed.emit()
         self._update_overall_status()
 
@@ -576,7 +582,12 @@ class ExportQueueDialog(QDialog):
         super().__init__(parent)
         self.queue_mgr = queue_mgr
         self.setWindowTitle("扫描队列管理")
-        self.setFixedSize(680, 420)
+        # 单张任务卡 86px + 8px 间距，太矮只能看到 3 张。给一个能放 5 张的默认高度，
+        # 同时允许往上拉和往下收（最小 460 = 约 3.5 张）。
+        self.setMinimumSize(680, 460)
+        self._restore_size()
+        self._done_seq = 0            # 历史区的排序依据：谁最近完成，谁在最上面
+        self._history_expanded = False
 
         try:
             from core.path_utils import get_resource_dir
@@ -733,7 +744,7 @@ class ExportQueueDialog(QDialog):
     def _init_ui(self):
         is_dark = theme_manager.is_dark()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(16, 16, 8, 16)
         layout.setSpacing(12)
 
         # Header Bar
@@ -820,6 +831,8 @@ class ExportQueueDialog(QDialog):
             """)
         self.btn_clear_hist.clicked.connect(self.queue_mgr.clear_history)
         hdr.addWidget(self.btn_clear_hist)
+        # 右侧外边距收到 8px 后按钮会整体右移，补一段等宽间距让表头维持原位。
+        hdr.addSpacing(8)
 
         layout.addLayout(hdr)
 
@@ -827,12 +840,136 @@ class ExportQueueDialog(QDialog):
         self.scroll = SmoothScrollArea()
         self.scroll.setWidgetResizable(True)
         self.container = QWidget()
+        # 内容不足一屏时，容器默认会露出浅色调色板底色（暗色主题下就是一块白）。卡片
+        # 自带背景样式，会盖过这里的透明声明，所以整片刷透明是安全的。
+        self.container.setStyleSheet("background: transparent;")
+        self.scroll.viewport().setStyleSheet("background: transparent;")
         self.item_layout = QVBoxLayout(self.container)
-        self.item_layout.setContentsMargins(0, 0, 0, 0)
+        # 右侧留 8px 内边距：滚动条原本紧贴卡片右缘（间隙 1px），挪进沟槽正中后
+        # 卡片绝对位置不变，观感是「卡片 | 8px | 滚动条 6px | 8px | 窗口边缘」。
+        self.item_layout.setContentsMargins(0, 0, 8, 0)
         self.item_layout.setSpacing(8)
+
+        # 历史区与活跃区之间的虚线分隔：一眼看出"从这里往下都是过去"。
+        self._history_sep = QFrame()
+        self._history_sep.setFixedHeight(1)
+        self._history_sep.setFrameShape(QFrame.Shape.NoFrame)
+        self._history_sep.setStyleSheet(
+            "background: transparent; border: none; border-top: 1px dashed %s;"
+            % ("#4a4e5e" if is_dark else "#b3becd"))
+        self._history_sep.hide()
+
+        # 历史超过一屏时折叠成一行，点开才铺开。
+        self._fold_row = QPushButton("")
+        self._fold_row.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fold_row.setFixedHeight(26)
+        self._fold_row.setStyleSheet(
+            ("QPushButton { background: transparent; border: none; color: #94a3b8;"
+             " font-size: 11px; text-align: left; padding: 0px 2px; }"
+             "QPushButton:hover { color: #f59e0b; }") if is_dark else
+            ("QPushButton { background: transparent; border: none; color: #64748b;"
+             " font-size: 11px; text-align: left; padding: 0px 2px; }"
+             "QPushButton:hover { color: #b45309; }"))
+        self._fold_row.clicked.connect(self._toggle_history)
+        self._fold_row.hide()
+
+        self.item_layout.addWidget(self._history_sep)
+        self.item_layout.addWidget(self._fold_row)
         self.item_layout.addStretch()
         self.scroll.setWidget(self.container)
         layout.addWidget(self.scroll, 1)
+
+    # --- window size -------------------------------------------------------
+    QUEUE_SIZE_PREF = "export_queue_size"
+
+    def _restore_size(self):
+        """恢复上次拖出来的尺寸；没有记录或超出屏幕就用默认 680×600。"""
+        w, h = 680, 600
+        try:
+            from core import config_manager
+            saved = config_manager.get_preferences().get(self.QUEUE_SIZE_PREF)
+            if isinstance(saved, (list, tuple)) and len(saved) == 2:
+                w, h = int(saved[0]), int(saved[1])
+        except Exception:
+            pass
+        try:
+            from PySide6.QtGui import QGuiApplication
+            screen = self.screen() or QGuiApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                w = max(self.minimumWidth(), min(w, max(self.minimumWidth(), avail.width() - 40)))
+                h = max(self.minimumHeight(), min(h, max(self.minimumHeight(), avail.height() - 60)))
+        except Exception:
+            pass
+        self.resize(w, h)
+
+    def done(self, result):
+        try:
+            from core import config_manager
+            config_manager.set_preference(self.QUEUE_SIZE_PREF, [self.width(), self.height()])
+        except Exception:
+            pass
+        super().done(result)
+
+    # --- ordering / folding ------------------------------------------------
+    FOLD_THRESHOLD = 4
+
+    def _toggle_history(self):
+        self._history_expanded = not self._history_expanded
+        self._refresh_list()
+
+    def _ordered_tasks(self, tasks):
+        """活跃 → 失败 → 历史。
+
+        失败刻意不沉底：扫坏了的那张要留在靠上的位置，否则错误会被历史埋掉。
+        历史区按完成先后倒序，紧贴活跃区的第一张永远是刚扫完的那张。
+        """
+        active = [t for t in tasks if t.status in ("queued", "running")]
+        failed = [t for t in tasks if t.status == "failed"]
+        done = [t for t in tasks if t.status in ("finished", "cancelled")]
+        done.sort(key=lambda t: -int(getattr(t, "_done_seq", 0) or 0))
+        return active, failed, done
+
+    def _stage_widgets(self, active, failed, done):
+        """把卡片按目标顺序放回布局；隐藏的分支只从布局摘掉，不销毁。"""
+        bar = self.scroll.verticalScrollBar()
+        keep = bar.value()
+        at_top = keep <= 0
+
+        fold_visible = len(done) > self.FOLD_THRESHOLD
+        show_done_cards = bool(done) and (self._history_expanded or not fold_visible)
+
+        widgets = []
+        for t in active + failed:
+            widgets.append(self._cards[t.task_id]["card"])
+        if done:
+            widgets.append(self._history_sep)
+            if fold_visible:
+                widgets.append(self._fold_row)
+            if show_done_cards:
+                for t in done:
+                    widgets.append(self._cards[t.task_id]["card"])
+
+        managed = [w for d in self._cards.values() for w in (d.get("card"),)]
+        managed += [self._history_sep, self._fold_row]
+        for w in managed:
+            if w is not None:
+                self.item_layout.removeWidget(w)
+                w.hide()
+
+        for i, w in enumerate(widgets):
+            self.item_layout.insertWidget(i, w)
+            w.show()
+
+        if fold_visible:
+            self._fold_row.setText(
+                f"已完成 {len(done)} 条 · {'收起' if self._history_expanded else '展开'}")
+
+        if at_top:
+            bar.setValue(0)
+        else:
+            # 布局重新计算后滚动范围才会更新，延后一拍再还原，避免被旧的 range 截断。
+            QTimer.singleShot(0, lambda v=keep: bar.setValue(min(v, bar.maximum())))
 
     def _on_task_progress(self, task_id, pct):
         """Lightweight live progress bar updater without triggering full card rebuilds."""
@@ -861,6 +998,8 @@ class ExportQueueDialog(QDialog):
                         self.item_layout.removeWidget(card)
                         card.deleteLater()
                 self._cards.clear()
+                self._history_sep.hide()
+                self._fold_row.hide()
 
                 if not self._empty_label:
                     self._empty_label = QLabel("当前暂无扫描任务")
@@ -891,15 +1030,29 @@ class ExportQueueDialog(QDialog):
         finally:
             self._is_refreshing_ui = False
 
-        # Maintain chronological forward order (earliest task at top)
-        for idx, task in enumerate(tasks):
+        # 先把状态与卡片准备好，再统一排序落位。
+        for task in tasks:
             if task.task_id in self._cards:
                 self._update_task_card(self._cards[task.task_id], task)
             else:
                 card, item_dict = self._build_task_card(task)
                 self._cards[task.task_id] = item_dict
-                insert_idx = max(0, self.item_layout.count() - 1)
-                self.item_layout.insertWidget(insert_idx, card)
+
+        # 记录"最近完成"的先后：历史区按它倒序，刚扫完的那张永远紧贴活跃区。
+        # 用对话框自己的计数器而不是任务时间戳，避免为排序去改调度器。
+        for task in tasks:
+            item = self._cards[task.task_id]
+            prev = item.get("status")
+            if prev == task.status:
+                continue
+            item["status"] = task.status
+            if task.status in ("finished", "cancelled", "failed") and \
+                    prev not in ("finished", "cancelled", "failed"):
+                self._done_seq += 1
+                task._done_seq = self._done_seq
+
+        active, failed, done = self._ordered_tasks(tasks)
+        self._stage_widgets(active, failed, done)
 
     def _update_task_card(self, card_dict: dict, task: ExportTask):
         st_lbl = card_dict.get("st_lbl")

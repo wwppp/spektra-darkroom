@@ -33,7 +33,10 @@ def apply_post_lut_adjustments_f32(img_f32: np.ndarray, params: dict, baked: dic
     # 2. Enlarger Color Timing (CMY filters, print exposure, preflash) - bypassed only for positive slide film
     film = str(params.get("film_stock", "")).lower()
     is_pos = ("positive" in film) or ("reversal" in film) or ("e100" in film) or ("velvia" in film) or ("provia" in film)
-    if not is_pos:
+    paper = str(params.get("paper_profile", params.get("paper_stock", ""))).lower()
+    pmode = str(params.get("print_mode", "optical")).lower()
+    is_scan = (paper == "none" or pmode == "scan")
+    if not is_pos and not is_scan:
         c_val = float(params.get("enlarger_cyan", 0.0))
         m_val = float(params.get("enlarger_magenta", 0.0))
         y_val = float(params.get("enlarger_yellow", 0.0))
