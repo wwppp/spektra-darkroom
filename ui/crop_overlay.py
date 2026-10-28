@@ -311,15 +311,14 @@ class CropOverlayWidget(QWidget):
             "is_portrait": bool(getattr(self, "is_portrait_orientation", False)),
             "_user_crop_w": round(self._user_crop_w, 5),
             "_user_crop_h": round(self._user_crop_h, 5),
-            "pan_x": float(getattr(self.canvas, "pan_x", 0.0)),
-            "pan_y": float(getattr(self.canvas, "pan_y", 0.0)),
-            "zoom": float(getattr(self.canvas, "zoom", 1.0)),
         }
 
     def _is_snapshot_equal(self, s1: dict, s2: dict) -> bool:
         if not s1 or not s2:
             return False
-        for k in ("x", "y", "w", "h", "angle", "rot_90", "flip_h", "flip_v", "aspect_ratio", "custom_ratio", "is_portrait", "pan_x", "pan_y", "zoom"):
+        # Viewport pan/zoom is deliberately not part of the history: it is navigation, not
+        # an edit, and recording it pushed real crop steps out of the 50-entry stack.
+        for k in ("x", "y", "w", "h", "angle", "rot_90", "flip_h", "flip_v", "aspect_ratio", "custom_ratio", "is_portrait"):
             if s1.get(k) != s2.get(k):
                 return False
         return True
@@ -1717,7 +1716,7 @@ class CropOverlayWidget(QWidget):
             self.update()
             if getattr(self, "_space_held", False):
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
-            self._push_undo_snapshot()
+            # Panning is navigation, not an edit: it must not consume an undo slot.
             return
 
         if event.button() == Qt.MouseButton.LeftButton and self._active_handle:
@@ -1808,6 +1807,23 @@ class CropOverlayWidget(QWidget):
             event.accept()
             return
         super().keyReleaseEvent(event)
+
+    def _release_space_state(self):
+        """Drop the temporary pan mode. The KeyRelease for Space is lost whenever the widget
+        loses focus first (Alt+Tab, opening a dialog), which used to leave the crop box and
+        every handle permanently undraggable."""
+        if getattr(self, "_space_held", False):
+            self._space_held = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.update()
+
+    def focusOutEvent(self, event):
+        self._release_space_state()
+        super().focusOutEvent(event)
+
+    def hideEvent(self, event):
+        self._release_space_state()
+        super().hideEvent(event)
 
     def contextMenuEvent(self, event):
         from ui.canvas_viewport import get_darkroom_menu_style
@@ -2187,7 +2203,9 @@ class CropSidebarWidget(QFrame):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 0)
+        # The sidebar container now reserves only 4px on its right for the scrollbar gutter;
+        # keep the crop panel's own 4px so its content stays where it was before that change.
+        layout.setContentsMargins(0, 4, 4, 0)
         layout.setSpacing(6)
 
         # 1. Section: 画幅比例 (AccordionSection)

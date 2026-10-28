@@ -9,6 +9,7 @@ import json
 import copy
 import ctypes
 import logging
+import time
 
 logger = logging.getLogger("SpektraDarkroom.Config")
 
@@ -67,6 +68,7 @@ DEFAULT_CONFIG = {
 
 MAX_RECENT_FILES = 16
 _cached_config = None
+_cached_config_stamp = None
 
 
 def get_app_dir() -> str:
@@ -107,21 +109,60 @@ def get_config_path() -> str:
     return local_config
 
 
+_needs_repair = False
+
+
 def _deep_merge(target: dict, source: dict) -> dict:
-    """Recursively merges source into a deep copy of target."""
+    """Recursively merges source into a deep copy of target.
+
+    Type mismatches are treated as corruption, not as an override: a ``null`` or a string
+    where the defaults expect a dict is dropped and the config is flagged for rewrite,
+    instead of poisoning every later ``cfg.get`` call.
+    """
+    global _needs_repair
     result = copy.deepcopy(target)
     for k, v in source.items():
-        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-            result[k] = _deep_merge(result[k], v)
-        else:
-            result[k] = copy.deepcopy(v)
+        if k in result:
+            expected = result[k]
+            if isinstance(expected, dict):
+                if isinstance(v, dict):
+                    result[k] = _deep_merge(expected, v)
+                else:
+                    _needs_repair = True
+                    logger.warning(f"Config key '{k}' should be an object, got {type(v).__name__}; using defaults.")
+                continue
+            if isinstance(expected, list) and not isinstance(v, list):
+                _needs_repair = True
+                logger.warning(f"Config key '{k}' should be a list, got {type(v).__name__}; using defaults.")
+                continue
+            if isinstance(expected, bool) and not isinstance(v, bool):
+                _needs_repair = True
+                logger.warning(f"Config key '{k}' should be a boolean, got {type(v).__name__}; using defaults.")
+                continue
+        result[k] = copy.deepcopy(v)
     return result
+
+
+def _config_stamp(config_file: str):
+    """Cheap identity for the on-disk config: (path, mtime, size)."""
+    try:
+        st = os.stat(config_file)
+        return (config_file, st.st_mtime, st.st_size)
+    except OSError:
+        return (config_file, None, None)
 
 
 def load_config() -> dict:
     """Loads configuration with fallback defaults and legacy migration."""
-    global _cached_config
+    global _cached_config, _cached_config_stamp
     config_file = get_config_path()
+
+    # Every get_xxx() in this module goes through load_config(); without this guard the
+    # file was re-read and the defaults deep-copied on every single accessor (1.2 ms each,
+    # i.e. seconds across a large library import).
+    stamp = _config_stamp(config_file)
+    if _cached_config is not None and _cached_config_stamp == stamp:
+        return _cached_config
 
     loaded_data = None
     if os.path.isfile(config_file):
@@ -144,21 +185,25 @@ def load_config() -> dict:
                 logger.warning(f"Error reading legacy config: {e}")
 
     if loaded_data and isinstance(loaded_data, dict):
+        global _needs_repair
+        _needs_repair = False
         merged = _deep_merge(DEFAULT_CONFIG, loaded_data)
     else:
         merged = copy.deepcopy(DEFAULT_CONFIG)
 
     _cached_config = merged
-    # If the file does not exist on disk yet, save it immediately so it is visible
-    if not os.path.isfile(config_file):
+    # Write back when the file is missing, or when corrupt values were dropped above:
+    # otherwise a single bad key keeps breaking startup forever.
+    if not os.path.isfile(config_file) or _needs_repair:
         save_config(merged)
+    _cached_config_stamp = _config_stamp(config_file)
 
     return _cached_config
 
 
 def save_config(cfg: dict = None):
     """Atomically saves configuration to the determined path."""
-    global _cached_config
+    global _cached_config, _cached_config_stamp
     if cfg is not None:
         _cached_config = cfg
     elif _cached_config is None:
@@ -174,16 +219,28 @@ def save_config(cfg: dict = None):
         with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(_cached_config, f, indent=2, ensure_ascii=False)
 
-        # Atomic replacement on Windows / POSIX
-        if os.path.exists(config_file):
+        # Atomic replacement only. Never delete the live config first: on Windows the
+        # target file is routinely locked for a few milliseconds by AV scanners or the
+        # indexer, and "remove then rename" turns that temporary failure into data loss.
+        last_err = None
+        for attempt in range(4):
             try:
                 os.replace(temp_file, config_file)
-            except OSError:
-                os.remove(config_file)
-                os.rename(temp_file, config_file)
+                last_err = None
+                break
+            except OSError as ex:
+                last_err = ex
+                time.sleep(0.05 * (attempt + 1))
+        if last_err is not None:
+            logger.warning(
+                f"Config replace failed after retries ({last_err}); "
+                f"kept existing config and temp copy at {temp_file}")
+            # Disk still holds the old bytes: drop the stamp so the next read reflects it.
+            _cached_config_stamp = None
         else:
-            os.rename(temp_file, config_file)
+            _cached_config_stamp = _config_stamp(config_file)
     except Exception as e:
+        _cached_config_stamp = None
         logger.warning(f"Error saving config to {config_file}: {e}")
 
 
@@ -193,7 +250,10 @@ def save_config(cfg: dict = None):
 
 def get_window_config() -> dict:
     cfg = load_config()
-    return cfg.get("window", DEFAULT_CONFIG["window"])
+    win = cfg.get("window", DEFAULT_CONFIG["window"])
+    # Defence in depth: _deep_merge already drops type-mismatched values, but a caller
+    # reading a config loaded before the repair landed must still get a usable dict.
+    return win if isinstance(win, dict) else copy.deepcopy(DEFAULT_CONFIG["window"])
 
 
 def save_window_config(

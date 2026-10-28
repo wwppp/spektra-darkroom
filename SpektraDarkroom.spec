@@ -62,7 +62,6 @@ added_hidden = [
     'ui.relink_dialog',
     'ui.smooth_scroll',
     'ui.spinner_widget',
-    'ui.stock_manager_dialog',
     'ui.theme_manager',
     'ui.thumbnail_controller',
     'ui.tooltip',

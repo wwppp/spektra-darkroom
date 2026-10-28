@@ -8,6 +8,7 @@ Supports:
 
 import os
 import re
+import sys
 import math
 import logging
 import xml.etree.ElementTree as ET
@@ -210,7 +211,11 @@ class LCPParser:
                     if sub_tag == "VignetteModelPiecewiseParam":
                         for pli in sub.iter():
                             if pli.tag.split("}")[-1] == "li" and pli.text:
-                                parts = [float(x.strip()) for x in pli.text.split(",") if x.strip()]
+                                try:
+                                    parts = [float(x.strip()) for x in pli.text.split(",") if x.strip()]
+                                except (TypeError, ValueError):
+                                    # One malformed pair must not discard the whole profile.
+                                    continue
                                 if len(parts) >= 2:
                                     piecewise.append((parts[0], parts[1]))
 
@@ -267,10 +272,13 @@ class LCPParser:
                     except Exception:
                         pass
 
-                fx = float(data.get("FocalLengthX", 1.0))
-                fy = float(data.get("FocalLengthY", fx))
-                cx = float(data.get("ImageXCenter", 0.5))
-                cy = float(data.get("ImageYCenter", 0.5))
+                # Empty calibration fields are common in hand-made / older LCPs. Parsing
+                # them with bare float() raised and threw away every calibration in the
+                # file, which showed up as "this lens simply does not exist".
+                fx = _parse_float_safe(data.get("FocalLengthX")) or 1.0
+                fy = _parse_float_safe(data.get("FocalLengthY")) or fx
+                cx = _parse_float_safe(data.get("ImageXCenter")) or 0.5
+                cy = _parse_float_safe(data.get("ImageYCenter")) or 0.5
 
                 if abs(k1) > 1e-6 or abs(k2) > 1e-6 or abs(k3) > 1e-6 or vig_coeffs or piecewise:
                     calibrations.append(LensCalibrationEntry(
@@ -288,6 +296,10 @@ class LCPParser:
                         vignette_piecewise=piecewise
                     ))
 
+            if not calibrations and calib_nodes:
+                logger.warning(
+                    f"LCP {os.path.basename(lcp_path)} declares {len(calib_nodes)} calibration "
+                    f"node(s) but none could be read; the profile will not correct anything.")
             if not lens_name:
                 lens_name = os.path.splitext(os.path.basename(lcp_path))[0]
             if not profile_name:
@@ -638,6 +650,8 @@ class LCPDatabase:
         """Build or refresh profile database index."""
         self._roots = find_all_lcp_root_directories()
         self._models_by_make.clear()
+        # A re-imported .lcp with the same name must not keep serving the previous profile.
+        self._profile_cache.clear()
         self._build_index()
 
     def _build_index(self):

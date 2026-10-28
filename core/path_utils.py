@@ -171,17 +171,9 @@ def send_to_recycle_bin(paths) -> bool:
         except Exception:
             pass
 
-    # Fallback to standard delete if shell32 not available or non-windows
-    try:
-        for p in valid_paths:
-            if os.path.isdir(p):
-                import shutil
-                shutil.rmtree(p)
-            elif os.path.isfile(p):
-                os.remove(p)
-        return True
-    except Exception:
-        return False
+    # No silent fallback to a permanent delete: "sent to the recycle bin" must never mean
+    # "unrecoverable". Callers get False and can tell the user.
+    return False
 
 
 # Re-export centralized format constants

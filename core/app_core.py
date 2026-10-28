@@ -96,13 +96,46 @@ def prophoto_to_srgb(lin_pro):
     return np.clip(srgb_disp, 0.0, 1.0).astype(np.float32)
 
 
+# --- Digital (no-film) display transform -------------------------------------
+# With no stock selected the scene-linear signal goes straight to the display: no density
+# curves, no paper D-max, nothing between the sensor and sRGB. That makes these five
+# constants the entire "chemistry" of the bypass path, so they carry the same job the
+# measured stock profiles do elsewhere — they set the black point, the mid-grey anchor,
+# and the white point. Chosen so that 18% scene grey lands exactly where it did before
+# (display 0.4614), true black reaches 0, and a 100% reflectance white card lands on
+# paper white instead of the old 0.788 ceiling.
+DIGITAL_TOE_LINEAR = 0.002      # black-level subtraction (sensor black + base fog)
+DIGITAL_KNEE_LINEAR = 0.18      # mid-grey pivot: linear below, roll-off above
+DIGITAL_WHITE_LINEAR = 1.0      # 100% reflectance white card -> paper white
+DIGITAL_WHITE_COMP = 0.97       # display-linear value AT the white card
+DIGITAL_TAIL_SCALE = 0.6        # exponential headroom above the white card, tends to 1.0
+
+
+def digital_display_comp(lin_srgb):
+    """Linear scene RGB -> display-linear [0, 1] for the digital bypass path.
+
+    Three stages, mirroring what a print does rather than inventing a look:
+      1. toe      - subtract the black level so shadows actually reach 0
+      2. shoulder - identity up to 18% grey, then a C1 Hermite roll-off to paper white
+                    (f(t) = t + t^2 - t^3 has f(0)=0, f(1)=1, f'(0)=1, f'(1)=0)
+      3. tail     - exponential headroom above the white card, so over-range highlights
+                    keep a little separation instead of clipping flat
+
+    Must stay bit-for-bit in step with ``prophoto_to_srgb`` in ui/canvas_viewport.py.
+    """
+    x = np.asarray(lin_srgb, dtype=np.float32)
+    x = np.maximum(x - DIGITAL_TOE_LINEAR, 0.0) / (1.0 - DIGITAL_TOE_LINEAR)
+    k, w, tw = DIGITAL_KNEE_LINEAR, DIGITAL_WHITE_LINEAR, DIGITAL_WHITE_COMP
+    t = np.clip((x - k) / (w - k), 0.0, 1.0)
+    shoulder = k + (tw - k) * (t + t * t - t * t * t)
+    tail = tw + (1.0 - tw) * (1.0 - np.exp(-np.maximum(x - w, 0.0) / DIGITAL_TAIL_SCALE))
+    return np.where(x <= k, x, np.where(x <= w, shoulder, tail)).astype(np.float32)
+
+
 def prophoto_to_srgb_filmic(lin_pro):
-    """Convert Linear ProPhoto RGB [0.0, 8.0] to Display sRGB with smooth highlight roll-off (Bypass mode)."""
+    """Convert Linear ProPhoto RGB [0.0, 8.0] to Display sRGB (digital bypass display transform)."""
     lin_srgb = np.maximum(0.0, lin_pro @ PROPHOTO_TO_SRGB.T)
-    knee = 0.5
-    scale = 3.5
-    comp = np.where(lin_srgb <= knee, lin_srgb, knee + (1.0 - knee) * (lin_srgb - knee) / ((lin_srgb - knee) + (scale - 1.0)))
-    comp = np.clip(comp, 0.0, 1.0)
+    comp = digital_display_comp(lin_srgb)
     srgb_disp = np.where(
         comp <= 0.0031308,
         12.92 * comp,
@@ -1577,12 +1610,21 @@ class SpektraEngine:
                             pass
         return papers
 
+    def _lookup_neutral_table(self, paper_stock, film_stock):
+        """Measured neutral filtration for a paper/film pair, or None when unmeasured."""
+        paper_dict = self.neutral_filters.get(paper_stock)
+        if not isinstance(paper_dict, dict):
+            return None
+        for illuminant_key in ["TH-KG3", "tungsten", "default"]:
+            bucket = paper_dict.get(illuminant_key)
+            if isinstance(bucket, dict) and film_stock in bucket:
+                return list(bucket[film_stock])
+        return None
+
     def get_neutral_filter(self, paper_stock, film_stock):
-        if paper_stock in self.neutral_filters:
-            paper_dict = self.neutral_filters[paper_stock]
-            for illuminant_key in ["TH-KG3", "tungsten", "default"]:
-                if illuminant_key in paper_dict and film_stock in paper_dict[illuminant_key]:
-                    return list(paper_dict[illuminant_key][film_stock])
+        measured = self._lookup_neutral_table(paper_stock, film_stock)
+        if measured is not None:
+            return measured
 
         # If positive / reversal slide film or monochrome, return neutral baseline
         if self.is_positive_film(film_stock):
@@ -1592,6 +1634,17 @@ class SpektraEngine:
             return [0.0, 0.0, 0.0]
 
         # Automatic on-the-fly solver for arbitrary custom negative film stocks
+        progress = getattr(self, "_neutral_solving", None)
+        if progress is None:
+            progress = set()
+            self._neutral_solving = progress
+        ctx = (paper_stock, film_stock)
+        if ctx in progress:
+            # Re-entered for the same pair: the solver cannot bootstrap itself. Bail out
+            # with the documented neutral baseline instead of recursing to RecursionError.
+            logger.warning(f"Neutral filter solver re-entered for {paper_stock}/{film_stock}; using baseline")
+            return [0.0, 60.0, 60.0]
+        progress.add(ctx)
         try:
             from scipy.optimize import root
             from spektrafilm.model.illuminants import standard_illuminant
@@ -1609,7 +1662,11 @@ class SpektraEngine:
                     ref_idx0 = int(np.argmin(np.abs(ref_film.data.log_exposure)))
                     ref_cmy_mid = ref_film.data.density_curves[ref_idx0:ref_idx0+1][None, :, :]
                     ref_ds = compute_density_spectral(ref_film.data.channel_density, ref_cmy_mid, base_density=ref_film.data.base_density)
-                    cal_filt = self.get_neutral_filter(paper_stock, "kodak_portra_400")
+                    # Table lookup only: asking get_neutral_filter() again here is what made
+                    # every paper missing from neutral_print_filters.json recurse forever.
+                    cal_filt = self._lookup_neutral_table(paper_stock, "kodak_portra_400")
+                    if cal_filt is None:
+                        cal_filt = [0.0, 60.0, 60.0]
                     filtered_lamp = color_enlarger(lamp, cal_filt)
                     light = density_to_light(ref_ds, filtered_lamp)
                     raw_p = np.einsum('ijk, kl->ijl', light, paper_sens)[0, 0]
@@ -1636,6 +1693,8 @@ class SpektraEngine:
                         return res
         except Exception as e:
             print(f"[SpektraEngine] On-the-fly filter solve fallback: {e}")
+        finally:
+            progress.discard(ctx)
 
         return [0.0, 60.0, 60.0]
 
@@ -2043,7 +2102,16 @@ class SpektraEngine:
 
         # 2. Bypass mode: 胶卷为 "none" 时，生成从 Linear ProPhoto RGB [0.0, 8.0] -> Display sRGB 的平滑高光胶片色调转换表
         if film_stock == "none":
-            identity_lut = prophoto_to_srgb_filmic(lattice)
+            # The digital display transform has a tight shoulder near paper white, so the
+            # default 33^3 lattice under-samples it: trilinear interpolation came out ~0.011
+            # short at 0.9 linear versus the closed form. 65^3 brings that under 0.003 while
+            # costing ~3 MB, and this table is baked from a scalar function so it is cheap.
+            none_size = max(int(lut_size), 65)
+            lin_t_none = np.linspace(0.0, 1.0, none_size, dtype=np.float32)
+            lin_x_none = shaper_inverse(lin_t_none)
+            bn, gn, rn = np.meshgrid(lin_x_none, lin_x_none, lin_x_none, indexing='ij')
+            lattice_none = np.stack([rn, gn, bn], axis=-1).astype(np.float32)
+            identity_lut = prophoto_to_srgb_filmic(lattice_none)
             with self._render_lock:
                 self._lut_cache[cache_key] = identity_lut
                 self._lut_cache.move_to_end(cache_key)
@@ -3441,6 +3509,42 @@ class SpektraEngine:
             lin_srgb = srgb_to_linear(f_img)
             return np.maximum(0.0, lin_srgb @ SRGB_TO_PROPHOTO.T)
 
+    @staticmethod
+    def _apply_export_crop(rendered_float, params_dict):
+        """Apply the session crop (flips -> 90° steps -> straighten -> rect) to the rendered
+        buffer. Shared by the film pipeline and the digital-bypass pipeline so a bypass export
+        cannot silently ignore the crop the user sees in the viewport."""
+        crop_cfg = params_dict.get("crop", {})
+        if not isinstance(crop_cfg, dict) or not crop_cfg.get("enabled", False):
+            return rendered_float
+
+        # 1. Flips
+        if crop_cfg.get("flip_h", False):
+            rendered_float = cv2.flip(rendered_float, 1)
+        if crop_cfg.get("flip_v", False):
+            rendered_float = cv2.flip(rendered_float, 0)
+
+        # 2. 90-degree step rotation
+        rot_90 = int(crop_cfg.get("rot_90", 0)) % 360
+        if rot_90 == 90:
+            rendered_float = cv2.rotate(rendered_float, cv2.ROTATE_90_CLOCKWISE)
+        elif rot_90 == 180:
+            rendered_float = cv2.rotate(rendered_float, cv2.ROTATE_180)
+        elif rot_90 == 270:
+            rendered_float = cv2.rotate(rendered_float, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        rH, rW = rendered_float.shape[:2]
+        cx = int(max(0, min(rW - 1, float(crop_cfg.get("x", 0.0)) * rW)))
+        cy = int(max(0, min(rH - 1, float(crop_cfg.get("y", 0.0)) * rH)))
+        cw = int(max(1, min(rW - cx, float(crop_cfg.get("w", 1.0)) * rW)))
+        ch = int(max(1, min(rH - cy, float(crop_cfg.get("h", 1.0)) * rH)))
+        c_angle = float(crop_cfg.get("angle", 0.0))
+        if abs(c_angle) > 0.01:
+            center_pt = (float(rW * 0.5), float(rH * 0.5))
+            M = cv2.getRotationMatrix2D(center_pt, -c_angle, 1.0)
+            rendered_float = cv2.warpAffine(rendered_float, M, (rW, rH), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT)
+        return np.ascontiguousarray(rendered_float[cy:cy+ch, cx:cx+cw])
+
     def export_image(self, params_dict, output_path, format_type="tiff16", quality=9, source_path=None, progress_cb=None, cancel_cb=None):
         """Render at 100% full resolution and write to disk."""
         try:
@@ -3451,6 +3555,24 @@ class SpektraEngine:
                 progress_cb(5, "正在载入底片并准备物理色彩管线...")
 
             target_src = source_path or params_dict.get("source_path") or self.current_file_path
+
+            # Hard backstop: the developed frame must never land on top of the source
+            # negative, regardless of which caller computed the path.
+            if target_src and output_path and not os.path.isdir(output_path):
+                try:
+                    src_key = os.path.normcase(os.path.abspath(target_src))
+                    if os.path.normcase(os.path.abspath(output_path)) == src_key:
+                        root, out_ext = os.path.splitext(output_path)
+                        candidate = f"{root}_dev{out_ext}"
+                        counter = 1
+                        while os.path.exists(candidate):
+                            candidate = f"{root}_dev_{counter}{out_ext}"
+                            counter += 1
+                        print(f"[SpektraEngine] 导出目标与原始底片相同，已改写到: {candidate}")
+                        output_path = candidate
+                except Exception as ex_guard:
+                    print(f"[SpektraEngine] 导出路径保护检查跳过: {ex_guard}")
+
             raw_target = None
             base_ev = float(params_dict.get("base_ev", 0.0))
             if not base_ev and target_src:
@@ -3480,7 +3602,10 @@ class SpektraEngine:
             temp_val = float(params_dict.get("color_temp", 5500.0))
             tint_val = float(params_dict.get("tint", 1.0))
             is_pos = self.is_positive_film(film_stock)
-            if is_pos:
+            paper_prof = str(params_dict.get("paper_profile", params_dict.get("paper_stock", "none"))).lower()
+            pmode = str(params_dict.get("print_mode", "optical")).lower()
+            is_scan = (paper_prof == "none" or pmode == "scan")
+            if is_pos or is_scan:
                 c_val = 0.0
                 m_val = 0.0
                 y_val = 0.0
@@ -3509,14 +3634,44 @@ class SpektraEngine:
             rendered_float = np.empty((H, W, 3), dtype=np.float32)
 
             if film_stock == "none":
-                # Pure digital RAW bypass export: output untouched original raw converted directly to sRGB
+                # Digital bypass export: apply scene exposure & optical diffusion, then render via filmic sRGB
                 if progress_cb:
-                    progress_cb(60, "正在导出数码原片直出 (Bypass)...")
-                rendered_float = np.clip(prophoto_to_srgb(raw_target), 0.0, 1.0)
+                    progress_cb(15, "正在计算场景曝光与光学参数...")
+                base_temp = float(params_dict.get("base_temp", 5500.0))
+                base_tint = float(params_dict.get("base_tint", 1.0))
+                from .darkroom_math import wb_gains, apply_black_point
+                wb_g = wb_gains(temp_val, base_temp, tint_val, base_tint)
+                eff_exp = exp_val + base_ev
+                linear_full = (raw_target * float(np.exp2(eff_exp))).astype(np.float32) * wb_g
+
+                hl_val = float(params_dict.get("highlights", 0.0))
+                sh_val = float(params_dict.get("shadows", 0.0))
+                linear_full = apply_highlights_shadows_np(linear_full, hl_val, sh_val)
+
+                if diff_family != "none" and diff_strength > 0.001:
+                    if progress_cb:
+                        progress_cb(40, f"正在进行光学柔光模拟 ({diff_family})...")
+                    try:
+                        linear_full = apply_diffusion_np(linear_full, diff_family, diff_strength, diff_warmth)
+                    except Exception as e:
+                        print(f"[SpektraExport] 柔光模拟异常: {e}")
+
+                if progress_cb:
+                    progress_cb(75, "正在转换色彩空间至 sRGB...")
+                rendered_float = prophoto_to_srgb_filmic(linear_full)
+
+                # Display-domain black point, mirroring shader step 8. Without this the bypass
+                # export would ignore 黑场 while the viewport honoured it.
+                if abs(black_lift) > 1e-4:
+                    rendered_float = apply_black_point(rendered_float, black_lift)
+
+                # Crop, flips and straighten exactly as the film pipeline does below
+                rendered_float = self._apply_export_crop(rendered_float, params_dict)
+
                 if progress_cb:
                     progress_cb(92, "正在编码并写入图像文件...")
 
-                if os.path.isdir(output_path) or output_path.endswith(('/', '\\\\')):
+                if os.path.isdir(output_path) or output_path.endswith(('/', '\\')):
                     src = source_path or params_dict.get("source_path") or self.current_file_path or "developed"
                     base_name = os.path.splitext(os.path.basename(src))[0]
                     fmt_str = str(format_type).lower()
@@ -3527,11 +3682,19 @@ class SpektraEngine:
                 enc_params["format"] = format_type
                 enc_params["quality"] = quality
                 enc_params["source_path"] = target_src
+                # Honour the export-size preset here too (TIFF / PNG included), otherwise a
+                # bypass export would silently come out at full resolution.
+                enc_params["out_long_edge"] = int(params_dict.get("out_long_edge", 0) or 0)
                 save_encoded_image(rendered_float, output_path, enc_params)
 
                 if progress_cb:
                     progress_cb(100, f"成片扫描完成: {os.path.basename(output_path)}")
-                return {"success": True, "output_path": output_path}
+                return {
+                    "success": True,
+                    "output_path": output_path,
+                    "width": rendered_float.shape[1],
+                    "height": rendered_float.shape[0]
+                }
 
             base_temp = float(params_dict.get("base_temp", 5500.0))
             base_tint = float(params_dict.get("base_tint", 1.0))
@@ -3543,7 +3706,9 @@ class SpektraEngine:
                 progress_cb(10, "正在计算全局线性曝光与基准白平衡...")
 
             # 1. Exposure compensation & White balance in linear radiance space
-            base_ev = float(params_dict.get("base_ev", 0.0))
+            # `base_ev` is the value resolved above (params -> session photos -> 0).
+            # Re-reading it from params_dict here silently dropped the session backfill,
+            # which made exports darker than the preview.
             eff_exp = exp_val + base_ev
             linear_full = (raw_target * float(np.exp2(eff_exp))).astype(np.float32)
             linear_full *= wb_g
@@ -3626,6 +3791,12 @@ class SpektraEngine:
             max_workers = max(1, min(16, (os.cpu_count() or 4) - 1))
             chunk_size = 256
             chunks = [(y0, min(y0 + chunk_size, H)) for y0 in range(0, H, chunk_size)]
+            # A sliver chunk (a few rows at the bottom) would get its grain blurred against a
+            # field far smaller than the grain's own sigma, which both wastes a worker and
+            # makes that strip behave differently from every export above it. Fold it into
+            # the previous chunk instead.
+            if len(chunks) > 1 and (chunks[-1][1] - chunks[-1][0]) < 64:
+                chunks[-2:] = [(chunks[-2][0], H)]
 
             dir_amt = float(params_dict.get("dir_amount", 1.0))
             dir_intl = float(params_dict.get("dir_interlayer", 1.0))
@@ -3662,15 +3833,23 @@ class SpektraEngine:
                 grain_colour=grain_colour,
                 density_preset=grain_preset,
             )
-            grain_rng = np.random.default_rng(20260127)
+            # One Generator per chunk, seeded from the chunk's own row offset. A single
+            # shared Generator was both thread-unsafe and non-reproducible: the same
+            # parameters produced different grain on every export.
+            grain_seed_base = 20260127
 
             def _process_chunk(y_range):
                 y0, y1 = y_range
+                # Checked inside the worker, not only between completed futures: a single
+                # 64 MP chunk takes long enough that "cancel" used to look dead for a second.
+                if cancel_cb and cancel_cb():
+                    return
                 chunk_linear = linear_full[y0:y1].copy()
+                chunk_rng = np.random.default_rng(grain_seed_base + y0 * 7919)
 
                 # Pre-LUT physical transmittance grain (shared model with the GPU shader)
                 if grain_spec.active:
-                    layer = grain_model.synthesize_layer_grain(grain_spec, y1 - y0, chunk_linear.shape[1], grain_rng)
+                    layer = grain_model.synthesize_layer_grain(grain_spec, y1 - y0, chunk_linear.shape[1], chunk_rng)
                     # The stock's density law is the same table the shader samples as a texture.
                     response = grain_model.density_response(chunk_linear, grain_spec.density_lut)
                     dD = layer * (grain_spec.strength * grain_model.STRENGTH_GAIN) * response
@@ -3749,34 +3928,7 @@ class SpektraEngine:
                 output_path = os.path.join(output_path, f"{base_name}_developed{ext}")
 
             # Apply crop and straighten rotation if enabled in CPU export
-            crop_cfg = params_dict.get("crop", {})
-            if isinstance(crop_cfg, dict) and crop_cfg.get("enabled", False):
-                # 1. Flips
-                if crop_cfg.get("flip_h", False):
-                    rendered_float = cv2.flip(rendered_float, 1)
-                if crop_cfg.get("flip_v", False):
-                    rendered_float = cv2.flip(rendered_float, 0)
-
-                # 2. 90-degree step rotation
-                rot_90 = int(crop_cfg.get("rot_90", 0)) % 360
-                if rot_90 == 90:
-                    rendered_float = cv2.rotate(rendered_float, cv2.ROTATE_90_CLOCKWISE)
-                elif rot_90 == 180:
-                    rendered_float = cv2.rotate(rendered_float, cv2.ROTATE_180)
-                elif rot_90 == 270:
-                    rendered_float = cv2.rotate(rendered_float, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-                rH, rW = rendered_float.shape[:2]
-                cx = int(max(0, min(rW - 1, float(crop_cfg.get("x", 0.0)) * rW)))
-                cy = int(max(0, min(rH - 1, float(crop_cfg.get("y", 0.0)) * rH)))
-                cw = int(max(1, min(rW - cx, float(crop_cfg.get("w", 1.0)) * rW)))
-                ch = int(max(1, min(rH - cy, float(crop_cfg.get("h", 1.0)) * rH)))
-                c_angle = float(crop_cfg.get("angle", 0.0))
-                if abs(c_angle) > 0.01:
-                    center_pt = (float(rW * 0.5), float(rH * 0.5))
-                    M = cv2.getRotationMatrix2D(center_pt, -c_angle, 1.0)
-                    rendered_float = cv2.warpAffine(rendered_float, M, (rW, rH), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT)
-                rendered_float = np.ascontiguousarray(rendered_float[cy:cy+ch, cx:cx+cw])
+            rendered_float = self._apply_export_crop(rendered_float, params_dict)
 
             enc_params = dict(params_dict)
             enc_params["format"] = format_type
@@ -3962,50 +4114,4 @@ class SpektraEngine:
             "lut_path": output_cube_path
         }
 
-    def import_film_lut(self, src_path, custom_name="", custom_desc=""):
-        return self.import_custom_stock("film", src_path, custom_name, custom_desc)
-
-    def import_paper_lut(self, src_path, custom_name="", custom_desc=""):
-        return self.import_custom_stock("paper", src_path, custom_name, custom_desc)
-
-    def import_custom_stock(self, stock_type, src_path, custom_name="", custom_desc=""):
-        import json
-        dest_dir = self.profiles_dir
-        os.makedirs(dest_dir, exist_ok=True)
-        fname = os.path.basename(src_path)
-        dest_path = os.path.join(dest_dir, fname)
-        try:
-            with open(src_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if custom_name:
-                data["name"] = custom_name
-            if custom_desc:
-                if "info" in data and isinstance(data["info"], dict):
-                    data["info"]["desc"] = custom_desc
-                data["desc"] = custom_desc
-            with open(dest_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            import shutil
-            shutil.copy2(src_path, dest_path)
-
-        with self._render_lock:
-            self._lut_cache.clear()
-        self._profile_cache.clear()
-        return dest_path
-
-    def delete_custom_stock(self, stock_type, stock_id):
-        """Physically deletes user-imported profile from disk and clears caches."""
-        dest_dir = self.profiles_dir
-        for f in os.listdir(dest_dir):
-            if f.endswith(".json") and (f.startswith(stock_id) or stock_id in f):
-                fp = os.path.join(dest_dir, f)
-                try:
-                    os.remove(fp)
-                except Exception:
-                    pass
-        with self._render_lock:
-            self._lut_cache.clear()
-        self._profile_cache.clear()
-        return True
 
