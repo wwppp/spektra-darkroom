@@ -18,6 +18,7 @@ import sys
 import copy
 import ctypes
 import threading
+import time
 from ctypes import c_int, byref
 from datetime import datetime
 import logging
@@ -364,15 +365,32 @@ class BatchImportWorker(QThread):
         self.engine = engine
         self.start_idx = start_idx
         self._stopped = False
+        self._import_finished_emitted = False
 
     def stop(self):
         self._stopped = True
 
     def run(self):
+        """Decode the batch, always emitting importFinished exactly once.
+
+        The window clears its "importing" lock (and with it the status bar lock) only when
+        importFinished arrives, so an exception escaping the decode loop would freeze the
+        status bar — and every later "saved"/"exported" message — for the whole session.
+        """
+        loaded = 0
+        try:
+            loaded = self._run_import()
+        except Exception as ex:
+            logger.warning(f"BatchImportWorker aborted: {ex}")
+        finally:
+            if not self._import_finished_emitted:
+                self._import_finished_emitted = True
+                self.importFinished.emit(int(loaded or 0))
+
+    def _run_import(self):
         total = len(self.file_paths)
         if total == 0:
-            self.importFinished.emit(0)
-            return
+            return 0
 
         import os
         import concurrent.futures
@@ -544,7 +562,12 @@ class BatchImportWorker(QThread):
                     time.sleep(0.004)
             next_to_emit += 1
 
-        self.importFinished.emit(loaded_count)
+        self._emit_import_finished(loaded_count)
+        return loaded_count
+
+    def _emit_import_finished(self, loaded_count):
+        self._import_finished_emitted = True
+        self.importFinished.emit(int(loaded_count or 0))
 
 
 class SlotDecodeWorker(QThread):
@@ -2201,6 +2224,7 @@ class DarkroomMainWindow(QMainWindow):
         total_files = len(existing_files)
         self.photos = [None] * total_files
         self._is_importing = True
+        self._import_lock_time = time.time()
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(True)
 
@@ -2293,6 +2317,7 @@ class DarkroomMainWindow(QMainWindow):
             # Uncached slots handling
             if uncached_slots:
                 self._is_importing = True
+                self._import_lock_time = time.time()
                 if hasattr(self, "btn_cancel_import"):
                     self.btn_cancel_import.setVisible(True)
                 self.set_app_status(f"正在恢复底片库 (0/{len(uncached_slots)} 张)...", spinning=True, timeout_ms=0)
@@ -4989,6 +5014,8 @@ class DarkroomMainWindow(QMainWindow):
     def restore_default_status(self):
         """Restores transient status to default or clears it while preserving permanent photo info."""
         self._update_photo_info_display()
+        if self._stale_import_lock():
+            self._is_importing = False
         if getattr(self, "_is_importing", False) or getattr(self, "_is_multi_selecting", False):
             return
         if hasattr(self, "export_queue") and self.export_queue and self.export_queue.has_active_tasks():
@@ -5001,6 +5028,8 @@ class DarkroomMainWindow(QMainWindow):
             self._clear_status_text()
 
     def _clear_status_text(self):
+        if self._stale_import_lock():
+            self._is_importing = False
         if getattr(self, "_is_importing", False) or getattr(self, "_is_multi_selecting", False):
             return
         self.status_label.setText("")
@@ -5214,6 +5243,21 @@ class DarkroomMainWindow(QMainWindow):
                 return
         super().keyPressEvent(event)
 
+    def _stale_import_lock(self) -> bool:
+        """True when the import lock outlived its worker (crash, killed batch, lost signal).
+
+        The lock freezes every status message for the whole session, so a lost signal would
+        leave the spinner turning forever and hide messages such as "会话已保存".
+        """
+        if not getattr(self, "_is_importing", False):
+            return False
+        worker = getattr(self, "_import_worker", None)
+        if worker is not None and worker.isRunning():
+            return False
+        if getattr(self, "_pending_import_queue", None):
+            return False
+        return time.time() - float(getattr(self, "_import_lock_time", 0.0)) > 10.0
+
     def set_app_status(self, text: str, spinning: bool = False, timeout_ms: int = 0, is_export_link: bool = False):
         """Centralized status indicator with animated spinner and comfortable lingering timer."""
         # If legacy call routed export link here, redirect directly to right-side capsule
@@ -5223,12 +5267,17 @@ class DarkroomMainWindow(QMainWindow):
 
         # Lock status during batch import so auxiliary switch events don't wipe it
         if getattr(self, "_is_importing", False):
-            is_import_msg = any(text.startswith(prefix) for prefix in [
-                "正在导入", "导入底片", "正在恢复", "底片库", "会话底片库", "已导入", "已取消",
-                "正在载入", "载入会话", "载入底片", "正在加载", "加载会话", "会话已恢复", "会话"
-            ])
-            if not is_import_msg:
-                return
+            if self._stale_import_lock():
+                logger.warning("Clearing stale import status lock")
+                self._is_importing = False
+            else:
+                is_import_msg = any(text.startswith(prefix) for prefix in [
+                    "正在导入", "导入底片", "正在恢复", "底片库", "会话底片库", "已导入", "已取消",
+                    "正在载入", "载入会话", "载入底片", "正在加载", "加载会话", "会话已恢复", "会话",
+                    "正在保存会话"
+                ])
+                if not is_import_msg:
+                    return
         # Lock status during multi-selection so photo click doesn't wipe selection count
         if getattr(self, "_is_multi_selecting", False) and not spinning:
             if not text.startswith("已选中") and not text.startswith("已全选"):
@@ -5491,16 +5540,27 @@ class DarkroomMainWindow(QMainWindow):
 
     def _do_save_session(self, file_path):
         self.set_app_status("正在保存会话...", spinning=True)
+        try:
+            return self._write_session(file_path)
+        except Exception as e:
+            logger.error(f"Failed to save session {file_path}: {e}")
+            self.set_app_status(f"会话保存失败: {e}", timeout_ms=4000)
+            return False
+
+    def _write_session(self, file_path):
         # Flush current dirty photo parameters to .sdc sidecar
         if self._photo_is_dirty and self._current_photo_path:
             curr_target_p = next((x for x in self.photos if x and x.get("id") == self.active_photo_id), None)
-            sdc_manager.save_sdc(
-                self._current_photo_path,
-                self.current_film_stock,
-                self.current_paper_stock,
-                self.current_params,
-                print_mode=getattr(self, "current_print_mode", "optical")
-            )
+            try:
+                sdc_manager.save_sdc(
+                    self._current_photo_path,
+                    self.current_film_stock,
+                    self.current_paper_stock,
+                    self.current_params,
+                    print_mode=getattr(self, "current_print_mode", "optical")
+                )
+            except Exception as e:
+                logger.warning(f"Could not flush sidecar for {self._current_photo_path}: {e}")
             self._photo_is_dirty = False
             if self.active_photo_id:
                 if curr_target_p:
@@ -5513,15 +5573,18 @@ class DarkroomMainWindow(QMainWindow):
             if not p or not p.get("path"):
                 continue
             if p.get("is_dirty"):
-                sdc_manager.save_sdc(
-                    p["path"],
-                    p.get("film_profile", "none"),
-                    p.get("paper_profile", "none"),
-                    p.get("params", {}),
-                    print_mode=p.get("print_mode", "optical")
-                )
-                p["is_dirty"] = False
-                p["is_edited"] = True
+                try:
+                    sdc_manager.save_sdc(
+                        p["path"],
+                        p.get("film_profile", "none"),
+                        p.get("paper_profile", "none"),
+                        p.get("params", {}),
+                        print_mode=p.get("print_mode", "optical")
+                    )
+                    p["is_dirty"] = False
+                    p["is_edited"] = True
+                except Exception as e:
+                    logger.warning(f"Could not flush sidecar for {p.get('path')}: {e}")
 
         from core.path_utils import normalize_path
         session_dir = os.path.dirname(os.path.abspath(file_path))
@@ -8167,6 +8230,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # 5. No worker running: initialize and start fresh import session
         self._is_importing = True
+        self._import_lock_time = time.time()
         self._pending_import_queue = []
         self._current_import_batch = list(new_paths)
         self._import_session_completed = 0
@@ -8198,6 +8262,7 @@ class DarkroomMainWindow(QMainWindow):
         self._photo_id_counter = start_idx + len(next_batch)
 
         self._is_importing = True
+        self._import_lock_time = time.time()
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(True)
 
@@ -10813,6 +10878,10 @@ class DarkroomMainWindow(QMainWindow):
             "jxl_lossless": cfg.get("jxl_lossless", False),
             "jxl_distance": cfg.get("jxl_distance", 1.0),
             "jxl_effort": cfg.get("jxl_effort", 7),
+            # Viewport-only state must never reach a render: exporting while the compare
+            # split is open used to bake a split-screen frame into the output file.
+            "view_mode": 0,
+            "is_thumbnail": False,
         })
 
         out_path = cfg["path"].strip() if cfg.get("path") else ""
@@ -10966,35 +11035,31 @@ class DarkroomMainWindow(QMainWindow):
                 if matched_ep and "base_ev" in matched_ep:
                     b_ev = float(matched_ep["base_ev"])
 
-            export_params = {
+            # Start from the photo's full parameter set instead of re-listing keys by hand:
+            # every value the renderer reads has to survive this hop, including the nested
+            # lens / crop blocks and the chemistry values baked into the LUT. Defaults only
+            # fill in what an older sidecar may be missing.
+            export_params = self.get_default_params(b_temp, b_tint)
+            if isinstance(params, dict):
+                export_params.update(params)
+            export_params.update({
                 "source_path": file_p,
                 "film_stock": film,
                 "paper_stock": paper,
-                "print_mode": photo.get("print_mode", params.get("print_mode", "optical")),
+                "print_mode": photo.get("print_mode") or params.get("print_mode") or "optical",
                 "base_ev": b_ev,
                 "base_temp": b_temp,
                 "base_tint": b_tint,
-                "exposure_ev": params.get("exposure_ev", 0.0),
-                "highlights": params.get("highlights", 0.0),
-                "shadows": params.get("shadows", 0.0),
-                "color_temp": params.get("color_temp", b_temp),
-                "tint": params.get("tint", b_tint),
-                "enlarger_cyan": params.get("enlarger_cyan", 0.0),
-                "enlarger_magenta": params.get("enlarger_magenta", 0.0),
-                "enlarger_yellow": params.get("enlarger_yellow", 0.0),
-                "print_exposure": params.get("print_exposure", 1.0),
-                "pre_flash": params.get("pre_flash", 0.0),
-                "black_lift": params.get("black_lift", 0.0),
-                "halation": params.get("halation_amount", params.get("halation", 1.0)),
-                "halation_amount": params.get("halation_amount", params.get("halation", 1.0)),
-                "halation_spatial_scale": params.get("halation_spatial_scale", 1.0),
-                "scatter_amount": params.get("scatter_amount", 1.0),
-                "boost_ev": params.get("boost_ev", params.get("halation_boost", 0.0)),
-                "halation_boost": params.get("boost_ev", params.get("halation_boost", 0.0)),
-                "grain": params.get("grain", 0.4),
-                "grain_size": params.get("grain_size", 1.0),
-                "grain_cloud_blur": params.get("grain_cloud_blur", 1.0),
-                "grain_colour": params.get("grain_colour", 1.0),
+                "halation": export_params.get("halation_amount", export_params.get("halation", 1.0)),
+                "halation_amount": export_params.get("halation_amount", export_params.get("halation", 1.0)),
+                "boost_ev": export_params.get("boost_ev", export_params.get("halation_boost", 0.0)),
+                "halation_boost": export_params.get("boost_ev", export_params.get("halation_boost", 0.0)),
+                "crop": dict(export_params.get("crop") or {}),
+                "lens": dict(export_params.get("lens") or self._get_default_lens_params()),
+                # Viewport-only state must never reach a render: a leftover compare view
+                # would otherwise turn the exported frame into a split-screen image.
+                "view_mode": 0,
+                "is_thumbnail": False,
                 "engine": cfg.get("engine", "wysiwyg"),
                 "format": fmt,
                 "quality": cfg.get("quality", 9),
@@ -11011,7 +11076,7 @@ class DarkroomMainWindow(QMainWindow):
                 "jxl_distance": cfg.get("jxl_distance", 1.0),
                 "jxl_effort": cfg.get("jxl_effort", 7),
                 "scale_pct": cfg.get("scale_pct", 100)
-            }
+            })
 
             stem = os.path.splitext(os.path.basename(file_p))[0]
             base_fn = f"{prefix}{stem}{suffix}"
