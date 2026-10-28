@@ -55,7 +55,14 @@ class ExportSizeWidget(QWidget):
         self._crop = None
         self._dpi = 300
 
-        lay = QHBoxLayout(self)
+        # Two rows: controls on top, "actual pixels" note directly underneath, both left
+        # aligned to the same edge. Fixed widths keep the layout stable when the custom box
+        # appears and never push the neighbouring "色彩抽样" column around.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        lay = QHBoxLayout()
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
@@ -63,14 +70,23 @@ class ExportSizeWidget(QWidget):
         setup_solid_combobox(self.combo)
         for key, label, edge, _paper in EXPORT_SIZE_PRESETS:
             self.combo.addItem(label, key)
-        lay.addWidget(self.combo, 1)
+        self.combo.setFixedWidth(170)
+        lay.addWidget(self.combo, 0)
 
         self.spin = QLineEdit()
-        self.spin.setFixedWidth(72)
-        self.spin.setPlaceholderText("长边 px")
+        self.spin.setFixedWidth(78)
+        self.spin.setPlaceholderText("px")
         self.spin.setVisible(False)
         self.spin.editingFinished.connect(self._on_custom_edited)
-        lay.addWidget(self.spin)
+        lay.addWidget(self.spin, 0)
+        lay.addStretch(1)
+
+        self.summary_lbl = QLabel("")
+        self.summary_lbl.setStyleSheet("font-size: 11px;")
+
+        outer.addLayout(lay)
+        outer.addWidget(self.summary_lbl)
+        self.sub_row = lay  # kept for callers
 
         self.combo.currentIndexChanged.connect(self._on_preset_changed)
 
@@ -190,6 +206,8 @@ class ExportSizeWidget(QWidget):
         self.combo.setToolTip(summary)
         self.spin.setToolTip(summary)
         self.setProperty("summary", summary)
+        if hasattr(self, "summary_lbl"):
+            self.summary_lbl.setText(summary)
         # The owning dialogs render their own label; walk up the parent chain because Qt
         # re-parents the widget onto an internal page container.
         node = self.parent()
@@ -340,10 +358,9 @@ class BaseExportDialog(QDialog):
         self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
         grid_top.addWidget(self.combo_subsampling, 2, 3)
 
-        # Real output pixels + physical print size under the size row
-        self.lbl_size_summary = QLabel("")
-        self.lbl_size_summary.setStyleSheet("font-size: 11px;")
-        grid_top.addWidget(self.lbl_size_summary, 3, 1, 1, 3)
+        # Real output pixels: rendered by ExportSizeWidget as the second line of the widget,
+        # so the size row keeps one control height and the grid rows stay evenly spaced.
+        self.lbl_size_summary = self.size_widget.summary_lbl
 
         card_layout.addLayout(grid_top)
 
@@ -362,7 +379,7 @@ class BaseExportDialog(QDialog):
 
         # Row 3: Format-Specific Settings Stack
         self.stack_settings = QStackedWidget()
-        self.stack_settings.setFixedHeight(76)
+        self.stack_settings.setFixedHeight(84)
 
         # --- Stack Page 0: JPEG Options ---
         page_jpeg = QWidget()
@@ -375,7 +392,7 @@ class BaseExportDialog(QDialog):
         grid_jpeg.setColumnStretch(2, 0)
         grid_jpeg.setColumnStretch(3, 1)
 
-        # Row 0: Quality Slider & Progressive Checkbox
+        # Quality slider occupies the full option row (metric label, slider, checkbox)
         lbl_q = QLabel("画质档位:")
         lbl_q.setFixedWidth(72)
         grid_jpeg.addWidget(lbl_q, 0, 0)
@@ -397,11 +414,11 @@ class BaseExportDialog(QDialog):
         self.lbl_quality_val.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 11px;")
         box_q.addWidget(self.lbl_quality_val)
 
-        grid_jpeg.addLayout(box_q, 1, 1)
+        grid_jpeg.addLayout(box_q, 0, 1, 1, 3)
 
         self.chk_progressive = QCheckBox("渐进式")
         self.chk_progressive.setChecked(True)
-        grid_jpeg.addWidget(self.chk_progressive, 1, 3, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        grid_jpeg.addWidget(self.chk_progressive, 1, 1, 1, 3, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self.stack_settings.addWidget(page_jpeg)
 
@@ -900,7 +917,7 @@ class SingleExportDialog(BaseExportDialog):
     def __init__(self, default_file_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("单片扫描")
-        self.setFixedSize(720, 432)
+        self.setFixedSize(720, 448)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         self._init_ui()
@@ -1084,7 +1101,7 @@ class BatchExportDialog(BaseExportDialog):
         super().__init__(parent)
         self.batch_count = batch_count
         self.setWindowTitle(f"批量扫描：{self.batch_count}张")
-        self.setFixedSize(720, 518)
+        self.setFixedSize(720, 534)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
