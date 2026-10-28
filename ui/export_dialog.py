@@ -159,9 +159,14 @@ class ExportSizeWidget(QWidget):
         is_custom = self.combo.currentData() == "custom"
         self._set_editable(is_custom)
         if is_custom:
-            self.combo.setEditText(str(self._custom_edge_value()))
-            if self.combo.lineEdit() is not None:
-                self.combo.lineEdit().selectAll()
+            # Show the edge only: no "自定义长边…" prefix, no parentheses, no unit suffix.
+            edge = self._custom_edge_value()
+            self.combo.setEditText(str(edge))
+            edit = self.combo.lineEdit()
+            if edit is not None:
+                edit.setText(str(edge))
+                edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                edit.selectAll()
         else:
             # Re-selecting the row restores the preset's own label after a custom edit.
             self.combo.setCurrentIndex(idx)
@@ -426,8 +431,8 @@ class BaseExportDialog(QDialog):
         self.slider_quality.valueChanged.connect(self._on_quality_changed)
         grid_jpeg.addWidget(self.slider_quality, 0, 1)
 
-        self.lbl_quality_val = QLabel("9 档 (90%)")
-        self.lbl_quality_val.setFixedWidth(64)
+        self.lbl_quality_val = QLabel("9")
+        self.lbl_quality_val.setFixedWidth(28)
         self.lbl_quality_val.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 11px;")
         grid_jpeg.addWidget(self.lbl_quality_val, 0, 2)
 
@@ -554,9 +559,8 @@ class BaseExportDialog(QDialog):
 
     def _on_export_size_changed(self, out_w, out_h):
         """Called by ExportSizeWidget whenever the resulting pixel size changes."""
-        if hasattr(self, "lbl_output_size"):
-            is_custom = self.size_widget.combo.currentData() == "custom"
-            self.lbl_output_size.setText("自定义长边:" if is_custom else "输出尺寸:")
+        # The label stays 输出尺寸: the editable combo already shows the number when custom.
+        return
 
     def _on_format_changed(self, index):
         fmt = self.combo_format.currentData()
@@ -586,8 +590,8 @@ class BaseExportDialog(QDialog):
             self.combo_depth.addItem("16 位 (16-bit)", 16)
 
     def _on_quality_changed(self, val):
-        pct = int(val * 10)
-        self.lbl_quality_val.setText(f"{val} 档 ({pct}%)")
+        # Just the tier number: the scale is 1-10 and the slider already shows the position.
+        self.lbl_quality_val.setText(str(int(val)))
 
     def _apply_last_settings(self):
         try:
