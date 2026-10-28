@@ -90,10 +90,26 @@ class TooltipController(QObject):
             self._visible = False
             self._bubble.hide()
 
+    @staticmethod
+    def _is_combobox_popup(obj) -> bool:
+        curr = obj if isinstance(obj, QWidget) else None
+        while curr is not None:
+            cname = curr.metaObject().className()
+            if cname in ("QComboBoxPrivateContainer", "DarkroomComboListView", "AdobeComboListView"):
+                return True
+            if hasattr(curr, "delegate") and hasattr(getattr(curr, "delegate", None), "combo"):
+                return True
+            curr = curr.parent()
+        return False
+
     def eventFilter(self, obj, event):
         etype = event.type()
         if etype == QEvent.Type.ToolTip:
             try:
+                if self._is_combobox_popup(obj):
+                    self.hide_bubble()
+                    return True
+
                 widget = obj if isinstance(obj, QWidget) else None
                 text = widget.toolTip() if widget is not None else ""
                 if text:

@@ -1,6 +1,6 @@
 import re
 import os
-from PySide6.QtCore import Qt, Signal, QPoint, QSize, QRect, QVariantAnimation, QEasingCurve
+from PySide6.QtCore import Qt, Signal, QPoint, QSize, QRect, QVariantAnimation, QEasingCurve, QEvent
 from PySide6.QtGui import QCursor, QFont, QIcon, QGuiApplication, QPainter, QColor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication, QListView, QStyledItemDelegate, QAbstractItemView, QStyle
@@ -692,6 +692,10 @@ class DarkroomComboItemDelegate(QStyledItemDelegate):
         self.combo = combo
         self.hovered_row = -1
 
+    def helpEvent(self, event, view, option, index):
+        # Dropdown popup items do not show hover tooltips (popup list has elastic width)
+        return True
+
     def sizeHint(self, option, index):
         w = option.rect.width() if (option and hasattr(option, "rect")) else 100
         return QSize(w, 24)
@@ -756,6 +760,16 @@ class DarkroomComboListView(QListView):
         self._target_scroll = 0
         self.delegate = None
 
+    def viewportEvent(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            return True
+        return super().viewportEvent(event)
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            return True
+        return super().event(event)
+
     def _on_scroll_anim_step(self, val):
         self.verticalScrollBar().setValue(int(val))
 
@@ -809,10 +823,10 @@ class DarkroomComboBox(QComboBox):
     """Custom darkroom styled combobox featuring:
     - Screen-edge awareness (smart upward/downward popup direction)
     - Dynamic visible item count (scales from 6 up to 24 items depending on available screen height)
-    - Compact bounded popup list width matching unexpanded control with tooltip for overflow
+    - Compact bounded popup list width matching unexpanded control with elastic width on popup
     - Smooth opening animation (OutCubic expansion and opacity fade)
     - Smooth inertial mouse-wheel scrolling
-    - Full text tooltip on hover for collapsed box and popup list items
+    - Full text tooltip on hover for collapsed box (popup list items rely on elastic popup width)
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -973,7 +987,6 @@ class ComboBoxRow(QWidget):
 
         for idx, (text, val) in enumerate(items):
             self.combo.addItem(text, val)
-            self.combo.setItemData(idx, text, Qt.ItemDataRole.ToolTipRole)
         if default_val is not None:
             self.set_value(default_val)
         elif self.combo.currentIndex() >= 0:
@@ -1126,7 +1139,6 @@ class ComboBoxRow(QWidget):
         self.combo.clear()
         for idx, (text, val) in enumerate(items):
             self.combo.addItem(text, val)
-            self.combo.setItemData(idx, text, Qt.ItemDataRole.ToolTipRole)
         if default_val is not None:
             idx = self.combo.findData(default_val)
             if idx >= 0:
