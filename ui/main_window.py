@@ -9255,7 +9255,12 @@ class DarkroomMainWindow(QMainWindow):
         from core.lens_correction import LCPDatabase
         db = LCPDatabase.get_instance()
         models = db.get_models_for_make(make) if make else []
-        model_items = [("无", "")] + [(m_name, m_name) for m_name, _, _ in models]
+        seen_models = set()
+        model_items = [("无", "")]
+        for m_name, _, _ in models:
+            if m_name not in seen_models:
+                seen_models.add(m_name)
+                model_items.append((m_name, m_name))
 
         self._is_updating_sliders = True
         try:
@@ -9298,7 +9303,15 @@ class DarkroomMainWindow(QMainWindow):
         prof_items.append(("[+ 添加配置文件 (.lcp)...]", "__import_lcp__"))
         self._is_updating_sliders = True
         try:
-            def_path = matching_paths[0][1] if matching_paths else ""
+            def_path = ""
+            if matching_paths:
+                active_p = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
+                is_raw = bool(active_p and active_p.get("ext", "").lower() in getattr(self.engine, "RAW_EXTS", ()))
+                if is_raw:
+                    raw_cand = next((p[1] for p in matching_paths if "raw" in p[1].lower()), None)
+                    def_path = raw_cand or matching_paths[0][1]
+                else:
+                    def_path = matching_paths[0][1]
             self.combo_lens_profile.set_items(prof_items, default_val=def_path)
         finally:
             self._is_updating_sliders = False
@@ -9449,7 +9462,12 @@ class DarkroomMainWindow(QMainWindow):
 
             # 2. Populate models
             models = db.get_models_for_make(make) if make else []
-            model_items = [("无", "")] + [(m_name, m_name) for m_name, _, _ in models]
+            seen_models = set()
+            model_items = [("无", "")]
+            for m_name, _, _ in models:
+                if m_name not in seen_models:
+                    seen_models.add(m_name)
+                    model_items.append((m_name, m_name))
             if model and model not in [m for _, m in model_items]:
                 model_items.append((model, model))
             self.combo_lens_model.set_items(model_items, default_val=model)
