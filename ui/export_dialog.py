@@ -13,7 +13,7 @@ from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox,
     QSlider, QLineEdit, QPushButton, QFileDialog, QFrame, QWidget,
-    QStackedWidget, QCheckBox, QProgressBar
+    QStackedWidget, QCheckBox, QProgressBar, QStyle, QStyleOptionComboBox
 )
 
 from core.path_utils import get_icon_path, get_resource_dir, normalize_path
@@ -165,8 +165,8 @@ class ExportSizeWidget(QWidget):
             edit = self.combo.lineEdit()
             if edit is not None:
                 edit.setText(str(edge))
-                edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
                 edit.selectAll()
+                self._align_custom_editor()
         else:
             # Re-selecting the row restores the preset's own label after a custom edit.
             self.combo.setCurrentIndex(idx)
@@ -182,9 +182,39 @@ class ExportSizeWidget(QWidget):
             if edit is not None:
                 edit.setValidator(QIntValidator(64, 30000, self))
                 edit.setPlaceholderText("长边 px")
-                edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                # A styled combo reserves the arrow through the drop-down subcontrol, which Qt
+                # then subtracts from the *left* padding of the editor. Pin the editor's own
+                # geometry so the digits start where the preset text starts.
+                edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                edit.setStyleSheet(
+                    "QLineEdit { padding: 0px 0px 0px 0px; margin: 0px; "
+                    "border: none; background: transparent; }")
+                edit.setContentsMargins(0, 0, 0, 0)
+                edit.setTextMargins(0, 0, 0, 0)
                 edit.editingFinished.connect(self._update_summary)
                 edit.returnPressed.connect(self._update_summary)
+                self._align_custom_editor()
+
+    def _align_custom_editor(self):
+        """Match the editable text inset to the preset text inset (8 px, as the combo style)."""
+        edit = self.combo.lineEdit()
+        if edit is None:
+            return
+        try:
+            arrow = self.combo.style().subControlRect(
+                QStyle.ComplexControl.CC_ComboBox,
+                QStyleOptionComboBox(),
+                QStyle.SubControl.SC_ComboBoxArrow,
+                self.combo)
+            inset = max(0, arrow.left())
+        except Exception:
+            inset = 0
+        edit.setTextMargins(inset, 0, 0, 0)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.combo.isEditable():
+            self._align_custom_editor()
 
     def _custom_edge_value(self):
         """Long edge the custom box currently holds, falling back to the source long edge."""
@@ -416,7 +446,7 @@ class BaseExportDialog(QDialog):
         grid_jpeg.setColumnStretch(0, 0)
         grid_jpeg.setColumnStretch(1, 1)
         grid_jpeg.setColumnStretch(2, 0)
-        grid_jpeg.setColumnStretch(3, 1)
+        grid_jpeg.setColumnStretch(3, 0)
 
         # One row: metric label, slider, value, progressive toggle - no half-empty rows.
         lbl_q = QLabel("画质档位:")
@@ -429,12 +459,28 @@ class BaseExportDialog(QDialog):
         self.slider_quality.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider_quality.setTickInterval(1)
         self.slider_quality.valueChanged.connect(self._on_quality_changed)
-        grid_jpeg.addWidget(self.slider_quality, 0, 1)
+        self.slider_quality.setToolTip("画质档位 1–10，数字越大压缩越重、体积越小")
 
+        # One row: metric label, scale ends + slider, current value, progressive toggle.
+        #   "画质档位:  1 [========] 10   9   ☑ 渐进式"
         self.lbl_quality_val = QLabel("9")
-        self.lbl_quality_val.setFixedWidth(28)
-        self.lbl_quality_val.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 11px;")
-        grid_jpeg.addWidget(self.lbl_quality_val, 0, 2)
+        self.lbl_quality_val.setFixedWidth(16)
+        self.lbl_quality_val.setStyleSheet(
+            "color: #f59e0b; font-weight: bold; font-size: 11px;")
+
+        box_slider = QHBoxLayout()
+        box_slider.setContentsMargins(0, 0, 0, 0)
+        box_slider.setSpacing(6)
+        lbl_min = QLabel("1")
+        lbl_min.setStyleSheet("font-size: 11px;")
+        box_slider.addWidget(lbl_min)
+        box_slider.addWidget(self.slider_quality, 1)
+        lbl_max = QLabel("10")
+        lbl_max.setStyleSheet("font-size: 11px;")
+        box_slider.addWidget(lbl_max)
+        box_slider.addSpacing(10)
+        box_slider.addWidget(self.lbl_quality_val)
+        grid_jpeg.addLayout(box_slider, 0, 1)
 
         self.chk_progressive = QCheckBox("渐进式")
         self.chk_progressive.setObjectName("chkProgressive")
