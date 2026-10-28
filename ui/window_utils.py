@@ -277,8 +277,11 @@ def setup_solid_combobox(combo):
         # Tooltip styling is global now (theme_manager.get_tooltip_stylesheet applied on
         # QApplication). A QToolTip rule on the popup view would shadow that global rule and
         # keep the previous theme's colours after a theme switch.
-        if combo.view():
-            combo.view().setStyleSheet("")
+        try:
+            if combo and combo.view():
+                combo.view().setStyleSheet("")
+        except RuntimeError:
+            pass
 
     _apply_solid_combo_tooltip()
     try:

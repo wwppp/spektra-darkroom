@@ -28,14 +28,14 @@ from core import config_manager
 # export by use: print at a paper size, or fit a pixel budget for the web.
 #   key, label, long edge in px (0 = keep the source resolution), paper mm (w, h) or None
 EXPORT_SIZE_PRESETS = (
-    ("original", "原始尺寸", 0, None),
-    ("print_a4", "打印 A4 · 300dpi", 3508, (210, 297)),
-    ("print_a3", "打印 A3 · 300dpi", 4961, (297, 420)),
-    ("print_a2", "打印 A2 · 300dpi", 7016, (420, 594)),
-    ("web_4k", "屏幕 4K · 3840 px", 3840, None),
-    ("web_2k", "网页 2K · 2048 px", 2048, None),
-    ("share_1080", "分享 1080 px", 1080, None),
-    ("custom", "自定义长边…", -1, None),
+    ("original", "原尺寸", 0, None),
+    ("print_a4", "A4", 3508, (210, 297)),
+    ("print_a3", "A3", 4961, (297, 420)),
+    ("print_a2", "A2", 7016, (420, 594)),
+    ("web_4k", "4K", 3840, None),
+    ("web_2k", "2K", 2048, None),
+    ("share_1080", "1080p", 1080, None),
+    ("custom", "自定义…", -1, None),
 )
 
 EXPORT_SIZE_PREF_KEY = "export_size_long_edge"
@@ -139,15 +139,11 @@ class ExportSizeWidget(QWidget):
         except (TypeError, ValueError):
             self._dpi = 300
         self._update_summary()
-        self.combo.setItemText(self._preset_row("print_a4"), self._print_label("print_a4"))
-        self.combo.setItemText(self._preset_row("print_a3"), self._print_label("print_a3"))
-        self.combo.setItemText(self._preset_row("print_a2"), self._print_label("print_a2"))
 
     def _print_label(self, key):
-        for name, _label, long_edge, paper in EXPORT_SIZE_PRESETS:
-            if name == key and paper:
-                return (f"打印 {name.split('_')[-1].upper()} · "
-                        f"{self._max_short_edge_dpi(long_edge, paper)}dpi")
+        for name, label, _long_edge, _paper in EXPORT_SIZE_PRESETS:
+            if name == key:
+                return label
         return ""
 
     def _max_short_edge_dpi(self, long_edge, paper):
@@ -301,9 +297,8 @@ class ExportSizeWidget(QWidget):
         self._update_summary()
 
     def _base_labels(self):
-        """Preset labels with the print dpi resolved for the current DPI setting."""
-        return {name: (self._print_label(name) if paper else label)
-                for name, label, _edge, paper in EXPORT_SIZE_PRESETS}
+        """Preset labels."""
+        return {name: label for name, label, _edge, _paper in EXPORT_SIZE_PRESETS}
 
     def _update_summary(self):
         """Fold the real pixel size into the combo's own text so it needs no extra row."""
@@ -313,7 +308,7 @@ class ExportSizeWidget(QWidget):
             current = self.combo.currentData()
             for name, text in labels.items():
                 row = self._preset_row(name)
-                if name == current:
+                if name == current and name != "custom":
                     self.combo.setItemText(row, f"{text} · {out_w}×{out_h}")
                 else:
                     self.combo.setItemText(row, text)
@@ -484,8 +479,6 @@ class BaseExportDialog(QDialog):
         # so the form keeps four evenly spaced rows.
         self.lbl_size_summary = None
 
-        card_layout.addLayout(grid_top)
-
         # Shared GPS Privacy Checkbox (Placed cleanly below path input in specific dialogs)
         self.chk_strip_gps = QCheckBox("去除 GPS 位置隐私 (保护个人安全)")
         self.chk_strip_gps.setObjectName("chkStripGps")
@@ -499,102 +492,87 @@ class BaseExportDialog(QDialog):
         self.chk_overwrite.setChecked(True)
         self.chk_overwrite.setToolTip("勾选时同目录同名文件直接覆盖；取消勾选则自动改名为 xxx_1、xxx_2 等，保留原文件。")
 
-        # Row 3: Format-Specific Settings Stack
-        self.stack_settings = QStackedWidget()
-        self.stack_settings.setFixedHeight(46)
+        # Row 3: Format-Specific Settings (Directly in grid_top columns 0, 1, 2, 3)
+        self.lbl_format_opt1 = QLabel("画质档位:")
+        self.lbl_format_opt1.setFixedWidth(72)
+        grid_top.addWidget(self.lbl_format_opt1, 3, 0)
 
-        # Every format page repeats the top grid's column geometry (72 | stretch | 72 |
-        # stretch), so a format option always lines up with the control above it instead of
-        # stretching across the whole card.
-        page_jpeg = self._make_page()
-        grid_jpeg = page_jpeg.layout()
+        self.stack_format_opt1 = QStackedWidget()
+        self.stack_format_opt1.setFixedHeight(26)
 
-        lbl_q = QLabel("画质档位:")
-        lbl_q.setFixedWidth(72)
-        grid_jpeg.addWidget(lbl_q, 0, 0)
-
+        # 0: JPEG Quality
         self.combo_quality = QComboBox()
         setup_solid_combobox(self.combo_quality)
         for q, desc in EXPORT_QUALITY_LEVELS:
             self.combo_quality.addItem(f"{q} · {desc}", q)
         self.combo_quality.setCurrentIndex(self.combo_quality.findData(9))
         self.combo_quality.setToolTip("JPEG 画质档位 1–10，数字越大画质越高、体积越大")
-        grid_jpeg.addWidget(self.combo_quality, 0, 1, Qt.AlignmentFlag.AlignLeft)
+        self.stack_format_opt1.addWidget(self.combo_quality)
 
-        self.chk_progressive = QCheckBox("渐进式")
-        self.chk_progressive.setObjectName("chkProgressive")
-        self.chk_progressive.setChecked(True)
-        self.chk_progressive.setToolTip("渐进式 JPEG 在网络加载时由模糊到清晰，文件体积略大")
-        grid_jpeg.addWidget(self.chk_progressive, 0, 3,
-                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-        self.stack_settings.addWidget(page_jpeg)
-
-        # --- TIFF ---
-        page_tiff = self._make_page()
-        grid_tiff = page_tiff.layout()
-
-        lbl_t_comp = QLabel("压缩算法:")
-        lbl_t_comp.setFixedWidth(72)
-        grid_tiff.addWidget(lbl_t_comp, 0, 0)
-
+        # 1: TIFF Compression
         self.combo_tiff_comp = QComboBox()
         setup_solid_combobox(self.combo_tiff_comp)
         self.combo_tiff_comp.addItem("LZW 压缩", "lzw")
         self.combo_tiff_comp.addItem("Zip / Deflate", "deflate")
         self.combo_tiff_comp.addItem("无压缩", "none")
-        grid_tiff.addWidget(self.combo_tiff_comp, 0, 1, Qt.AlignmentFlag.AlignLeft)
+        self.stack_format_opt1.addWidget(self.combo_tiff_comp)
 
-        self.stack_settings.addWidget(page_tiff)
-
-        # --- PNG ---
-        page_png = self._make_page()
-        grid_png = page_png.layout()
-
-        lbl_p_comp = QLabel("压缩级别:")
-        lbl_p_comp.setFixedWidth(72)
-        grid_png.addWidget(lbl_p_comp, 0, 0)
-
+        # 2: PNG Level
         self.combo_png_level = QComboBox()
         setup_solid_combobox(self.combo_png_level)
         self.combo_png_level.addItem("标准 (Level 6)", 6)
         self.combo_png_level.addItem("极限 (Level 9)", 9)
         self.combo_png_level.addItem("快速 (Level 1)", 1)
-        grid_png.addWidget(self.combo_png_level, 0, 1, Qt.AlignmentFlag.AlignLeft)
+        self.stack_format_opt1.addWidget(self.combo_png_level)
 
-        self.stack_settings.addWidget(page_png)
-
-        # --- JPEG XL ---
-        page_jxl = self._make_page()
-        grid_jxl = page_jxl.layout()
-
-        lbl_jxl_mode = QLabel("压缩模式:")
-        lbl_jxl_mode.setFixedWidth(72)
-        grid_jxl.addWidget(lbl_jxl_mode, 0, 0)
-
+        # 3: JPEG XL Mode
         self.combo_jxl_mode = QComboBox()
         setup_solid_combobox(self.combo_jxl_mode)
-        self.combo_jxl_mode.addItem("视觉无损 (1.0)", "visual_10")
-        self.combo_jxl_mode.addItem("超高保真 (0.5)", "visual_05")
         self.combo_jxl_mode.addItem("高质量 (1.5)", "visual_15")
-        self.combo_jxl_mode.addItem("完全无损", "lossless")
-        grid_jxl.addWidget(self.combo_jxl_mode, 0, 1, Qt.AlignmentFlag.AlignLeft)
+        self.combo_jxl_mode.addItem("视觉无损 (1.0)", "visual_10")
+        self.combo_jxl_mode.addItem("高保真 (0.5)", "visual_05")
+        self.combo_jxl_mode.addItem("无损", "lossless")
+        self.combo_jxl_mode.setCurrentIndex(self.combo_jxl_mode.findData("visual_10"))
+        self.stack_format_opt1.addWidget(self.combo_jxl_mode)
 
-        # Sits in the right-hand column pair, exactly under 色彩抽样 above.
-        lbl_jxl_effort = QLabel("编码精度:")
-        lbl_jxl_effort.setFixedWidth(72)
-        grid_jxl.addWidget(lbl_jxl_effort, 0, 2)
+        grid_top.addWidget(self.stack_format_opt1, 3, 1)
 
+        # Row 3 Column 2: Format Option 2 Label (for JXL: "编码精度:")
+        self.lbl_format_opt2 = QLabel("")
+        self.lbl_format_opt2.setFixedWidth(72)
+        grid_top.addWidget(self.lbl_format_opt2, 3, 2)
+
+        self.stack_format_opt2 = QStackedWidget()
+        self.stack_format_opt2.setFixedHeight(26)
+
+        # 0: JPEG Progressive
+        self.chk_progressive = QCheckBox("渐进式")
+        self.chk_progressive.setObjectName("chkProgressive")
+        self.chk_progressive.setChecked(True)
+        self.chk_progressive.setToolTip("渐进式 JPEG 在网络加载时由模糊到清晰，文件体积略大")
+        self.stack_format_opt2.addWidget(self.chk_progressive)
+
+        # 1: TIFF empty placeholder
+        self.stack_format_opt2.addWidget(QWidget())
+
+        # 2: PNG empty placeholder
+        self.stack_format_opt2.addWidget(QWidget())
+
+        # 3: JPEG XL Effort
         self.combo_jxl_effort = QComboBox()
         setup_solid_combobox(self.combo_jxl_effort)
         self.combo_jxl_effort.addItem("标准 (Effort 7)", 7)
         self.combo_jxl_effort.addItem("极限 (9)", 9)
         self.combo_jxl_effort.addItem("极速 (5)", 5)
-        grid_jxl.addWidget(self.combo_jxl_effort, 0, 3, Qt.AlignmentFlag.AlignLeft)
+        self.stack_format_opt2.addWidget(self.combo_jxl_effort)
 
-        self.stack_settings.addWidget(page_jxl)
+        grid_top.addWidget(self.stack_format_opt2, 3, 3)
 
-        card_layout.addWidget(self.stack_settings)
+        # Compatibility alias
+        self.stack_settings = self.stack_format_opt1
+
+        self.grid_top = grid_top
+        card_layout.addLayout(grid_top)
         self.combo_format.currentIndexChanged.connect(self._on_format_changed)
         if hasattr(self, "combo_dpi"):
             self.combo_dpi.currentIndexChanged.connect(self._on_dpi_changed)
@@ -602,49 +580,12 @@ class BaseExportDialog(QDialog):
         return card, card_layout
 
     def _make_page(self):
-        """A format-options page whose columns match the shared grid above it."""
-        page = QWidget()
-        grid = QGridLayout(page)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(10)
-        grid.setColumnStretch(0, 0)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 0)
-        grid.setColumnStretch(3, 1)
-        # An invisible 72 px spacer in column 2 keeps column 1 exactly as wide as the
-        # "输出尺寸" combo above; without it the single left-hand combo would spread over
-        # both halves of the card.
-        spacer = QLabel("")
-        spacer.setFixedWidth(72)
-        grid.addWidget(spacer, 0, 2)
-        # Reserve the same width the right-hand control column takes, so column 1 keeps exactly
-        # the width of the 输出尺寸 combo instead of growing over both halves.
-        right = QLabel("")
-        try:
-            right.setFixedWidth(max(120, self.combo_subsampling.sizeHint().width()))
-        except Exception:
-            right.setFixedWidth(217)
-        grid.addWidget(right, 0, 3)
-        return page
+        """Deprecated: kept for backward compatibility."""
+        return QWidget()
 
     def _match_option_widths(self):
-        """Give the format options the same width as the 输出尺寸 combo.
-
-        Applied at show time, after the stylesheet is in place: the format pages are separate
-        layouts, so without this their single combo is sized by its own text and ends up a few
-        pixels wider or narrower than the control above it.
-        """
-        if not hasattr(self, "size_widget"):
-            return
-        width = self.size_widget.combo.width()
-        if width < 120:
-            return
-        for name in ("combo_quality", "combo_tiff_comp", "combo_png_level",
-                     "combo_jxl_mode", "combo_jxl_effort"):
-            widget = getattr(self, name, None)
-            if widget is not None and widget.width() != width:
-                widget.setFixedWidth(width)
+        """No-op: All rows share self.grid_top, guaranteed identical column widths."""
+        pass
 
     def _on_dpi_changed(self, _index):
         if hasattr(self, "size_widget"):
@@ -663,22 +604,34 @@ class BaseExportDialog(QDialog):
         self.combo_subsampling.setToolTip("" if fmt == "jpeg" else "色彩抽样仅对 JPEG 生效")
         # Stack pages: 0 JPEG, 1 TIFF, 2 PNG, 3 JPEG XL
         if fmt == "jpeg":
-            self.stack_settings.setCurrentIndex(0)
+            self.lbl_format_opt1.setText("画质档位:")
+            self.stack_format_opt1.setCurrentIndex(0)
+            self.lbl_format_opt2.setText("")
+            self.stack_format_opt2.setCurrentIndex(0)
             self.combo_depth.addItem("8 位 (8-bit)", 8)
         elif fmt == "tiff":
-            self.stack_settings.setCurrentIndex(1)
+            self.lbl_format_opt1.setText("压缩算法:")
+            self.stack_format_opt1.setCurrentIndex(1)
+            self.lbl_format_opt2.setText("")
+            self.stack_format_opt2.setCurrentIndex(1)
             self.combo_depth.addItem("8 位 (8-bit)", 8)
             self.combo_depth.addItem("16 位 (16-bit)", 16)
             self.combo_depth.addItem("32 位浮点 (32-bit Float)", 32)
             self.combo_depth.setCurrentIndex(1)
         elif fmt == "jxl":
-            self.stack_settings.setCurrentIndex(3)
+            self.lbl_format_opt1.setText("压缩模式:")
+            self.stack_format_opt1.setCurrentIndex(3)
+            self.lbl_format_opt2.setText("编码精度:")
+            self.stack_format_opt2.setCurrentIndex(3)
             self.combo_depth.addItem("8 位 (8-bit)", 8)
             self.combo_depth.addItem("16 位 (16-bit)", 16)
             self.combo_depth.addItem("32 位浮点 (32-bit Float)", 32)
             self.combo_depth.setCurrentIndex(1)
         else:  # png
-            self.stack_settings.setCurrentIndex(2)
+            self.lbl_format_opt1.setText("压缩级别:")
+            self.stack_format_opt1.setCurrentIndex(2)
+            self.lbl_format_opt2.setText("")
+            self.stack_format_opt2.setCurrentIndex(2)
             self.combo_depth.addItem("8 位 (8-bit)", 8)
             self.combo_depth.addItem("16 位 (16-bit)", 16)
 
@@ -873,12 +826,12 @@ class BaseExportDialog(QDialog):
                     outline: 0px;
                 }}
                 QLineEdit {{
-                    background: #121215;
+                    background: #14151a;
                     color: #e2e8f0;
                     border: 1px solid #323542;
                     border-radius: 4px;
-                    padding: 5px 8px;
-                    font-size: 12px;
+                    padding: 4px 8px;
+                    font-size: 11px;
                 }}
                 QLineEdit:focus {{
                     border: 1px solid #f59e0b;
@@ -987,8 +940,8 @@ class BaseExportDialog(QDialog):
                     color: #1e293b;
                     border: 1px solid #cbd5e1;
                     border-radius: 4px;
-                    padding: 5px 8px;
-                    font-size: 12px;
+                    padding: 4px 8px;
+                    font-size: 11px;
                 }}
                 QLineEdit:focus {{
                     border: 1px solid #f59e0b;
@@ -1042,7 +995,7 @@ class SingleExportDialog(BaseExportDialog):
     def __init__(self, default_file_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("单片扫描")
-        self.setFixedSize(720, 378)
+        self.setFixedSize(620, 360)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         self._init_ui()
@@ -1068,6 +1021,7 @@ class SingleExportDialog(BaseExportDialog):
         path_box = QHBoxLayout()
         path_box.setSpacing(8)
         self.edit_path = QLineEdit(self._default_file_path)
+        self.edit_path.setFixedHeight(26)
         path_box.addWidget(self.edit_path, 1)
 
         btn_browse = QPushButton("浏览...")
@@ -1226,7 +1180,7 @@ class BatchExportDialog(BaseExportDialog):
         super().__init__(parent)
         self.batch_count = batch_count
         self.setWindowTitle(f"批量扫描：{self.batch_count}张")
-        self.setFixedSize(720, 428)
+        self.setFixedSize(620, 410)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
@@ -1248,41 +1202,31 @@ class BatchExportDialog(BaseExportDialog):
         # 1. Shared Settings Card
         card, card_layout = self._init_settings_card()
 
-        # Row 4: File Naming Rules (Concise prefix and suffix)
-        row_naming = QHBoxLayout()
-        row_naming.setSpacing(10)
+        # Row 4: File Naming Rules (Integrated directly into self.grid_top for pixel-perfect column alignment)
+        lbl_pre = QLabel("文件前缀:")
+        lbl_pre.setFixedWidth(72)
+        self.grid_top.addWidget(lbl_pre, 4, 0)
 
-        lbl_name_tag = QLabel("文件命名:")
-        lbl_name_tag.setFixedWidth(72)
-        row_naming.addWidget(lbl_name_tag)
-
-        lbl_pre = QLabel("前缀:")
-        lbl_pre.setStyleSheet("color: #94a3b8; font-size: 11px;")
-        row_naming.addWidget(lbl_pre)
         self.edit_prefix = QLineEdit()
+        self.edit_prefix.setFixedHeight(26)
         self.edit_prefix.setPlaceholderText("无")
-        self.edit_prefix.setFixedWidth(110)
-        row_naming.addWidget(self.edit_prefix)
+        self.grid_top.addWidget(self.edit_prefix, 4, 1)
 
-        row_naming.addSpacing(10)
+        lbl_suf = QLabel("文件后缀:")
+        lbl_suf.setFixedWidth(72)
+        self.grid_top.addWidget(lbl_suf, 4, 2)
 
-        lbl_suf = QLabel("后缀:")
-        lbl_suf.setStyleSheet("color: #94a3b8; font-size: 11px;")
-        row_naming.addWidget(lbl_suf)
         self.edit_suffix = QLineEdit()
+        self.edit_suffix.setFixedHeight(26)
         self.edit_suffix.setPlaceholderText("无")
-        self.edit_suffix.setFixedWidth(110)
-        row_naming.addWidget(self.edit_suffix)
+        self.grid_top.addWidget(self.edit_suffix, 4, 3)
 
-        row_naming.addSpacing(10)
+        # Row 5: Naming hint on next line
         lbl_hint = QLabel("留空则保持原文件名输出")
         lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
-        row_naming.addWidget(lbl_hint)
-        row_naming.addStretch()
+        self.grid_top.addWidget(lbl_hint, 5, 1, 1, 3)
 
-        card_layout.addLayout(row_naming)
-
-        # Row 5: Strictly Destination Directory
+        # Row 6: Strictly Destination Directory
         row_path = QVBoxLayout()
         row_path.setContentsMargins(0, 2, 0, 0)
         row_path.setSpacing(6)
@@ -1293,6 +1237,7 @@ class BatchExportDialog(BaseExportDialog):
         path_box = QHBoxLayout()
         path_box.setSpacing(8)
         self.edit_path = QLineEdit(self._default_dir)
+        self.edit_path.setFixedHeight(26)
         path_box.addWidget(self.edit_path, 1)
 
         btn_browse = QPushButton("浏览...")
