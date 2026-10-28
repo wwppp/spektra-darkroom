@@ -26,7 +26,8 @@ except ImportError:
 from .format_constants import (
     RAW_EXTENSIONS,
     STANDARD_IMAGE_EXTENSIONS,
-    ALL_SUPPORTED_IMAGE_EXTENSIONS
+    LOSSLESS_IMAGE_EXTENSIONS,
+    IMPORTABLE_IMAGE_EXTENSIONS
 )
 from . import colorspace as color_space
 from . import grain_model
@@ -142,6 +143,78 @@ def prophoto_to_srgb_filmic(lin_pro):
         1.055 * np.power(np.maximum(comp, 1e-6), 1.0 / 2.4) - 0.055
     )
     return np.clip(srgb_disp, 0.0, 1.0).astype(np.float32)
+
+
+# --- Input normalization: single source of truth ------------------------------
+# Every raster entry point (preview decode and full-resolution decode) must scale an
+# incoming array the same way, or the viewport and the exported file disagree about how
+# bright a given input is. A 32-bit float TIFF is the dangerous case: 0..1 display-referred
+# floats (what this app writes) and 0..65535 integer-scaled floats (what most converters
+# emit) are indistinguishable by extension, and the old per-site heuristics disagreed --
+# the preview clipped it to white while the export divided it by 255 and went black.
+NORMALIZED_FLOAT_CEILING = 2.0      # <=1 stop over white: resampling / sharpening overshoot, clip it
+_INTEGER_QUANT_TOL = 1e-3
+_INTEGER_QUANT_FRACTION = 0.90
+_INTEGER_QUANT_SAMPLES = 1 << 18
+
+
+class UnsupportedInputRange(ValueError):
+    """Raised when a float image carries data outside the pipeline's display-referred model."""
+
+
+def _is_integer_scaled_float(arr):
+    """True when the float values only ever land on whole numbers above 1.0.
+
+    That is the fingerprint of a float TIFF produced by casting a 16-bit (or 8-bit) integer
+    buffer, as opposed to a scene-linear HDR float whose values are continuous.
+    """
+    flat = arr.reshape(-1)
+    over = flat[flat > 1.5]
+    if over.size < 64:
+        return False
+    if over.size > _INTEGER_QUANT_SAMPLES:
+        over = over[:: int(over.size // _INTEGER_QUANT_SAMPLES) + 1]
+    residual = np.abs(over - np.rint(over))
+    return float(np.mean(residual < _INTEGER_QUANT_TOL)) >= _INTEGER_QUANT_FRACTION
+
+
+def normalize_to_unit(rgb, source=""):
+    """Scale a decoded raster array to float32 [0, 1] using one rule for every caller.
+
+    Rules, in order:
+      * float, peak <= 2.0     -> already normalized (display-referred) plus at most one stop
+                                  of overshoot; clip to [0, 1]
+      * float, whole-number peak > 1.5 -> integer-scaled float: divide by 255 or 65535
+      * float, anything else  -> scene-linear / HDR data the display-referred pipeline
+                                 cannot represent; raise instead of silently crushing it
+      * uint16 -> /65535, uint8 -> /255, other integer widths -> /dtype maximum
+    """
+    if rgb is None or getattr(rgb, "size", 0) == 0:
+        raise UnsupportedInputRange("图像数组为空")
+
+    dt = rgb.dtype
+    if np.issubdtype(dt, np.floating):
+        arr = np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
+        peak = float(arr.max())
+        if peak <= NORMALIZED_FLOAT_CEILING:
+            return np.clip(arr, 0.0, 1.0)
+        if _is_integer_scaled_float(arr):
+            scale = 65535.0 if peak > 255.5 else 255.0
+            return np.clip(arr / np.float32(scale), 0.0, 1.0)
+        where = source or "该图像"
+        raise UnsupportedInputRange(
+            f"{where} 含大于 1 的浮点数据（峰值 {peak:.3f}），"
+            "当前链路只接受 0–1 显示参考浮点、或 0–255/0–65535 整数定标的浮点；"
+            "场景线性 / HDR 浮点请先转换为 16 位整数或 0–1 浮点。"
+        )
+
+    if dt == np.uint8:
+        return rgb.astype(np.float32) / 255.0
+    if dt == np.uint16:
+        return rgb.astype(np.float32) / 65535.0
+    if np.issubdtype(dt, np.integer):
+        return rgb.astype(np.float32) / float(np.iinfo(dt).max)
+    return np.clip(rgb.astype(np.float32), 0.0, 1.0)
 
 
 def filmic_shoulder_np(c, threshold=0.75):
@@ -3197,12 +3270,7 @@ class SpektraEngine:
                     rgb_raw = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
                 h, w = rgb_raw.shape[:2]
-                if np.issubdtype(rgb_raw.dtype, np.floating):
-                    f_img = np.clip(rgb_raw.astype(np.float32), 0.0, 1.0)
-                elif rgb_raw.dtype == np.uint16:
-                    f_img = rgb_raw.astype(np.float32) / 65535.0
-                else:
-                    f_img = rgb_raw.astype(np.float32) / 255.0
+                f_img = normalize_to_unit(rgb_raw, source=os.path.basename(file_path))
                 del rgb_raw
                 # Convert standard sRGB image to linear ProPhoto RGB
                 lin_srgb = srgb_to_linear(f_img)
@@ -3225,17 +3293,16 @@ class SpektraEngine:
                 preview_small = rgb_linear_pro
             del rgb_linear_pro
 
+            # Metering is symmetric: a camera RAW and a developed TIFF/PNG both get the same
+            # middle-grey / highlight measurement, so the same scene does not arrive at two
+            # different base exposures depending on which container it came in. The meter is
+            # idempotent (measure -> apply -> measure again returns ~0 EV), so re-importing a
+            # file that already carries its base exposure does not double-apply it.
             is_raw_file = (ext in raw_exts)
-            if is_raw_file:
-                # Calculate auto-exposure baseline for metadata recommendation
-                auto_ev = cls.calculate_auto_exposure_ev(preview_small)
-                base_ev = auto_ev
-                # Retain pristine scene-linear ProPhoto radiance values without pre-multiplying base_ev
-                raw_preview = preview_small.astype(np.float32)
-            else:
-                auto_ev = 0.0
-                base_ev = 0.0
-                raw_preview = preview_small.astype(np.float32)
+            auto_ev = cls.calculate_auto_exposure_ev(preview_small)
+            base_ev = auto_ev
+            # Retain pristine scene-linear ProPhoto radiance values without pre-multiplying base_ev
+            raw_preview = preview_small.astype(np.float32)
             del preview_small
 
             # Small filmstrip negative thumbnail (height 72px) with smooth highlight roll-off
@@ -3492,19 +3559,7 @@ class SpektraEngine:
                     img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
                 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-            if np.issubdtype(img_rgb.dtype, np.floating):
-                out = img_rgb.astype(np.float32)
-                max_v = float(np.nanmax(out)) if out.size > 0 else 1.0
-                if max_v > 255.0:
-                    f_img = out / 65535.0
-                elif max_v > 1.0:
-                    f_img = out / 255.0
-                else:
-                    f_img = out
-            elif img_rgb.dtype == np.uint16:
-                f_img = img_rgb.astype(np.float32) / 65535.0
-            else:
-                f_img = img_rgb.astype(np.float32) / 255.0
+            f_img = normalize_to_unit(img_rgb, source=os.path.basename(file_path))
 
             lin_srgb = srgb_to_linear(f_img)
             return np.maximum(0.0, lin_srgb @ SRGB_TO_PROPHOTO.T)
