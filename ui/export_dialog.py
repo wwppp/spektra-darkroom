@@ -147,13 +147,18 @@ class ExportSizeWidget(QWidget):
         return 0
 
     def output_pixels(self):
-        """(width, height) the file will have, never upscaling past the source."""
+        """(width, height) the file will have, never upscaling past the source.
+
+        The preset pins the *long* edge, whichever axis that is: a portrait frame must stay
+        portrait instead of being forced to `edge` pixels wide.
+        """
         src_w, src_h = self.source_pixels()
         edge = self._target_long_edge()
-        if edge <= 0 or edge >= max(src_w, src_h):
+        long_edge = max(src_w, src_h)
+        if edge <= 0 or edge >= long_edge:
             return src_w, src_h
-        scale = edge / float(max(src_w, src_h))
-        return max(1, int(edge)), max(1, int(round(src_h * scale)))
+        scale = edge / float(long_edge)
+        return max(1, int(round(src_w * scale))), max(1, int(round(src_h * scale)))
 
     def scale_pct(self):
         src_w, src_h = self.source_pixels()
@@ -714,9 +719,11 @@ class BaseExportDialog(QDialog):
             "jxl_lossless": is_lossless,
             "jxl_distance": dist_val,
             "jxl_effort": effort_val,
-            # Output size: the widget resolves the long edge to the exact pixel width the
-            # renderer must produce, so no post-hoc percentage rounding is applied.
-            "out_long_edge": self.size_widget.output_pixels()[0] if hasattr(self, "size_widget") else 0,
+            # Output size: exact (width, height) resolved against the source geometry and the
+            # crop rect. A bare long edge is ambiguous for portrait frames - passing the width
+            # as the long edge is what squashed a 4024x6024 scan into 4024x4024.
+            "out_size": list(self.size_widget.output_pixels()) if hasattr(self, "size_widget") else [0, 0],
+            "out_long_edge": max(self.size_widget.output_pixels()) if hasattr(self, "size_widget") else 0,
             "scale_pct": self.size_widget.scale_pct() if hasattr(self, "size_widget") else 100,
             EXPORT_SIZE_PREF_KEY: self.size_widget._target_long_edge() if hasattr(self, "size_widget") else 0,
             "overwrite": self.chk_overwrite.isChecked() if hasattr(self, "chk_overwrite") else True,
