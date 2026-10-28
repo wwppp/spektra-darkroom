@@ -414,9 +414,17 @@ class ExportQueueManager(QObject):
                     else:
                         cw_factor, ch_factor = 1.0, 1.0
 
-                    scale_pct = int(task.params.get("scale_pct", 100))
-                    tgt_w = max(1, int(src_w * cw_factor * scale_pct / 100.0))
-                    tgt_h = max(1, int(src_h * ch_factor * scale_pct / 100.0))
+                    # The dialog resolves its size preset to an exact output width; use it
+                    # verbatim so the grain spec is derived at the size that is actually written.
+                    out_long_edge = int(task.params.get("out_long_edge", 0) or 0)
+                    crop_long = src_w * cw_factor
+                    if out_long_edge > 0 and out_long_edge < crop_long:
+                        tgt_w = max(1, out_long_edge)
+                        tgt_h = max(1, int(round(src_h * ch_factor * out_long_edge / max(1.0, crop_long))))
+                    else:
+                        scale_pct = int(task.params.get("scale_pct", 100))
+                        tgt_w = max(1, int(src_w * cw_factor * scale_pct / 100.0))
+                        tgt_h = max(1, int(src_h * ch_factor * scale_pct / 100.0))
                     bit_depth = int(task.params.get("bit_depth", 8))
 
                     eff_lut = lut_arr

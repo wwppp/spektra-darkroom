@@ -10837,9 +10837,39 @@ class DarkroomMainWindow(QMainWindow):
         default_out = os.path.join(last_dir, f"{base_name}{ext}")
 
         dlg = SingleExportDialog(default_out, parent=self)
+        self._seed_export_size_dialog(dlg, self._current_photo_path)
         if dlg.exec():
             cfg = dlg.get_export_config()
             self._do_export_single(cfg)
+
+    def _seed_export_size_dialog(self, dlg, photo_path):
+        """Give the export dialog the master resolution and crop of the photo(s) involved,
+        so the size selector can show real output pixels instead of a bare percentage."""
+        try:
+            photo = next((p for p in self.photos if p and p.get("path") == photo_path), None)
+            width = photo.get("width") if photo else None
+            height = photo.get("height") if photo else None
+            if not width or not height:
+                if photo_path == self._current_photo_path and self.canvas._has_image:
+                    width, height = self.canvas._master_width, self.canvas._master_height
+            if not width or not height:
+                # Non-RAW sources such as a freshly imported JPEG carry no cached master size.
+                try:
+                    from core.session_cache_manager import get_image_dimensions
+                    dw, dh = get_image_dimensions(photo_path)
+                    if dw > 0 and dh > 0:
+                        width, height = dw, dh
+                except Exception:
+                    pass
+            crop = None
+            if photo_path == self._current_photo_path:
+                crop = self.current_params.get("crop")
+            elif isinstance(photo, dict) and isinstance(photo.get("params"), dict):
+                crop = photo["params"].get("crop")
+            if hasattr(dlg, "set_source_context"):
+                dlg.set_source_context(width, height, crop)
+        except Exception as e:
+            logger.debug(f"Export size context unavailable: {e}")
 
     def _do_export_single(self, cfg):
         if not self._current_photo_path:
@@ -10953,6 +10983,7 @@ class DarkroomMainWindow(QMainWindow):
                 base_name = os.path.splitext(os.path.basename(self._current_photo_path))[0]
                 default_out = os.path.join(last_dir, f"{base_name}{ext}")
                 dlg = SingleExportDialog(default_out, parent=self)
+                self._seed_export_size_dialog(dlg, self._current_photo_path)
                 if dlg.exec():
                     cfg = dlg.get_export_config()
                     self._do_export_single(cfg)
@@ -10964,6 +10995,9 @@ class DarkroomMainWindow(QMainWindow):
             last_dir = os.path.dirname(first_photo["path"]) if first_photo else os.path.expanduser("~")
 
         dialog = BatchExportDialog(last_dir, batch_count=len(photo_ids), parent=self)
+        first_photo = next((p for p in self.photos if p and p.get("id") in photo_ids), None)
+        if first_photo:
+            self._seed_export_size_dialog(dialog, first_photo.get("path"))
         if not dialog.exec():
             return
 
