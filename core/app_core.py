@@ -2499,7 +2499,7 @@ class SpektraEngine:
                             meta["artist"] = str(val).strip()
                         elif t_name == 'Copyright' and meta["copyright"] == "-":
                             meta["copyright"] = str(val).strip()
-                        elif t_name == 'BodySerialNumber' and meta["serial_number"] == "-":
+                        elif t_name in ('BodySerialNumber', 'CameraSerialNumber', 'SerialNumber') and meta["serial_number"] == "-":
                             meta["serial_number"] = str(val).strip()
                         elif t_name == 'ExifTag' and isinstance(val, dict):
                             sub = val
@@ -2511,7 +2511,7 @@ class SpektraEngine:
                                     meta["lens_model"] = str(v).strip().strip("\x00")
                                 elif k in ('LensMake', 0xa433) and meta["lens_make"] == "-":
                                     meta["lens_make"] = str(v).strip().strip("\x00")
-                                elif k in ('BodySerialNumber', 0xa431) and meta["serial_number"] == "-":
+                                elif k in ('BodySerialNumber', 'CameraSerialNumber', 'SerialNumber', 0xa431) and meta["serial_number"] == "-":
                                     meta["serial_number"] = str(v).strip().strip("\x00")
                                 elif k in ('FocalLengthIn35mmFilm', 0xa405) and meta["focal_length_35mm"] == "-":
                                     meta["focal_length_35mm"] = f"{v} 毫米"
@@ -2633,7 +2633,7 @@ class SpektraEngine:
                                 t = ExifTags.TAGS.get(k, str(k))
                                 if t == "LensModel" and meta["lens_model"] == "-": meta["lens_model"] = str(v).strip()
                                 elif t == "LensMake" and meta["lens_make"] == "-": meta["lens_make"] = str(v).strip()
-                                elif t == "BodySerialNumber" and meta["serial_number"] == "-": meta["serial_number"] = str(v).strip()
+                                elif t in ("BodySerialNumber", "CameraSerialNumber", "SerialNumber") and meta["serial_number"] == "-": meta["serial_number"] = str(v).strip()
                                 elif t == "FocalLengthIn35mmFilm" and meta["focal_length_35mm"] == "-": meta["focal_length_35mm"] = f"{v} 毫米"
                                 elif t == "FNumber" and meta["aperture"] == "-": meta["aperture"] = f"f/{float(v):.1f}"
                                 elif t == "ExposureTime" and meta["shutter_speed"] == "-":
@@ -2758,6 +2758,17 @@ class SpektraEngine:
             meta["color_temp"] = 5500.0
             meta["tint"] = 1.0
             meta["white_balance"] = "5500 K"
+
+        # Smart deduction for lens manufacturer if EXIF omitted LensMake tag (e.g. Sony body with third-party lens)
+        if meta.get("lens_make") in ("-", "", None) and meta.get("lens_model") and meta.get("lens_model") != "-":
+            try:
+                from .lens_correction import detect_lens_brand
+                cam_m = meta.get("camera_make") if meta.get("camera_make") != "-" else None
+                guessed_make = detect_lens_brand(meta["lens_model"], cam_m)
+                if guessed_make and guessed_make != "-":
+                    meta["lens_make"] = guessed_make
+            except Exception:
+                pass
 
         return meta
 

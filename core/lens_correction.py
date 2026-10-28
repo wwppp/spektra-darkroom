@@ -366,68 +366,86 @@ def find_all_lcp_root_directories() -> List[str]:
     return roots
 
 
+def extract_lens_model_code(lens_name: str) -> str:
+    """Extract lens model / series identification code.
+    Examples:
+        'E 28-200mm F2.8-5.6 A071' -> 'A071' (Tamron)
+        'E 11-20mm F2.8 B060' -> 'B060' (Tamron)
+        '35mm F1.4 DG DN | Art 021' -> 'A021' (Sigma)
+        '10-18mm F2.8 DC DN | Contemporary 023' -> 'C023' (Sigma)
+        'E 24mm F2.8 F051' -> 'F051' (Tamron)
+    """
+    if not lens_name:
+        return ""
+    s = str(lens_name).strip()
+
+    # 1. Sigma Global Vision series: Art 021 -> A021, Contemporary 023 -> C023, Sport 020 -> S020
+    m_art = re.search(r'\b(Art|Contemporary|Sports?)\s+(\d{3})\b', s, re.IGNORECASE)
+    if m_art:
+        return f"{m_art.group(1).upper()[0]}{m_art.group(2)}"
+
+    # 2. Sigma code: C023, A018, S020
+    m_sig = re.search(r'\b([CAS]\d{3}[A-Za-z]?)\b', s)
+    if m_sig:
+        return m_sig.group(1).upper()
+
+    # 3. Tamron model code: A071, B060, F051, A036, etc.
+    aperture_numbers = {"11", "16", "22", "32", "45", "64"}
+    for m in re.finditer(r'\b([ABCFG]\d{2,3}[A-Za-z]?)\b', s):
+        code = m.group(1).upper()
+        # Exclude apertures like F11, F16, F22
+        if code.startswith("F") and code[1:] in aperture_numbers:
+            continue
+        return code
+
+    return ""
+
+
 def detect_lens_brand(lens_model: str, camera_make: Optional[str] = None) -> Optional[str]:
-    """Detect lens brand from lens model string or fallback to camera make.
-    Accurately maps abbreviations, adapters, and prefixes (e.g. 'YN', 'TAMRON', 'SIGMA') to database makes.
+    """Detect lens brand from lens model string, model code (e.g. A071), or fallback to camera make.
+    Accurately maps abbreviations, adapters, technology tags, and model codes to database makes.
     """
     if not lens_model:
-        return (camera_make or "").strip() or None
+        return (camera_make or "").strip().capitalize() if camera_make else None
 
     lm_lower = lens_model.lower().strip()
 
-    # If an adapter is in the string (e.g. "YONGNUO ADPTER II + TAMRON 35-150mm"),
+    # 1. If an adapter is in the string (e.g. "YONGNUO ADPTER II + TAMRON 35-150mm"),
     # prioritize the primary mounted lens brand following/inside the adapter string
     if "adapter" in lm_lower or "adpter" in lm_lower or "+" in lm_lower:
         for b_name in ["tamron", "sigma", "samyang", "rokinon", "viltrox", "tokina", "zeiss", "canon", "nikon", "sony"]:
             if b_name in lm_lower:
                 return b_name.capitalize()
 
-    # Yongnuo (永诺)
-    if re.search(r"\b(yn|yongnuo|yongnou)\b", lm_lower) or lm_lower.startswith("yn") or "ynlens" in lm_lower:
-        return "Yongnuo"
-    # Tamron (腾龙)
-    if "tamron" in lm_lower or re.search(r"\bsp\b", lm_lower):
+    # 2. Explicit lens brand names (highest certainty)
+    if "tamron" in lm_lower:
         return "Tamron"
-    # Sigma (适马)
     if "sigma" in lm_lower:
         return "Sigma"
-    # Samyang / Rokinon (森养 / 三阳)
     if "samyang" in lm_lower or "rokinon" in lm_lower:
         return "Samyang"
-    # Viltrox (唯卓仕)
     if "viltrox" in lm_lower:
         return "Viltrox"
-    # Venus Optics / Laowa (老蛙)
     if "laowa" in lm_lower or "venus" in lm_lower:
         return "Venus Optics"
-    # TTArtisan (铭匠)
     if "ttartisan" in lm_lower or "tt artisan" in lm_lower:
         return "TTArtisan"
-    # 7Artisans (七工匠)
     if "7artisans" in lm_lower or "7 artisans" in lm_lower:
         return "7Artisans"
-    # Meike (美科)
     if "meike" in lm_lower:
         return "Meike"
-    # Tokina (图丽)
-    if "tokina" in lm_lower or "at-x" in lm_lower or "firin" in lm_lower:
+    if "tokina" in lm_lower:
         return "Tokina"
-    # Zeiss (蔡司)
     if "zeiss" in lm_lower:
         return "Zeiss"
-    # Voigtlander (福伦达)
     if "voigtlander" in lm_lower or "voigtländer" in lm_lower:
         return "Voigtlander"
-    # IRIX
     if "irix" in lm_lower:
         return "IRIX"
-    # Schneider (施耐德)
     if "schneider" in lm_lower:
         return "Schneider"
-    # Leica (徕卡)
     if "leica" in lm_lower:
         return "Leica"
-    # Major camera OEMs
     if "canon" in lm_lower:
         return "Canon"
     if "nikon" in lm_lower or "nikkor" in lm_lower:
@@ -446,9 +464,39 @@ def detect_lens_brand(lens_model: str, camera_make: Optional[str] = None) -> Opt
         return "Ricoh"
     if "hasselblad" in lm_lower:
         return "Hasselblad"
+    if re.search(r"\b(yn|yongnuo|yongnou)\b", lm_lower) or lm_lower.startswith("yn") or "ynlens" in lm_lower:
+        return "Yongnuo"
+
+    # 3. Optical technology terms & sub-brand lines (where brand name was omitted by camera body)
+    if any(k in lm_lower for k in ["rxd", "vxd", "osd", "pzd", "hld", "di iii", "di-iii", "di ii", "di-ii", "di vc", "vc usd"]) or re.search(r"\bsp\b", lm_lower):
+        return "Tamron"
+    if any(k in lm_lower for k in ["dg dn", "dc dn"]) or re.search(r"\b(contemporary|art|sports?)\b", lm_lower):
+        return "Sigma"
+    if re.search(r"\b(batis|loxia|touit|milvus|otus)\b", lm_lower):
+        return "Zeiss"
+    if re.search(r"\b(atx-m|atx-i|at-x|firin|opera)\b", lm_lower):
+        return "Tokina"
+
+    # 4. Lens model code detection (e.g. 'A071', 'B060', 'C023', 'A021')
+    code = extract_lens_model_code(lens_model)
+    if code:
+        if re.match(r"^[ABCFG]\d{2,3}[A-Z]?$", code):
+            if re.match(r"^[CS]\d{3}", code):
+                return "Sigma"
+            return "Tamron"
+
+    # 5. OEM camera manufacturer series terms
+    if re.search(r"\b(fe|sel\d+|gm|g master)\b", lm_lower):
+        return "Sony"
+    if re.search(r"\b(ef-s|ef-m|\bef\b|\brf\b|\brf-s\b)\b", lm_lower):
+        return "Canon"
+    if re.search(r"\b(af-s|af-p|z-mount|\bvr\b)\b", lm_lower):
+        return "Nikon"
+    if re.search(r"\b(xf|xc|gf)\b", lm_lower):
+        return "Fujifilm"
 
     if camera_make and camera_make.strip():
-        return camera_make.strip()
+        return camera_make.strip().capitalize()
     return None
 
 
@@ -517,10 +565,12 @@ def import_user_lcp_file(source_path: str, target_make: Optional[str] = None) ->
     clean_name = f[:-4]
     if clean_name.upper().startswith(make.upper()):
         clean_name = clean_name[len(make):].strip(" -_()")
-    if clean_name.endswith(" - RAW") or clean_name.endswith(" - JPEG"):
+    if clean_name.endswith(" - RAW"):
+        clean_name = clean_name[:-6].strip()
+    elif clean_name.endswith(" - JPEG"):
         clean_name = clean_name[:-7].strip()
     model_name = clean_name or f[:-4]
-    prof_display = parsed_lens or clean_name
+    prof_display = parsed_lens or f[:-4]
 
     return True, make, model_name, prof_display, dest_path
 
@@ -635,11 +685,13 @@ class LCPDatabase:
                         # Remove leading brand prefix if redundant
                         if clean_name.upper().startswith(make.upper()):
                             clean_name = clean_name[len(make):].strip(" -_()")
-                        if clean_name.endswith(" - RAW") or clean_name.endswith(" - JPEG"):
+                        if clean_name.endswith(" - RAW"):
+                            clean_name = clean_name[:-6].strip()
+                        elif clean_name.endswith(" - JPEG"):
                             clean_name = clean_name[:-7].strip()
                         if not clean_name:
                             clean_name = f[:-4]
-                        prof_display = clean_name
+                        prof_display = f[:-4]
                         results.append((clean_name, prof_display, p))
 
         # Sort by model name
@@ -659,17 +711,20 @@ class LCPDatabase:
         return prof
 
     def match_lens_from_exif(self, camera_make: str, camera_model: str, lens_model: str, focal_length: Optional[float] = None) -> Optional[Tuple[str, str, str, str]]:
-        """Attempt to find matching (make, model, profile_name, lcp_path) from EXIF metadata."""
+        """Attempt to find matching (make, model, profile_name, lcp_path) from EXIF metadata.
+        Uses intelligent brand deduction, model code extraction (e.g. Tamron A071, Sigma Art 021),
+        mount alignment, and token overlap scoring to reliably identify the correct Adobe LCP profile.
+        """
         if not self._makes:
             return None
 
-        # 1. Determine make candidates
-        make_candidates = []
         clean_lens = (lens_model or "").strip()
         clean_cam_make = (camera_make or "").strip()
+        detected_brand = detect_lens_brand(clean_lens, clean_cam_make)
+        code = extract_lens_model_code(clean_lens).lower()
 
-        # Check detected brand first (prioritizes third-party manufacturers like Yongnuo, Tamron, Sigma)
-        detected_brand = detect_lens_brand(clean_lens)
+        # 1. Determine make candidates
+        make_candidates = []
         if detected_brand:
             for m in self._makes:
                 if m.lower() == detected_brand.lower():
@@ -681,8 +736,8 @@ class LCPDatabase:
             if m.lower() in clean_lens.lower() and m not in make_candidates:
                 make_candidates.append(m)
 
-        # Fallback to camera manufacturer only if no third-party lens brand was positively matched
-        if clean_cam_make and not detected_brand:
+        # Fallback candidate to camera manufacturer
+        if clean_cam_make:
             for m in self._makes:
                 if m.lower() == clean_cam_make.lower() and m not in make_candidates:
                     make_candidates.append(m)
@@ -691,20 +746,40 @@ class LCPDatabase:
             make_candidates = list(self._makes)
 
         # 2. Search inside candidate makes with advanced alphanumeric tokenization
-        lens_tokens = set(re.findall(r"[A-Za-z]+|[0-9]+", clean_lens.lower()))
-        noisy_tokens = {"mm", "f", "lens", "adapter", "adpter"}
+        lens_tokens = set(re.findall(r"[a-z0-9]+", clean_lens.lower()))
+        noisy_tokens = {"mm", "f", "lens", "adapter", "adpter", "mount"}
         lens_tokens = {t for t in lens_tokens if t not in noisy_tokens}
         best_match = None
-        best_score = 0
+        best_score = -1
 
         for m in make_candidates:
             models = self.get_models_for_make(m)
+            is_detected_brand = bool(detected_brand and m.lower() == detected_brand.lower())
+
             for mod_name, prof_name, p in models:
-                mod_tokens = set(re.findall(r"[A-Za-z]+|[0-9]+", mod_name.lower()))
+                p_leaf = os.path.basename(p).lower()
+                mod_tokens = set(re.findall(r"[a-z0-9]+", mod_name.lower()))
                 mod_tokens = {t for t in mod_tokens if t not in noisy_tokens}
                 common = lens_tokens.intersection(mod_tokens)
-                score = len(common)
-                if score > best_score and score >= 2:
+                score = len(common) * 2
+
+                # Brand alignment bonus
+                if is_detected_brand:
+                    score += 5
+
+                # Mount / Camera make alignment bonus
+                if clean_cam_make and clean_cam_make.lower() in (mod_name.lower() + " " + p_leaf):
+                    score += 3
+
+                # Model code match (HIGHEST PRIORITY!)
+                if code and (code in mod_name.lower() or code in p_leaf):
+                    score += 15
+
+                # Prefer RAW profile if available
+                if p_leaf.endswith(" - raw.lcp"):
+                    score += 1
+
+                if score > best_score and score >= 4:
                     best_score = score
                     best_match = (m, mod_name, prof_name, p)
 
@@ -716,6 +791,7 @@ def read_lens_metadata(file_path: str) -> Dict[str, any]:
     meta = {
         "camera_make": "",
         "camera_model": "",
+        "lens_make": "",
         "lens_model": "",
         "focal_length": None,
         "aperture": None,
@@ -797,6 +873,9 @@ def read_lens_metadata(file_path: str) -> Dict[str, any]:
     if not meta["lens_model"] and meta["camera_model"]:
         fl_str = f"{int(meta['focal_length'])}mm" if meta['focal_length'] else ""
         meta["lens_model"] = f"{meta['camera_model']} {fl_str}".strip()
+
+    if not meta.get("lens_make") and meta.get("lens_model"):
+        meta["lens_make"] = detect_lens_brand(meta["lens_model"], meta.get("camera_make")) or ""
 
     return meta
 
