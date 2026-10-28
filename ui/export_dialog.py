@@ -55,37 +55,18 @@ class ExportSizeWidget(QWidget):
         self._crop = None
         self._dpi = 300
 
-        # Two rows: controls on top, "actual pixels" note directly underneath, both left
-        # aligned to the same edge. Fixed widths keep the layout stable when the custom box
-        # appears and never push the neighbouring "色彩抽样" column around.
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(2)
-
-        lay = QHBoxLayout()
+        # A single combo, never a second widget: when "自定义长边" is chosen the combo itself
+        # becomes editable and takes the number, so the two control columns always end up
+        # exactly the same length.
+        lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
+        lay.setSpacing(0)
 
         self.combo = QComboBox()
         setup_solid_combobox(self.combo)
         for key, label, edge, _paper in EXPORT_SIZE_PRESETS:
             self.combo.addItem(label, key)
-        self.combo.setFixedWidth(170)
-        lay.addWidget(self.combo, 0)
-
-        self.spin = QLineEdit()
-        self.spin.setFixedWidth(78)
-        self.spin.setPlaceholderText("px")
-        self.spin.setVisible(False)
-        self.spin.editingFinished.connect(self._on_custom_edited)
-        lay.addWidget(self.spin, 0)
-        lay.addStretch(1)
-
-        self.summary_lbl = QLabel("")
-        self.summary_lbl.setStyleSheet("font-size: 11px;")
-
-        outer.addLayout(lay)
-        outer.addWidget(self.summary_lbl)
+        lay.addWidget(self.combo, 1)
         self.sub_row = lay  # kept for callers
 
         self.combo.currentIndexChanged.connect(self._on_preset_changed)
@@ -147,10 +128,7 @@ class ExportSizeWidget(QWidget):
         for name, _label, long_edge, _paper in EXPORT_SIZE_PRESETS:
             if name == key:
                 if name == "custom":
-                    try:
-                        return max(1, int(self.spin.text().strip() or 0))
-                    except ValueError:
-                        return 0
+                    return self._custom_edge_value()
                 return long_edge
         return 0
 
@@ -177,26 +155,78 @@ class ExportSizeWidget(QWidget):
                 return idx
         return 0
 
-    def _on_preset_changed(self, _idx):
+    def _on_preset_changed(self, idx):
         is_custom = self.combo.currentData() == "custom"
-        self.spin.setVisible(is_custom)
-        if is_custom and not self.spin.text().strip():
-            w, _h = self.output_pixels()
-            self.spin.setText(str(max(1, w)))
+        self._set_editable(is_custom)
+        if is_custom:
+            self.combo.setEditText(str(self._custom_edge_value()))
+            if self.combo.lineEdit() is not None:
+                self.combo.lineEdit().selectAll()
+        else:
+            # Re-selecting the row restores the preset's own label after a custom edit.
+            self.combo.setCurrentIndex(idx)
+        self._update_summary()
+
+    def _set_editable(self, editable):
+        if self.combo.isEditable() == editable:
+            return
+        self.combo.setEditable(editable)
+        if editable:
+            from PySide6.QtGui import QIntValidator
+            edit = self.combo.lineEdit()
+            if edit is not None:
+                edit.setValidator(QIntValidator(64, 30000, self))
+                edit.setPlaceholderText("长边 px")
+                edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                edit.editingFinished.connect(self._update_summary)
+                edit.returnPressed.connect(self._update_summary)
+
+    def _custom_edge_value(self):
+        """Long edge the custom box currently holds, falling back to the source long edge."""
+        raw = self.combo.currentText() if self.combo.isEditable() else ""
+        digits = "".join(ch for ch in str(raw) if ch.isdigit())
+        if digits:
+            try:
+                return max(64, min(30000, int(digits)))
+            except ValueError:
+                pass
+        # No usable number yet: fall back to the source long edge (never to output_pixels(),
+        # which would recurse back into this lookup).
+        return max(1, max(self.source_pixels()))
+
+    def set_custom_edge(self, edge):
+        """Programmatically pick the custom row and set its long edge."""
+        try:
+            edge = max(64, min(30000, int(edge)))
+        except (TypeError, ValueError):
+            return
+        if self.combo.currentData() != "custom":
+            self.combo.setCurrentIndex(self._preset_row("custom"))
+        else:
+            self._set_editable(True)
+        self.combo.setEditText(str(edge))
         self._update_summary()
 
     def _on_custom_edited(self):
-        try:
-            val = max(64, min(30000, int(self.spin.text().strip())))
-        except ValueError:
-            val = 0
-        if val:
-            self.spin.setText(str(val))
         self._update_summary()
 
+    def _base_labels(self):
+        """Preset labels with the print dpi resolved for the current DPI setting."""
+        return {name: (self._print_label(name) if paper else label)
+                for name, label, _edge, paper in EXPORT_SIZE_PRESETS}
+
     def _update_summary(self):
-        """Fold the real pixel size into the combo text so it is visible without hovering."""
+        """Fold the real pixel size into the combo's own text so it needs no extra row."""
         out_w, out_h = self.output_pixels()
+        labels = self._base_labels()
+        if not self.combo.isEditable():
+            current = self.combo.currentData()
+            for name, text in labels.items():
+                row = self._preset_row(name)
+                if name == current:
+                    self.combo.setItemText(row, f"{text} · {out_w}×{out_h}")
+                else:
+                    self.combo.setItemText(row, text)
         summary = f"{out_w} × {out_h} px"
         if self._dpi > 0 and self._src_w > 0:
             cm_w = out_w / self._dpi * 2.54
@@ -204,10 +234,7 @@ class ExportSizeWidget(QWidget):
             summary += f"  ·  {cm_w:.1f} × {cm_h:.1f} cm @ {self._dpi}dpi"
         self.setToolTip(summary)
         self.combo.setToolTip(summary)
-        self.spin.setToolTip(summary)
         self.setProperty("summary", summary)
-        if hasattr(self, "summary_lbl"):
-            self.summary_lbl.setText(summary)
         # The owning dialogs render their own label; walk up the parent chain because Qt
         # re-parents the widget onto an internal page container.
         node = self.parent()
@@ -230,11 +257,7 @@ class ExportSizeWidget(QWidget):
             return
         src_w, src_h = self.source_pixels()
         edge = max(1, int(round(max(src_w, src_h) * pct / 100.0)))
-        row = self._preset_row("custom")
-        if row >= 0:
-            self.combo.setCurrentIndex(row)
-            self.spin.setText(str(edge))
-        self._update_summary()
+        self.set_custom_edge(edge)
 
     def restore_long_edge(self, edge):
         """Restore by absolute long edge (everything saved from now on)."""
@@ -249,10 +272,7 @@ class ExportSizeWidget(QWidget):
             if name not in ("original", "custom") and preset_edge == edge:
                 self.combo.setCurrentIndex(self._preset_row(name))
                 return
-        self.combo.setCurrentIndex(self._preset_row("custom"))
-        self.spin.setText(str(edge))
-        self.spin.setVisible(True)
-        self._update_summary()
+        self.set_custom_edge(edge)
 
     def refresh(self):
         self._update_summary()
@@ -285,7 +305,7 @@ class BaseExportDialog(QDialog):
         grid_top = QGridLayout()
         grid_top.setContentsMargins(0, 0, 0, 0)
         grid_top.setHorizontalSpacing(12)
-        grid_top.setVerticalSpacing(10)
+        grid_top.setVerticalSpacing(8)
         grid_top.setColumnStretch(0, 0)
         grid_top.setColumnStretch(1, 1)
         grid_top.setColumnStretch(2, 0)
@@ -305,7 +325,7 @@ class BaseExportDialog(QDialog):
         grid_top.addWidget(self.combo_format, 0, 1)
 
         lbl_cs = QLabel("色彩空间:")
-        lbl_cs.setFixedWidth(65)
+        lbl_cs.setFixedWidth(72)
         grid_top.addWidget(lbl_cs, 0, 2)
 
         self.combo_colorspace = QComboBox()
@@ -331,7 +351,7 @@ class BaseExportDialog(QDialog):
         grid_top.addWidget(self.combo_dpi, 1, 1)
 
         lbl_bit = QLabel("输出位深:")
-        lbl_bit.setFixedWidth(65)
+        lbl_bit.setFixedWidth(72)
         grid_top.addWidget(lbl_bit, 1, 2)
 
         self.combo_depth = QComboBox()
@@ -342,13 +362,14 @@ class BaseExportDialog(QDialog):
         # pages instead of inside one of them.
         lbl_size = QLabel("输出尺寸:")
         lbl_size.setFixedWidth(72)
+        self.lbl_output_size = lbl_size
         grid_top.addWidget(lbl_size, 2, 0)
 
         self.size_widget = ExportSizeWidget(self)
         grid_top.addWidget(self.size_widget, 2, 1)
 
         lbl_sub = QLabel("色彩抽样:")
-        lbl_sub.setFixedWidth(65)
+        lbl_sub.setFixedWidth(72)
         grid_top.addWidget(lbl_sub, 2, 2)
 
         self.combo_subsampling = QComboBox()
@@ -358,9 +379,9 @@ class BaseExportDialog(QDialog):
         self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
         grid_top.addWidget(self.combo_subsampling, 2, 3)
 
-        # Real output pixels: rendered by ExportSizeWidget as the second line of the widget,
-        # so the size row keeps one control height and the grid rows stay evenly spaced.
-        self.lbl_size_summary = self.size_widget.summary_lbl
+        # No extra hint line: the resolved pixel size is folded into the size combo's own text,
+        # so the form keeps four evenly spaced rows.
+        self.lbl_size_summary = None
 
         card_layout.addLayout(grid_top)
 
@@ -379,7 +400,7 @@ class BaseExportDialog(QDialog):
 
         # Row 3: Format-Specific Settings Stack
         self.stack_settings = QStackedWidget()
-        self.stack_settings.setFixedHeight(84)
+        self.stack_settings.setFixedHeight(38)
 
         # --- Stack Page 0: JPEG Options ---
         page_jpeg = QWidget()
@@ -392,14 +413,10 @@ class BaseExportDialog(QDialog):
         grid_jpeg.setColumnStretch(2, 0)
         grid_jpeg.setColumnStretch(3, 1)
 
-        # Quality slider occupies the full option row (metric label, slider, checkbox)
+        # One row: metric label, slider, value, progressive toggle - no half-empty rows.
         lbl_q = QLabel("画质档位:")
         lbl_q.setFixedWidth(72)
         grid_jpeg.addWidget(lbl_q, 0, 0)
-
-        box_q = QHBoxLayout()
-        box_q.setContentsMargins(0, 0, 0, 0)
-        box_q.setSpacing(8)
 
         self.slider_quality = QSlider(Qt.Orientation.Horizontal)
         self.slider_quality.setRange(1, 10)
@@ -407,18 +424,18 @@ class BaseExportDialog(QDialog):
         self.slider_quality.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider_quality.setTickInterval(1)
         self.slider_quality.valueChanged.connect(self._on_quality_changed)
-        box_q.addWidget(self.slider_quality, 1)
+        grid_jpeg.addWidget(self.slider_quality, 0, 1)
 
         self.lbl_quality_val = QLabel("9 档 (90%)")
-        self.lbl_quality_val.setFixedWidth(68)
+        self.lbl_quality_val.setFixedWidth(64)
         self.lbl_quality_val.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 11px;")
-        box_q.addWidget(self.lbl_quality_val)
-
-        grid_jpeg.addLayout(box_q, 0, 1, 1, 3)
+        grid_jpeg.addWidget(self.lbl_quality_val, 0, 2)
 
         self.chk_progressive = QCheckBox("渐进式")
+        self.chk_progressive.setObjectName("chkProgressive")
         self.chk_progressive.setChecked(True)
-        grid_jpeg.addWidget(self.chk_progressive, 1, 1, 1, 3, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        grid_jpeg.addWidget(self.chk_progressive, 0, 3,
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self.stack_settings.addWidget(page_jpeg)
 
@@ -537,14 +554,9 @@ class BaseExportDialog(QDialog):
 
     def _on_export_size_changed(self, out_w, out_h):
         """Called by ExportSizeWidget whenever the resulting pixel size changes."""
-        if not hasattr(self, "lbl_size_summary"):
-            return
-        src_w, src_h = self.size_widget.source_pixels() if hasattr(self, "size_widget") else (0, 0)
-        if src_w <= 0:
-            self.lbl_size_summary.setText("")
-            return
-        mp = out_w * out_h / 1_000_000.0
-        self.lbl_size_summary.setText(f"{out_w} × {out_h} px  ·  {mp:.1f} MP")
+        if hasattr(self, "lbl_output_size"):
+            is_custom = self.size_widget.combo.currentData() == "custom"
+            self.lbl_output_size.setText("自定义长边:" if is_custom else "输出尺寸:")
 
     def _on_format_changed(self, index):
         fmt = self.combo_format.currentData()
@@ -779,7 +791,7 @@ class BaseExportDialog(QDialog):
                     background: #f59e0b;
                 }}
 {get_standard_checkbox_style(is_dark=True)}
-                QCheckBox#chkStripGps, QCheckBox#chkOverwrite {{
+                QCheckBox#chkStripGps, QCheckBox#chkOverwrite, QCheckBox#chkProgressive {{
                     color: #c4c4cc;
                     font-size: 12px;
                     font-weight: normal;
@@ -884,7 +896,7 @@ class BaseExportDialog(QDialog):
                     background: #f59e0b;
                 }}
 {get_standard_checkbox_style(is_dark=False)}
-                QCheckBox#chkStripGps, QCheckBox#chkOverwrite {{
+                QCheckBox#chkStripGps, QCheckBox#chkOverwrite, QCheckBox#chkProgressive {{
                     color: #334155;
                     font-size: 12px;
                     font-weight: normal;
@@ -917,7 +929,7 @@ class SingleExportDialog(BaseExportDialog):
     def __init__(self, default_file_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("单片扫描")
-        self.setFixedSize(720, 448)
+        self.setFixedSize(720, 370)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         self._init_ui()
@@ -1101,7 +1113,7 @@ class BatchExportDialog(BaseExportDialog):
         super().__init__(parent)
         self.batch_count = batch_count
         self.setWindowTitle(f"批量扫描：{self.batch_count}张")
-        self.setFixedSize(720, 534)
+        self.setFixedSize(720, 420)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
