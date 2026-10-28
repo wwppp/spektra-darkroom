@@ -320,6 +320,31 @@ class BaseExportDialog(QDialog):
         setup_solid_combobox(self.combo_depth)
         grid_top.addWidget(self.combo_depth, 1, 3)
 
+        # Shared output-size row: every format can be scaled, so it sits above the format
+        # pages instead of inside one of them.
+        lbl_size = QLabel("输出尺寸:")
+        lbl_size.setFixedWidth(72)
+        grid_top.addWidget(lbl_size, 2, 0)
+
+        self.size_widget = ExportSizeWidget(self)
+        grid_top.addWidget(self.size_widget, 2, 1)
+
+        lbl_sub = QLabel("色彩抽样:")
+        lbl_sub.setFixedWidth(65)
+        grid_top.addWidget(lbl_sub, 2, 2)
+
+        self.combo_subsampling = QComboBox()
+        setup_solid_combobox(self.combo_subsampling)
+        self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
+        self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
+        self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
+        grid_top.addWidget(self.combo_subsampling, 2, 3)
+
+        # Real output pixels + physical print size under the size row
+        self.lbl_size_summary = QLabel("")
+        self.lbl_size_summary.setStyleSheet("font-size: 11px;")
+        grid_top.addWidget(self.lbl_size_summary, 3, 1, 1, 3)
+
         card_layout.addLayout(grid_top)
 
         # Shared GPS Privacy Checkbox (Placed cleanly below path input in specific dialogs)
@@ -328,9 +353,16 @@ class BaseExportDialog(QDialog):
         self.chk_strip_gps.setChecked(True)
         self.chk_strip_gps.setToolTip("开启后将从导出文件的 EXIF 元数据中完全抹除 GPS 经纬度与海拔坐标，保留相机、镜头、光圈、快门与拍摄时间等专业参数。")
 
+        # Shared overwrite policy: checked (default) replaces a same-name file; unchecked makes
+        # the exporter append 1, 2, 3 ... instead of overwriting.
+        self.chk_overwrite = QCheckBox("替换重名文件")
+        self.chk_overwrite.setObjectName("chkOverwrite")
+        self.chk_overwrite.setChecked(True)
+        self.chk_overwrite.setToolTip("勾选时同目录同名文件直接覆盖；取消勾选则自动改名为 xxx_1、xxx_2 等，保留原文件。")
+
         # Row 3: Format-Specific Settings Stack
         self.stack_settings = QStackedWidget()
-        self.stack_settings.setFixedHeight(96)
+        self.stack_settings.setFixedHeight(76)
 
         # --- Stack Page 0: JPEG Options ---
         page_jpeg = QWidget()
@@ -343,40 +375,10 @@ class BaseExportDialog(QDialog):
         grid_jpeg.setColumnStretch(2, 0)
         grid_jpeg.setColumnStretch(3, 1)
 
-        # Row 0: Output size (with the resolved pixel size underneath) & Subsampling
-        lbl_scale = QLabel("输出尺寸:")
-        lbl_scale.setFixedWidth(72)
-        grid_jpeg.addWidget(lbl_scale, 0, 0, 1, 1, Qt.AlignmentFlag.AlignTop)
-
-        size_box = QVBoxLayout()
-        size_box.setContentsMargins(0, 0, 0, 0)
-        size_box.setSpacing(3)
-
-        self.size_widget = ExportSizeWidget(self)
-        size_box.addWidget(self.size_widget)
-
-        # Real output pixels + physical print size, so the choice is never a blind percentage
-        self.lbl_size_summary = QLabel("")
-        self.lbl_size_summary.setStyleSheet("color: #f59e0b; font-size: 11px;")
-        size_box.addWidget(self.lbl_size_summary)
-
-        grid_jpeg.addLayout(size_box, 0, 1)
-
-        lbl_sub = QLabel("色彩抽样:")
-        lbl_sub.setFixedWidth(65)
-        grid_jpeg.addWidget(lbl_sub, 0, 2)
-
-        self.combo_subsampling = QComboBox()
-        setup_solid_combobox(self.combo_subsampling)
-        self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
-        self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
-        self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
-        grid_jpeg.addWidget(self.combo_subsampling, 0, 3)
-
-        # Row 1: Quality Slider & Progressive Checkbox
+        # Row 0: Quality Slider & Progressive Checkbox
         lbl_q = QLabel("画质档位:")
         lbl_q.setFixedWidth(72)
-        grid_jpeg.addWidget(lbl_q, 1, 0)
+        grid_jpeg.addWidget(lbl_q, 0, 0)
 
         box_q = QHBoxLayout()
         box_q.setContentsMargins(0, 0, 0, 0)
@@ -425,11 +427,23 @@ class BaseExportDialog(QDialog):
         self.combo_tiff_comp.addItem("无压缩 (Raw TIFF)", "none")
         grid_tiff.addWidget(self.combo_tiff_comp, 0, 1)
 
-        lbl_t_hint = QLabel("TIFF 支持最高 32 位浮点线性渲染，适合送印大型相纸展演或二次排版。")
-        lbl_t_hint.setStyleSheet("color: #888; font-size: 11px;")
-        grid_tiff.addWidget(lbl_t_hint, 1, 0, 1, 4)
 
         self.stack_settings.addWidget(page_tiff)
+
+        # --- Stack Page: shared output size, shown for every format that is not JPEG ---
+        page_size = QWidget()
+        grid_size = QGridLayout(page_size)
+        grid_size.setContentsMargins(0, 0, 0, 0)
+        grid_size.setHorizontalSpacing(12)
+        grid_size.setVerticalSpacing(10)
+        grid_size.setColumnStretch(0, 0)
+        grid_size.setColumnStretch(1, 1)
+        grid_size.setColumnStretch(2, 0)
+        grid_size.setColumnStretch(3, 1)
+        lbl_no_size_opts = QLabel("该格式无额外编码选项：输出尺寸与色彩设置在对话框上方统一设置。")
+        lbl_no_size_opts.setStyleSheet("font-size: 11px;")
+        grid_size.addWidget(lbl_no_size_opts, 1, 0, 1, 4)
+        self.stack_settings.addWidget(page_size)
 
         # --- Stack Page 2: PNG Options ---
         page_png = QWidget()
@@ -453,9 +467,6 @@ class BaseExportDialog(QDialog):
         self.combo_png_level.addItem("快速存储 (Level 1)", 1)
         grid_png.addWidget(self.combo_png_level, 0, 1)
 
-        lbl_p_hint = QLabel("PNG 支持 8位 与 16位 无损通道与广泛的网络兼容性。")
-        lbl_p_hint.setStyleSheet("color: #888; font-size: 11px;")
-        grid_png.addWidget(lbl_p_hint, 1, 0, 1, 4)
 
         self.stack_settings.addWidget(page_png)
 
@@ -493,9 +504,6 @@ class BaseExportDialog(QDialog):
         self.combo_jxl_effort.addItem("极速导出 (Effort 5)", 5)
         grid_jxl.addWidget(self.combo_jxl_effort, 0, 3)
 
-        lbl_jxl_hint = QLabel("JPEG XL (.jxl) 是新一代高保真格式，兼具超高压缩率与 16/32 位浮点广色域存储。")
-        lbl_jxl_hint.setStyleSheet("color: #888; font-size: 11px;")
-        grid_jxl.addWidget(lbl_jxl_hint, 1, 0, 1, 4)
 
         self.stack_settings.addWidget(page_jxl)
 
@@ -519,16 +527,15 @@ class BaseExportDialog(QDialog):
             self.lbl_size_summary.setText("")
             return
         mp = out_w * out_h / 1_000_000.0
-        # Keep it short: the label sits under the combo and gets clipped at the column width.
-        if out_w < src_w:
-            text = f"{out_w}×{out_h} px · {mp:.1f}MP · 颗粒按此重算"
-        else:
-            text = f"{out_w}×{out_h} px · {mp:.1f}MP"
-        self.lbl_size_summary.setText(text)
+        self.lbl_size_summary.setText(f"{out_w} × {out_h} px  ·  {mp:.1f} MP")
 
     def _on_format_changed(self, index):
         fmt = self.combo_format.currentData()
         self.combo_depth.clear()
+        # Subsampling is a JPEG-only concept; keep the row otherwise clean.
+        self.combo_subsampling.setEnabled(fmt == "jpeg")
+        self.combo_subsampling.setToolTip("" if fmt == "jpeg" else "色彩抽样仅对 JPEG 生效")
+        # Stack pages: 0 JPEG, 1 TIFF, 2 shared size info, 3 PNG, 4 JPEG XL
         if fmt == "jpeg":
             self.stack_settings.setCurrentIndex(0)
             self.combo_depth.addItem("8 位 (8-bit)", 8)
@@ -539,13 +546,13 @@ class BaseExportDialog(QDialog):
             self.combo_depth.addItem("32 位浮点 (32-bit Float)", 32)
             self.combo_depth.setCurrentIndex(1)
         elif fmt == "jxl":
-            self.stack_settings.setCurrentIndex(3)
+            self.stack_settings.setCurrentIndex(4)
             self.combo_depth.addItem("8 位 (8-bit)", 8)
             self.combo_depth.addItem("16 位 (16-bit)", 16)
             self.combo_depth.addItem("32 位浮点 (32-bit Float)", 32)
             self.combo_depth.setCurrentIndex(1)
         else:  # png
-            self.stack_settings.setCurrentIndex(2)
+            self.stack_settings.setCurrentIndex(3)
             self.combo_depth.addItem("8 位 (8-bit)", 8)
             self.combo_depth.addItem("16 位 (16-bit)", 16)
 
@@ -618,6 +625,9 @@ class BaseExportDialog(QDialog):
             if hasattr(self, "chk_strip_gps"):
                 self.chk_strip_gps.setChecked(bool(last.get("strip_gps", True)))
 
+            if hasattr(self, "chk_overwrite"):
+                self.chk_overwrite.setChecked(bool(last.get("overwrite", True)))
+
             if hasattr(self, "combo_jxl_mode"):
                 idx_jm = self.combo_jxl_mode.findData(last.get("jxl_mode", "visual_10"))
                 if idx_jm >= 0:
@@ -663,6 +673,7 @@ class BaseExportDialog(QDialog):
             "out_long_edge": self.size_widget.output_pixels()[0] if hasattr(self, "size_widget") else 0,
             "scale_pct": self.size_widget.scale_pct() if hasattr(self, "size_widget") else 100,
             EXPORT_SIZE_PREF_KEY: self.size_widget._target_long_edge() if hasattr(self, "size_widget") else 0,
+            "overwrite": self.chk_overwrite.isChecked() if hasattr(self, "chk_overwrite") else True,
         }
 
     def _apply_style(self):
@@ -751,7 +762,7 @@ class BaseExportDialog(QDialog):
                     background: #f59e0b;
                 }}
 {get_standard_checkbox_style(is_dark=True)}
-                QCheckBox#chkStripGps {{
+                QCheckBox#chkStripGps, QCheckBox#chkOverwrite {{
                     color: #c4c4cc;
                     font-size: 12px;
                     font-weight: normal;
@@ -856,7 +867,7 @@ class BaseExportDialog(QDialog):
                     background: #f59e0b;
                 }}
 {get_standard_checkbox_style(is_dark=False)}
-                QCheckBox#chkStripGps {{
+                QCheckBox#chkStripGps, QCheckBox#chkOverwrite {{
                     color: #334155;
                     font-size: 12px;
                     font-weight: normal;
@@ -889,7 +900,7 @@ class SingleExportDialog(BaseExportDialog):
     def __init__(self, default_file_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("单片扫描")
-        self.setFixedSize(660, 395)
+        self.setFixedSize(720, 432)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         self._init_ui()
@@ -926,11 +937,13 @@ class SingleExportDialog(BaseExportDialog):
         card_layout.addLayout(row_path)
 
         # Row 5: GPS Privacy Checkbox directly below path input box inside the card
-        row_gps = QHBoxLayout()
-        row_gps.setContentsMargins(0, 4, 0, 0)
-        row_gps.addWidget(self.chk_strip_gps)
-        row_gps.addStretch()
-        card_layout.addLayout(row_gps)
+        row_opts = QHBoxLayout()
+        row_opts.setContentsMargins(0, 4, 0, 0)
+        row_opts.setSpacing(18)
+        row_opts.addWidget(self.chk_strip_gps)
+        row_opts.addWidget(self.chk_overwrite)
+        row_opts.addStretch()
+        card_layout.addLayout(row_opts)
 
         main_layout.addWidget(card)
 
@@ -1071,7 +1084,7 @@ class BatchExportDialog(BaseExportDialog):
         super().__init__(parent)
         self.batch_count = batch_count
         self.setWindowTitle(f"批量扫描：{self.batch_count}张")
-        self.setFixedSize(660, 470)
+        self.setFixedSize(720, 518)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
@@ -1149,11 +1162,13 @@ class BatchExportDialog(BaseExportDialog):
         card_layout.addLayout(row_path)
 
         # Row 6: GPS Privacy Checkbox directly below destination path inside the card
-        row_gps = QHBoxLayout()
-        row_gps.setContentsMargins(0, 4, 0, 0)
-        row_gps.addWidget(self.chk_strip_gps)
-        row_gps.addStretch()
-        card_layout.addLayout(row_gps)
+        row_opts = QHBoxLayout()
+        row_opts.setContentsMargins(0, 4, 0, 0)
+        row_opts.setSpacing(18)
+        row_opts.addWidget(self.chk_strip_gps)
+        row_opts.addWidget(self.chk_overwrite)
+        row_opts.addStretch()
+        card_layout.addLayout(row_opts)
 
         main_layout.addWidget(card)
 

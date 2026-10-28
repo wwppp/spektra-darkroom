@@ -10842,6 +10842,20 @@ class DarkroomMainWindow(QMainWindow):
             cfg = dlg.get_export_config()
             self._do_export_single(cfg)
 
+    def _unique_export_path(self, out_path):
+        """Return a path that does not exist yet, appending 1, 2, 3 ... before the extension.
+
+        Used when "替换重名文件" is unchecked: the exporter must never silently overwrite an
+        existing scan.
+        """
+        if not out_path or not os.path.exists(out_path):
+            return out_path
+        base, ext = os.path.splitext(out_path)
+        counter = 1
+        while os.path.exists(f"{base}_{counter}{ext}"):
+            counter += 1
+        return f"{base}_{counter}{ext}"
+
     def _seed_export_size_dialog(self, dlg, photo_path):
         """Give the export dialog the master resolution and crop of the photo(s) involved,
         so the size selector can show real output pixels instead of a bare percentage."""
@@ -10900,6 +10914,7 @@ class DarkroomMainWindow(QMainWindow):
             "strip_gps": cfg.get("strip_gps", True),
             "quality": cfg.get("quality", 9),
             "scale_pct": cfg.get("scale_pct", 100),
+            "out_long_edge": cfg.get("out_long_edge", 0),
             "subsampling": cfg.get("subsampling", "4:4:4"),
             "progressive": cfg.get("progressive", True),
             "tiff_compression": cfg.get("tiff_compression", "lzw"),
@@ -10927,6 +10942,13 @@ class DarkroomMainWindow(QMainWindow):
             config_manager.set_last_export_dir(os.path.dirname(out_path))
         except Exception:
             pass
+
+        if not bool(cfg.get("overwrite", True)):
+            resolved = self._unique_export_path(out_path)
+            if resolved != out_path:
+                self.set_app_status(
+                    f"目标文件已存在，另存为 {os.path.basename(resolved)}", timeout_ms=3000)
+                out_path = resolved
 
         pix = None
         if self._current_photo_thumb is not None:
@@ -11030,6 +11052,7 @@ class DarkroomMainWindow(QMainWindow):
 
         prefix = cfg.get("prefix", "").strip()
         suffix = cfg.get("suffix", "").strip()
+        overwrite = bool(cfg.get("overwrite", True))
 
         import uuid
         enqueued_count = 0
@@ -11118,13 +11141,17 @@ class DarkroomMainWindow(QMainWindow):
             out_target = os.path.join(out_dir, out_fn)
 
             norm_src = os.path.abspath(file_p).lower()
-            counter = 1
-            while (out_target.lower() in used_targets) or (
-                os.path.exists(out_target) and os.path.abspath(out_target).lower() != norm_src
-            ):
-                out_fn = f"{base_fn}_{counter}{ext}"
-                out_target = os.path.join(out_dir, out_fn)
-                counter += 1
+            if not overwrite:
+                # "替换重名文件" is off: never touch an existing file, append 1, 2, 3 ...
+                out_target = self._unique_export_path(out_target)
+            else:
+                counter = 1
+                while (out_target.lower() in used_targets) or (
+                    os.path.exists(out_target) and os.path.abspath(out_target).lower() != norm_src
+                ):
+                    out_fn = f"{base_fn}_{counter}{ext}"
+                    out_target = os.path.join(out_dir, out_fn)
+                    counter += 1
             used_targets.add(out_target.lower())
 
             pix = None
