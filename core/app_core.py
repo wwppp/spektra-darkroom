@@ -895,19 +895,34 @@ def save_encoded_image(rendered_data, output_path, params_dict):
             logger.debug(f"save_encoded_image EXIF tag sync: {e_sync}")
 
     # 3. Format-specific encoding
-    # Output size: honour the exact long edge resolved by the export dialog, so TIFF and PNG
-    # resize too (previously only JPEG/JXL were scaled and the dropdown silently did nothing).
+    # Output size. The export dialog resolves the preset against the real source geometry and
+    # hands over an exact (width, height); the older single-number and percentage forms are
+    # still honoured for compatibility. Using only a long edge is not enough: a portrait frame
+    # whose *width* was passed as the long edge came out squashed to a square.
+    out_size = params_dict.get("out_size") or None
     out_long_edge = int(params_dict.get("out_long_edge", 0) or 0)
     legacy_pct = int(params_dict.get("scale_pct", 100) or 100)
-    if out_long_edge <= 0 and 0 < legacy_pct < 100:
-        # Older callers only pass a percentage; resolve it here so no format ignores it.
-        out_long_edge = int(round(max(rendered_float.shape[:2]) * legacy_pct / 100.0))
-    if out_long_edge > 0:
+    target_w = target_h = 0
+    if isinstance(out_size, (list, tuple)) and len(out_size) == 2:
+        try:
+            target_w, target_h = int(out_size[0]), int(out_size[1])
+        except (TypeError, ValueError):
+            target_w = target_h = 0
+    if target_w <= 0 or target_h <= 0:
+        if out_long_edge <= 0 and 0 < legacy_pct < 100:
+            out_long_edge = int(round(max(rendered_float.shape[:2]) * legacy_pct / 100.0))
+        if out_long_edge > 0:
+            cur_h, cur_w = rendered_float.shape[:2]
+            long_edge = max(cur_h, cur_w)
+            if out_long_edge < long_edge:
+                scale = out_long_edge / float(long_edge)
+                if cur_w >= cur_h:
+                    target_w, target_h = out_long_edge, int(round(cur_h * scale))
+                else:
+                    target_w, target_h = int(round(cur_w * scale)), out_long_edge
+    if target_w > 0 and target_h > 0:
         cur_h, cur_w = rendered_float.shape[:2]
-        if out_long_edge < max(cur_h, cur_w):
-            scale = out_long_edge / float(max(cur_h, cur_w))
-            target_w = max(1, int(out_long_edge))
-            target_h = max(1, int(round(cur_h * scale)))
+        if (target_w, target_h) != (cur_w, cur_h):
             rendered_float = cv2.resize(rendered_float, (target_w, target_h),
                                         interpolation=cv2.INTER_AREA)
             params_dict["scale_pct"] = 100  # already applied; the encoders must not rescale

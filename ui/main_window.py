@@ -10914,6 +10914,7 @@ class DarkroomMainWindow(QMainWindow):
             "strip_gps": cfg.get("strip_gps", True),
             "quality": cfg.get("quality", 9),
             "scale_pct": cfg.get("scale_pct", 100),
+            "out_size": list(cfg.get("out_size") or [0, 0]),
             "out_long_edge": cfg.get("out_long_edge", 0),
             "subsampling": cfg.get("subsampling", "4:4:4"),
             "progressive": cfg.get("progressive", True),
