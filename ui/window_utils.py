@@ -251,7 +251,8 @@ def setup_solid_combobox(combo):
     - Opaque background preventing layered transparent bleedthrough
     - Smooth inertial mouse-wheel scrolling (DarkroomComboListView with ScrollPerPixel)
     - Custom item delegate with hover feedback & left amber accent bar (DarkroomComboItemDelegate)
-    - Adaptive popup width based on content text length
+    - Adaptive popup width based on content text length (suppressing popup item tooltips)
+    - Retained full-text tooltip for the collapsed box on hover
     - Smart screen-edge upward/downward direction detection
     - Smooth opening expansion & opacity fade animation
     """
@@ -289,6 +290,22 @@ def setup_solid_combobox(combo):
         theme_manager.themeChanged.connect(lambda _: _apply_solid_combo_tooltip())
     except Exception:
         pass
+
+    def _update_collapsed_tooltip(idx=None):
+        try:
+            if not combo.toolTip() or getattr(combo, "_auto_tooltip", False):
+                txt = combo.currentText().strip()
+                if txt:
+                    combo._auto_tooltip = True
+                    combo.setToolTip(txt)
+        except RuntimeError:
+            pass
+
+    if not getattr(combo, "_auto_tt_connected", False):
+        combo._auto_tt_connected = True
+        combo.currentIndexChanged.connect(_update_collapsed_tooltip)
+        if not combo.toolTip() and combo.currentText().strip():
+            _update_collapsed_tooltip()
 
     if not isinstance(combo, DarkroomComboBox) and not getattr(combo, "_setup_solid_hooked", False):
         combo._setup_solid_hooked = True
