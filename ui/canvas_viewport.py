@@ -173,7 +173,6 @@ uniform float u_black_lift;
 uniform float u_halation;           // halation_amount (1.0 = physical default)
 uniform float u_hal_spatial_scale;  // halation_spatial_scale (1.0 = physical default)
 uniform float u_scatter_amount;     // scatter_amount (1.0 = physical default)
-uniform float u_halation_boost;     // boost_ev (0.0 = physical default)
 uniform vec3  u_hal_strength_rgb;   // profile-driven RGB preset
 uniform float u_hal_sigma_um;       // profile-driven first bounce sigma (um)
 // 1.0 when the caller already ran the separable-Gaussian halation chain
@@ -993,7 +992,10 @@ void main() {
     if (eff_diff_type == 0 && u_diffusion_strength > 0.001) {
         eff_diff_type = 1; // Default to Black Pro-Mist if strength > 0
     }
-    if (eff_diff_type > 0 && u_diffusion_ps > 0.0005) {
+    if (eff_diff_type > 0 && u_diffusion_ps > 0.0005 && u_scene_prepared < 0.5) {
+        // u_scene_prepared: the GLHalationChain already evaluated the diffusion plan
+        // (core/diffusion_model.py) upstream; running this tap-based bloom on top of
+        // its output would apply the filter twice.
         // The PSF is the CPU model's own three-group split — core (stays at the
         // pixel), halo and bloom — each an exponential disc truncated at 8 mean
         // free paths. The radii arrive in micrometres from the same table the
@@ -1092,12 +1094,10 @@ void main() {
                     float r_norm = length(offset);
                     vec2 tap_uv = clamp(sample_uv + offset * hal_spread, 0.0, 1.0);
                     vec3 tap_rgb = compute_scene_radiance(textureLod(u_image, tap_uv, lod_b).rgb);
-                    
-                    if (u_halation_boost > 0.001) {
-                        float tap_luma = dot(tap_rgb, vec3(0.2126, 0.7152, 0.0722));
-                        float boost_f = 1.0 + max(0.0, tap_luma - 0.7) * (u_halation_boost * 0.6);
-                        tap_rgb *= boost_f;
-                    }
+                    // No highlight boost here: the real EV reconstruction is an image-global
+                    // transform (normalised by the frame max) and the GLHalationChain owns
+                    // it. A tap-level stand-in would need a max the shader cannot have;
+                    // on the fallback path the boost simply does not apply.
 
                     float w = exp(-r_norm * 1.5) * bounce_w;
                     hal_accum += tap_rgb * w;
@@ -1873,7 +1873,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_halation", hal_amt)
         u_1f("u_hal_spatial_scale", hal_scale)
         u_1f("u_scatter_amount", scatter_amt)
-        u_1f("u_halation_boost", boost_ev)
         u_3f("u_hal_strength_rgb", float(strength[0]), float(strength[1]), float(strength[2]))
         u_1f("u_hal_sigma_um", sigma_um)
         # The live viewport always feeds the raw texture, so the shader must apply gain and
@@ -3118,7 +3117,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_halation", hal_amt)
             u_1f("u_hal_spatial_scale", hal_scale)
             u_1f("u_scatter_amount", scatter_amt)
-            u_1f("u_halation_boost", boost_ev)
             u_3f("u_hal_strength_rgb", float(strength[0]), float(strength[1]), float(strength[2]))
             u_1f("u_hal_sigma_um", sigma_um)
 
@@ -3207,9 +3205,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # instead of 16 taps reading whatever mip level happened to be handy -- which
             # is what made the halo shape depend on the preview size.
             prepared_tex = None
-            _hal_elig = ((hal_amt > 0.001 or scatter_amt > 0.001) and not is_film_none_off
-                         and diff_family == "none"   # diffusion is applied before halation
-                         and boost_ev <= 0.001)      # chain has no global boost yet (P3)
+            diff_strength = float(eff_params.get("diffusion_strength", 0.0))
+            _hal_elig = ((hal_amt > 0.001 or scatter_amt > 0.001
+                          or (diff_family != "none" and diff_strength > 0.001))
+                         and not is_film_none_off)
             if _hal_elig:
                 try:
                     eng_off = getattr(self, "engine", None)
@@ -3237,7 +3236,23 @@ class DarkroomGLCanvas(QOpenGLWidget):
                                 "eff": min(0.5, float(scatter_amt) * 0.06),
                                 "amount": float(scatter_amt),
                             }
-                        if want_hal or scat_arg:
+                        diff_arg = None
+                        if diff_family != "none" and diff_strength > 0.001:
+                            from core.diffusion_model import resolve_diffusion_mix
+                            # The CPU diffusion (apply_diffusion_np) sizes its pixels as
+                            # 36000/max(W,H) -- a 36 mm frame, NOT the halation chain's
+                            # fmt_mm*1000. The 2.9% sigma mismatch on a 500 px bloom
+                            # component shears the veil profile and costs ~15 dB.
+                            diff_px_um = 36000.0 / float(max(target_w, target_h))
+                            # spatial_scale: the CPU diffusion path (apply_diffusion_np)
+                            # runs at 1.0 -- the halation spatial-scale dial must NOT
+                            # leak into the diffusion sigmas or the two ends disagree
+                            # the moment the user touches that slider.
+                            diff_arg = resolve_diffusion_mix(
+                                diff_family, float(diff_strength), 1.0,
+                                diff_px_um,
+                                float(eff_params.get("diffusion_warmth", 0.0)))
+                        if want_hal or scat_arg or diff_arg:
                             if self._halation_chain is None:
                                 from .gl_halation import GLHalationChain
                                 self._halation_chain = GLHalationChain()
@@ -3253,7 +3268,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
                                 float(hal_amt) if want_hal else 0.0,
                                 hs=(float(eff_params.get("highlights", 0.0)),
                                     float(eff_params.get("shadows", 0.0))),
-                                scatter=scat_arg)
+                                scatter=scat_arg,
+                                boost={"ev": float(boost_ev),
+                                       "range": float(hp.boost_range),
+                                       "protect": float(hp.protect_ev)},
+                                diffusion=diff_arg)
                 except Exception as _ex_hal_chain:
                     print(f"[DarkroomGLCanvas] halation chain skipped: {_ex_hal_chain}")
                     prepared_tex = None
@@ -3264,6 +3283,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                     u_1f("u_halation", 0.0)
                 if getattr(self._halation_chain, "last_did_scatter", False):
                     u_1f("u_scatter_amount", 0.0)
+                if getattr(self._halation_chain, "last_did_diffusion", False):
+                    u_1f("u_diffusion_ps", 0.0)
                 u_1f("u_scene_prepared", 1.0)
             else:
                 u_1f("u_scene_prepared", 0.0)

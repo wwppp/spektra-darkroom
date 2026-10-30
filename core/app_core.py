@@ -282,50 +282,29 @@ def apply_highlights_shadows_np(linear_img, highlights, shadows):
 def apply_diffusion_np(linear_img, diff_family="none", diff_strength=0.0, diff_warmth=0.0):
     """Optical diffusion filter for the film-less (bypass) export path.
 
-    Delegates to the physical PSF model that the film pipeline already uses
-    (`spektrafilm.model.diffusion.apply_diffusion_filter_um`), so the bypass
-    export, the film export and the viewport all share one calibration table.
-    Bypass mode has no film gauge, so the image width is taken as a 35 mm
-    frame to supply the μm-per-pixel scale.
+    Evaluates the same Gaussian-mixture kernel plan the viewport chain uses
+    (`core/diffusion_model.py`). The physical PSF behind the family shapes is an
+    exponential-radial kernel that is not separable, so it used to run through an FFT
+    here while the shader approximated it by other means -- two implementations, and
+    the two disagreed by 20-37 dB with diffusion on (worse than the halation gap was).
+    The mixture plan reproduces the FFT kernel to 54-70 dB per frame at a fraction of
+    the cost, and is by construction the same numbers the GPU evaluates.
 
-    This used to be a hand-port of the viewport shader's *old* additive bloom
-    (`out += blur * strength * intensity`, radius ∝ strength, veil lift on
-    pro-mist/cinebloom). That model injected every scattered photon twice and
-    scaled without bound — at cinebloom 2 stops it raised the linear mean by
-    218% and *increased* the standard deviation by 170%, which is the opposite
-    of what a diffusion filter does. Keeping a second, divergent implementation
-    here is what let the bypass export drift away from the preview; there is now
-    one implementation and this is a thin adapter over it.
+    Bypass mode has no film gauge, so the image width is taken as a 35 mm frame to
+    supply the μm-per-pixel scale.
     """
     diff_fam = str(diff_family).lower()
     strength = float(diff_strength)
     if linear_img is None or diff_fam in ("none", "") or strength <= 0.001:
         return linear_img
 
-    # Normalise the loose family strings used by stored sessions and presets.
-    family = "black_pro_mist"
-    if "glimmer" in diff_fam:
-        family = "glimmerglass"
-    elif "cine" in diff_fam:
-        family = "cinebloom"
-    elif "pro_mist" in diff_fam or "promist" in diff_fam:
-        family = "black_pro_mist" if "black" in diff_fam else "pro_mist"
+    from .diffusion_model import apply_diffusion_mix_np, resolve_diffusion_mix
 
-    from types import SimpleNamespace
-    from spektrafilm.model.diffusion import apply_diffusion_filter_um
-
-    params = SimpleNamespace(
-        active=True,
-        filter_family=family,
-        strength=strength,
-        spatial_scale=1.0,
-        halo_warmth=float(diff_warmth),
-        core_intensity=1.0, halo_intensity=1.0, bloom_intensity=1.0,
-        core_size=1.0, halo_size=1.0, bloom_size=1.0,
-    )
     pixel_size_um = 36000.0 / max(1, int(linear_img.shape[1]))
-    out = apply_diffusion_filter_um(linear_img, params, pixel_size_um)
-    return out.astype(linear_img.dtype, copy=False)
+    mix = resolve_diffusion_mix(diff_fam, strength, 1.0, pixel_size_um, float(diff_warmth or 0.0))
+    if mix is None:
+        return linear_img
+    return apply_diffusion_mix_np(linear_img, mix)
 
 
 def convert_image_colorspace(img_rgb_float, target_colorspace="sRGB", bit_depth=8):
