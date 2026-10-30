@@ -128,6 +128,49 @@ def has_vignette(eff) -> bool:
     return bool((eff or {}).get("enabled", False)) and abs(v_amt) > 1e-5
 
 
+def fill_scale(k1: float, k2: float, k3: float, aspect: float,
+               ca_expand: float = 0.0, samples: int = 257) -> float:
+    """Largest uniform scale that keeps the *whole* border inside the source frame.
+
+    The renderers used to normalise by the corner term alone, ``1/(1 + k1 + k2 + k3)``,
+    which only satisfies the border constraint when the corner happens to be the worst
+    offender. Barrel correction pushes the mid-edges out further than the corners, so the
+    sampling ran off the frame there and the clamp/replicate filled the gap with stretched
+    pixels -- the "拉丝" band along the edges.
+
+    Concretely: the output sample is ``0.5 + delta * r_dist * scale``, so the frame is
+    covered iff ``|delta_i * r_dist * scale| <= 0.5`` for every border point i. The scale
+    is therefore the minimum over the border, and it is *smaller* than the corner-only
+    value whenever the corner is not the extremum -- i.e. this can only ever zoom in a
+    touch more, never leave a gap.
+
+    ``ca_expand`` is the largest positive CA radial scale; it multiplies the sampled
+    coordinate after the distortion term, so it has to be divided out here as well.
+    """
+    if abs(k1) < 1e-12 and abs(k2) < 1e-12 and abs(k3) < 1e-12:
+        return 1.0
+    aspect = float(aspect) if aspect and aspect > 0 else 1.5
+    max_r2 = 0.25 * (aspect * aspect + 1.0)
+    t = np.linspace(-0.5, 0.5, samples, dtype=np.float64)
+    edge = np.full_like(t, 0.5)
+    edge_n = -edge
+    dx = np.concatenate([edge, edge_n, t, t])
+    dy = np.concatenate([t, t, edge, edge_n])
+    r2 = (dx * dx * aspect * aspect + dy * dy) / max_r2
+    rd = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 ** 3
+    sx = np.abs(dx * rd)
+    sy = np.abs(dy * rd)
+    lim = np.full_like(sx, np.inf)
+    np.divide(0.5, sx, out=lim, where=sx > 1e-6)
+    lim2 = np.full_like(sy, np.inf)
+    np.divide(0.5, sy, out=lim2, where=sy > 1e-6)
+    s = float(np.minimum(lim, lim2).min())
+    if not np.isfinite(s):
+        return 1.0
+    s /= max(1.0, 1.0 + max(0.0, float(ca_expand)))
+    return float(np.clip(s, 0.05, 4.0))
+
+
 def _axis_uv(w: int, h: int):
     """1-D pixel-centre UV offsets from the frame centre (fully separable radius terms)."""
     dx = (np.arange(w, dtype=np.float32) + 0.5) / float(w) - 0.5
@@ -173,7 +216,17 @@ def lens_remap_maps(w: int, h: int, eff, channel: str = "g"):
             ds = float(eff.get("dist_scale", 0.0) or 0.0)
         except (TypeError, ValueError):
             ds = 0.0
-        scale = ds if abs(ds) > 1e-9 else 1.0 / max(0.05, 1.0 + corner_k)
+        if abs(ds) > 1e-9:
+            scale = ds
+        else:
+            # Border-exact scale from compute_effective_lens_params; the corner-only
+            # fallback remains for callers that build an eff dict by hand.
+            fs = 0.0
+            try:
+                fs = float(eff.get("fill_scale", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                fs = 0.0
+            scale = fs if fs > 1e-6 else 1.0 / max(0.05, 1.0 + corner_k)
         su = np.multiply(rd, dx[None, :])
         sv = np.multiply(rd, dy[:, None])
         su *= np.float32(scale)

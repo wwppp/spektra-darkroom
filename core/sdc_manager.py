@@ -161,14 +161,10 @@ def save_sdc(
             except Exception:
                 pass
 
-        # Atomic write with os.replace. The previous version is kept as .bak so a bad
-        # save can always be rolled back by hand.
-        if os.path.isfile(sdc_path):
-            try:
-                import shutil
-                shutil.copy2(sdc_path, sdc_path + ".bak")
-            except Exception:
-                pass
+        # Atomic write with os.replace: the payload lands in .tmp first, so a crash
+        # mid-write can never truncate the sidecar. A .bak copy used to be kept here on
+        # every single save, which meant one junk file per edit next to every photo --
+        # the .tmp + replace pair already gives the rollback guarantee that mattered.
         tmp_path = sdc_path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)

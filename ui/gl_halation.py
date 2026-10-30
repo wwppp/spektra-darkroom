@@ -34,6 +34,8 @@ saved on entry and restored on every exit path.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from OpenGL import GL
 from PySide6.QtOpenGL import QOpenGLShader, QOpenGLShaderProgram
@@ -677,9 +679,17 @@ class GLHalationChain:
         # --- halo: decimated grid unless a component would go sub-pixel ---
         if mix.w_halo > 1e-9:
             div = max(1, int(mix.halo.divisor))
+            # `divisor` is a FACTOR (CPU: cv2.resize to w//ds), not a level count: a
+            # divisor of 8 means three halves. The loop used to run `divisor` times,
+            # i.e. 2**divisor -- a 256x reduction for halation and 2**128 for bloom
+            # (capped only by the >=2 px guard, so the working grid collapsed to a
+            # handful of pixels). Measured 2026-10-30 on the real chain: treating it
+            # as a factor is worth +22 dB at glimmerglass 1.0 / +20 dB at black pro
+            # mist 1.0.
+            nlev = max(0, int(round(math.log2(div))))
             d_tex, dw, dh = e_tex, sw, sh
             level = 0
-            while level < div and dw // 2 >= 2 and dh // 2 >= 2:
+            while level < nlev and dw // 2 >= 2 and dh // 2 >= 2:
                 d_tex, dw, dh = decimate(d_tex, dw, dh, f"dd{level}")
                 if not d_tex:
                     return None
@@ -717,9 +727,10 @@ class GLHalationChain:
         # --- bloom: 1/8 grid, all components decimated (the CPU does the same) ---
         if mix.w_bloom > 1e-9:
             div = max(1, int(mix.bloom.divisor))
+            nlev = max(0, int(round(math.log2(div))))   # factor, not level count
             d_tex, dw, dh = e_tex, sw, sh
             level = 0
-            while level < div and dw // 2 >= 2 and dh // 2 >= 2:
+            while level < nlev and dw // 2 >= 2 and dh // 2 >= 2:
                 d_tex, dw, dh = decimate(d_tex, dw, dh, f"bd{level}")
                 if not d_tex:
                     return None

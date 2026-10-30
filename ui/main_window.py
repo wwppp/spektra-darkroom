@@ -4030,7 +4030,10 @@ class DarkroomMainWindow(QMainWindow):
         tab_layout.addWidget(self.btn_lens_tab_manual, 1)
         self.sec_optics.addWidget(self.lens_tab_frame)
 
-        # 2. Checkbox: 删除色差
+        # 2. Checkbox: 删除色差 -- with an inline progress marker, and a "未找到" label
+        # when the frame has no measurable lateral CA. The measured shifts are deliberately
+        # not surfaced: the numbers were noise for every user who never tunes them, and the
+        # row is now a single line that says what happened.
         chk_layout = QHBoxLayout()
         chk_layout.setContentsMargins(0, 2, 0, 2)
         self.chk_remove_ca = QCheckBox("删除色差")
@@ -4039,26 +4042,17 @@ class DarkroomMainWindow(QMainWindow):
                                       "系数由画面自动测量（LCP 未提供色差模型时）")
         self.chk_remove_ca.toggled.connect(self._on_lens_remove_ca_toggled)
         chk_layout.addWidget(self.chk_remove_ca)
-        self.btn_recull_ca = QPushButton("重新估计")
-        self.btn_recull_ca.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_recull_ca.setFixedHeight(18)
-        self.btn_recull_ca.setFlat(True)
-        self.btn_recull_ca.setStyleSheet(
-            f"QPushButton {{ border: none; background: transparent; padding: 0; "
-            f"color: {theme_manager.color('text_muted')}; font-size: 11px; "
-            f"text-decoration: underline; }}"
-        )
-        self.btn_recull_ca.clicked.connect(self._on_reestimate_ca)
-        chk_layout.addStretch(1)
-        chk_layout.addWidget(self.btn_recull_ca)
-        self.sec_optics.addLayout(chk_layout)
 
-        # 2b. 自动色差测量结果（仅在启用删除色差时可见）
-        self.lbl_auto_ca = QLabel("")
-        self.lbl_auto_ca.setStyleSheet(
+        self.spinner_ca = SpinnerWidget(size=12, auto_hide=True)
+        chk_layout.addWidget(self.spinner_ca)
+
+        self.lbl_ca_status = QLabel("")
+        self.lbl_ca_status.setStyleSheet(
             f"color: {theme_manager.color('text_muted')}; font-size: 11px;")
-        self.lbl_auto_ca.setVisible(False)
-        self.sec_optics.addWidget(self.lbl_auto_ca)
+        self.lbl_ca_status.setVisible(False)
+        chk_layout.addWidget(self.lbl_ca_status)
+        chk_layout.addStretch(1)
+        self.sec_optics.addLayout(chk_layout)
 
         # 3. Profile Panel Container
         self.panel_lens_profile = QWidget()
@@ -4081,9 +4075,11 @@ class DarkroomMainWindow(QMainWindow):
             [
                 ("默认 (自动读取 EXIF)", "auto"),
                 ("自定", "custom"),
+                ("内置 (RAW 内)", "builtin"),
             ],
             default_val="auto",
-            tooltip="镜头校正配置文件设置来源：自动读取 EXIF 或自定义手动选取"
+            tooltip="镜头校正配置文件设置来源：自动读取 EXIF、自定义手动选取，"
+                    "或使用 RAW 内嵌的校正表（索尼 ARW）"
         )
         self.combo_lens_setup.valueChanged.connect(self._on_lens_setup_changed)
         profile_layout.addWidget(self.combo_lens_setup)
@@ -4097,7 +4093,7 @@ class DarkroomMainWindow(QMainWindow):
         db = LCPDatabase.get_instance()
         db.index_installed_profiles()
         makes = db.get_available_makes()
-        make_items = [("无", "")] + [(m, m) for m in makes] + [("内置（RAW 内）", "__builtin__")]
+        make_items = [("无", "")] + [(m, m) for m in makes]
 
         self.combo_lens_make = ComboBoxRow(
             "品牌",
@@ -4222,14 +4218,13 @@ class DarkroomMainWindow(QMainWindow):
         self.combo_diff_strength = ComboBoxRow(
             "柔光挡位",
             [
-                ("0 (无滤镜)", 0.0),
                 ("1/8 档", 0.125),
                 ("1/4 档", 0.25),
                 ("1/2 档", 0.5),
                 ("1 档", 1.0),
                 ("2 档", 2.0),
             ],
-            default_val=0.0,
+            default_val=0.125,
             tooltip="柔光镜散射密度挡位 (1/8 ~ 2 档)"
         )
         self.combo_diff_strength.valueChanged.connect(lambda v: self._on_combo_changed("diffusion_strength", v))
@@ -7315,27 +7310,27 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.current_params[param_key] = val
         self.canvas.update_params(**{param_key: val})
         if param_key == "diffusion_family":
-            if val != "none" and self.current_params.get("diffusion_strength", 0.0) == 0.0:
-                self.current_params["diffusion_strength"] = 0.25
-                self.canvas.update_params(diffusion_strength=0.25)
+            # The strength combo no longer carries a 0 marker ("no filter" is expressed by
+            # the family itself), so picking a family always lands on a real density.
+            if val != "none":
+                cur = float(self.current_params.get("diffusion_strength", 0.0) or 0.0)
+                if cur <= 0.0:
+                    cur = 0.125
+                    self.current_params["diffusion_strength"] = cur
+                    self.canvas.update_params(diffusion_strength=cur)
                 if hasattr(self, 'combo_diff_strength'):
-                    self.combo_diff_strength.set_value(0.25)
-            elif val == "none":
+                    self.combo_diff_strength.set_value(cur)
+            else:
                 self.current_params["diffusion_strength"] = 0.0
                 self.canvas.update_params(diffusion_strength=0.0)
-                if hasattr(self, 'combo_diff_strength'):
-                    self.combo_diff_strength.set_value(0.0)
         elif param_key == "diffusion_strength":
+            # A strength can only be chosen once a family is active (the row is disabled
+            # otherwise); fall back to the family the combo is already showing.
             if val > 0.0 and self.current_params.get("diffusion_family", "none") == "none":
                 self.current_params["diffusion_family"] = "black_pro_mist"
                 self.canvas.update_params(diffusion_family="black_pro_mist")
                 if hasattr(self, 'combo_diffusion'):
                     self.combo_diffusion.set_value("black_pro_mist")
-            elif val == 0.0 and self.current_params.get("diffusion_family") != "none":
-                self.current_params["diffusion_family"] = "none"
-                self.canvas.update_params(diffusion_family="none")
-                if hasattr(self, 'combo_diffusion'):
-                    self.combo_diffusion.set_value("none")
         if param_key in ("diffusion_family", "diffusion_strength"):
             self._update_diffusion_ui_state()
         elif param_key == "enlarger_illuminant":
@@ -7752,8 +7747,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'combo_format'): self.combo_format.set_value(p.get("film_format_mm", 35.0))
 
             if hasattr(self, 'combo_diffusion'): self.combo_diffusion.set_value(p.get("diffusion_family", "none"))
-            if hasattr(self, 'combo_diff_strength'): self.combo_diff_strength.set_value(p.get("diffusion_strength", 0.0))
-            if hasattr(self, 'slider_diff_strength'): self.slider_diff_strength.set_value(p.get("diffusion_strength", 0.0))
+            # Older sessions stored strength 0 as "no filter". The combo has no 0 entry any
+            # more and set_value() silently ignores unknown values, so an unclamped 0 would
+            # leave the row showing a stale density next to an active family.
+            if hasattr(self, 'combo_diff_strength'):
+                _ds = float(p.get("diffusion_strength", 0.0) or 0.0)
+                self.combo_diff_strength.set_value(_ds if _ds > 0.0 else 0.125)
+            if hasattr(self, 'slider_diff_strength'):
+                _ds = float(p.get("diffusion_strength", 0.0) or 0.0)
+                self.slider_diff_strength.set_value(_ds if _ds > 0.0 else 0.125)
             if hasattr(self, 'slider_diff_warmth'): self.slider_diff_warmth.set_value(p.get("diffusion_warmth", 0.0))
 
             if hasattr(self, 'slider_dir_amount'): self.slider_dir_amount.set_value(p.get("dir_amount", 1.0))
@@ -9388,14 +9390,26 @@ aspect_ratio=self._lens_frame_aspect(photo),
         """Enable or gray out profile controls depending on whether profile correction is enabled."""
         lens_cfg = self.current_params.get("lens", {})
         prof_en = bool(lens_cfg.get("profile_enabled", False))
+        is_builtin = str(lens_cfg.get("setup", "")).lower() == "builtin" or \
+            lens_cfg.get("profile_path") == "@builtin"
         if hasattr(self, 'combo_lens_setup'):
             self.combo_lens_setup.setEnabled(prof_en)
-        if hasattr(self, 'combo_lens_make'):
-            self.combo_lens_make.setEnabled(prof_en)
-        if hasattr(self, 'combo_lens_model'):
-            self.combo_lens_model.setEnabled(prof_en)
-        if hasattr(self, 'combo_lens_profile'):
-            self.combo_lens_profile.setEnabled(prof_en)
+        # 内置 has nothing to choose from: the tables are per-frame inside the RAW. Show the
+        # three rows grayed out reading "内置" instead of leaving a stale lens list the user
+        # could mistake for the active correction.
+        rows_enabled = prof_en and not is_builtin
+        for name in ('combo_lens_make', 'combo_lens_model', 'combo_lens_profile'):
+            if hasattr(self, name):
+                getattr(self, name).setEnabled(rows_enabled)
+        if is_builtin and hasattr(self, 'combo_lens_make'):
+            self._is_updating_sliders = True
+            try:
+                self.combo_lens_make.set_items([("内置", "")], default_val="")
+                self.combo_lens_model.set_items([("内置", "")], default_val="")
+                self.combo_lens_profile.set_items(
+                    [("内置（RAW 内）", "@builtin")], default_val="@builtin")
+            finally:
+                self._is_updating_sliders = False
         if hasattr(self, 'slider_lens_distortion'):
             self.slider_lens_distortion.setEnabled(prof_en)
         if hasattr(self, 'slider_lens_vignette'):
@@ -9466,20 +9480,20 @@ aspect_ratio=self._lens_frame_aspect(photo),
             photo.get("id"), np.array(img, dtype=np.float32, copy=True))
         self._ca_worker.caReady.connect(self._on_auto_ca_ready)
         self._ca_pending_id = photo.get("id")
-        self.lbl_auto_ca.setText("自动色差: 正在测量画面色边…")
-        self.lbl_auto_ca.setVisible(True)
-        self.btn_recull_ca.setEnabled(False)
+        # The row itself carries the progress: spinner next to the checkbox, "未找到"
+        # once a measurement comes back empty.
+        self.lbl_ca_status.setVisible(False)
+        self.spinner_ca.start()
         self._ca_worker.start(QThread.Priority.LowPriority)
 
     def _on_reestimate_ca(self):
         lens_cfg = self.current_params.get("lens", {})
         if isinstance(lens_cfg, dict):
-            for k in _AUTO_CA_KEYS:
+            for k in _AUTO_CA_KEYS + ("auto_ca_shift", "auto_ca_confidence"):
                 lens_cfg.pop(k, None)
         self._ensure_auto_ca(force=True)
 
     def _on_auto_ca_ready(self, photo_id, result):
-        self.btn_recull_ca.setEnabled(True)
         photo = next((p for p in self.photos if p and p.get("id") == photo_id), None)
         if not photo:
             self._update_auto_ca_ui()
@@ -9514,28 +9528,40 @@ aspect_ratio=self._lens_frame_aspect(photo),
             logger.debug(f"自动色差结果写入旁车失败: {e}")
 
     def _update_auto_ca_ui(self, no_image: bool = False):
-        if not hasattr(self, "lbl_auto_ca"):
+        """Spinner while measuring, "未找到" when the frame has no lateral CA, else quiet.
+
+        The measured shift used to be printed on a second line; it is not shown anywhere
+        now -- the correction either ran or it did not.
+        """
+        if not hasattr(self, "lbl_ca_status"):
             return
         lens_cfg = self.current_params.get("lens", {})
         on = isinstance(lens_cfg, dict) and bool(lens_cfg.get("remove_ca", False))
-        self.lbl_auto_ca.setVisible(on)
-        self.btn_recull_ca.setVisible(on)
         if not on:
+            self.spinner_ca.stop()
+            self.lbl_ca_status.setVisible(False)
             return
+
+        worker = getattr(self, "_ca_worker", None)
+        if worker is not None and worker.isRunning():
+            self.spinner_ca.start()
+            self.lbl_ca_status.setVisible(False)
+            return
+
+        self.spinner_ca.stop()
         if no_image:
-            self.lbl_auto_ca.setText("自动色差: 当前画面不可用")
+            self.lbl_ca_status.setText("不可用")
+            self.lbl_ca_status.setVisible(True)
             return
-        if all(k in lens_cfg for k in _AUTO_CA_KEYS):
-            shift = lens_cfg.get("auto_ca_shift") or (0.0, 0.0)
-            conf = float(lens_cfg.get("auto_ca_confidence", 0.0) or 0.0)
-            if abs(shift[0]) < 0.05 and abs(shift[1]) < 0.05:
-                self.lbl_auto_ca.setText("自动色差: 未检出明显色边")
-            else:
-                self.lbl_auto_ca.setText(
-                    f"自动色差: R {shift[0]:+.2f}px / B {shift[1]:+.2f}px · 拟合 {conf*100:.0f}%")
+        if not all(k in lens_cfg for k in _AUTO_CA_KEYS):
+            self.lbl_ca_status.setVisible(False)
+            return
+        shift = lens_cfg.get("auto_ca_shift") or (0.0, 0.0)
+        if abs(float(shift[0])) < 0.05 and abs(float(shift[1])) < 0.05:
+            self.lbl_ca_status.setText("未找到")
+            self.lbl_ca_status.setVisible(True)
         else:
-            self.lbl_auto_ca.setText("自动色差: 待测量")
-        self.push_undo_state()
+            self.lbl_ca_status.setVisible(False)
 
     def _on_lens_profile_enabled_toggled(self, checked):
         if getattr(self, "_is_updating_sliders", False):
@@ -9553,8 +9579,34 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
         lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
         lens_cfg["setup"] = setup_mode
-        if setup_mode == "auto":
+        if hasattr(self, 'combo_lens_setup') and self.combo_lens_setup.current_value() != setup_mode:
+            # The combo is the entry point for this handler, so this only fires when the
+            # mode is set programmatically (session restore, tests) -- keep the display
+            # and the saved state from drifting apart.
+            self._is_updating_sliders = True
+            try:
+                self.combo_lens_setup.set_value(setup_mode)
+            finally:
+                self._is_updating_sliders = False
+        if setup_mode == "builtin":
+            # 内置 tables live inside the RAW file (sony_lens reads them per frame), so
+            # there is no brand/model/profile to pick -- the three rows below go read-only
+            # and say "内置" rather than offering a list that cannot apply.
+            lens_cfg["make"] = ""
+            lens_cfg["model"] = ""
+            lens_cfg["profile_name"] = "内置（RAW 内）"
+            lens_cfg["profile_path"] = "@builtin"
+        elif lens_cfg.get("profile_path") == "@builtin":
+            # Leaving 内置: drop the pseudo-profile so nothing stale keeps being applied.
+            lens_cfg["profile_name"] = ""
+            lens_cfg["profile_path"] = ""
+            if setup_mode == "auto":
+                self._auto_detect_lens_profile()
+            else:
+                self._sync_lens_combos_from_cfg(lens_cfg)
+        elif setup_mode == "auto":
             self._auto_detect_lens_profile()
+        self._update_lens_ui_state()
         self._apply_lens_to_canvas()
         self._mark_current_photo_dirty()
         self._save_current_photo_sdc()
@@ -9566,28 +9618,6 @@ aspect_ratio=self._lens_frame_aspect(photo),
         lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
         lens_cfg["make"] = make
 
-        # "内置（RAW 内）": the tables are written per frame, so there is nothing to pick —
-        # core/sony_lens.py reads them from the file being edited every time.
-        if make == "__builtin__":
-            lens_cfg["setup"] = "custom"
-            lens_cfg["model"] = ""
-            lens_cfg["profile_name"] = "内置（RAW 内）"
-            lens_cfg["profile_path"] = "@builtin"
-            self._is_updating_sliders = True
-            try:
-                if hasattr(self, 'combo_lens_setup'):
-                    self.combo_lens_setup.set_value("custom")
-                self.combo_lens_model.set_items([("无", "")], default_val="")
-                self.combo_lens_profile.set_items(
-                    [("内置（RAW 内）", "@builtin"), ("[+ 添加配置文件 (.lcp)...]", "__import_lcp__")],
-                    default_val="@builtin")
-            finally:
-                self._is_updating_sliders = False
-            self._apply_lens_to_canvas()
-            self._mark_current_photo_dirty()
-            self._save_current_photo_sdc()
-            self.push_undo_state()
-            return
         # If user manually selects a make while in auto mode, switch setup to custom
         if lens_cfg.get("setup") == "auto":
             lens_cfg["setup"] = "custom"
@@ -9660,12 +9690,20 @@ aspect_ratio=self._lens_frame_aspect(photo),
         finally:
             self._is_updating_sliders = False
 
-        if matching_paths:
-            lens_cfg["profile_name"] = matching_paths[0][0]
-            lens_cfg["profile_path"] = matching_paths[0][1]
+        # Store the profile the combo is actually showing: it prefers the "- RAW" variant,
+        # while this used to always save matching_paths[0], so the panel and the renderer
+        # disagreed until the user re-picked the same entry by hand.
+        if def_path:
+            lens_cfg["profile_path"] = def_path
+            lens_cfg["profile_name"] = next(
+                (p[0] for p in matching_paths if p[1] == def_path), matching_paths[0][0])
         else:
             lens_cfg["profile_name"] = ""
             lens_cfg["profile_path"] = ""
+        # New optics: a cached lateral-CA measurement no longer describes this frame.
+        for k in _AUTO_CA_KEYS + ("auto_ca_shift", "auto_ca_confidence"):
+            lens_cfg.pop(k, None)
+        self._ensure_auto_ca()
         self._apply_lens_to_canvas()
         self._mark_current_photo_dirty()
         self._save_current_photo_sdc()
@@ -9681,6 +9719,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
         lens_cfg["profile_path"] = profile_path
         if hasattr(self, 'combo_lens_profile') and hasattr(self.combo_lens_profile, 'combo'):
             lens_cfg["profile_name"] = self.combo_lens_profile.combo.currentText()
+        # A different profile means different optics, so a cached CA measurement is no
+        # longer evidence about this frame. This is also the only remaining re-estimate
+        # trigger now that the "重新估计" button is gone.
+        for k in _AUTO_CA_KEYS + ("auto_ca_shift", "auto_ca_confidence"):
+            lens_cfg.pop(k, None)
+        self._ensure_auto_ca()
         self._apply_lens_to_canvas()
         self._mark_current_photo_dirty()
         self._save_current_photo_sdc()
@@ -9803,9 +9847,24 @@ aspect_ratio=self._lens_frame_aspect(photo),
             model = lens_cfg.get("model", "")
             prof_path = lens_cfg.get("profile_path", "")
 
+            # 内置 is a mode of the 设置 row, not a brand: reflect it there and leave the
+            # three dependent rows reading "内置" (they are also disabled by
+            # _update_lens_ui_state).
+            is_builtin = (str(lens_cfg.get("setup", "")).lower() == "builtin"
+                          or prof_path == "@builtin")
+            if is_builtin:
+                lens_cfg["setup"] = "builtin"
+                if hasattr(self, 'combo_lens_setup'):
+                    self.combo_lens_setup.set_value("builtin")
+                self.combo_lens_make.set_items([("内置", "")], default_val="")
+                self.combo_lens_model.set_items([("内置", "")], default_val="")
+                self.combo_lens_profile.set_items(
+                    [("内置（RAW 内）", "@builtin")], default_val="@builtin")
+                return
+
             # 1. Populate makes
             makes = db.get_available_makes()
-            make_items = [("无", "")] + [(m, m) for m in makes] + [("内置（RAW 内）", "__builtin__")]
+            make_items = [("无", "")] + [(m, m) for m in makes]
             if make and make not in [m for _, m in make_items]:
                 make_items.append((make, make))
             self.combo_lens_make.set_items(make_items, default_val=make)
@@ -9873,6 +9932,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         if hasattr(self, 'combo_lens_make'):
             self._sync_lens_combos_from_cfg(lens_cfg)
+            self._update_lens_ui_state()
 
     def _manage_photo_memory_lru(self, active_photo_id: str):
         """Strict LRU memory management: Keeps at most 2 photos' float_img in RAM

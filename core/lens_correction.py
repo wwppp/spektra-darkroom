@@ -687,6 +687,65 @@ def focal_range_from_name(name: str) -> Optional[Tuple[float, float]]:
     return None
 
 
+# --- lens-name parsing -------------------------------------------------------
+# Adobe's LCP files are named "<body> (<lens>) - RAW.lcp". The old indexer treated the
+# whole leaf as one "model" name, which put the camera body into the same token bag as
+# the lens: every 70-200 profile of a brand then scored alike and the first one won.
+_TOKEN_RE = re.compile(r"\d+\.\d+|[a-z]+|\d+")
+#: Words that carry no identity. Bare "f" is dropped, but "f/2.8" also splits into a bare
+#: "2" -- and a decisive "2" is exactly what used to match a "+2.0x" teleconverter. Single
+#: digits therefore never count as evidence.
+_GENERIC_TOKENS = frozenset({
+    "mm", "f", "lens", "adapter", "adpter", "mount", "l", "e", "dg", "dn", "os", "hsm",
+    "usm", "stm", "ii", "iii", "iv", "v", "z", "rf", "ef", "fe", "ed", "asp",
+    "aspherical", "macro", "art", "sports", "contemporary", "series", "pro", "dx", "fx",
+})
+_BRAND_TOKENS = frozenset({
+    "canon", "nikon", "sony", "minolta", "sigma", "tamron", "tokina", "zeiss", "leica",
+    "fujifilm", "fuji", "olympus", "om", "panasonic", "lumix", "pentax", "ricoh",
+    "samyang", "voigtlander", "viltrox", "yi", "dji", "hasselblad", "phase", "one",
+})
+_TC_RE = re.compile(r"\+\s*\d+(?:\.\d+)?\s*x|\bextender\b|\bteleconverter\b|"
+                    r"\btc[- ]?\d|\b\d\.\dx\b|\+\s*\d+(?:\.\d+)?x", re.IGNORECASE)
+
+
+def split_lcp_name(name: str) -> Tuple[str, str]:
+    """Split an LCP file name into (camera body, lens). Either half may be empty."""
+    base = name[:-4] if name.lower().endswith(".lcp") else name
+    if "(" in base and ")" in base:
+        l = base.index("(")
+        r = base.rindex(")")
+        return base[:l].strip(" -_"), (base[l + 1:r] or base).strip()
+    return "", base.strip(" -_")
+
+
+def lens_tokens(text: str) -> set:
+    """Identity-bearing tokens of a lens / body name, symmetric between the EXIF spelling
+    ("EF70-200mm f/2.8L IS USM") and Adobe's ("EF 70-200mm f2.8L IS USM")."""
+    raw = _TOKEN_RE.findall((text or "").lower())
+    out = set()
+    for t in raw:
+        if t in _GENERIC_TOKENS or t in _BRAND_TOKENS:
+            continue
+        if t.isdigit() and len(t) <= 2 and not t.endswith("0"):
+            # 1-2 digit numbers are focal lengths ("70") *or* fragments of "f/2.8";
+            # nothing distinguishes them, so only focal-length-ish values (multiples of
+            # ten) are allowed to count.
+            continue
+        out.add(t)
+    return out
+
+
+def version_markers(text: str) -> set:
+    """Roman-numeral generation markers (II / III) in a lens name."""
+    return {t for t in _TOKEN_RE.findall((text or "").lower())
+            if t in ("ii", "iii", "iv", "v")}
+
+
+def has_teleconverter(text: str) -> bool:
+    return bool(_TC_RE.search(text or ""))
+
+
 class LCPDatabase:
     """In-memory indexer and manager for Lens Profiles (.lcp)."""
 
@@ -735,7 +794,13 @@ class LCPDatabase:
         return list(self._makes)
 
     def get_models_for_make(self, make: str) -> List[Tuple[str, str, str]]:
-        """Return list of (model_display_name, profile_display_name, file_path) for the given make."""
+        """Return list of (lens_name, profile_display_name, file_path) for the given make.
+
+        ``lens_name`` is the bracketed lens of "<body> (<lens>) - RAW.lcp" -- the unit a
+        user picks ("EF 70-200mm f2.8L IS USM"), not the body+lens string the file is
+        named after. Profiles of the same lens on different bodies collapse onto one
+        entry, and the body is still visible in the profile display name.
+        """
         if not make:
             return []
         if make in self._models_by_make:
@@ -743,30 +808,32 @@ class LCPDatabase:
 
         results = []
         seen_paths = set()
+        seen_names = set()
         for root_dir in self._roots:
             make_dir = os.path.join(root_dir, make)
             if not os.path.isdir(make_dir):
                 continue
             for r, dirs, files in os.walk(make_dir):
                 for f in files:
-                    if f.lower().endswith(".lcp"):
-                        p = os.path.join(r, f)
-                        if p in seen_paths:
-                            continue
-                        seen_paths.add(p)
-                        # Derive model name cleanly from filename or quick metadata
-                        clean_name = f[:-4]
-                        # Remove leading brand prefix if redundant
-                        if clean_name.upper().startswith(make.upper()):
-                            clean_name = clean_name[len(make):].strip(" -_()")
-                        if clean_name.endswith(" - RAW"):
-                            clean_name = clean_name[:-6].strip()
-                        elif clean_name.endswith(" - JPEG"):
-                            clean_name = clean_name[:-7].strip()
-                        if not clean_name:
-                            clean_name = f[:-4]
-                        prof_display = f[:-4]
-                        results.append((clean_name, prof_display, p))
+                    if not f.lower().endswith(".lcp"):
+                        continue
+                    p = os.path.join(r, f)
+                    if p in seen_paths:
+                        continue
+                    seen_paths.add(p)
+                    prof_display = f[:-4]
+                    # Adobe's own directory and the user directory can both hold the same
+                    # profile; the user copy is found first, so keep that one. Duplicated
+                    # names made the dropdown list the identical profile two or three times.
+                    if prof_display.lower() in seen_names:
+                        continue
+                    seen_names.add(prof_display.lower())
+                    _body, lens = split_lcp_name(f[:-4])
+                    if lens.endswith(" - RAW"):
+                        lens = lens[:-6].strip()
+                    elif lens.endswith(" - JPEG"):
+                        lens = lens[:-7].strip()
+                    results.append((lens.strip() or prof_display, prof_display, p))
 
         # Sort by model name
         results.sort(key=lambda x: x[0].lower())
@@ -786,14 +853,25 @@ class LCPDatabase:
 
     def match_lens_from_exif(self, camera_make: str, camera_model: str, lens_model: str, focal_length: Optional[float] = None) -> Optional[Tuple[str, str, str, str]]:
         """Attempt to find matching (make, model, profile_name, lcp_path) from EXIF metadata.
-        Uses intelligent brand deduction, model code extraction (e.g. Tamron A071, Sigma Art 021),
-        mount alignment, and token overlap scoring to reliably identify the correct Adobe LCP profile.
+
+        The score is a token recall/precision pair over the *lens* half of each candidate's
+        file name, with hard gates for the two things that change the optics rather than
+        merely the wording:
+
+        * a teleconverter ("+2.0x", "EXTENDER") is only eligible when the EXIF lens says so;
+        * a generation marker (II / III) that both sides state and that disagrees.
+
+        Measured on 2G3A0048.CR2 (5D Mark III + EF70-200mm f/2.8L IS USM): the previous
+        scoring picked "...IS II USM +2.0x", because "f/2.8" splits into a bare "2" and
+        that "2" matched "+2.0x" -- two points that beat every correct candidate, while an
+        extra "II" on the wrong side cost nothing.
         """
         if not self._makes:
             return None
 
         clean_lens = (lens_model or "").strip()
         clean_cam_make = (camera_make or "").strip()
+        clean_cam_model = (camera_model or "").strip()
         detected_brand = detect_lens_brand(clean_lens, clean_cam_make)
         code = extract_lens_model_code(clean_lens).lower()
 
@@ -819,59 +897,70 @@ class LCPDatabase:
         if not make_candidates and self._makes:
             make_candidates = list(self._makes)
 
-        # 2. Search inside candidate makes with advanced alphanumeric tokenization
-        lens_tokens = set(re.findall(r"[a-z0-9]+", clean_lens.lower()))
-        noisy_tokens = {"mm", "f", "lens", "adapter", "adpter", "mount"}
-        lens_tokens = {t for t in lens_tokens if t not in noisy_tokens}
+        # 2. Score the lens half of every candidate
+        exif_tokens = lens_tokens(clean_lens)
+        if not exif_tokens:
+            return None
+        exif_tc = has_teleconverter(clean_lens)
+        exif_ver = version_markers(clean_lens)
+        body_tokens = lens_tokens(clean_cam_model)
         best_match = None
-        best_score = -1
+        best_score = -1e9
+        best_rank = None
 
         for m in make_candidates:
             models = self.get_models_for_make(m)
             is_detected_brand = bool(detected_brand and m.lower() == detected_brand.lower())
 
-            for mod_name, prof_name, p in models:
-                p_leaf = os.path.basename(p).lower()
-                mod_tokens = set(re.findall(r"[a-z0-9]+", mod_name.lower()))
-                mod_tokens = {t for t in mod_tokens if t not in noisy_tokens}
-                common = lens_tokens.intersection(mod_tokens)
-                code_hit = bool(code) and (code in mod_name.lower() or code in p_leaf)
-                # A brand token alone is not evidence of the right lens: with +5 for the
-                # brand, any model of that brand cleared the threshold, so a Tamron 70-300
-                # could be served for a Tamron 28-200. Require at least one real model
-                # token (or the model code) before a candidate is eligible at all.
-                if not common and not code_hit:
+            for cand_lens, prof_name, p in models:
+                cand_tokens = lens_tokens(cand_lens)
+                if not cand_tokens:
+                    continue
+                common = exif_tokens & cand_tokens
+                if len(common) < 2:
+                    continue
+                # Optically different hardware is not a wording difference: a 2x
+                # teleconverter turns 70-200 into 140-400 with its own distortion.
+                if has_teleconverter(cand_lens) != exif_tc:
+                    continue
+                cand_ver = version_markers(cand_lens)
+                if exif_ver and cand_ver and exif_ver != cand_ver:
                     continue
 
                 # Focal range gate: the profile has to cover the focal length actually used.
-                fr = focal_range_from_name(mod_name) or focal_range_from_name(p_leaf)
+                fr = focal_range_from_name(cand_lens)
                 if focal_length and fr:
                     fl_val = _parse_float_safe(focal_length)
                     if fl_val and not (fr[0] * 0.9 <= fl_val <= fr[1] * 1.1):
                         continue
 
-                score = len(common) * 2
+                recall = len(common) / len(exif_tokens)
+                extra = len(cand_tokens - exif_tokens)
+                missing = len(exif_tokens - cand_tokens)
+                score = recall * 100.0 - 8.0 * extra - 8.0 * missing
 
-                # Brand alignment bonus
+                # Version stated on exactly one side is a weaker but real signal.
+                if cand_ver != exif_ver:
+                    score -= 6.0
                 if is_detected_brand:
-                    score += 3
+                    score += 3.0
+                if code and (code in cand_lens.lower() or code in os.path.basename(p).lower()):
+                    score += 8.0
 
-                # Mount / Camera make alignment bonus
-                if clean_cam_make and clean_cam_make.lower() in (mod_name.lower() + " " + p_leaf):
-                    score += 3
+                # Prefer the profile shot on the same body, then any body of the same make.
+                _b, _ = split_lcp_name(prof_name)
+                cand_body = lens_tokens(_b)
+                body_hit = len(body_tokens & cand_body) if body_tokens else 0
+                score += 4.0 * body_hit / max(1, len(body_tokens))
 
-                # Model code match (HIGHEST PRIORITY!)
-                if code_hit:
-                    score += 15
-
-                # Prefer RAW profile if available
-                if p_leaf.endswith(" - raw.lcp"):
-                    score += 1
-
-                if score > best_score and score >= 4:
+                rank = (score, body_hit, -extra)
+                if rank > (best_rank or (-1e9, -1, -1e9)):
+                    best_rank = rank
                     best_score = score
-                    best_match = (m, mod_name, prof_name, p)
+                    best_match = (m, cand_lens, prof_name, p)
 
+        if best_match is not None and best_score < 45.0:
+            return None
         return best_match
 
 
@@ -1239,6 +1328,20 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
             ca_r_scale = _float_safe(lens_cfg.get("auto_ca_scale_r"))
             ca_b_scale = _float_safe(lens_cfg.get("auto_ca_scale_b"))
 
+    # Scale that keeps every border sample inside the frame (see core.lens_warp.fill_scale).
+    # Computed once, here, so the preview shader and the CPU export consume the same number
+    # instead of each deriving its own approximation -- the previous corner-only rule left
+    # the mid-edges sampling past the image and the clamp smeared them into streaks.
+    fill = 0.0
+    if is_enabled and (abs(k1) > 1e-9 or abs(k2) > 1e-9 or abs(k3) > 1e-9):
+        try:
+            from .lens_warp import fill_scale as _fill_scale
+            aspect_wh = (1.0 / aspect_ratio) if aspect_ratio else 1.5
+            fill = _fill_scale(k1, k2, k3, aspect_wh,
+                               ca_expand=max(0.0, ca_r_scale, ca_b_scale))
+        except Exception:
+            fill = 0.0
+
     return {
         "enabled": is_enabled,
         "remove_ca": remove_ca,
@@ -1253,5 +1356,6 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
         "ca_b_scale": ca_b_scale,
         "ca_r_coeffs": ca_r_eff,
         "ca_b_coeffs": ca_b_eff,
-        "dist_scale": out_dist_scale
+        "dist_scale": out_dist_scale,
+        "fill_scale": fill
     }

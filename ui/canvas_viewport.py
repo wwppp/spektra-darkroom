@@ -261,6 +261,11 @@ uniform vec3 u_lens_distort;
 // overrides it. Sony's embedded tables are normalised at the centre, so re-normalising at the
 // corner would shrink the frame a further 15% and move it away from the camera's own JPEG.
 uniform float u_lens_dist_scale;
+// Precomputed border-exact guard (core.lens_warp.fill_scale): the largest scale that keeps
+// every one of the four edges inside the source. Unlike the corner-only fallback it is
+// derived from the whole border, so nothing samples past the frame and the clamp never has
+// to invent pixels -- that stretch is what users saw as a smeared band along the edges.
+uniform float u_lens_fill_scale;
 uniform vec2 u_lens_vignette;
 uniform int u_lens_ca_enabled;
 // Lateral CA has two parts. The leading term is a CONSTANT magnification difference between
@@ -774,7 +779,9 @@ void main() {
         float corner_k = u_lens_distort.x + u_lens_distort.y + u_lens_distort.z;
         float scale = abs(u_lens_dist_scale) > 1e-9
                     ? u_lens_dist_scale
-                    : 1.0 / max(0.05, 1.0 + corner_k);
+                    : (u_lens_fill_scale > 1e-6
+                        ? u_lens_fill_scale
+                        : 1.0 / max(0.05, 1.0 + corner_k));
         sample_uv = 0.5 + (delta * r_dist) * scale;
 
         // Local Jacobian of the warp. The sampling density changes with radius, so the mip
@@ -1811,6 +1818,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1i("u_lens_enabled", lens_en)
             u_3f("u_lens_distort", lens_cfg.get("k1", 0.0), lens_cfg.get("k2", 0.0), lens_cfg.get("k3", 0.0))
             u_1f("u_lens_dist_scale", lens_cfg.get("dist_scale", 0.0) or 0.0)
+            u_1f("u_lens_fill_scale", lens_cfg.get("fill_scale", 0.0) or 0.0)
             u_2f("u_lens_vignette", lens_cfg.get("vignette_amount", 0.0), lens_cfg.get("vignette_midpoint", 50.0))
             ca_en = 1 if lens_cfg.get("remove_ca", False) else 0
             u_1i("u_lens_ca_enabled", ca_en)
@@ -1824,6 +1832,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1i("u_lens_enabled", 0)
             u_3f("u_lens_distort", 0.0, 0.0, 0.0)
             u_1f("u_lens_dist_scale", 0.0)
+            u_1f("u_lens_fill_scale", 0.0)
             u_2f("u_lens_vignette", 0.0, 50.0)
             u_1i("u_lens_ca_enabled", 0)
             u_3f("u_lens_ca_r", 0.0, 0.0, 0.0)
@@ -3071,11 +3080,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 u_1i("u_lens_enabled", 1)
                 u_3f("u_lens_distort", off_lens.get("k1", 0.0), off_lens.get("k2", 0.0), off_lens.get("k3", 0.0))
                 u_1f("u_lens_dist_scale", off_lens.get("dist_scale", 0.0) or 0.0)
+                u_1f("u_lens_fill_scale", off_lens.get("fill_scale", 0.0) or 0.0)
                 u_2f("u_lens_vignette", off_lens.get("vignette_amount", 0.0), off_lens.get("vignette_midpoint", 50.0))
             else:
                 u_1i("u_lens_enabled", 0)
                 u_3f("u_lens_distort", 0.0, 0.0, 0.0)
                 u_1f("u_lens_dist_scale", 0.0)
+                u_1f("u_lens_fill_scale", 0.0)
                 u_2f("u_lens_vignette", 0.0, 50.0)
             off_ca = 1 if (isinstance(off_lens, dict) and off_lens.get("remove_ca", False)) else 0
             u_1i("u_lens_ca_enabled", off_ca)
