@@ -1975,6 +1975,9 @@ class SpektraEngine:
                             "fog_density": cg.get("fog_density"),
                             "reversal_profile": cg.get("reversal_profile"),
                             "population": cg.get("population"),
+                            # Where the three coated sub-layers sit on the density axis (P2): the
+                            # grain octaves are those sub-layers, so each needs its own response.
+                            "layer_structure": self._profile_layer_structure(d),
                             "density_min": d_min,
                             "density_max": d_max,
                         }
@@ -2049,6 +2052,68 @@ class SpektraEngine:
                     [float(x) for x in arr.max(axis=0)[:3]])
         except Exception:
             return None, None
+
+    @staticmethod
+    def _profile_layer_structure(doc):
+        """Per record, per sub-layer ``[dmax, half_development, span]``, in units of the record's Dmax.
+
+        The three spatial grain octaves are the three coated sub-layers of a chromogenic emulsion
+        (fast/coarse -> slow/fine), so P2 needs to know where each sub-layer lives on the density
+        axis.  The profiles already carry that: ``density_curves_layers`` is (N, 3 layers, 3
+        records) of net density.  For each sub-layer this reports
+
+          * ``dmax``   -- how much density the sub-layer carries (its ceiling, /total);
+          * ``half``   -- the *total* density at which it is half developed (/total), i.e. where
+                          that sub-layer is most "active", which is where its granularity peaks;
+          * ``span``   -- the total-density width of its 20..80 % development (/total), which sets
+                          how sharp that peak is.
+
+        Returns ``None`` when the profile carries no layer curves.  A sub-layer with no density at
+        all yields ``[0, 0, 0]``; ``grain_model._layer_geometry`` treats that (and any three
+        sub-layers that half-develop at the same density) as "not separable" and uses its
+        structural fallback.
+        """
+        try:
+            data = doc.get("data") if isinstance(doc.get("data"), dict) else doc
+            layers = data.get("density_curves_layers")
+            curves = data.get("density_curves")
+            if not layers or not curves:
+                return None
+            layer_arr = np.asarray(layers, dtype=np.float64)
+            curve_arr = np.asarray(curves, dtype=np.float64)
+            if layer_arr.ndim != 3 or layer_arr.shape[1] != 3 or layer_arr.shape[2] < 3:
+                return None
+            if curve_arr.ndim != 2 or curve_arr.shape[1] < 3:
+                return None
+            structure = []
+            for record in range(3):
+                total_curve = curve_arr[:, record]
+                ceiling = float(np.nanmax(total_curve))
+                if not np.isfinite(ceiling) or ceiling <= 1e-6:
+                    structure.append([[0.0, 0.0, 0.0] for _ in range(3)])
+                    continue
+                net_total = total_curve - float(np.nanmin(total_curve))
+                rows = []
+                for layer in range(3):
+                    column = layer_arr[:, layer, record]
+                    base = float(np.nanmin(column))
+                    net = column - base
+                    peak = float(np.nanmax(net))
+                    if not np.isfinite(peak) or peak <= 1e-6:
+                        rows.append([0.0, 0.0, 0.0])
+                        continue
+                    fraction = net / peak
+                    developed = np.nan_to_num(net_total, nan=0.0)
+                    half = developed[int(np.argmax(fraction >= 0.5))]
+                    lo = developed[int(np.argmax(fraction >= 0.2))]
+                    hi = developed[int(np.argmax(fraction >= 0.8))]
+                    rows.append([peak / ceiling,
+                                 float(half) / ceiling,
+                                 max(float(hi - lo), 0.0) / ceiling])
+                structure.append(rows)
+            return structure
+        except Exception:
+            return None
 
     @staticmethod
     def _postprocess_positive_lut(lut_3d: np.ndarray, film_stock: str) -> np.ndarray:
@@ -4141,14 +4206,11 @@ class SpektraEngine:
                 chunk_linear = linear_full[y0:y1].copy()
                 chunk_rng = np.random.default_rng(grain_seed_base + y0 * 7919)
 
-                # Pre-LUT physical transmittance grain (shared model with the GPU shader)
+                # Pre-LUT physical transmittance grain (shared model with the GPU shader).  The
+                # call goes through grain_model.apply_block so the export cannot fall behind the
+                # preview: density lookup, per-octave response and transmittance live there (P2).
                 if grain_spec.active:
-                    layer = grain_model.synthesize_layer_grain(grain_spec, y1 - y0, chunk_linear.shape[1], chunk_rng)
-                    # The stock's density law is the same table the shader samples as a texture.
-                    response = grain_model.density_response(
-                        chunk_linear, grain_spec.density_lut, grain_spec.film_density)
-                    dD = layer * (grain_spec.strength * grain_model.STRENGTH_GAIN) * response
-                    chunk_linear = np.maximum(0.0, chunk_linear * np.exp(-dD * grain_model.LOG10_E))
+                    chunk_linear = grain_model.apply_block(chunk_linear, grain_spec, chunk_rng)
 
                 coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
                 idx0 = coords.astype(np.int32)

@@ -267,6 +267,51 @@ DENSITY_LUT_MAX = 4.0
 # because density is a smooth, monotonic function of exposure.
 FILM_DENSITY_LUT_SIZE = 33
 
+# ---------------------------------------------------------------------------
+# Multi-layer structure (P2)
+# ---------------------------------------------------------------------------
+# A chromogenic emulsion coats three sub-layers of decreasing speed and crystal size.  The fast
+# coarse one develops first and saturates early, so its granularity lives in the toe; the slow
+# fine one is still developing in the shoulder.  The three spatial octaves are exactly those
+# three sub-layers, so they must not share one density response: the mottle octave has to follow
+# the coarse layer and the fine octave the slow one.
+#
+# What is *not* done here matters as much.  The per-stock granularity-vs-density law (the only
+# per-stock *measured* data we have) is not re-fitted or split by guesswork: the per-octave
+# responses are normalised against the noise each octave really carries, so their signal-weighted
+# RMS equals the declared law at every density.  The measured curve therefore survives untouched;
+# only the split across spatial scales moves -- shadows turn coarse and mottled, highlights turn
+# fine, and the slider still controls the total.
+#
+# Octave order is (fine, cloud, mottle) throughout this module; sub-layer order is the profile's
+# (coarse -> fine), so the mapping is reversed.
+OCTAVE_TO_LAYER = (2, 1, 0)
+# Where each sub-layer sits on the density axis, as a fraction of the stock's total Dmax, when
+# the profile's layer curves cannot separate them (they are pure scalings of the total: 38 of the
+# 61 stocks that carry layer curves).  This is a *structural* constant -- three sub-layers of
+# decreasing speed -- not a per-stock calibration; the data overrides it wherever it can.
+# Fast/coarse: a third of the way up the curve, saturating early.  Slow/fine: near the shoulder.
+LAYER_CENTER_FALLBACK = (0.72, 0.40, 0.15)
+LAYER_CENTER_MIN = 0.03
+LAYER_CENTER_MAX = 0.94
+# Response half-width, as a fraction of the layer's own 20..80 % development span, with a floor so
+# a nearly step-like layer curve does not produce a delta.
+LAYER_WIDTH_PER_SPAN = 0.45
+LAYER_WIDTH_PER_CENTER = 0.45      # used with LAYER_CENTER_FALLBACK
+LAYER_WIDTH_MIN = 0.13
+# A sub-layer keeps developing below its half-development density, so its activity falls off much
+# more slowly on the toe side than above the peak (where it is saturating).  Without this
+# asymmetry a narrow coarse peak leaves nothing to carry the deep shadows and the model would have
+# to amplify it back up; with it the coarse octave simply owns the toe, which is the physics.
+LAYER_LEFT_WIDTH_RATIO = 2.2
+# Two sub-layers closer than this on the density axis carry no distinguishable structure; the
+# fallback split is used instead of pretending three identical curves are three layers.
+LAYER_SEPARATION_MIN = 0.05
+# The redistribution gain needs no clamp: it is |signal| / |signal * shape|, and every shape is at
+# most 1, so the per-octave response can never exceed |signal| / signal_o times the law -- about
+# 2.2x for the widest mix this project uses.  Above the last sub-layer's half-development density
+# the split is frozen (see bake_layer_lut) so that bound actually holds instead of decaying.
+
 
 def _flat(values):
     """Flatten ``(1.1, 3.0)`` / ``((1.1,), (3.0,))`` style specs into a flat list of floats."""
@@ -476,14 +521,23 @@ def bake_density_lut(preset):
     return lut
 
 
-def _sample_density_lut(lut, density):
-    """Linear interpolation into a baked table -- the CPU's copy of the shader's texture fetch."""
-    table = np.asarray(lut, dtype=np.float32)
+def _lattice_index(density):
+    """Density -> (lower entry index, fraction) for a linear fetch of a baked table.
+
+    Shared by both tables so the CPU can never interpolate differently from the GPU's
+    ``GL_LINEAR`` fetch along the density axis.
+    """
     span = DENSITY_LUT_SIZE - 1
     pos = np.clip(density, 0.0, DENSITY_LUT_MAX).astype(np.float32) * (span / DENSITY_LUT_MAX)
     lo = pos.astype(np.int32)
     np.clip(lo, 0, span - 1, out=lo)
-    frac = (pos - lo).astype(np.float32)
+    return lo, (pos - lo).astype(np.float32)
+
+
+def _sample_density_lut(lut, density):
+    """Linear interpolation into a baked table -- the CPU's copy of the shader's texture fetch."""
+    table = np.asarray(lut, dtype=np.float32)
+    lo, frac = _lattice_index(density)
     out = np.empty(density.shape, dtype=np.float32)
     for channel in range(3):
         column = table[:, channel]
@@ -491,6 +545,290 @@ def _sample_density_lut(lut, density):
         next_ = column[lo[..., channel] + 1]
         out[..., channel] = base + (next_ - base) * frac[..., channel]
     return out
+
+
+_BELL_LUT = None
+
+
+def bake_bell_lut():
+    """The P0 bell as a table, in the same units as ``bake_density_lut``.
+
+    Only used to build the layered table for callers with no declared law (no film selected,
+    thumbnails, offline probes): the layered path needs a total law to redistribute, and it must
+    be the same bell both renderers already fall back to.
+    """
+    global _BELL_LUT
+    if _BELL_LUT is not None:
+        return _BELL_LUT
+    grid = np.linspace(0.0, DENSITY_LUT_MAX, DENSITY_LUT_SIZE, dtype=np.float64)
+    z = grid - DENS_PEAK
+    w = np.where(z > 0.0, DENS_W_SHOULDER, DENS_W_TOE)
+    bell = DENS_FLOOR + (1.0 - DENS_FLOOR) * np.exp(-0.5 * (z / w) ** 2)
+    t = np.clip((grid - (DENS_DMAX - DENS_W_SAT)) / DENS_W_SAT, 0.0, 1.0)
+    roll = 1.0 - (3.0 * t * t - 2.0 * t * t * t)
+    column = (DENS_GAIN * bell * roll).astype(np.float32)
+    _BELL_LUT = np.repeat(column[:, None], 3, axis=1)
+    return _BELL_LUT
+
+
+def _layer_geometry(preset):
+    """Per record, per octave ``(center, width)`` in units of the stock's total density.
+
+    Read from the profile's own sub-layer curves (``layer_structure``, built by
+    ``app_core.get_film_grain_preset``): for each sub-layer, where it is half developed and how
+    wide its 20..80 % development span is, both divided by the stock's total net Dmax.  A layer
+    that halves early is the fast coarse one, which is exactly where the mottle octave belongs.
+
+    Degenerate profiles -- layer curves that are pure scalings of the total, so every layer halves
+    at the same density -- fall back to :data:`LAYER_CENTER_FALLBACK`.  That is a structural
+    statement (three sub-layers of decreasing speed), not a per-stock measurement, and the
+    fallback is applied per record so a stock that separates one record keeps the measured
+    geometry for it.
+    """
+    preset = preset or {}
+    structure = preset.get("layer_structure")
+    geometry = np.zeros((3, 3, 2), dtype=np.float64)
+    for record in range(3):
+        rows = structure[record] if structure and len(structure) > record else None
+        centers, widths = [], []
+        for octave in range(3):
+            layer = OCTAVE_TO_LAYER[octave]
+            row = rows[layer] if rows and len(rows) > layer else None
+            if row and float(row[0]) > 1e-4 and float(row[2]) > 1e-4:
+                centers.append(float(row[1]))
+                widths.append(max(LAYER_WIDTH_MIN, LAYER_WIDTH_PER_SPAN * float(row[2])))
+            else:
+                centers = None
+                break
+        if not centers or (max(centers) - min(centers)) < LAYER_SEPARATION_MIN:
+            centers = [float(c) for c in LAYER_CENTER_FALLBACK]
+            widths = [max(LAYER_WIDTH_MIN, LAYER_WIDTH_PER_CENTER * c) for c in centers]
+        else:
+            # Which sub-layer is coarsest is structural (crystal size), not a matter of array
+            # order: the fast coarse layer is always the one that half-develops first.  A profile
+            # whose three half-development densities come out non-monotonic (10 of 61 do, by up to
+            # 0.1 D) is therefore assigned by rank -- the three measured positions are kept, only
+            # their octave assignment is corrected.  Nothing is invented.
+            rank = np.argsort(centers)
+            centers = [centers[i] for i in rank][::-1]      # octave order: fine > cloud > mottle
+            widths = [widths[i] for i in rank][::-1]
+        geometry[record, :, 0] = np.clip(centers, LAYER_CENTER_MIN, LAYER_CENTER_MAX)
+        geometry[record, :, 1] = widths
+    return geometry
+
+
+def _layer_share_weights(preset):
+    """Per-octave amplitude from ``crystal_grain.population.sublayerShares``.
+
+    The shares say how much of the coating each sub-layer carries, so a layer with a small share
+    contributes a smaller slice of the granularity.  Every stock currently declares the same
+    ``[0.25, 0.25, 0.25, 0.25]``, which makes this a no-op today -- it is wired so a per-stock
+    population (the field exists in the profiles and nothing read it before P2) is honoured the
+    moment someone fills it in.  ``radiusSpan`` fixes which sub-layer is coarsest, which is what
+    :data:`OCTAVE_TO_LAYER` encodes; it is not a per-stock measurement, so it does not enter the
+    amplitude.
+    """
+    population = (preset or {}).get("population") or {}
+    shares = population.get("sublayerShares")
+    if not shares or len(shares) < 3:
+        return np.ones(3, dtype=np.float64)
+    values = np.asarray([float(x) for x in shares[:3]], dtype=np.float64)
+    peak = float(values.max())
+    if peak <= 1e-9:
+        return np.ones(3, dtype=np.float64)
+    values = values / peak
+    return np.clip(np.asarray([values[OCTAVE_TO_LAYER[o]] for o in range(3)]), 0.05, 1.0)
+
+
+def _octave_signal(octave_weights, rho, layer_weights):
+    """How much noise each octave actually carries, per record: ``(3 records, 3 octaves)``.
+
+    The split must never hand a density band to an octave that has no signal there.  The fine
+    octave feeds the shared luminance stream only, so on a stock whose grain is deliberately
+    independent per channel (``luma_correlation = 0`` -> ``rho = 0``, e.g. Harman Phoenix) it
+    carries *nothing*; redistributing the shoulder onto it emptied the highlights.  This is the
+    per-octave std of the synthesised streams, so ``shape * signal`` is what actually lands in
+    the output.
+    """
+    w = np.asarray(octave_weights, dtype=np.float64)
+    g = np.asarray(OCTAVE_GAIN, dtype=np.float64)
+    rho = float(np.clip(rho, 0.0, 1.0))
+    lw = np.asarray(layer_weights, dtype=np.float64)
+    lw_mean = float(lw.mean())
+    shared = np.sqrt(rho) * lw_mean
+    chroma = np.sqrt(1.0 - rho) * CHROMA_MOTTLE_GAIN
+    signal = np.empty((3, 3), dtype=np.float64)
+    for record in range(3):
+        chroma_var = (chroma * lw[record]) ** 2 + shared ** 2
+        signal[record, 0] = w[0] * g[0] * shared                 # fine: shared stream only
+        signal[record, 1] = w[1] * g[1] * np.sqrt(chroma_var)
+        signal[record, 2] = w[2] * g[2] * np.sqrt(chroma_var)
+    return signal
+
+
+_LAYER_LUT_CACHE = {}
+
+
+def bake_layer_lut(preset, octave_weights=None, rho=None, layer_weights=None):
+    """Bake the per-octave response table: ``(3 records, DENSITY_LUT_SIZE, 3 octaves)``.
+
+    ``layer_lut[record, i, octave] = law_record(D_i) * redistribution``.  The redistribution moves
+    the declared law's granularity between the three coated sub-layers; it never changes the
+    total, because:
+
+        ``sqrt(sum_o (signal_o * response_o)^2) == sqrt(sum_o signal_o^2) * law``
+
+    at every density, where ``signal_o`` is the per-octave std the synthesiser really produces
+    (:func:`_octave_signal`).  Preserving the *signal-weighted* total rather than the raw
+    weights is what makes this hold for a stock whose grain is per-channel independent
+    (``rho = 0``): its fine octave carries no signal, so the shoulder cannot be dumped on it.
+    ``DENS_GAIN`` therefore stays the single amplitude knob and the measured granularity-vs-density
+    law -- the only per-stock measured data we have -- survives untouched.
+
+    ``octave_weights`` (the slider mix), ``rho`` and ``layer_weights`` all enter that
+    normalisation, so the table is baked per blur setting and per stock; it is 18 KB.
+    """
+    weights = tuple(float(x) for x in ((0.45, 0.50, 0.28) if octave_weights is None
+                                       else octave_weights))
+    rho = 0.79 if rho is None else float(rho)
+    layer_weights = tuple(float(x) for x in (layer_weights if layer_weights is not None
+                                             else (0.70, 1.0, 1.35)))
+    structure = (preset or {}).get("layer_structure")
+    key = (_preset_signature(preset) if preset else None,
+           _freeze(structure) if structure else None,
+           _freeze((preset or {}).get("population")),
+           weights, round(rho, 6), layer_weights)
+    cached = _LAYER_LUT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    base = bake_density_lut(preset) if preset else None
+    if base is None:
+        base = bake_bell_lut()
+    geometry = _layer_geometry(preset)
+    shares = _layer_share_weights(preset)
+    signal = _octave_signal(weights, rho, layer_weights)
+    grid = np.linspace(0.0, DENSITY_LUT_MAX, DENSITY_LUT_SIZE, dtype=np.float64)
+    d_max = (preset or {}).get("density_max")
+
+    out = np.zeros((3, DENSITY_LUT_SIZE, 3), dtype=np.float32)
+    for record in range(3):
+        ceiling = max(_layer_value(d_max, record, DEFAULT_DENSITY_MAX), 0.05)
+        x = np.clip(grid / ceiling, 0.0, 1.5)
+        # Freeze the split above the last sub-layer's peak: past it every layer is saturating, so
+        # where the granularity lives stops moving, while the *total* keeps following the law's
+        # Dmax fade.  Without the freeze the basis collapses to zero there and the normalisation
+        # would have to amplify a vanishing number.
+        x_shape = np.minimum(x, float(geometry[record, :, 0].max()))
+        shape = np.empty((3, grid.size), dtype=np.float64)
+        for octave in range(3):
+            center, width = geometry[record, octave]
+            side = np.where(x_shape < center, width * LAYER_LEFT_WIDTH_RATIO, width)
+            shape[octave] = shares[octave] * np.exp(-0.5 * ((x_shape - center) / side) ** 2)
+
+        sig = signal[record]
+        total = float(np.sqrt((sig ** 2).sum()))
+        carried = np.sqrt(((sig[:, None] * shape) ** 2).sum(axis=0))
+        # r_o = law * |signal| * shape_o / |signal * shape|: the signal-weighted share, which is
+        # bounded by |signal| / max(signal) * law and needs no clamp.
+        gain = np.where(carried > 1e-9, total / np.maximum(carried, 1e-9), 0.0)
+        for octave in range(3):
+            out[record, :, octave] = (base[:, record] * shape[octave] * gain).astype(np.float32)
+
+    _LAYER_LUT_CACHE[key] = out
+    return out
+
+
+def _sample_layer_lut(lut, density, octave):
+    """One octave's response (per record) at the given density -- the shader's fetch, in numpy.
+
+    Only used by the slow path (no numba) and by the checks; :func:`layer_response_dd` fuses the
+    same arithmetic into one compiled pass, because nine gathers per pixel cost ~3 s on a 24 MP
+    frame while the fused kernel is bandwidth-bound.
+    """
+    table = np.asarray(lut, dtype=np.float32)[:, :, int(octave)]
+    lo, frac = _lattice_index(density)
+    out = np.empty(np.shape(density), dtype=np.float32)
+    for record in range(3):
+        column = table[record]
+        base = column[lo[..., record]]
+        next_ = column[lo[..., record] + 1]
+        out[..., record] = base + (next_ - base) * frac[..., record]
+    return out
+
+
+_RESPONSE_KERNEL = None
+_RESPONSE_KERNEL_TRIED = False
+_RESPONSE_KERNEL_LOCK = threading.Lock()
+
+
+def _response_kernel():
+    """Compiled (density, 3 tables, 3 octave streams) -> dD, or None without numba."""
+    global _RESPONSE_KERNEL, _RESPONSE_KERNEL_TRIED
+    if _RESPONSE_KERNEL_TRIED:
+        return _RESPONSE_KERNEL
+    with _RESPONSE_KERNEL_LOCK:
+        if _RESPONSE_KERNEL_TRIED:
+            return _RESPONSE_KERNEL
+        try:
+            from numba import njit, prange
+
+            span = DENSITY_LUT_SIZE - 1
+            scale = span / DENSITY_LUT_MAX
+
+            @njit(cache=True, parallel=True, fastmath=True)
+            def kernel(density, table, fine, cloud, mottle, out):
+                h = density.shape[0]
+                w = density.shape[1]
+                for y in prange(h):
+                    for x in range(w):
+                        for c in range(3):
+                            pos = density[y, x, c] * scale
+                            if pos < 0.0:
+                                pos = 0.0
+                            elif pos > span:
+                                pos = span
+                            i = int(pos)
+                            if i > span - 1:
+                                i = span - 1
+                            f = pos - i
+                            total = 0.0
+                            acc = fine[y, x, c]
+                            b0 = table[c, i, 0]
+                            b1 = table[c, i + 1, 0]
+                            total += acc * (b0 + (b1 - b0) * f)
+                            acc = cloud[y, x, c]
+                            b0 = table[c, i, 1]
+                            b1 = table[c, i + 1, 1]
+                            total += acc * (b0 + (b1 - b0) * f)
+                            acc = mottle[y, x, c]
+                            b0 = table[c, i, 2]
+                            b1 = table[c, i + 1, 2]
+                            total += acc * (b0 + (b1 - b0) * f)
+                            out[y, x, c] = total
+
+            _RESPONSE_KERNEL = kernel
+        except Exception:
+            _RESPONSE_KERNEL = None
+        _RESPONSE_KERNEL_TRIED = True
+    return _RESPONSE_KERNEL
+
+
+def layer_response_dd(layer_lut, density, fine, cloud, mottle):
+    """``sum_o stream_o * response_o(density)`` in one pass (the layered dD, before gain)."""
+    table = np.ascontiguousarray(layer_lut, dtype=np.float32)
+    kernel = _response_kernel()
+    if kernel is not None:
+        out = np.empty(density.shape, dtype=np.float32)
+        kernel(np.ascontiguousarray(density, dtype=np.float32), table,
+               np.ascontiguousarray(fine, dtype=np.float32),
+               np.ascontiguousarray(cloud, dtype=np.float32),
+               np.ascontiguousarray(mottle, dtype=np.float32), out)
+        return out
+    dD = fine * _sample_layer_lut(table, density, 0)
+    dD += cloud * _sample_layer_lut(table, density, 1)
+    dD += mottle * _sample_layer_lut(table, density, 2)
+    return dD
 
 
 def density_from_linear(linear_rgb, grid):
@@ -530,6 +868,21 @@ def density_from_linear(linear_rgb, grid):
     return out
 
 
+def density_for_linear(linear_rgb, film_density=None):
+    """Negative net density for a scene-linear block: the cube when there is one, else -log10.
+
+    The legacy reading treats the scene-linear value as the negative's transmittance; it is only
+    for callers with no LUT context (thumbnails, offline probes) and is what zeroed the grain
+    below -3 EV before P1.  Both the layered and the flat path read density through here so they
+    cannot disagree about *what density a pixel has*.
+    """
+    density = density_from_linear(linear_rgb, film_density)
+    if density is not None:
+        return density
+    lin = np.clip(np.asarray(linear_rgb, dtype=np.float32), DENS_MIN_TRANSMITTANCE, 1.0)
+    return (-np.log10(lin)).astype(np.float32)
+
+
 def density_response(linear_rgb, lut=None, film_density=None):
     """Granularity as a function of negative optical density (per channel).
 
@@ -545,20 +898,20 @@ def density_response(linear_rgb, lut=None, film_density=None):
     the global calibration targets still describe.  Both paths return the *same* quantity: the
     density modulation in units where ``DENS_GAIN`` is the amplitude at the reference density,
     so swapping one for the other cannot change the overall grain level.
+
+    This is the *total* response (all octaves together).  The layered path does not call it: it
+    fetches per-octave responses from :func:`bake_layer_lut`, which sums to this same curve.
     """
-    density = density_from_linear(linear_rgb, film_density)
-    if density is None:
-        lin = np.clip(np.asarray(linear_rgb, dtype=np.float32), DENS_MIN_TRANSMITTANCE, 1.0)
-        density = -np.log10(lin)
+    density = density_for_linear(linear_rgb, film_density)
+    if lut is not None:
+        return _sample_density_lut(lut, density)
     z = density - DENS_PEAK
     w = np.where(z > 0.0, DENS_W_SHOULDER, DENS_W_TOE).astype(np.float32)
     bell = DENS_FLOOR + (1.0 - DENS_FLOOR) * np.exp(-0.5 * (z / w) ** 2)
     # fade to zero as the film saturates at its Dmax
     t = np.clip((density - (DENS_DMAX - DENS_W_SAT)) / DENS_W_SAT, 0.0, 1.0).astype(np.float32)
     roll = 1.0 - (3.0 * t * t - 2.0 * t * t * t)
-    if lut is None:
-        return (DENS_GAIN * bell * roll).astype(np.float32)
-    return _sample_density_lut(lut, density)
+    return (DENS_GAIN * bell * roll).astype(np.float32)
 
 
 def effective_strength(grain_slider, stock_strength):
@@ -574,11 +927,11 @@ class GrainSpec:
     """Everything the two renderers need to agree on, computed in one place."""
 
     __slots__ = ("scale_px", "sigmas", "w_fine", "w_cloud", "w_mottle", "rho", "lw",
-                 "lw_mean", "strength", "amplitude", "active", "density_lut",
+                 "lw_mean", "strength", "amplitude", "active", "density_lut", "layer_lut",
                  "luma_correlation", "film_density")
 
     def __init__(self, scale_px, sigmas, weights, rho, layer_weights, strength, amplitude, active,
-                 density_lut=None, luma_correlation=None, film_density=None):
+                 density_lut=None, luma_correlation=None, film_density=None, layer_lut=None):
         self.scale_px = scale_px
         self.sigmas = sigmas
         self.w_fine, self.w_cloud, self.w_mottle = weights
@@ -592,6 +945,9 @@ class GrainSpec:
         # bell.  Both renderers read this one table (texture on the GPU, interpolation on the CPU).
         self.density_lut = density_lut
         self.luma_correlation = luma_correlation
+        # Per-octave response table (3 records, LUT size, 3 octaves), or None to keep the single
+        # total response.  Built by bake_layer_lut() from the profile's sub-layer geometry (P2).
+        self.layer_lut = layer_lut
         # Negative net density on the LUT's shaper lattice (N, N, N, 3), or None to keep the
         # historical -log10(lin) reading.  This is the input the density law is a function of.
         self.film_density = film_density
@@ -599,10 +955,11 @@ class GrainSpec:
     def __repr__(self):
         law = "bell" if self.density_lut is None else "lut"
         dens = "linear" if self.film_density is None else "film"
+        layers = "layered" if self.layer_lut is not None else "flat"
         return (f"GrainSpec(scale_px={self.scale_px:.4f}, sigmas={tuple(round(s, 3) for s in self.sigmas)}, "
                 f"w=({self.w_fine:.3f},{self.w_cloud:.3f},{self.w_mottle:.3f}), rho={self.rho:.3f}, "
                 f"strength={self.strength:.4f}, amplitude={self.amplitude:.4f}, density={law}, "
-                f"domain={dens})")
+                f"domain={dens}, response={layers})")
 
 
 def amplitude_for_long_edge(long_edge_px):
@@ -668,6 +1025,10 @@ def derive(grain_slider, stock_strength, layer_weights, cloud_blur, rho,
         density_lut=bake_density_lut(density_preset),
         luma_correlation=luma,
         film_density=film_density,
+        # The octave weights are part of the layered table's normalisation, so it is baked per
+        # blur setting; it is 6 KB and cached by the slider tuple.
+        layer_lut=bake_layer_lut(density_preset, weights, rho=solved_rho,
+                                 layer_weights=layer_weights),
     )
     return spec
 
@@ -694,22 +1055,28 @@ def _gauss_ksize(sigma):
 
 
 def gauss_white_gain(sigma):
-    """Factor that restores unit variance after blurring unit-variance white noise.
+    """Factor that restores the *nominal* std after blurring unit-variance white noise.
 
-    Blurring white noise shrinks its standard deviation by ``sqrt(sum(k^2))`` for the
-    normalised separable kernel ``k``.  That factor is known analytically, so measuring
-    ``arr.std()`` after every blur is unnecessary -- and on a 4K field that measurement alone
-    cost ~72 ms per octave.
+    Blurring white noise shrinks its standard deviation by ``sqrt(sum(k^2))`` for the normalised
+    separable kernel ``k``.  That factor is known analytically -- and using it is wrong for small
+    sigma: ``cv2.GaussianBlur``'s truncated kernel plus float32 rounding leaves a real deviation
+    from the analytic value once sigma drops below about one pixel, and the finest octave sits
+    exactly there on every output below ~2300 px (``MIN_OCTAVE_SIGMA_PX`` is 0.35).  Measured on a
+    128x128 field, the analytic correction was off by up to 29 %, which is what made the CPU's
+    fine octave louder than the shader's (the plan's A2).
+
+    So the factor is measured, on a fixed deterministic field, once per sigma and cached.  The
+    measurement costs one blur of a small field; it used to cost a ``std()`` over the whole 4K
+    render, which is why this looked expensive the first time round.
     """
     key = round(float(sigma), 6)
     cached = _GAUSS_GAIN_CACHE.get(key)
     if cached is not None:
         return cached
-    _ksize, r = _gauss_ksize(sigma)
-    xs = np.arange(-r, r + 1, dtype=np.float64)
-    g = np.exp(-0.5 * (xs / float(sigma)) ** 2)
-    g /= g.sum()
-    gain = 1.0 / float((g ** 2).sum())
+    field = np.random.default_rng(20260130).standard_normal((192, 192)).astype(np.float32)
+    blurred = _gaussian_blur(field, float(sigma))
+    measured = float(np.asarray(blurred, dtype=np.float64).std())
+    gain = 1.0 / measured if measured > 1e-9 else 1.0
     _GAUSS_GAIN_CACHE[key] = gain
     return gain
 
@@ -784,16 +1151,18 @@ def _gaussian_blur(x, sigma):
     return cv2.GaussianBlur(x, (ksize, ksize), float(sigma), borderType=cv2.BORDER_REFLECT)
 
 
-def synthesize_layer_grain(spec, height, width, rng):
-    """Per-channel ``layer_grain`` with the octave structure of the preview.
+def synthesize_octave_grain(spec, height, width, rng):
+    """The three octaves of ``layer_grain``, separately: ``(fine, cloud, mottle)``.
 
-    Returns ``(h, w, 3)`` float32 with std matching the GLSL ``layer_grain`` by construction
-    of :func:`expected_layer_std`.
+    Same seeds, same order and same mixing as the flat mixture, so summing the triple reproduces
+    :func:`synthesize_layer_grain` bit for bit when all three carry the same response.  They are
+    returned separately because P2 gives each octave its own density response: a saturated coarse
+    sub-layer has no granularity left in the shoulder, so the mottle octave must fade out there
+    while the fine octave takes over, and that is only expressible octave by octave.
 
-    The CPU approximates the shader's value-noise octaves with Gaussian-blurred white noise.
-    Every octave is rescaled to ``VALUE_NOISE_STD`` -- the constant the shader's value noise
-    carries -- using the analytic blur factor, so the two renderers stay on the same amplitude
-    model while their spectral character may differ.
+    Each octave's per-layer (chroma) part excludes the fine micro-crystal octave, exactly as
+    before -- the fine octave only feeds the shared luminance stream, so chroma never speckles at
+    the pixel level.
     """
     s_fine, s_cloud, s_mottle = spec.sigmas
     g_fine, g_cloud, g_mottle = OCTAVE_GAIN
@@ -810,33 +1179,81 @@ def synthesize_layer_grain(spec, height, width, rng):
     # Per-layer stream: cloud + mottle octaves only (no pixel-level chroma speckle).
     rgb_cloud = octave(seeds[0], s_cloud, 3)
     rgb_mottle = octave(seeds[1], s_mottle, 3)
-    raw_noise = (rgb_cloud * (spec.w_cloud * g_cloud)
-                 + rgb_mottle * (spec.w_mottle * g_mottle)) * CHROMA_MOTTLE_GAIN
 
     # Shared luminance stream across coupled emulsion layers: all three octaves.
-    shared_noise = (octave(seeds[2], s_fine, 1) * (spec.w_fine * g_fine)
-                    + octave(seeds[3], s_cloud, 1) * (spec.w_cloud * g_cloud)
-                    + octave(seeds[4], s_mottle, 1) * (spec.w_mottle * g_mottle))
+    shared_fine = octave(seeds[2], s_fine, 1)
+    shared_cloud = octave(seeds[3], s_cloud, 1)
+    shared_mottle = octave(seeds[4], s_mottle, 1)
 
-    layer = (np.sqrt(1.0 - spec.rho) * raw_noise * spec.lw[None, None, :]
-             + np.sqrt(spec.rho) * shared_noise * spec.lw_mean)
-    return (layer * spec.amplitude).astype(np.float32)
+    rho = spec.rho
+    lw = spec.lw[None, None, :]
+    lw_mean = spec.lw_mean
+    shared_gain = np.float32(np.sqrt(rho) * lw_mean)
+    chroma_gain = np.float32(np.sqrt(1.0 - rho))
+
+    def blend(raw, shared):
+        return (chroma_gain * raw * lw + shared * shared_gain).astype(np.float32)
+
+    fine = blend(np.float32(0.0), shared_fine * np.float32(spec.w_fine * g_fine))
+    cloud = blend(rgb_cloud * np.float32(spec.w_cloud * g_cloud * CHROMA_MOTTLE_GAIN),
+                  shared_cloud * np.float32(spec.w_cloud * g_cloud))
+    mottle = blend(rgb_mottle * np.float32(spec.w_mottle * g_mottle * CHROMA_MOTTLE_GAIN),
+                   shared_mottle * np.float32(spec.w_mottle * g_mottle))
+    amplitude = np.float32(spec.amplitude)
+    return (fine * amplitude, cloud * amplitude, mottle * amplitude)
+
+
+def synthesize_layer_grain(spec, height, width, rng):
+    """Per-channel ``layer_grain`` with the octave structure of the preview.
+
+    Returns ``(h, w, 3)`` float32 with std matching the GLSL ``layer_grain`` by construction
+    of :func:`expected_layer_std`.
+
+    The CPU approximates the shader's value-noise octaves with Gaussian-blurred white noise.
+    Every octave is rescaled to ``VALUE_NOISE_STD`` -- the constant the shader's value noise
+    carries -- using the analytic blur factor, so the two renderers stay on the same amplitude
+    model while their spectral character may differ.
+
+    This is the *sum* of :func:`synthesize_octave_grain`'s three streams; callers that apply a
+    per-octave response use that function directly.
+    """
+    fine, cloud, mottle = synthesize_octave_grain(spec, height, width, rng)
+    return (fine + cloud + mottle).astype(np.float32)
+
+
+def apply_block(linear_rgb, spec, rng):
+    """Apply pre-LUT transmittance grain to one block, in place-safe fashion.
+
+    ``T_out = T_in * 10^(-dD)`` with ``dD = sum_o layer_grain_o * response_o * (strength * GAIN)``.
+
+    With a layered response table each octave is scaled by its own curve at the pixel's density
+    before the sum, so the coarse sub-layer's share collapses as it saturates and the fine one
+    takes over in the shoulder.  Without one the three octaves are summed first and scaled by the
+    single total response, which is the P1 behaviour and still the path used by callers that pass
+    no stock.
+    """
+    h, w = linear_rgb.shape[:2]
+    gain = np.float32(spec.strength * STRENGTH_GAIN)
+
+    if spec.layer_lut is None:
+        layer = synthesize_layer_grain(spec, h, w, rng)
+        response = density_response(linear_rgb, spec.density_lut, spec.film_density)
+        dD = layer * gain * response
+    else:
+        octaves = synthesize_octave_grain(spec, h, w, rng)
+        density = density_for_linear(linear_rgb, spec.film_density)
+        dD = layer_response_dd(spec.layer_lut, density, *octaves)
+        dD *= gain
+    return np.maximum(0.0, linear_rgb * np.exp(-dD * LOG10_E)).astype(np.float32)
+
 
 def apply_to_linear(linear_rgb, spec, rng, chunk_rows=512):
-    """Apply pre-LUT transmittance grain to a scene-linear RGB image, in place-safe fashion.
-
-    ``T_out = T_in * 10^(-dD)`` with ``dD = layer_grain * (strength * STRENGTH_GAIN) * dens_mod``.
-    Chunked so a 64 MP frame does not need a second full-size noise field at once.
-    """
+    """Chunked :func:`apply_block` -- a 64 MP frame does not need every noise field at once."""
     if not spec.active:
         return linear_rgb
-    h, w = linear_rgb.shape[:2]
+    h = linear_rgb.shape[0]
     out = np.empty_like(linear_rgb)
     for y0 in range(0, h, chunk_rows):
         y1 = min(y0 + chunk_rows, h)
-        block = linear_rgb[y0:y1]
-        layer = synthesize_layer_grain(spec, y1 - y0, w, rng)
-        response = density_response(block, spec.density_lut, spec.film_density)
-        dD = layer * (spec.strength * STRENGTH_GAIN) * response
-        out[y0:y1] = np.maximum(0.0, block * np.exp(-dD * LOG10_E))
+        out[y0:y1] = apply_block(linear_rgb[y0:y1], spec, rng)
     return out

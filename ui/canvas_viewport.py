@@ -206,11 +206,13 @@ uniform float u_grain_dens_wtoe;
 uniform float u_grain_dens_wshoulder;
 uniform float u_grain_dens_dmax;
 uniform float u_grain_dens_wsat;
-// Per-stock density law, baked by core/grain_model.bake_density_lut() into a 512x1 RGB ramp over
-// D = 0..4 and sampled here.  Keeping the law in a texture rather than in GLSL means a stock's
-// law is implemented exactly once (in Python) and both renderers read the same numbers.
-// u_grain_density_enable == 0 falls back to the P0 bell above, so a missing texture can never
-// blank the grain.
+// Per-octave density response, baked by core/grain_model.bake_layer_lut() into a 512x3 table
+// (row = C/M/Y record, rgb = fine/cloud/mottle response at that density) over D = 0..4 and
+// sampled here once per record.  Keeping it in a texture rather than in GLSL means a stock's
+// law is implemented exactly once (in Python) and both renderers read the same numbers -- and
+// P2's split across the three coated sub-layers cannot drift between preview and export either.
+// u_grain_density_enable == 0 falls back to the P0 bell above for all three octaves, so a
+// missing texture can never blank the grain.
 uniform sampler2D u_grain_density_lut;
 uniform float u_grain_density_scale;
 uniform float u_grain_density_enable;
@@ -1153,8 +1155,7 @@ void main() {
         float grain_att = 1.0 / max(1.0, footprint);
 
         // Multi-scale organic dye cloud clusters & micro-crystals:
-        // 1. High-frequency micro-crystals (~1.2 master px, ~7 um) with continuous subpixel continuity
-        vec3 fine_rgb = (smooth_cloud_noise_rgb(gcoord * 0.75) - vec3(0.5)) * 2.0;
+        // 1. High-frequency micro-crystals (~1.2 master px, ~7 um): luminance only, sampled below.
         // 2. Mid-frequency dye clouds (~1.8 master px, ~11 um)
         vec3 cloud_rgb = (smooth_cloud_noise_rgb(gcoord * 0.45 + vec2(43.1, 89.4)) - vec3(0.5)) * 1.8;
         // 3. Low-frequency organic dye mottle (~3.5 master px, ~21 um)
@@ -1166,15 +1167,6 @@ void main() {
         float w_fine = u_grain_w_fine;
         float w_cloud = u_grain_w_cloud;
         float w_mottle = u_grain_w_mottle;
-        // Per-layer (chroma) component: dye-cloud mottle is spatially coarser than the luminance
-        // grain, so the independent part excludes the fine micro-crystal octave (no RGB pixel speckle).
-        vec3 raw_noise = (cloud_rgb * w_cloud + mottle_rgb * w_mottle) * 1.15;
-
-        // Shared luminance grain stream across coupled emulsion layers
-        float shared_fine = (smooth_cloud_noise(gcoord * 0.75 + vec2(53.2, 19.8)) - 0.5) * 2.0;
-        float shared_cloud = (smooth_cloud_noise(gcoord * 0.45 + vec2(11.7, 73.2)) - 0.5) * 1.8;
-        float shared_mottle = (smooth_cloud_noise(gcoord * 0.22 + vec2(91.2, 53.4)) - 0.5) * 1.6;
-        float shared_noise = shared_fine * w_fine + shared_cloud * w_cloud + shared_mottle * w_mottle;
 
         // Coupled C-41 emulsion layer correlation (organic dye clouds vs digital chroma noise).
         // u_grain_rho is not a literal: core/grain_model.rho_for_target_correlation() solves it
@@ -1198,9 +1190,25 @@ void main() {
         // The factor is applied here, not in the export, because the export carries the P0
         // calibration and must not drift.
         float noise_fix = (u_preview_noise_fix > 0.01) ? u_preview_noise_fix : 1.0;
-        vec3 layer_grain = (sqrt(1.0 - rho) * raw_noise * u_stock_layer_weights
-                          + sqrt(rho) * vec3(shared_noise * lw_mean))
-                         * u_grain_amplitude * noise_fix;
+        float amp_fix = u_grain_amplitude * noise_fix;
+        float chroma_gain = sqrt(1.0 - rho);
+        float shared_gain = sqrt(rho) * lw_mean;
+
+        // P2: the three octaves are the three coated sub-layers (coarse/mid/fine), so each one is
+        // scaled by its own density response below instead of sharing one. They must therefore
+        // stay separate here.  Per-layer (chroma) stream excludes the fine micro-crystal octave,
+        // exactly as the CPU synthesiser does -- no RGB pixel speckle.  cloud_rgb / mottle_rgb /
+        // shared_* already carry their OCTAVE_GAIN, so only the slider weight is applied now.
+        vec3 cloud_rgb_scaled = cloud_rgb * (w_cloud * 1.15);
+        vec3 mottle_rgb_scaled = mottle_rgb * (w_mottle * 1.15);
+        float shared_fine = (smooth_cloud_noise(gcoord * 0.75 + vec2(53.2, 19.8)) - 0.5) * 2.0;
+        float shared_cloud = (smooth_cloud_noise(gcoord * 0.45 + vec2(11.7, 73.2)) - 0.5) * 1.8;
+        float shared_mottle = (smooth_cloud_noise(gcoord * 0.22 + vec2(91.2, 53.4)) - 0.5) * 1.6;
+        vec3 g_fine = vec3(shared_fine * w_fine * shared_gain) * amp_fix;
+        vec3 g_cloud = (chroma_gain * cloud_rgb_scaled * u_stock_layer_weights
+                        + shared_cloud * w_cloud * shared_gain) * amp_fix;
+        vec3 g_mottle = (chroma_gain * mottle_rgb_scaled * u_stock_layer_weights
+                         + shared_mottle * w_mottle * shared_gain) * amp_fix;
 
         // Stock strength & user slider modulation
         float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
@@ -1223,14 +1231,21 @@ void main() {
         } else {
             dens_D = -log(clamp(linear_rgb, vec3(1e-4), vec3(1.0))) * (1.0 / 2.302585092994046);
         }
-        vec3 dens_mod;
+        // Per-octave responses.  The table is 512 wide (density) by 3 tall (record), and each
+        // texel's rgb carries the fine / cloud / mottle response at that density, so one fetch
+        // per record returns all three octaves.  Row centres are exactly (r + 0.5) / 3.
+        vec3 resp_fine, resp_cloud, resp_mottle;
         if (u_grain_density_enable > 0.5) {
-            // One fetch per record; the ramp is linear-filtered, and the CPU interpolates the
-            // same table the same way, so preview and export agree on the law.
-            dens_mod = vec3(
-                textureLod(u_grain_density_lut, vec2(dens_D.r * u_grain_density_scale, 0.5), 0.0).r,
-                textureLod(u_grain_density_lut, vec2(dens_D.g * u_grain_density_scale, 0.5), 0.0).g,
-                textureLod(u_grain_density_lut, vec2(dens_D.b * u_grain_density_scale, 0.5), 0.0).b);
+            float row = 1.0 / 3.0;
+            vec3 t_r = textureLod(u_grain_density_lut,
+                                  vec2(dens_D.r * u_grain_density_scale, 0.5 * row), 0.0).rgb;
+            vec3 t_g = textureLod(u_grain_density_lut,
+                                  vec2(dens_D.g * u_grain_density_scale, 1.5 * row), 0.0).rgb;
+            vec3 t_b = textureLod(u_grain_density_lut,
+                                  vec2(dens_D.b * u_grain_density_scale, 2.5 * row), 0.0).rgb;
+            resp_fine   = vec3(t_r.x, t_g.x, t_b.x);
+            resp_cloud  = vec3(t_r.y, t_g.y, t_b.y);
+            resp_mottle = vec3(t_r.z, t_g.z, t_b.z);
         } else {
             vec3 dens_z = dens_D - vec3(u_grain_dens_peak);
             vec3 dens_w = mix(vec3(u_grain_dens_wtoe), vec3(u_grain_dens_wshoulder),
@@ -1241,14 +1256,19 @@ void main() {
             // Film saturation: fade to zero just below the stock's Dmax. Above it the particle-model
             // reference returns a constant saturated field (every crystal developed), so extending
             // the Gaussian there would put grain into fully clipped highlights.
-            vec3 dens_t = clamp((dens_D - vec3(u_grain_dens_dmax - u_grain_dens_wsat))
-                                / vec3(u_grain_dens_wsat), 0.0, 1.0);
-            vec3 dens_roll = vec3(1.0) - (vec3(3.0) * dens_t * dens_t - vec3(2.0) * dens_t * dens_t * dens_t);
-            dens_mod = vec3(u_grain_dens_gain) * dens_bell * dens_roll;
+            vec3 sat_t = clamp((dens_D - vec3(u_grain_dens_dmax - u_grain_dens_wsat))
+                               / vec3(u_grain_dens_wsat), 0.0, 1.0);
+            vec3 dens_roll = vec3(1.0) - (vec3(3.0) * sat_t * sat_t
+                                          - vec3(2.0) * sat_t * sat_t * sat_t);
+            vec3 dens_bell_total = vec3(u_grain_dens_gain) * dens_bell * dens_roll;
+            resp_fine = dens_bell_total;
+            resp_cloud = dens_bell_total;
+            resp_mottle = dens_bell_total;
         }
 
         // Transmittance modulation: T = T_in * 10^(-dD) = T_in * exp(-dD * 2.3025851)
-        vec3 dD = layer_grain * (eff_strength * 0.35 * grain_att) * dens_mod;
+        vec3 dD = (g_fine * resp_fine + g_cloud * resp_cloud + g_mottle * resp_mottle)
+                  * (eff_strength * 0.35 * grain_att);
         linear_rgb = max(vec3(0.0), linear_rgb * exp(-dD * 2.3025851));
     }
 
@@ -1676,11 +1696,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         pass
 
     def _upload_grain_density_lut(self, lut):
-        """Upload (or refresh) the 512x1 density-law ramp and return its texture id.
+        """Upload (or refresh) the per-octave response table and return its texture id.
 
-        The table is baked once per stock by core/grain_model.bake_density_lut() and cached there,
-        so the same array object comes back every frame; ``id()`` is enough to notice a stock
-        change without re-uploading 6 KB of constants on every paint.
+        Shape is ``(3 records, DENSITY_LUT_SIZE, 3 octaves)`` -- row = record, rgb = the fine /
+        cloud / mottle response at that density (P2).  Baking happens in
+        ``core/grain_model.bake_layer_lut()``, which caches per (stock, layer geometry, octave
+        weights), so the same array object comes back every frame and ``id()`` is enough to notice
+        a stock or blur-slider change without re-uploading 6 KB of constants on every paint.
         """
         if lut is None:
             return None
@@ -1688,8 +1710,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         tex = getattr(self, "_grain_density_tex_id", None)
         if tex and getattr(self, "_grain_density_lut_id", None) == key:
             return tex
-        data = np.ascontiguousarray(lut, dtype=np.float32).reshape(1, int(lut.shape[0]), 3)
-        height, width = data.shape[0], data.shape[1]
+        data = np.ascontiguousarray(lut, dtype=np.float32)
+        height, width = int(data.shape[0]), int(data.shape[1])
         if not tex:
             tex = GL.glGenTextures(1)
             GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
@@ -1766,14 +1788,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
         funcs.glActiveTexture(0x84C0)
 
     def _bind_grain_density_lut(self, funcs, u_1f, u_1i, spec):
-        """Bind the stock's density law, or switch the shader back to the P0 bell."""
+        """Bind the stock's per-octave response table, or switch back to the P0 bell."""
         tex = None
-        lut = getattr(spec, "density_lut", None)
+        lut = getattr(spec, "layer_lut", None)
         if lut is not None:
             try:
                 tex = self._upload_grain_density_lut(lut)
             except Exception as exc:                # noqa: BLE001 - never break a paint
-                print(f"[SpektraGrain] 密度律纹理上传失败，回退 P0 钟形: {exc}")
+                print(f"[SpektraGrain] 分层响应表纹理上传失败，回退 P0 钟形: {exc}")
                 tex = None
         if not tex:
             # No table: the shader keeps the global P0 bell.  Both branches return the same
