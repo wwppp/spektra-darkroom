@@ -35,6 +35,7 @@ saved on entry and restored on every exit path.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 from OpenGL import GL
@@ -486,8 +487,15 @@ class GLHalationChain:
                         GL.GL_RGBA, GL.GL_FLOAT, None)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        # Legacy B (docs/push-grain-plan.md 14.2): the CPU side blurs with
+        # cv2.BORDER_REFLECT_101 while GL clamps to the edge, so the border ring differs.
+        # On the 47 px working grid that ring is ~8 % of the area -- the right order to
+        # explain the remaining 1.5 dB on cinebloom 1.0.  HAL_BORDER=mirror switches the
+        # intermediate targets to mirroring so the hypothesis can be tested without a patch.
+        _wrap = (GL.GL_MIRRORED_REPEAT if os.environ.get("HAL_BORDER") == "mirror"
+                 else GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, _wrap)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, _wrap)
         GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
 
         fbo = GL.glGenFramebuffers(1)
