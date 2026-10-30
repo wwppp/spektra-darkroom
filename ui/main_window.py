@@ -7198,11 +7198,36 @@ aspect_ratio=self._lens_frame_aspect(photo),
     def _apply_lut(self, lut_3d):
         """Upload a committed LUT and record which parameter key it represents, so the live
         preview can tell "already showing this" from "still stale"."""
-        self.canvas.set_lut(lut_3d)
+        self.canvas.set_lut(lut_3d, self._film_density_for_current())
         self._lut_applied_key = self._current_lut_key()
         queued = getattr(self, "_lut_job", None)
         if queued is not None and queued[0] != self._lut_applied_key:
             self._lut_job = None       # superseded: never spend a bake on outdated parameters
+
+    def _film_density_for_current(self):
+        """Density cube belonging to the LUT currently being shown.
+
+        The grain law is a function of negative density, and that cube is baked alongside the
+        LUT; the canvas carries it so the shader cannot index one bake's law with another
+        bake's densities. A miss means the LUT on screen did not come from this engine's cache
+        (or the parameters moved between bake and apply) -- say so once instead of silently
+        dropping the grain back to the -log10(lin) domain, which is what P1 exists to remove.
+        """
+        eng = getattr(self, "engine", None)
+        film = getattr(self, "current_film_stock", "none")
+        if eng is None or film in (None, "", "none"):
+            return None
+        params = dict(self.current_params)
+        params["print_mode"] = getattr(self, "current_print_mode", "optical")
+        try:
+            grid = eng.get_film_density(film, getattr(self, "current_paper_stock", "kodak_2383"), 33, params)
+        except Exception as exc:                    # noqa: BLE001 - never break a paint
+            print(f"[SpektraGrain] 密度表获取失败: {exc}")
+            grid = None
+        if grid is None and not getattr(self, "_density_miss_warned", False):
+            self._density_miss_warned = True
+            print("[SpektraGrain] 警告：当前 LUT 没有配套的显影密度表，颗粒回退到 -log10(lin) 域")
+        return grid
 
     def _ensure_lut_bake_bridge(self):
         if hasattr(self, "_lut_bake_bridge"):
@@ -7296,7 +7321,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 if isinstance(getattr(self.canvas, "params", None), dict):
                     for k, v in chem.items():
                         self.canvas.params[k] = v
-                self.canvas.set_lut(lut)
+                self.canvas.set_lut(lut, self._film_density_for_current())
             except RuntimeError:
                 return  # canvas / window already torn down
             self._lut_applied_key = key

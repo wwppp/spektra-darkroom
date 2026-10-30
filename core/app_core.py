@@ -79,22 +79,17 @@ PROPHOTO_TO_SRGB = np.array([
 ], dtype=np.float32)
 
 
-# Log Shaper constants: maps scene-linear HDR [0.0, 8.0] into [0.0, 1.0] with dense shadow resolution
-SHAPER_C = 60.0
-SHAPER_MAX = 8.0
-SHAPER_S = float(np.log(1.0 + SHAPER_C * SHAPER_MAX))  # ~6.175867147775916
-SHAPER_INV_S = float(1.0 / SHAPER_S)                    # ~0.16192058097945077
-
-
-def shaper_forward(lin):
-    """Map scene-linear HDR [0.0, 8.0+] into [0.0, 1.0] with logarithmic shadow allocation."""
-    c = np.maximum(0.0, lin)
-    return (np.log(1.0 + SHAPER_C * c) * SHAPER_INV_S).astype(np.float32)
-
-
-def shaper_inverse(t):
-    """Map shaper lattice coordinates [0.0, 1.0] into scene-linear HDR [0.0, 8.0]."""
-    return ((np.exp(t * SHAPER_S) - 1.0) / SHAPER_C).astype(np.float32)
+# Log Shaper: the definition now lives in core/shaper.py so core/grain_model.py can use the
+# same lattice without importing the engine.  Re-exported here because a lot of code (and
+# every scratch script) imports it from this module.
+from .shaper import (  # noqa: E402  (kept next to the constants it describes)
+    SHAPER_C,
+    SHAPER_INV_S,
+    SHAPER_MAX,
+    SHAPER_S,
+    shaper_forward,
+    shaper_inverse,
+)
 
 
 def srgb_to_linear(srgb):
@@ -2254,9 +2249,21 @@ class SpektraEngine:
             cache_file = os.path.join(cache_dir, f"v4_shaper__{film_stock}__{eff_paper}__{lut_size}.npy")
             bundled_file = os.path.join(bundled_cache_dir, f"v4_shaper__{film_stock}__{eff_paper}__{lut_size}.npy")
             load_target = cache_file if os.path.exists(cache_file) else (bundled_file if os.path.exists(bundled_file) else None)
-            if load_target:
+            # The grain law reads the negative density, not the LUT. Serving a cached LUT without
+            # its density cube would silently drop the grain back to the -log10(lin) domain, so a
+            # cache hit only counts when both files are there; otherwise fall through and rebake
+            # (one extra develop-only pass, once per stock).
+            dens_name = f"density_v2__{film_stock}__{eff_paper}__{lut_size}__1.0_1.0_1.0.npy"
+            dens_file = os.path.join(cache_dir, dens_name)
+            dens_bundled = os.path.join(bundled_cache_dir, dens_name)
+            dens_target = dens_file if os.path.exists(dens_file) else (
+                dens_bundled if os.path.exists(dens_bundled) else None)
+            if load_target and dens_target:
                 try:
                     lut_3d = np.load(load_target)
+                    grid = np.load(dens_target).astype(np.float32, copy=False)
+                    if grid.shape != (lut_size, lut_size, lut_size, 3):
+                        raise ValueError(f"density cube shape {grid.shape}")
                     self._record_lut_baked(lut_3d, {
                         "dir_amount": 1.0,
                         "dir_interlayer": 1.0,
@@ -2264,6 +2271,10 @@ class SpektraEngine:
                         "morph_gamma": 1.0,
                         "developer_exhaustion": 0.0,
                     })
+                    if not hasattr(self, "_film_density_cache"):
+                        self._film_density_cache = {}
+                    self._film_density_cache[
+                        (film_stock, eff_paper, lut_size, illuminant, 1.0, 1.0, 1.0)] = grid
                     with self._render_lock:
                         self._lut_cache[cache_key] = lut_3d
                         self._lut_cache.move_to_end(cache_key)
@@ -2391,6 +2402,30 @@ class SpektraEngine:
                 self._lut_loge_cache.pop(next(iter(self._lut_loge_cache)))
             self._lut_loge_cache[loge_key] = log_e_film
 
+        # Negative density on the same lattice. The grain law is a function of *density*, so
+        # this is the input it should have had all along (docs/push-grain-plan.md P1). Baked
+        # from the same cached log-exposure film plane, so it costs one develop-only pass.
+        # NOTE: CMY_FILM sits *after* the DIR couplers, so the cache key must carry them --
+        # loge_key cannot be reused, because LOG_E_FILM is before DIR.
+        # Reversal stocks come out of develop() as dmax - D (the scanner inverts them later), and
+        # the grain law expects physical density, so flip here while the stock's range is known.
+        positive_ceiling = None
+        if is_pos:
+            _gp = self.get_film_grain_preset(film_stock)
+            _dmax = _gp.get("density_max")
+            positive_ceiling = [
+                grain_model._layer_value(_dmax, layer, grain_model.DEFAULT_DENSITY_MAX)
+                for layer in range(3)
+            ]
+        film_density = self._bake_film_density(
+            sim, log_e_film, lut_size,
+            key=(film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same),
+            is_default_params=is_default_params,
+            cache_dir=cache_dir if is_default_params else None,
+            bundled_dir=bundled_cache_dir if is_default_params else None,
+            positive_ceiling=positive_ceiling,
+        )
+
         lut_output = sim._pipeline.process(log_e_film, inject=Tap.LOG_E_FILM, collect=Tap.RGB_OUT)
         lut_3d = np.clip(lut_output.reshape(lut_size, lut_size, lut_size, 3), 0.0, 1.0).astype(np.float32)
 
@@ -2437,6 +2472,92 @@ class SpektraEngine:
                 pass
         print(f"[SpektraEngine] 3D LUT 生成完毕，耗时: {round((time.time() - t0)*1000, 1)}ms")
         return lut_3d
+
+    def _bake_film_density(self, sim, log_e_film, lut_size, key, is_default_params,
+                           cache_dir=None, bundled_dir=None, positive_ceiling=None):
+        """Return the negative net density cube on the LUT's shaper lattice.
+
+        Shape ``(lut_size, lut_size, lut_size, 3)`` in **C, M, Y** order -- exactly the channel
+        order ``spektrafilm.model.develop`` returns, and the same order ``grain_model``'s
+        per-record response table expects (C absorbs red, so C is the R record).  It is a
+        *net* density (the profile curves are baseline-zeroed), which is also what
+        ``bake_density_lut`` indexes, since it adds the fog itself.
+
+        ``positive_ceiling`` is ``(dmax_C, dmax_M, dmax_Y)`` for reversal films.  Their stored
+        curves run the other way round -- the develop stage returns ``dmax - D`` for a slide
+        (measured: Fuji Velvia 100 at -6 EV returns exactly its per-layer dmax), because the
+        scanner inverts them downstream.  The grain law is written against *physical* density,
+        so the cube is flipped here, once, rather than in each of the two renderers.
+
+        Costs one develop-only pass on the cached ``log_e_film`` plane: the expose and spectral
+        upsampling stages are shared with the LUT bake.
+        """
+        from spektrafilm.runtime.topology import Tap
+
+        if not hasattr(self, "_film_density_cache"):
+            self._film_density_cache = {}
+        cached = self._film_density_cache.get(key)
+        if cached is not None:
+            return cached
+
+        fname = f"density_v2__{key[0]}__{key[1]}__{lut_size}__{key[4]}_{key[5]}_{key[6]}.npy"
+        for directory in (cache_dir, bundled_dir):
+            if not directory:
+                continue
+            path = os.path.join(directory, fname)
+            if os.path.isfile(path):
+                try:
+                    grid = np.load(path).astype(np.float32, copy=False)
+                    if grid.shape == (lut_size, lut_size, lut_size, 3):
+                        self._film_density_cache[key] = grid
+                        return grid
+                except Exception:
+                    pass
+
+        t0 = time.time()
+        cmy = sim._pipeline.process(log_e_film, inject=Tap.LOG_E_FILM, collect=Tap.CMY_FILM)
+        grid = np.ascontiguousarray(
+            np.asarray(cmy, dtype=np.float32).reshape(lut_size, lut_size, lut_size, 3))
+        if positive_ceiling is not None:
+            ceiling = np.asarray(positive_ceiling, dtype=np.float32).reshape(1, 1, 1, 3)
+            grid = np.maximum(ceiling - grid, 0.0).astype(np.float32, copy=False)
+        self._film_density_cache[key] = grid
+        if cache_dir and is_default_params:
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                np.save(os.path.join(cache_dir, fname), grid)
+            except Exception:
+                pass
+        print(f"[SpektraEngine] 胶片密度表生成完毕 ({lut_size}^3, "
+              f"{round((time.time() - t0) * 1000, 1)}ms)")
+        return grid
+
+    def get_film_density(self, film_stock, paper_stock="kodak_2383", lut_size=33,
+                         params_dict=None, print_mode=None):
+        """Density cube for the same bake the LUT came from, or ``None`` if it isn't baked yet.
+
+        Deliberately does **not** build anything: the preview asks for this on every paint, and
+        whoever bakes the LUT (``get_3d_lut``) has already populated the cache.  A miss means the
+        caller is using a LUT and a density from different parameter sets, which must not be
+        papered over by silently rebaking here.
+        """
+        params_dict = params_dict or {}
+        if print_mode is None:
+            print_mode = str(params_dict.get("print_mode", "optical")).lower()
+        else:
+            print_mode = str(print_mode).lower()
+        if print_mode not in ("optical", "scan"):
+            print_mode = "optical"
+        eff_paper = "none" if self.is_positive_film(film_stock) else (
+            "scan" if print_mode == "scan" else paper_stock)
+        key = (
+            film_stock, eff_paper, lut_size,
+            str(params_dict.get("enlarger_illuminant", "TH-KG3")),
+            round(float(params_dict.get("dir_amount", 1.0)), 2),
+            round(float(params_dict.get("dir_interlayer", 1.0)), 2),
+            round(float(params_dict.get("dir_samelayer", 1.0)), 2),
+        )
+        return getattr(self, "_film_density_cache", {}).get(key)
 
     def _gate_dir_neutral_axis(self, lut_3d, lattice, film_stock, paper_stock, lut_size,
                                params_dict, print_mode):
@@ -3771,6 +3892,8 @@ class SpektraEngine:
             paper_stock = params_dict.get("paper_stock", "kodak_2383")
             
             lut_3d = self.get_3d_lut(film_stock, paper_stock, lut_size=33, params_dict=params_dict)
+            # Negative density for the grain law, from the very same bake as the LUT above.
+            film_density = self.get_film_density(film_stock, paper_stock, 33, params_dict)
 
             exp_val = float(params_dict.get("exposure_ev", 0.0))
             temp_val = float(params_dict.get("color_temp", 5500.0))
@@ -4002,6 +4125,7 @@ class SpektraEngine:
                 stock_size_mm=st_size,
                 grain_colour=grain_colour,
                 density_preset=grain_preset,
+                film_density=film_density,
             )
             # One Generator per chunk, seeded from the chunk's own row offset. A single
             # shared Generator was both thread-unsafe and non-reproducible: the same
@@ -4021,7 +4145,8 @@ class SpektraEngine:
                 if grain_spec.active:
                     layer = grain_model.synthesize_layer_grain(grain_spec, y1 - y0, chunk_linear.shape[1], chunk_rng)
                     # The stock's density law is the same table the shader samples as a texture.
-                    response = grain_model.density_response(chunk_linear, grain_spec.density_lut)
+                    response = grain_model.density_response(
+                        chunk_linear, grain_spec.density_lut, grain_spec.film_density)
                     dD = layer * (grain_spec.strength * grain_model.STRENGTH_GAIN) * response
                     chunk_linear = np.maximum(0.0, chunk_linear * np.exp(-dD * grain_model.LOG10_E))
 

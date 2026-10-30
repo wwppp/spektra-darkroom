@@ -30,6 +30,9 @@ from __future__ import annotations
 
 import numpy as np
 import threading
+from scipy import ndimage
+
+from .shaper import shaper_forward, shaper_inverse
 
 # ---------------------------------------------------------------------------
 # Octave structure
@@ -237,6 +240,12 @@ DEFAULT_DENSITY_RECORDS = (
 # table covers the domain exactly and the shader's sample coordinate never needs clamping.
 DENSITY_LUT_SIZE = 512
 DENSITY_LUT_MAX = 4.0
+
+# Side length of the negative-density cube (C/M/Y per node) baked by the engine on the same
+# shaper lattice as the 3D LUT.  float32 -> 33^3 * 3 * 4 = 421 KB per stock, trivial next to the
+# LUT itself (33^3 * 3 * 4 = 421 KB as well); the lattice is coarser than the response table
+# because density is a smooth, monotonic function of exposure.
+FILM_DENSITY_LUT_SIZE = 33
 
 
 def _flat(values):
@@ -464,12 +473,52 @@ def _sample_density_lut(lut, density):
     return out
 
 
-def density_response(linear_rgb, lut=None):
+def density_from_linear(linear_rgb, grid):
+    """Look up the negative's net density for a scene-linear RGB pixel.
+
+    ``grid`` is the density cube baked by ``app_core`` on the same shaper lattice as the 3D
+    LUT (``FILM_DENSITY_LUT_SIZE`` cubed, C/M/Y per node).  Both renderers read it: the shader
+    as a 3D texture, this function as trilinear interpolation over the same lattice, so the
+    two cannot disagree about *what density a pixel has*.
+
+    Axis order matters.  The cube is indexed ``[b][g][r]`` -- it comes from ``develop()``'
+    ``(N, N*N, 3)`` image whose last axis is RGB, reshaped cube-last -- which is also how
+    ``glTexImage3D`` lays the data out (last axis = fastest = x).  A pixel's ``(r, g, b)``
+    therefore maps to coordinates ``(r, g, b)`` in x/y/z order, and getting this backwards is
+    invisible on a neutral ramp while scrambling every colour.
+
+    Returns ``None`` when no cube was supplied, and the caller falls back to the historical
+    ``D = -log10(clamp(lin))`` reading.
+    """
+    if grid is None:
+        return None
+    lin = np.asarray(linear_rgb, dtype=np.float32)
+    n = int(grid.shape[0])
+    if n < 2:
+        return None
+    # linear -> shaper coordinate, then into lattice index space (same mapping as the shader).
+    pos = shaper_forward(lin) * (n - 1)
+    coords = np.stack([pos[..., 2], pos[..., 1], pos[..., 0]], axis=0).astype(np.float32)
+    out = np.empty(lin.shape, dtype=np.float32)
+    for channel in range(3):
+        # order=1 is trilinear, mode="nearest" is the GPU's CLAMP_TO_EDGE.  map_coordinates is
+        # ~3x faster than eight fancy-index gathers, which matters: this runs per chunk per
+        # export, and a 12 MP frame has ~9 M samples per channel.
+        out[..., channel] = ndimage.map_coordinates(
+            np.ascontiguousarray(grid[..., channel]), coords,
+            order=1, mode="nearest", prefilter=False)
+    return out
+
+
+def density_response(linear_rgb, lut=None, film_density=None):
     """Granularity as a function of negative optical density (per channel).
 
-    The renderer's ``linear_rgb`` is scene-linear exposure; it is read as the negative's
-    transmittance, so ``D = -log10(lin)``.  Shape and constants are fitted to the particle-model
-    reference (P0); mirrors the GLSL expression exactly, which takes the constants as uniforms.
+    ``film_density`` (baked density cube) is the physically right input: the negative's own net
+    density at that pixel, taken from the same film pipeline that produced the LUT.  When it is
+    absent the legacy reading ``D = -log10(lin)`` is used, which treats scene-linear exposure as
+    the negative's transmittance -- that is what zeroed the grain below -3 EV (see
+    docs/push-grain-plan.md section 2.1) and it survives only as a fallback for callers with no
+    LUT context.
 
     ``lut`` selects the per-stock density law baked by :func:`bake_density_lut`.  When it is
     ``None`` the P0 bell is used -- that is the path the two renderers fall back to, and the one
@@ -477,8 +526,10 @@ def density_response(linear_rgb, lut=None):
     density modulation in units where ``DENS_GAIN`` is the amplitude at the reference density,
     so swapping one for the other cannot change the overall grain level.
     """
-    lin = np.clip(np.asarray(linear_rgb, dtype=np.float32), DENS_MIN_TRANSMITTANCE, 1.0)
-    density = -np.log10(lin)
+    density = density_from_linear(linear_rgb, film_density)
+    if density is None:
+        lin = np.clip(np.asarray(linear_rgb, dtype=np.float32), DENS_MIN_TRANSMITTANCE, 1.0)
+        density = -np.log10(lin)
     z = density - DENS_PEAK
     w = np.where(z > 0.0, DENS_W_SHOULDER, DENS_W_TOE).astype(np.float32)
     bell = DENS_FLOOR + (1.0 - DENS_FLOOR) * np.exp(-0.5 * (z / w) ** 2)
@@ -504,10 +555,10 @@ class GrainSpec:
 
     __slots__ = ("scale_px", "sigmas", "w_fine", "w_cloud", "w_mottle", "rho", "lw",
                  "lw_mean", "strength", "amplitude", "active", "density_lut",
-                 "luma_correlation")
+                 "luma_correlation", "film_density")
 
     def __init__(self, scale_px, sigmas, weights, rho, layer_weights, strength, amplitude, active,
-                 density_lut=None, luma_correlation=None):
+                 density_lut=None, luma_correlation=None, film_density=None):
         self.scale_px = scale_px
         self.sigmas = sigmas
         self.w_fine, self.w_cloud, self.w_mottle = weights
@@ -521,12 +572,17 @@ class GrainSpec:
         # bell.  Both renderers read this one table (texture on the GPU, interpolation on the CPU).
         self.density_lut = density_lut
         self.luma_correlation = luma_correlation
+        # Negative net density on the LUT's shaper lattice (N, N, N, 3), or None to keep the
+        # historical -log10(lin) reading.  This is the input the density law is a function of.
+        self.film_density = film_density
 
     def __repr__(self):
         law = "bell" if self.density_lut is None else "lut"
+        dens = "linear" if self.film_density is None else "film"
         return (f"GrainSpec(scale_px={self.scale_px:.4f}, sigmas={tuple(round(s, 3) for s in self.sigmas)}, "
                 f"w=({self.w_fine:.3f},{self.w_cloud:.3f},{self.w_mottle:.3f}), rho={self.rho:.3f}, "
-                f"strength={self.strength:.4f}, amplitude={self.amplitude:.4f}, density={law})")
+                f"strength={self.strength:.4f}, amplitude={self.amplitude:.4f}, density={law}, "
+                f"domain={dens})")
 
 
 def amplitude_for_long_edge(long_edge_px):
@@ -543,7 +599,8 @@ def amplitude_for_long_edge(long_edge_px):
 
 def derive(grain_slider, stock_strength, layer_weights, cloud_blur, rho,
            fmt_mm, long_edge_px, grain_size=1.0, stock_size_mm=0.005,
-           grain_colour=1.0, target_correlation=None, density_preset=None):
+           grain_colour=1.0, target_correlation=None, density_preset=None,
+           film_density=None):
     """Build a :class:`GrainSpec` for one render.
 
     ``long_edge_px`` must be the long edge **of the image being rendered**, so the physical
@@ -558,6 +615,10 @@ def derive(grain_slider, stock_strength, layer_weights, cloud_blur, rho,
     ``density_preset`` is the stock's ``crystal_grain`` dict (as returned by
     ``get_film_grain_preset``).  It selects the stock's density law, which is baked into the
     lookup table carried by the spec; without it the P0 bell is used.
+
+    ``film_density`` is the negative-density cube for the film+paper+DIR combination being
+    rendered.  With it the law is evaluated at the pixel's real density; without it the legacy
+    ``-log10(lin)`` reading is used.
     """
     from .darkroom_math import grain_scale_px
 
@@ -586,6 +647,7 @@ def derive(grain_slider, stock_strength, layer_weights, cloud_blur, rho,
         active=float(grain_slider) > 0.01,
         density_lut=bake_density_lut(density_preset),
         luma_correlation=luma,
+        film_density=film_density,
     )
     return spec
 
@@ -754,7 +816,7 @@ def apply_to_linear(linear_rgb, spec, rng, chunk_rows=512):
         y1 = min(y0 + chunk_rows, h)
         block = linear_rgb[y0:y1]
         layer = synthesize_layer_grain(spec, y1 - y0, w, rng)
-        response = density_response(block, spec.density_lut)
+        response = density_response(block, spec.density_lut, spec.film_density)
         dD = layer * (spec.strength * STRENGTH_GAIN) * response
         out[y0:y1] = np.maximum(0.0, block * np.exp(-dD * LOG10_E))
     return out

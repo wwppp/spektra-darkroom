@@ -91,7 +91,7 @@ def diffusion_shader_profile(family, strength):
 
 
 def grain_derive_spec(params, stock_strength, stock_layer_weights, stock_size_mm,
-                      fmt_mm, long_edge_px, grain_preset=None):
+                      fmt_mm, long_edge_px, grain_preset=None, film_density=None):
     """Build the shared GrainSpec for a shader draw.
 
     Everything the shader needs about grain amplitude, octave mixing, layer correlation and
@@ -114,6 +114,7 @@ def grain_derive_spec(params, stock_strength, stock_layer_weights, stock_size_mm
         stock_size_mm=stock_size_mm,
         grain_colour=float(params.get("grain_colour", 1.0)),
         density_preset=grain_preset,
+        film_density=film_density,
     )
 
 
@@ -131,6 +132,8 @@ def _bind_density_uniforms(u_1f):
 
 # The density-law ramp lives on its own texture unit, clear of the image (0) and the 3D LUT (1).
 GRAIN_DENSITY_TEX_UNIT = 2
+# The negative-density cube (the law's *input*) gets a fourth unit.
+FILM_DENSITY_TEX_UNIT = 3
 
 
 VERTEX_SHADER_SRC = """
@@ -210,6 +213,12 @@ uniform float u_grain_dens_wsat;
 uniform sampler2D u_grain_density_lut;
 uniform float u_grain_density_scale;
 uniform float u_grain_density_enable;
+// Negative net density (C/M/Y) on the 3D LUT's own shaper lattice, baked by the engine from the
+// same film pipeline that produced u_lut.  The density law above is a function of *density*, so
+// this is what it should be indexed by; u_film_density_enable == 0 keeps the historical
+// D = -log10(lin) reading for callers with no LUT context (thumbnails, offline probes).
+uniform sampler3D u_film_density;
+uniform float u_film_density_enable;
 uniform float u_stock_grain_size;
 uniform float u_stock_grain_strength;
 uniform vec3  u_stock_layer_weights;
@@ -1186,16 +1195,23 @@ void main() {
         float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
         float eff_strength = (u_grain / 0.40) * (base_stock_strength / 0.010);
 
-        // Granularity vs negative optical density. linear_rgb is read as the negative's
-        // transmittance, so D = -log10(lin).  Two paths, and the choice is made on the CPU:
-        //   u_grain_density_enable == 1: the stock's own law, baked by
-        //     core/grain_model.bake_density_lut() and fetched from a 512x1 ramp.  The table is
-        //     normalised so that its value at the stock's reading density is exactly
-        //     u_grain_dens_gain, which is why adopting a law cannot change overall amplitude.
-        //   u_grain_density_enable == 0: the P0 bell, i.e. the global curve fitted to the
-        //     particle-model reference.  Used when no table could be uploaded.
-        vec3 lin_c = clamp(linear_rgb, vec3(1e-4), vec3(1.0));
-        vec3 dens_D = -log(lin_c) * (1.0 / 2.302585092994046);
+        // Granularity vs negative optical density.  Two possible sources for D:
+        //   u_film_density_enable == 1: the negative's own net density, read from the cube the
+        //     engine baked through the same film pipeline as u_lut.  This is the physical input:
+        //     exposure maps to density through the film's characteristic curve, and the grain
+        //     law is a function of density, so it must be indexed by that -- not by exposure.
+        //   u_film_density_enable == 0: the legacy reading D = -log10(lin), which treats the
+        //     scene-linear value as transmittance.  Kept only for callers with no LUT context.
+        vec3 dens_D;
+        if (u_film_density_enable > 0.5) {
+            float dens_dim = float(textureSize(u_film_density, 0).x);
+            vec3 dens_t = linear_to_shaper(linear_rgb);
+            // Same texel-centre mapping the LUT sampler uses, but with the cube's own dimension.
+            vec3 dens_coord = dens_t * ((dens_dim - 1.0) / dens_dim) + (0.5 / dens_dim);
+            dens_D = textureLod(u_film_density, dens_coord, 0.0).rgb;
+        } else {
+            dens_D = -log(clamp(linear_rgb, vec3(1e-4), vec3(1.0))) * (1.0 / 2.302585092994046);
+        }
         vec3 dens_mod;
         if (u_grain_density_enable > 0.5) {
             // One fetch per record; the ramp is linear-filtered, and the CPU interpolates the
@@ -1380,6 +1396,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._has_library_photos = False
         self._pending_image = None
         self._pending_lut = None
+        # Negative-density cube travelling with _pending_lut: the grain law is indexed by it.
+        self._film_density = None
         self._gl_initialized = False
 
         # Long-press on canvas to preview original (Before)
@@ -1679,6 +1697,63 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._grain_density_lut_id = key
         return tex
 
+    def _upload_film_density(self, grid):
+        """Upload (or refresh) the negative-density cube as a 3D texture, return its id.
+
+        Keyed on ``id()`` like the density ramp: the engine caches one array per
+        (film, paper, size, DIR) and hands back the same object, so a stock or DIR change is
+        noticed without re-uploading 421 KB on every paint.
+        """
+        if grid is None:
+            return None
+        key = (id(grid), grid.shape)
+        tex = getattr(self, "_film_density_tex_id", None)
+        if tex and getattr(self, "_film_density_key", None) == key:
+            return tex
+        data = np.ascontiguousarray(grid, dtype=np.float32)
+        size = int(data.shape[0])
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        if not tex:
+            tex = GL.glGenTextures(1)
+            GL.glBindTexture(GL.GL_TEXTURE_3D, tex)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
+            # 32F, not 16F: density runs to ~3.5 and the law's slope is order 1, so half-float
+            # quantisation (~0.002 in D) would show up as a systematic amplitude error, and the
+            # table is only 421 KB.
+            GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGB32F, size, size, size, 0,
+                            GL.GL_RGB, GL.GL_FLOAT, data)
+            self._film_density_tex_id = tex
+        else:
+            GL.glBindTexture(GL.GL_TEXTURE_3D, tex)
+            GL.glTexSubImage3D(GL.GL_TEXTURE_3D, 0, 0, 0, 0, size, size, size,
+                               GL.GL_RGB, GL.GL_FLOAT, data)
+        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+        self._film_density_key = key
+        return tex
+
+    def _bind_film_density(self, funcs, u_1f, u_1i, spec):
+        """Bind the density cube, or switch the shader back to the -log10(lin) reading."""
+        grid = getattr(spec, "film_density", None)
+        tex = None
+        if grid is not None:
+            try:
+                tex = self._upload_film_density(grid)
+            except Exception as exc:                # noqa: BLE001 - never break a paint
+                print(f"[SpektraGrain] 密度表纹理上传失败，回退 -log10(lin): {exc}")
+                tex = None
+        if not tex:
+            u_1f("u_film_density_enable", 0.0)
+            return
+        funcs.glActiveTexture(0x84C0 + FILM_DENSITY_TEX_UNIT)
+        GL.glBindTexture(GL.GL_TEXTURE_3D, tex)
+        u_1i("u_film_density", FILM_DENSITY_TEX_UNIT)
+        u_1f("u_film_density_enable", 1.0)
+        funcs.glActiveTexture(0x84C0)
+
     def _bind_grain_density_lut(self, funcs, u_1f, u_1i, spec):
         """Bind the stock's density law, or switch the shader back to the P0 bell."""
         tex = None
@@ -1920,7 +1995,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_grain_blur", self.params.get("grain_cloud_blur", 1.0))
         u_1f("u_grain_colour", float(self.params.get("grain_colour", 1.0)))
         _spec = grain_derive_spec(self.params, st_strength, st_lw, st_size, fmt_mm,
-                                 max(_mw, _mh), grain_preset)
+                                 max(_mw, _mh), grain_preset,
+                                 film_density=getattr(self, "_film_density", None))
         u_1f("u_grain_rho", _spec.rho)
         u_1f("u_grain_w_fine", _spec.w_fine)
         u_1f("u_grain_w_cloud", _spec.w_cloud)
@@ -1928,6 +2004,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_grain_amplitude", _spec.amplitude)
         _bind_density_uniforms(u_1f)
         self._bind_grain_density_lut(funcs, u_1f, u_1i, _spec)
+        self._bind_film_density(funcs, u_1f, u_1i, _spec)
         master_w = float(getattr(self, "_master_width", 0) or self._image_width)
         master_h = float(getattr(self, "_master_height", 0) or self._image_height)
         u_2f("u_master_resolution", master_w, master_h)
@@ -2245,10 +2322,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 pass
         return {"dir_amount": 1.0, "dir_interlayer": 1.0, "dir_samelayer": 1.0, "morph_gamma": 1.0, "developer_exhaustion": 0.0}
 
-    def set_3d_lut(self, lut_array_3d):
-        """Upload 3D LUT array (float32 [N, N, N, 3]) to 3D texture."""
+    def set_3d_lut(self, lut_array_3d, film_density=None):
+        """Upload 3D LUT array (float32 [N, N, N, 3]) to 3D texture.
+
+        ``film_density`` is the negative-density cube baked alongside that LUT.  It has to
+        travel with the LUT, not be looked up later: the grain law is indexed by density, and a
+        cube from a different (film, paper, DIR) bake would silently misplace the whole curve.
+        """
         self._lut_baked = self._lookup_lut_baked(lut_array_3d)
         self._pending_lut = lut_array_3d
+        self._film_density = film_density
         self.update()
 
     set_lut = set_3d_lut
@@ -2886,7 +2969,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         else:
             super().mouseDoubleClickEvent(event)
 
-    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None):
+    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None, density_override=None):
         """Render image at target resolution on GPU using an offscreen FBO.
         Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
         """
@@ -2928,6 +3011,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         temp_tex_id = None
         temp_lut_tex_id = None
         fbo = None
+        _saved_film_density = self._film_density
         try:
             funcs = QOpenGLContext.currentContext().functions()
 
@@ -2973,6 +3057,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 active_lut_tex_id = temp_lut_tex_id
             else:
                 active_lut_tex_id = self._lut_tex_id
+
+            # The density cube has to follow the LUT it was baked with. Swapping the LUT without
+            # swapping the cube would index one bake's grain law with another bake's densities.
+            if lut_override is not None:
+                self._film_density = density_override
 
             # Merge params
             eff_params = dict(self.params)
@@ -3178,7 +3267,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # The offscreen pass renders at the export resolution, so the spec is derived with
             # the target long edge -- that is what applies the physical amplitude law.
             _spec = grain_derive_spec(eff_params, st_strength, st_lw, st_size, fmt_mm,
-                                     max(float(target_w), float(target_h)), grain_preset)
+                                     max(float(target_w), float(target_h)), grain_preset,
+                                     film_density=getattr(self, "_film_density", None))
             u_1f("u_grain_rho", _spec.rho)
             u_1f("u_grain_w_fine", _spec.w_fine)
             u_1f("u_grain_w_cloud", _spec.w_cloud)
@@ -3186,6 +3276,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_grain_amplitude", _spec.amplitude)
             _bind_density_uniforms(u_1f)
             self._bind_grain_density_lut(funcs, u_1f, u_1i, _spec)
+            self._bind_film_density(funcs, u_1f, u_1i, _spec)
             u_2f("u_master_resolution", float(target_w), float(target_h))
 
             diff_family = str(eff_params.get("diffusion_family", "none")).lower()
@@ -3361,6 +3452,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             print(f"[DarkroomGLCanvas] render_offscreen error: {e}")
             return None
         finally:
+            self._film_density = _saved_film_density
             if temp_tex_id:
                 try:
                     GL.glDeleteTextures([temp_tex_id])

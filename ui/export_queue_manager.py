@@ -449,6 +449,19 @@ class ExportQueueManager(QObject):
                     bit_depth = int(task.params.get("bit_depth", 8))
 
                     eff_lut = lut_arr
+                    eff_density = None
+                    if hasattr(self.engine, "get_film_density"):
+                        # The grain law is indexed by negative density; without this the GPU path
+                        # would fall back to -log10(lin) while the CPU path uses the real cube,
+                        # i.e. two exports of the same frame would differ in the shadows only.
+                        film_stock = task.params.get("film_stock", "kodak_portra_400")
+                        paper_stock = task.params.get("paper_stock", "kodak_2383")
+                        print_mode = task.params.get("print_mode", "optical")
+                        try:
+                            eff_density = self.engine.get_film_density(
+                                film_stock, paper_stock, 33, task.params, print_mode)
+                        except Exception as ex_den:
+                            logger.warning(f"Failed to fetch film density cube for GPU export: {ex_den}")
                     if eff_lut is None and hasattr(self.engine, "get_3d_lut"):
                         film_stock = task.params.get("film_stock", "kodak_portra_400")
                         paper_stock = task.params.get("paper_stock", "kodak_2383")
@@ -457,13 +470,20 @@ class ExportQueueManager(QObject):
                             eff_lut = self.engine.get_3d_lut(film_stock, paper_stock, lut_size=33, print_mode=print_mode)
                         except Exception as ex_lut:
                             logger.warning(f"Failed to fetch 3D LUT for GPU export: {ex_lut}")
+                        if eff_density is None and hasattr(self.engine, "get_film_density"):
+                            try:
+                                eff_density = self.engine.get_film_density(
+                                    film_stock, paper_stock, 33, task.params, print_mode)
+                            except Exception:
+                                pass
 
                     rendered_arr = self.canvas.render_offscreen(
                         tgt_w, tgt_h,
                         float_img_rgb=raw_target,
                         params_override=task.params,
                         bit_depth=bit_depth,
-                        lut_override=eff_lut
+                        lut_override=eff_lut,
+                        density_override=eff_density,
                     )
                     QCoreApplication.processEvents()
                 except Exception as ex_gl:
