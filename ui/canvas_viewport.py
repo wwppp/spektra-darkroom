@@ -2881,6 +2881,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
         """Render image at target resolution on GPU using an offscreen FBO.
         Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
         """
+        # Oversize guard: GL textures cap at GL_MAX_TEXTURE_SIZE (typically 16384) and
+        # there is no tiled renderer yet. Failing loudly beats a silently clipped or
+        # black export; the tile renderer (with the 3-sigma overlap from
+        # halation_model.halation_overlap_px) is the planned fix.
+        if max(int(target_w), int(target_h)) > 16384:
+            print(f"[DarkroomGLCanvas] render_offscreen: {target_w}x{target_h} exceeds the "
+                  f"16384 px GL texture limit; falling back to CPU export. "
+                  f"(tiled GPU rendering not implemented yet)")
+            return None
         if is_16bit is not None:
             bit_depth = 16 if is_16bit else 8
         if not getattr(self, "_gl_initialized", False) or not self.isValid():

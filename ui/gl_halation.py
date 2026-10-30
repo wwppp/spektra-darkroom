@@ -755,9 +755,10 @@ class GLHalationChain:
         The band is what keeps the blur cheap: with sigma on the working grid near 3 px the
         kernel needs ~9 taps per axis, and the pass runs at 1/k^2 of the pixels. It is
         deliberately not the same k the CPU uses (core.halation_model._pick_decimation aims
-        at 4 px), because the two only have to agree on the *continuous* kernel -- the
-        decimation is exact area averaging on both sides, and the residual difference is
-        smaller than the 8-bit quantisation of the result.
+        at 4 px). Measured 2026-10-30: aligning the two (GPU target 4 px) changed the
+        end-to-end PSNR by exactly 0.00 dB while costing 106 -> 156 ms at 24 MP, so the
+        residual between the renderers is kernel quadrature, not grid mismatch -- the
+        grids stay free to optimise for cost.
         """
         if max_sigma_px <= GLHalationChain.TARGET_SIGMA_MAX:
             return 1

@@ -4403,7 +4403,10 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_scatter_amount = AdobeScrubSlider(
             "乳剂内散射强度", 0.0, 2.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="感光乳剂层内前向光散射强度，模拟高光微粒漫射 (Light Wrap)"
+            tooltip="感光乳剂层内前向光散射强度 (Light Wrap)。\n"
+                    "散射核尺寸为引擎标定常量 (core/halation_model.py)：当前所有胶卷"
+                    "档案均未提供实测散射数据 (diffuseSigmaMM 覆盖 0/53)，"
+                    "三通道 core/tail 采用 2.2/2.0/1.6 + 9.3/9.7/9.1 μm 标定值"
         )
         self.slider_scatter_amount.valueChanged.connect(lambda v: self._on_slider_live("scatter_amount", v))
         self.slider_scatter_amount.sliderReleased.connect(self._on_slider_committed)
@@ -4411,7 +4414,9 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_boost_ev = AdobeScrubSlider(
             "高光能量重建", 0.0, 4.0, 0.0, step=0.05, unit=" EV", decimals=2,
-            tooltip="超大光比高光点能量重构 (EV)，呈现自然真实的胶片逆光包容感"
+            tooltip="把画面最亮像素再抬高 N 档后交给光晕/散射，重建被扫描截断的高光能量。\n"
+                    "保护点在中灰以上 4 档：常规曝光的照片整幅最大值达不到该点，"
+                    "此滑块将不起作用——需要强过曝或 +EV 曝光补偿后才生效"
         )
         self.slider_boost_ev.valueChanged.connect(lambda v: self._on_slider_live("boost_ev", v))
         self.slider_boost_ev.sliderReleased.connect(self._on_slider_committed)
