@@ -124,7 +124,11 @@ def get_cache_key(file_path: str, normcase: bool = True) -> str:
         max_edge = int(config_manager.get_preferences().get("preview_max_edge", 2048))
     except Exception:
         max_edge = 2048
-    token = f"prophoto_v3|{norm_path}|{mtime}|{size}|res_{max_edge}".encode("utf-8")
+    # v4: the metering anchor gained an expose-to-the-right ceiling (app_core
+    # calculate_auto_exposure_ev), so every cached base_ev from v3 is a different number for
+    # the same file. Bumping the token drops the stale anchors -- and the stale previews with
+    # them, some of which were saved at full resolution.
+    token = f"prophoto_v4|{norm_path}|{mtime}|{size}|res_{max_edge}".encode("utf-8")
     return hashlib.sha256(token).hexdigest()[:24]
 
 

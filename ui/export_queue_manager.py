@@ -369,8 +369,13 @@ class ExportQueueManager(QObject):
         # Step 1 (Thread): Load 100% full-resolution RAW image in background
         # Step 2 (Main Thread): Render on GPU via FBO shader in ~20ms (zero freeze!)
         # Step 3 (Thread): Compress & write image to disk in background
+        # Only "global" opts export into the GLSL path. "preview_only" means
+        # exactly what it says in Preferences — the viewport and thumbnails may
+        # use the GPU, export stays on the CPU pipeline. The old `!= "off"`
+        # test let preview_only through as well, so the setting silently did
+        # nothing for export.
         can_use_gpu = (
-            hw_mode != "off"
+            hw_mode == "global"
             and self.canvas is not None
             and hasattr(self.canvas, "render_offscreen")
         )

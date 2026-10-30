@@ -51,6 +51,11 @@ class LensCalibrationEntry:
     vignette_cx: float = 0.5
     vignette_cy: float = 0.5
     vignette_piecewise: List[Tuple[float, float]] = field(default_factory=list)
+    # Lateral chromatic aberration, as the same three-term radial polynomial Adobe uses for
+    # distortion (ChromaticRedGreenModel / ChromaticBlueGreenModel). Stored raw, in the
+    # profile's own r = R/f space; compute_effective_lens_params renormalises them.
+    ca_r_coeffs: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    ca_b_coeffs: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass
@@ -140,7 +145,7 @@ class LensProfile:
                 ap_diff = abs(math.log2(max(0.5, entry.aperture) / max(0.5, ap)))
             except Exception:
                 ap_diff = abs(entry.aperture - ap)
-            dist = fl_diff * 10.0 + ap_diff * 2.0
+            dist = fl_diff * 10.0 + ap_diff * 3.0
             if dist < best_dist:
                 best_dist = dist
                 best_entry = entry
@@ -202,7 +207,31 @@ class LCPParser:
             for node in calib_nodes:
                 data = {}
                 piecewise = []
+                # Adobe LCP nests three sub-models inside one calibration entry (vignette,
+                # red/green CA, blue/green CA) and they reuse the SAME element names:
+                # RadialDistortParam1..3, FocalLengthX/Y, ImageXCenter. Flattening every
+                # descendant into one dict let the CA model's coefficients overwrite the main
+                # distortion ones — on an iPhone 4 profile k1 = 0.2253 became -0.002058, so
+                # distortion correction silently did nothing. Collect the CA sub-trees
+                # separately and keep their descendants out of the main pass.
+                ca_models = {}
+                ca_skip = set()
                 for sub in node.iter():
+                    sub_tag_ca = sub.tag.split("}")[-1]
+                    if sub_tag_ca in ("ChromaticRedGreenModel", "ChromaticGreenModel", "ChromaticBlueGreenModel"):
+                        params = {}
+                        for ch in sub.iter():
+                            ct = ch.tag.split("}")[-1]
+                            if ct.startswith("RadialDistortParam") and ch.text:
+                                try:
+                                    params[int(ct[len("RadialDistortParam"):])] = float(ch.text.strip())
+                                except (TypeError, ValueError):
+                                    pass
+                            ca_skip.add(id(ch))
+                        ca_models[sub_tag_ca] = tuple(params.get(i, 0.0) for i in (1, 2, 3))
+                for sub in node.iter():
+                    if id(sub) in ca_skip:
+                        continue
                     sub_tag = sub.tag.split("}")[-1]
                     for k, v in sub.attrib.items():
                         data[k.split("}")[-1]] = v
@@ -280,7 +309,9 @@ class LCPParser:
                 cx = _parse_float_safe(data.get("ImageXCenter")) or 0.5
                 cy = _parse_float_safe(data.get("ImageYCenter")) or 0.5
 
-                if abs(k1) > 1e-6 or abs(k2) > 1e-6 or abs(k3) > 1e-6 or vig_coeffs or piecewise:
+                if abs(k1) > 1e-6 or abs(k2) > 1e-6 or abs(k3) > 1e-6 or vig_coeffs or piecewise \
+                        or any(abs(v) > 1e-6 for v in ca_models.get("ChromaticRedGreenModel", ())) \
+                        or any(abs(v) > 1e-6 for v in ca_models.get("ChromaticBlueGreenModel", ())):
                     calibrations.append(LensCalibrationEntry(
                         focal_length=fl if fl is not None else 50.0,
                         aperture=ap if ap is not None else 2.8,
@@ -293,7 +324,9 @@ class LCPParser:
                         vignette_fy=fy,
                         vignette_cx=cx,
                         vignette_cy=cy,
-                        vignette_piecewise=piecewise
+                        vignette_piecewise=piecewise,
+                        ca_r_coeffs=ca_models.get("ChromaticRedGreenModel", (0.0, 0.0, 0.0)),
+                        ca_b_coeffs=ca_models.get("ChromaticBlueGreenModel", (0.0, 0.0, 0.0)),
                     ))
 
             if not calibrations and calib_nodes:
@@ -627,6 +660,33 @@ def copy_system_acr_profiles_to_user_dir(progress_cb=None) -> Tuple[int, int]:
     return copied, skipped
 
 
+def focal_range_from_name(name: str) -> Optional[Tuple[float, float]]:
+    """Focal range advertised by a profile file name ("28-200mm" / "85mm").
+
+    Used only as a sanity gate when auto-matching: a brand-level token match used to be
+    enough to select the first lens of that brand, whatever its focal range.
+    """
+    if not name:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*mm", name, re.IGNORECASE)
+    if m:
+        try:
+            lo, hi = float(m.group(1)), float(m.group(2))
+            if lo > 0 and hi >= lo:
+                return lo, hi
+        except ValueError:
+            return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*mm", name, re.IGNORECASE)
+    if m:
+        try:
+            v = float(m.group(1))
+            if v > 0:
+                return v * 0.9, v * 1.1
+        except ValueError:
+            return None
+    return None
+
+
 class LCPDatabase:
     """In-memory indexer and manager for Lens Profiles (.lcp)."""
 
@@ -775,18 +835,33 @@ class LCPDatabase:
                 mod_tokens = set(re.findall(r"[a-z0-9]+", mod_name.lower()))
                 mod_tokens = {t for t in mod_tokens if t not in noisy_tokens}
                 common = lens_tokens.intersection(mod_tokens)
+                code_hit = bool(code) and (code in mod_name.lower() or code in p_leaf)
+                # A brand token alone is not evidence of the right lens: with +5 for the
+                # brand, any model of that brand cleared the threshold, so a Tamron 70-300
+                # could be served for a Tamron 28-200. Require at least one real model
+                # token (or the model code) before a candidate is eligible at all.
+                if not common and not code_hit:
+                    continue
+
+                # Focal range gate: the profile has to cover the focal length actually used.
+                fr = focal_range_from_name(mod_name) or focal_range_from_name(p_leaf)
+                if focal_length and fr:
+                    fl_val = _parse_float_safe(focal_length)
+                    if fl_val and not (fr[0] * 0.9 <= fl_val <= fr[1] * 1.1):
+                        continue
+
                 score = len(common) * 2
 
                 # Brand alignment bonus
                 if is_detected_brand:
-                    score += 5
+                    score += 3
 
                 # Mount / Camera make alignment bonus
                 if clean_cam_make and clean_cam_make.lower() in (mod_name.lower() + " " + p_leaf):
                     score += 3
 
                 # Model code match (HIGHEST PRIORITY!)
-                if code and (code in mod_name.lower() or code in p_leaf):
+                if code_hit:
                     score += 15
 
                 # Prefer RAW profile if available
@@ -976,8 +1051,34 @@ def evaluate_vignette_gain(calib: Optional[LensCalibrationEntry], photo_aperture
     return max(0.05, min(0.45, eff_gain))
 
 
-def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] = None, aperture: Optional[float] = None) -> dict:
-    """Compute active (k1, k2, k3, vignette_amount, vignette_midpoint, remove_ca) from configuration dictionary."""
+def _float_safe(raw) -> float:
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _coeff_triplet(raw) -> Tuple[float, float, float]:
+    """Coerce a cached sidecar value (list from JSON, tuple, None) to a 3-tuple of floats."""
+    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+        try:
+            return float(raw[0]), float(raw[1]), float(raw[2])
+        except (TypeError, ValueError):
+            pass
+    return (0.0, 0.0, 0.0)
+
+
+def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] = None,
+                                  aperture: Optional[float] = None,
+                                  aspect_ratio: float = 0.6667,
+                                  source_path: Optional[str] = None) -> dict:
+    """Compute active (k1, k2, k3, vignette_amount, vignette_midpoint, remove_ca) from configuration dictionary.
+
+    ``profile_path == "@builtin"`` selects the correction tables Sony writes into the ARW
+    itself (``core/sony_lens.py``) instead of an .lcp file; ``source_path`` then has to point
+    at the raw file being edited. The tables are per-frame (they are written at shoot time
+    with the lens and zoom the camera saw), so this is deliberately not cached anywhere.
+    """
     if not isinstance(lens_cfg, dict):
         return {
             "enabled": False,
@@ -988,7 +1089,12 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
             "k2": 0.0,
             "k3": 0.0,
             "vignette_amount": 0.0,
-            "vignette_midpoint": 50.0
+            "vignette_midpoint": 50.0,
+            "ca_r_coeffs": (0.0, 0.0, 0.0),
+            "ca_b_coeffs": (0.0, 0.0, 0.0),
+            "ca_r_scale": 0.0,
+            "ca_b_scale": 0.0,
+            "dist_scale": 0.0
         }
 
     active_tab = lens_cfg.get("active_tab", "profile")
@@ -1012,11 +1118,21 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
             "k2": 0.0,
             "k3": 0.0,
             "vignette_amount": 0.0,
-            "vignette_midpoint": 50.0
+            "vignette_midpoint": 50.0,
+            "ca_r_coeffs": (0.0, 0.0, 0.0),
+            "ca_b_coeffs": (0.0, 0.0, 0.0),
+            "ca_r_scale": 0.0,
+            "ca_b_scale": 0.0,
+            "dist_scale": 0.0
         }
 
     k1, k2, k3 = 0.0, 0.0, 0.0
     v_amt, v_mid = 0.0, 50.0
+    out_dist_scale = 0.0
+    ca_r_eff = (0.0, 0.0, 0.0)
+    ca_b_eff = (0.0, 0.0, 0.0)
+    ca_r_scale = 0.0
+    ca_b_scale = 0.0
 
     if is_enabled:
         if active_tab == "manual":
@@ -1034,7 +1150,31 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
             # Scale distortion: 0 -> 1.0 (100%), +100 -> 2.0 (200%), -100 -> 0.0 (0%)
             dist_scale = max(0.0, 1.0 + (p_dist_val / 100.0))
 
-            if p_path and os.path.isfile(p_path):
+            if p_path == "@builtin":
+                from .sony_lens import builtin_lens_params
+                src = source_path or lens_cfg.get("builtin_source", "")
+                bi = builtin_lens_params(src) if src else None
+                if bi:
+                    k1 = bi["k1"] * dist_scale
+                    k2 = bi["k2"] * dist_scale
+                    k3 = bi["k3"] * dist_scale
+                    ca_r_eff = tuple(bi["ca_r_coeffs"])
+                    ca_b_eff = tuple(bi["ca_b_coeffs"])
+                    ca_r_scale = float(bi["ca_r_scale"])
+                    ca_b_scale = float(bi["ca_b_scale"])
+                    base_amt = float(bi["vignette_amount"])
+                    if p_vig_val >= 0:
+                        v_amt = base_amt * (1.0 + p_vig_val / 100.0)
+                    else:
+                        v_amt = base_amt + (p_vig_val / 100.0) * (base_amt + 0.5)
+                    v_mid = float(bi["vignette_midpoint"])
+                    # Sony normalises its spline by its maximum, so the corrected frame keeps
+                    # the camera's own (slightly narrower) field of view. Re-applying the
+                    # renderer's corner normalisation on top pushed the residual against the
+                    # camera JPEG from 1.6 px to 12.6 px.
+                    out_dist_scale = float(bi["dist_scale"])
+
+            elif p_path and os.path.isfile(p_path):
                 db = LCPDatabase.get_instance()
                 prof = db.load_profile(p_path)
                 if prof:
@@ -1063,8 +1203,19 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
                     k2 = calib_dist.k2 * (r_corner ** 4) * dist_scale
                     k3 = calib_dist.k3 * (r_corner ** 6) * dist_scale
 
+                    # Lateral CA uses the same r = R/f convention, so the same corner
+                    # renormalisation applies term by term (r^2, r^4, r^6).
+                    ca_r_eff = tuple(float(c) * (r_corner ** (2 * (i + 1)))
+                                     for i, c in enumerate(getattr(calib_dist, "ca_r_coeffs", (0.0, 0.0, 0.0))))
+                    ca_b_eff = tuple(float(c) * (r_corner ** (2 * (i + 1)))
+                                     for i, c in enumerate(getattr(calib_dist, "ca_b_coeffs", (0.0, 0.0, 0.0))))
+
                     calib_vig = prof.get_best_vignette_calibration(fl_parsed, ap_parsed)
-                    base_amt = evaluate_vignette_gain(calib_vig, photo_aperture=ap_parsed)
+                    # The vignette corner radius depends on the frame shape: a portrait
+                    # 3:2 frame has a different semi-diagonal than the 2:3 landscape the
+                    # old hard-coded 0.6667 assumed.
+                    base_amt = evaluate_vignette_gain(calib_vig, photo_aperture=ap_parsed,
+                                                      aspect_ratio=aspect_ratio)
 
                     if p_vig_val >= 0:
                         v_amt = base_amt * (1.0 + p_vig_val / 100.0)
@@ -1073,6 +1224,20 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
                         v_amt = base_amt + (p_vig_val / 100.0) * (base_amt + 0.5)
 
                     v_mid = 50.0
+
+    # Fully automatic lateral-CA estimation (core/ca_estimate.py). Adobe's Sony LCP files
+    # carry distortion and vignette models but no ChromaticRedGreen/BlueGreen model, so the
+    # profile path above yields (0, 0, 0) on every Sony/Tamron frame we have. The estimate
+    # is measured from the frame itself and cached in the sidecar under auto_ca_r / auto_ca_b;
+    # a profile that *does* provide CA still wins, because it is the vendor's own datum.
+    if remove_ca and not (any(abs(c) > 1e-9 for c in ca_r_eff)
+                          or any(abs(c) > 1e-9 for c in ca_b_eff)
+                          or abs(ca_r_scale) > 1e-9 or abs(ca_b_scale) > 1e-9):
+        if lens_cfg.get("auto_ca", True):
+            ca_r_eff = _coeff_triplet(lens_cfg.get("auto_ca_r"))
+            ca_b_eff = _coeff_triplet(lens_cfg.get("auto_ca_b"))
+            ca_r_scale = _float_safe(lens_cfg.get("auto_ca_scale_r"))
+            ca_b_scale = _float_safe(lens_cfg.get("auto_ca_scale_b"))
 
     return {
         "enabled": is_enabled,
@@ -1083,5 +1248,10 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
         "k2": k2,
         "k3": k3,
         "vignette_amount": v_amt,
-        "vignette_midpoint": v_mid
+        "vignette_midpoint": v_mid,
+        "ca_r_scale": ca_r_scale,
+        "ca_b_scale": ca_b_scale,
+        "ca_r_coeffs": ca_r_eff,
+        "ca_b_coeffs": ca_b_eff,
+        "dist_scale": out_dist_scale
     }

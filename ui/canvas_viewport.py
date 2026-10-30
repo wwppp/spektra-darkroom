@@ -11,10 +11,83 @@ from PySide6.QtOpenGL import (
 )
 from core.path_utils import get_resource_dir
 from core import config_manager
-from core.darkroom_math import grain_scale_px, grain_colour_rho
+from core.darkroom_math import grain_scale_px, grain_colour_rho, scene_gain
 from core import grain_model as grain_model_ref
 from core.grain_model import octave_weights as grain_octave_weights
 from OpenGL import GL
+
+
+_DIFFUSION_FAMILIES = ("glimmerglass", "black_pro_mist", "pro_mist", "cinebloom")
+
+# Truncation of the fitted exponential disc, in mean free paths. 8 keeps 99.95%
+# of a true 2D exponential; larger values compensate for collapsing each group's
+# multi-exponential PSF onto a single one.
+_DIFF_PSF_CUTOFF = 8.0
+
+
+def _ca_coeffs(lens_cfg, key, legacy_key):
+    """Three-term lateral-CA coefficients from a lens config, with the legacy single-term
+    ``ca_kr``/``ca_kb`` as a fallback for sidecars written before the LCP models were read."""
+    cfg = lens_cfg if isinstance(lens_cfg, dict) else {}
+    raw = cfg.get(key)
+    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+        try:
+            return float(raw[0]), float(raw[1]), float(raw[2])
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(cfg.get(legacy_key, 0.0) or 0.0), 0.0, 0.0
+    except (TypeError, ValueError):
+        return 0.0, 0.0, 0.0
+
+
+def diffusion_shader_profile(family, strength):
+    """Uniform payload for the viewport's diffusion filter.
+
+    Mirrors the export's PSF split so the preview and the export blur the same
+    physical distance. The export (`apply_diffusion_filter_um`) builds each
+    family from core/halo/bloom groups of weighted 2D exponentials; the shader
+    cannot afford that many taps, so each group is collapsed to a single
+    exponential whose mean free path matches the group's second moment
+    (lambda_eff = sqrt(sum w_i * lambda_i^2)) and whose truncation radius is
+    8 * lambda_eff, exactly as the export truncates. Weights are the CPU's own
+    group weights. Radii are in micrometres, so they are resolution-independent.
+    """
+    zero = {"ps": 0.0, "core_w": 1.0, "halo_w": 0.0, "bloom_w": 0.0,
+            "halo_um": 0.0, "bloom_um": 0.0, "warmth_base": 0.0,
+            "cutoff": float(_DIFF_PSF_CUTOFF)}
+    fam = str(family or "none").lower()
+    try:
+        s = float(strength)
+    except (TypeError, ValueError):
+        return zero
+    if s <= 0.0005 or fam in ("none", ""):
+        return zero
+    if fam not in _DIFFUSION_FAMILIES:
+        fam = "black_pro_mist"
+
+    from spektrafilm.model.diffusion import (
+        _expand_group, _resolve_family_cfg, _strength_to_scatter,
+    )
+    cfg = _resolve_family_cfg(fam)
+    total = cfg["w_c"] + cfg["w_h"] + cfg["w_b"]
+    out = {
+        "ps": float(_strength_to_scatter(s, fam)),
+        "core_w": cfg["w_c"] / total,
+        "halo_w": cfg["w_h"] / total,
+        "bloom_w": cfg["w_b"] / total,
+        "warmth_base": float(cfg.get("halo_warmth_base", 0.0)),
+        "cutoff": float(_DIFF_PSF_CUTOFF),
+    }
+    for kind in ("halo", "bloom"):
+        lam, wt = _expand_group(cfg[kind], kind=kind)
+        # Match the export's truncation: it sizes the kernel from the group's
+        # LONGEST component (8 * lambda_max), not from an effective wavelength.
+        # Using sqrt(sum w*lambda^2) here made the shader's disc 1.5-2.4x
+        # narrower than the exported one, which read as the export being both
+        # softer and brighter than the preview.
+        out[f"{kind}_um"] = _DIFF_PSF_CUTOFF * float(lam.max())
+    return out
 
 
 def grain_derive_spec(params, stock_strength, stock_layer_weights, stock_size_mm,
@@ -85,11 +158,10 @@ uniform int u_has_lut;
 uniform int u_is_bypass;
 uniform vec3 u_bg_color;
 
-uniform float u_exposure;
-uniform float u_temp;
-uniform float u_tint;
-uniform float u_base_temp;
-uniform float u_base_tint;
+// Camera metering, kept separate from u_scene_gain so the untouched (Before) view can show
+// the same exposure calibration the developed view uses without inheriting the user's EV
+// slider. Everything else (exposure, temperature, tint) lives in u_scene_gain.
+uniform float u_base_ev;
 uniform float u_highlights;
 uniform float u_shadows;
 uniform vec3 u_cmy;
@@ -104,6 +176,10 @@ uniform float u_scatter_amount;     // scatter_amount (1.0 = physical default)
 uniform float u_halation_boost;     // boost_ev (0.0 = physical default)
 uniform vec3  u_hal_strength_rgb;   // profile-driven RGB preset
 uniform float u_hal_sigma_um;       // profile-driven first bounce sigma (um)
+// 1.0 when the caller already ran the separable-Gaussian halation chain
+// (ui/gl_halation.py) and handed us its output. The halo is then already applied, so the
+// tap-based path below must stay off and the gain must not be re-multiplied.
+uniform float u_scene_prepared;
 
 // Grain physics & format
 uniform float u_grain;
@@ -141,9 +217,28 @@ uniform vec3  u_stock_layer_weights;
 uniform vec2 u_master_resolution;
 
 // Diffusion filter
+// u_diffusion_ps is the deflected-photon fraction p_s, computed on the CPU by
+// spektrafilm.model.diffusion._strength_to_scatter() so the preview and the
+// export share one calibration table. The shader only consumes it; it must not
+// infer intensity from u_diffusion_strength (that was an unbounded additive
+// gain and blew the frame out at 2 stops).
 uniform int u_diffusion_type;
 uniform float u_diffusion_strength;
 uniform float u_diffusion_warmth;
+uniform float u_diffusion_ps;
+// The three PSF groups, mirrored from spektrafilm.model.diffusion so the
+// viewport reproduces the export's core/halo/bloom split exactly. Each *_w is
+// the group's share of the total PSF (they sum to 1) and each *_um is the
+// truncation diameter in micrometres, 8 x the group's energy-equivalent
+// exponential mean free path. Radii are therefore physical and independent of
+// preview resolution; only p_s changes with the filter stop.
+uniform float u_diff_core_w;
+uniform float u_diff_halo_w;
+uniform float u_diff_bloom_w;
+uniform float u_diff_halo_um;
+uniform float u_diff_bloom_um;
+uniform float u_diff_warmth_base;
+uniform float u_diff_cutoff;
 
 // DIR Couplers: fully baked into the 3D LUT only. There is deliberately no shader-side
 // DIR approximation - it is a strongly non-linear cross-layer response and a linear
@@ -163,9 +258,23 @@ uniform float u_film_width_um;
 // Lens Optical & Geometric Correction
 uniform int u_lens_enabled;
 uniform vec3 u_lens_distort;
+// 0 = derive the guard scale from the corner gain (the classic behaviour); anything else
+// overrides it. Sony's embedded tables are normalised at the centre, so re-normalising at the
+// corner would shrink the frame a further 15% and move it away from the camera's own JPEG.
+uniform float u_lens_dist_scale;
 uniform vec2 u_lens_vignette;
 uniform int u_lens_ca_enabled;
-uniform vec2 u_lens_ca_params;
+// Lateral CA has two parts. The leading term is a CONSTANT magnification difference between
+// channels (a lens focuses red/blue at slightly different scales), whose displacement grows
+// linearly with radius. Adobe's LCP polynomial (the vec3 below) only describes the residual
+// field-dependent part, because its first basis function is r^2 -> displacement ~ r^3, which
+// is exactly zero at the centre. Fitting a real frame with the polynomial alone therefore
+// puts nearly all of the correction in the corners and almost nothing in the mid-field; the
+// scalar below carries the constant scale and the vec3 the profile residual.
+uniform float u_lens_ca_scale_r;
+uniform float u_lens_ca_scale_b;
+uniform vec3 u_lens_ca_r;
+uniform vec3 u_lens_ca_b;
 
 // Interactive Crop & Straighten
 uniform int u_crop_enabled;
@@ -255,13 +364,39 @@ const float DIG_WHITE = 1.0;
 const float DIG_WHITE_COMP = 0.97;
 const float DIG_TAIL = 0.6;
 
+// How strongly a detected fringe is pulled to a neutral of its own luminance.
+const float DEFRINGE_STRENGTH = 1.5;
+// Minimum fraction of the pixel's own chroma that must sit on a CA hue (magenta/cyan/green/red).
+const float DEFRINGE_HUE_MIN = 0.55;
+// The pixel must be at least this much more chromatic than the least chromatic pixel of its ring.
+const float DEFRINGE_EXCESS_FLOOR = 0.50;
+// ... and at least this chromatic relative to the most chromatic one (local ridge, not valley).
+const float DEFRINGE_RIDGE_TOL = 0.98;
+// Local luminance contrast required, relative to the pixel's own luminance.
+const float DEFRINGE_CONTRAST_MIN = 0.08;
+// Both sides of the fringe along the luminance normal must stay below 1/1.5 of the pixel's
+// own chroma. A ring test cannot make this distinction: at the rim of a small saturated
+// object one side of the ring IS the object's interior, so the "ridge" test passes and the
+// whole contour gets neutralised. Measured on the blossom frame that cost 11.1% of the
+// flowers' chroma while touching 2.96% of the frame; with this test the fringe removal on
+// DSC02729 is unchanged and the blossom loss drops to 2.3%.
+const float DEFRINGE_SIDE_RATIO = 2.00;
+
+float chroma_of(vec3 c) {
+    return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+}
+
 vec3 digital_display_comp(vec3 x) {
     vec3 xn = max(x - vec3(DIG_TOE), vec3(0.0)) / (1.0 - DIG_TOE);
     vec3 t = clamp((xn - vec3(DIG_KNEE)) / (DIG_WHITE - DIG_KNEE), 0.0, 1.0);
     vec3 shoulder = vec3(DIG_KNEE) + (DIG_WHITE_COMP - DIG_KNEE) * (t + t * t - t * t * t);
     vec3 tail = vec3(DIG_WHITE_COMP)
               + (1.0 - DIG_WHITE_COMP) * (vec3(1.0) - exp(-max(xn - vec3(DIG_WHITE), vec3(0.0)) / DIG_TAIL));
-    return mix(xn, mix(shoulder, tail, step(DIG_WHITE, xn)), step(xn, vec3(DIG_KNEE)));
+    // mix(a, b, t) returns b when t == 1, so the branch that must apply BELOW the knee (xn
+    // itself) has to be the second argument. Swapping these put shoulder(0) = 0.18 on every
+    // sub-knee pixel, which displayed as a flat 46% grey: the Before panel and the no-film
+    // bypass both washed out while the export (numpy side, correct) stayed clean.
+    return mix(mix(shoulder, tail, step(DIG_WHITE, xn)), xn, step(xn, vec3(DIG_KNEE)));
 }
 
 // Accurate Linear ProPhoto RGB to Display sRGB color space conversion
@@ -293,14 +428,10 @@ vec3 filmic_shoulder(vec3 c, float threshold) {
     return min(c, vec3(threshold)) + span * (over / (span + over));
 }
 
-// Hermite soft-knee thresholding: smoothly blends from zero to highlight glow
-float soft_knee_hl(float luma, float thr, float knee) {
-    float lo = max(0.001, thr - knee);
-    float hi = thr + knee;
-    float t = clamp((luma - lo) / max(0.0001, (hi - lo)), 0.0, 1.0);
-    float smooth_t = t * t * (3.0 - 2.0 * t);
-    return smooth_t * max(0.0, luma - lo);
-}
+// Mean nearest-neighbour spacing of the 32-tap Vogel set, in units of the disc
+// radius. The mipmap LOD must blur at least this much or adjacent taps stop
+// touching and the disc falls apart into a visible dot lattice.
+const float DIFF_TAP_SPACING = 0.298;
 
 // 16-tap isotropic Vogel spiral disc offsets
 const vec2 VOGEL_TAPS[16] = vec2[](
@@ -322,31 +453,139 @@ const vec2 VOGEL_TAPS[16] = vec2[](
     vec2( 0.32353, -0.93043)
 );
 
+// 8-point uniform ring, used by the halation/scatter convolutions. The Vogel
+// spirals above are scaled to fill a *disc* (radius 0 -> 1), which means every tap
+// sits at a different radius -- fine for a low-pass bloom, wrong for a Gaussian,
+// whose kernel is stratified by radius. Sampling a Gaussian with a disc-filling
+// spiral puts almost no taps in the core and over-weights the outer edge, which is
+// what made the halo read as a hollow star instead of a disc.
+const vec2 RING8[8] = vec2[](
+    vec2( 1.00000,  0.00000),
+    vec2( 0.70711,  0.70711),
+    vec2( 0.00000,  1.00000),
+    vec2(-0.70711,  0.70711),
+    vec2(-1.00000,  0.00000),
+    vec2(-0.70711, -0.70711),
+    vec2( 0.00000, -1.00000),
+    vec2( 0.70711, -0.70711)
+);
+// Same ring, rotated 22.5 degrees. Interleaving the two rings doubles the angular
+// resolution without doubling the tap count per ring, so the 16-gon approximation
+// of the circle has its corners offset by half a facet.
+const vec2 RING8R[8] = vec2[](
+    vec2( 0.92388,  0.38268),
+    vec2( 0.38268,  0.92388),
+    vec2(-0.38268,  0.92388),
+    vec2(-0.92388,  0.38268),
+    vec2(-0.92388, -0.38268),
+    vec2(-0.38268, -0.92388),
+    vec2( 0.38268, -0.92388),
+    vec2( 0.92388, -0.38268)
+);
+
+
+// ~45 px radius, so the mean tap separation is ~18 px while the mipmap LOD
+// supplied only ~7 px of pre-filtering. The 11 px of empty space between taps
+// showed up as a visibly regular dot/grid pattern over flat bright areas
+// (sky). 32 taps halve the separation; LOD is now derived from the actual
+// spacing (see DIFF_LOD_K below) so adjacent taps always overlap.
+const vec2 VOGEL_TAPS32[32] = vec2[](
+    vec2(+0.12500, +0.00000), vec2(-0.15965, +0.14625),
+    vec2(+0.02444, -0.27844), vec2(+0.20122, +0.26246),
+    vec2(-0.36927, -0.06532), vec2(+0.34980, -0.22252),
+    vec2(-0.11700, +0.43524), vec2(-0.22314, -0.42963),
+    vec2(+0.48412, +0.17680), vec2(-0.50364, +0.20790),
+    vec2(+0.24279, -0.51882), vec2(+0.17941, +0.57200),
+    vec2(-0.54076, -0.31338), vec2(+0.63437, -0.13946),
+    vec2(-0.38715, +0.55068), vec2(-0.08944, -0.69020),
+    vec2(+0.54907, +0.46276), vec2(-0.73888, +0.03055),
+    vec2(+0.53896, -0.53633), vec2(-0.03606, +0.77979),
+    vec2(-0.51282, -0.61453), vec2(+0.81236, +0.10930),
+    vec2(-0.68831, +0.47891), vec2(+0.18809, -0.83606),
+    vec2(+0.43503, +0.75919), vec2(-0.85045, -0.27132),
+    vec2(+0.82610, -0.38168), vec2(-0.35789, +0.85516),
+    vec2(-0.31941, -0.88803), vec2(+0.84991, +0.44669),
+    vec2(-0.94403, +0.24884), vec2(+0.53660, -0.83453)
+);
+
+// Exposure and luminance-preserving white balance, folded into one gain vector on the host
+// (core.darkroom_math.scene_gain). This function runs once per tap inside the diffusion
+// loop - 32 coalesced evaluations per pixel - and the WB solve (one log2, three exp2, a
+// divide and a dot) is tap-independent, so it is lifted out and uploaded as u_scene_gain.
+uniform vec3 u_scene_gain;
+
+// Highlights / shadows weight calibration - must stay in sync with core/darkroom_math.py.
+// Highlights key off max(R,G,B): over-exposure is a per-channel event, so a saturated neon or
+// tail light must be reachable, and keying off luminance left pure blue at weight 0.0.
+// The top of the range sits on the Clip decode ceiling (q = 1.0), not 4 stops above grey,
+// which is why the slider could never exceed 67% authority before.
+// A wide ramp, not a narrow one: foot on 18% grey and full weight on the clip point. A 0.97-
+// stop ramp turned one continuous sky into two flat plateaus (42 levels of shift on the bright
+// side, 3.6 on the dark side) which reads as a hard cutoff. Zero slope at the foot keeps grey
+// and below untouched.
+const float HS_HL_LO = 0.0;      // log2(q / 0.18): q = 0.18
+const float HS_HL_SPAN = 2.4709; // full weight at log2(1.0 / 0.18)
+// Shadows are a BELL, not a ramp: a ramp lifts the blacks along with the shadows and the frame
+// turns to grey fog (measured: 2nd percentile 5.9 -> 30, midtones +51 levels against +27 in the
+// shadows). t*(1-t)*4 is zero at 18% grey and at -6 stops, peaking at -3 stops (sRGB ~50).
+const float HS_SH_SPAN = 6.0;
+// Stops per slider unit at full weight. Highlights are deliberately softer than shadows: see
+// the note in core/darkroom_math.py.
+const float HS_HL_STOPS = 0.01;
+const float HS_SH_STOPS = 0.015;
+
 // Computes scene-linear radiance accounting for exposure, white balance tint, and highlights/shadows shaping
 vec3 compute_scene_radiance(vec3 raw_c) {
-    vec3 col = raw_c * exp2(u_exposure);
-    float b_temp = (u_base_temp > 1000.0) ? u_base_temp : 5500.0;
-    float b_tint = (u_base_tint > 0.1) ? u_base_tint : 1.0;
-    // Exponential, luminance-preserving white balance (mirrors core/darkroom_math.wb_gains)
-    float wb_s = log2(max(1000.0, u_temp) / b_temp);
-    vec3 wb_g = vec3(exp2(0.40 * wb_s), u_tint / b_tint, exp2(-0.40 * wb_s));
-    wb_g /= max(1e-4, dot(wb_g, vec3(0.2880, 0.7119, 0.0001)));
-    col *= wb_g;
+    // Pre-rendered path (ui/gl_halation.py): the texture already holds scene radiance with
+    // exposure, WB and HS shaping baked in, so applying the gain again would square it.
+    if (u_scene_prepared > 0.5) return raw_c;
+    vec3 col = raw_c * u_scene_gain;
 
     if (abs(u_highlights) > 0.001 || abs(u_shadows) > 0.001) {
-        float y_lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
-        if (y_lum > 0.00001) {
-            float z = log2(y_lum / 0.18);
-            float w_sh = clamp(-z * 0.25, 0.0, 1.0);
-            w_sh = w_sh * w_sh * (3.0 - 2.0 * w_sh);
-            float w_hl = clamp(z * 0.25, 0.0, 1.0);
-            w_hl = w_hl * w_hl * (3.0 - 2.0 * w_hl);
-            float delta_z = (u_shadows * 0.02) * w_sh + (u_highlights * 0.02) * w_hl;
-            float y_target = 0.18 * exp2(z + delta_z);
-            col *= (y_target / y_lum);
-        }
+        float hi = max(col.r, max(col.g, col.b));
+        // ProPhoto luminance: the same row the white-balance solve normalises with. Using the
+        // Rec.709 row here put the blue coefficient off by 840x against the WB gains.
+        float lum = dot(col, vec3(0.2880, 0.7119, 0.0001));
+
+        float t_hl = clamp((log2(max(hi, 1e-9) / 0.18) - HS_HL_LO) / HS_HL_SPAN, 0.0, 1.0);
+        float w_hl = t_hl * t_hl * (3.0 - 2.0 * t_hl);
+        // Bell: zero at 18% grey and at -5 stops, so pure black is neither lifted nor is the
+        // noise floor amplified (log2 saturates to t = 1, a zero weight).
+        float t_sh = clamp(-log2(max(lum, 1e-9) / 0.18) / HS_SH_SPAN, 0.0, 1.0);
+        float w_sh = t_sh * (1.0 - t_sh) * 4.0;
+
+        float delta_z = (u_shadows * HS_SH_STOPS) * w_sh + (u_highlights * HS_HL_STOPS) * w_hl;
+        // The old form re-aimed luminance at 0.18 * exp2(z + delta_z) and divided by the
+        // luminance, which is algebraically exp2(delta_z) - one exp2 and one mul instead of
+        // two exp2 plus a divide.
+        col *= exp2(delta_z);
     }
     return col;
+}
+
+// One PSF group of the diffusion filter: an exponential disc truncated at 8
+// mean-free-paths, sampled on the 32-tap Vogel set with a mipmap LOD matched to
+// the tap spacing. This is the shader-side (K_group * E) term. The radius is
+// physical (converted from micrometres by the caller), so the same scene blurs
+// identically at any preview resolution.
+vec3 diffusion_disc(vec2 sample_uv, vec2 radius_uv) {
+    vec2 tex_sz = max(vec2(100.0), vec2(textureSize(u_image, 0)));
+    float spacing_px = DIFF_TAP_SPACING * max(radius_uv.x * tex_sz.x, radius_uv.y * tex_sz.y);
+    float lod_base = clamp(log2(max(1.0, spacing_px)), 0.0, 9.0);
+    vec3 acc = vec3(0.0);
+    float w_sum = 0.0;
+    for (int i = 0; i < 32; i++) {
+        vec2 off = VOGEL_TAPS32[i];
+        float r_norm = length(off);
+        vec2 tap_uv = clamp(sample_uv + off * radius_uv, 0.0, 1.0);
+        float tap_lod = clamp(lod_base + r_norm * 0.35, 0.0, 9.0);
+        vec3 tap_rgb = compute_scene_radiance(textureLod(u_image, tap_uv, tap_lod).rgb);
+        // exp(-r/lambda), with the disc edge at r = 8 lambda
+        float w = exp(-u_diff_cutoff * r_norm);
+        acc += tap_rgb * w;
+        w_sum += w;
+    }
+    return acc / max(0.0001, w_sum);
 }
 
 void main() {
@@ -514,6 +753,10 @@ void main() {
         d_sample_dy = vec2(d_img_dy.x, -d_img_dy.y);
     }
 
+    // Lens vignetting is a property of the sensor position, not of the warped sample, so it
+    // is evaluated on the pre-warp coordinate (matches core/lens_warp.py).
+    vec2 pre_dist_uv = sample_uv;
+
     // Apply Lens Distortion Warp if enabled
     if (u_lens_enabled == 1 && (abs(u_lens_distort.x) > 0.00001 || abs(u_lens_distort.y) > 0.00001 || abs(u_lens_distort.z) > 0.00001)) {
         vec2 tex_dim = max(vec2(1.0), vec2(textureSize(u_image, 0)));
@@ -525,11 +768,28 @@ void main() {
         float r4 = r2 * r2;
         float r6 = r4 * r2;
         float r_dist = 1.0 + u_lens_distort.x * r2 + u_lens_distort.y * r4 + u_lens_distort.z * r6;
-        
-        // Auto-scale factor to prevent edge clamping / black borders
+
+        // Auto-scale factor to prevent edge clamping / black borders. Applied for both
+        // directions: only barrel correction used to be rescaled, so pincushion correction
+        // pushed the corners past the frame and the clamp turned them into smeared streaks.
         float corner_k = u_lens_distort.x + u_lens_distort.y + u_lens_distort.z;
-        float scale = (corner_k > 0.0) ? (1.0 / (1.0 + corner_k)) : 1.0;
+        float scale = abs(u_lens_dist_scale) > 1e-9
+                    ? u_lens_dist_scale
+                    : 1.0 / max(0.05, 1.0 + corner_k);
         sample_uv = 0.5 + (delta * r_dist) * scale;
+
+        // Local Jacobian of the warp. The sampling density changes with radius, so the mip
+        // level has to follow it; leaving the gradients untouched made a strong correction
+        // alias at the centre and over-blur at the edges.
+        float dK = u_lens_distort.x + 2.0 * u_lens_distort.y * r2 + 3.0 * u_lens_distort.z * r4;
+        vec2 grad_r2 = vec2(2.0 * aspect * aspect * delta.x, 2.0 * delta.y) / max_r2;
+        float j00 = scale * (r_dist + delta.x * grad_r2.x * dK);
+        float j01 = scale * (delta.x * grad_r2.y * dK);
+        float j10 = scale * (delta.y * grad_r2.x * dK);
+        float j11 = scale * (r_dist + delta.y * grad_r2.y * dK);
+        mat2 warp_jacobian = mat2(j00, j10, j01, j11);
+        d_sample_dx = warp_jacobian * d_sample_dx;
+        d_sample_dy = warp_jacobian * d_sample_dy;
     }
     
     // Clamping & Letterbox background
@@ -547,54 +807,137 @@ void main() {
     vec3 orig_rgb = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).rgb;
 
     // 1. Lateral CA Radial Shift (only when calibrated non-zero params provided)
-    if (u_lens_ca_enabled == 1 && (abs(u_lens_ca_params.x) > 0.00001 || abs(u_lens_ca_params.y) > 0.00001)) {
+    if (u_lens_ca_enabled == 1 &&
+        (abs(u_lens_ca_scale_r) + abs(u_lens_ca_scale_b) +
+         abs(u_lens_ca_r.x) + abs(u_lens_ca_r.y) + abs(u_lens_ca_r.z) +
+         abs(u_lens_ca_b.x) + abs(u_lens_ca_b.y) + abs(u_lens_ca_b.z) > 0.00001)) {
+        // Radius in the same corner-normalised space the distortion term uses, so the
+        // profile's r = R/f coefficients transfer without a second normalisation.
+        float asp_ca = tex_dim.x / tex_dim.y;
+        float max_r2_ca = 0.25 * (asp_ca * asp_ca + 1.0);
         vec2 lp_ca = (sample_uv - 0.5);
-        float r2_ca = dot(lp_ca, lp_ca);
-        vec2 uv_r = clamp(sample_uv + lp_ca * (u_lens_ca_params.x * r2_ca), half_texel, vec2(1.0) - half_texel);
-        vec2 uv_b = clamp(sample_uv + lp_ca * (u_lens_ca_params.y * r2_ca), half_texel, vec2(1.0) - half_texel);
+        float r2_ca = (lp_ca.x * asp_ca * lp_ca.x * asp_ca + lp_ca.y * lp_ca.y) / max_r2_ca;
+        float r4_ca = r2_ca * r2_ca;
+        float r6_ca = r4_ca * r2_ca;
+        float scale_r = 1.0 + u_lens_ca_scale_r
+                        + u_lens_ca_r.x * r2_ca + u_lens_ca_r.y * r4_ca + u_lens_ca_r.z * r6_ca;
+        float scale_b = 1.0 + u_lens_ca_scale_b
+                        + u_lens_ca_b.x * r2_ca + u_lens_ca_b.y * r4_ca + u_lens_ca_b.z * r6_ca;
+        vec2 uv_r = clamp(0.5 + lp_ca * scale_r, half_texel, vec2(1.0) - half_texel);
+        vec2 uv_b = clamp(0.5 + lp_ca * scale_b, half_texel, vec2(1.0) - half_texel);
         orig_rgb.r = textureGrad(u_image, uv_r, d_sample_dx, d_sample_dy).r;
         orig_rgb.b = textureGrad(u_image, uv_b, d_sample_dx, d_sample_dy).b;
     }
 
-    // 2. High-Contrast Edge Defringing (Removes purple, green, cyan & red color fringing along contrast boundaries)
+    // 2. Edge defringing. A colour fringe is *additive* colour laid on top of a surface, so the
+    //    only stable signature is a CHROMA RIDGE: the pixel is more chromatic than the ring
+    //    around it. Everything a previous version of this block did wrong follows from missing
+    //    that test —
+    //      * a 3x3/4px/8px mean is filled by the fringe itself on a 1-2 px band, so the excess
+    //        never opened up (measured 18% removal at every band width),
+    //      * a wide reference blends across the edge, which made the "repair" pull legit
+    //        colour toward the average: petals lost their own edges (measured -7.7% chroma on
+    //        the blossom test frame, 15% of pixels touched),
+    //      * and it fired on chroma VALLEYS too. Measured on the branch test frame, 77% of the
+    //        strong "purple rim" pixels are valleys — they are neutral anti-aliasing between a
+    //        bright sky and a dark branch, not colour that was added.
+    //    The repair is a neutralisation at the pixel's own luminance, which cannot import a tint
+    //    from anywhere else.
     if (u_lens_ca_enabled == 1) {
-        vec2 texel_step = 1.0 / tex_dim;
-        vec3 col_px = textureGrad(u_image, sample_uv + vec2(texel_step.x, 0.0), d_sample_dx, d_sample_dy).rgb;
-        vec3 col_py = textureGrad(u_image, sample_uv + vec2(0.0, texel_step.y), d_sample_dx, d_sample_dy).rgb;
+        float r = orig_rgb.r;
+        float g = orig_rgb.g;
+        float b = orig_rgb.b;
+        float l0 = dot(orig_rgb, vec3(0.299, 0.587, 0.114));
+        float mx0 = max(1e-4, max(r, max(g, b)));
+        float ch0 = mx0 - min(r, min(g, b));
 
-        float luma_c = 0.299 * orig_rgb.r + 0.587 * orig_rgb.g + 0.114 * orig_rgb.b;
-        float luma_x = 0.299 * col_px.r + 0.587 * col_px.g + 0.114 * col_px.b;
-        float luma_y = 0.299 * col_py.r + 0.587 * col_py.g + 0.114 * col_py.b;
+        float magenta = max(0.0, min(r, b) - g);          // R and B above G
+        float cyan = max(0.0, b - max(r, g));             // B above both
+        float green = max(0.0, g - max(r, b));            // G above both
+        float red = max(0.0, r - max(g, b));              // R above both
+        float hue = clamp((magenta + cyan + green + red) / max(ch0, 1e-6), 0.0, 1.0);
 
-        float edge_val = max(abs(luma_c - luma_x), abs(luma_c - luma_y));
-        float edge_mask = clamp(edge_val * 15.0, 0.0, 1.0);
+        if (ch0 / mx0 > 0.08 && hue > DEFRINGE_HUE_MIN) {
+            vec2 ts = 2.0 * (1.0 / tex_dim);
+            vec3 n1 = textureGrad(u_image, sample_uv + vec2(ts.x, 0.0), d_sample_dx, d_sample_dy).rgb;
+            vec3 n2 = textureGrad(u_image, sample_uv - vec2(ts.x, 0.0), d_sample_dx, d_sample_dy).rgb;
+            vec3 n3 = textureGrad(u_image, sample_uv + vec2(0.0, ts.y), d_sample_dx, d_sample_dy).rgb;
+            vec3 n4 = textureGrad(u_image, sample_uv - vec2(0.0, ts.y), d_sample_dx, d_sample_dy).rgb;
 
-        if (edge_mask > 0.01) {
-            float r = orig_rgb.r;
-            float g = orig_rgb.g;
-            float b = orig_rgb.b;
+            float c1 = max(n1.r, max(n1.g, n1.b)) - min(n1.r, min(n1.g, n1.b));
+            float c2 = max(n2.r, max(n2.g, n2.b)) - min(n2.r, min(n2.g, n2.b));
+            float c3 = max(n3.r, max(n3.g, n3.b)) - min(n3.r, min(n3.g, n3.b));
+            float c4 = max(n4.r, max(n4.g, n4.b)) - min(n4.r, min(n4.g, n4.b));
+            float c_lo = min(min(c1, c2), min(c3, c4));
+            float c_hi = max(max(c1, c2), max(c3, c4));
 
-            float purple = max(0.0, min(r, b) - g);
-            float green = max(0.0, g - max(r, b));
-            float cyan = max(0.0, b - max(r, g));
-            float red = max(0.0, r - max(g, b));
+            float l1 = dot(n1, vec3(0.299, 0.587, 0.114));
+            float l2 = dot(n2, vec3(0.299, 0.587, 0.114));
+            float l3 = dot(n3, vec3(0.299, 0.587, 0.114));
+            float l4 = dot(n4, vec3(0.299, 0.587, 0.114));
+            float l_lo = min(min(l1, l2), min(l3, l4));
+            float l_hi = max(max(l1, l2), max(l3, l4));
 
-            orig_rgb.r = max(0.0, r - (purple * 0.90 + red * 0.90) * edge_mask);
-            orig_rgb.g = max(0.0, g - (green * 0.90) * edge_mask);
-            orig_rgb.b = max(0.0, b - (purple * 0.90 + cyan * 0.90) * edge_mask);
+            float excess = clamp((ch0 - c_lo) / max(ch0, 1e-6), 0.0, 1.0);
+            float contrast = (l_hi - l_lo) / max(l0, 1e-3);
+
+            // Ridge: this pixel must be at least as chromatic as its ring. A petal crease and an
+            // anti-aliased branch edge are both valleys and stay untouched.
+            //
+            // The ring test alone accepts a STEP as well: at the rim of a small saturated
+            // object (the blossom frame's flowers are ~5 px across) one side of the ring is the
+            // object's own interior, so "as chromatic as the ring" holds and the whole contour
+            // is neutralised. A fringe is a band with low chroma on BOTH sides, so the last test
+            // taps the chroma at ±2 and ±3 px along the luminance normal and requires both
+            // sides to stay below ch0 / DEFRINGE_SIDE_RATIO.
+            if (excess > DEFRINGE_EXCESS_FLOOR && ch0 >= c_hi * DEFRINGE_RIDGE_TOL
+                    && contrast > DEFRINGE_CONTRAST_MIN) {
+                vec2 grad_l = vec2(l1 - l2, l3 - l4);
+                float gm = length(grad_l);
+                // No normal means no way to ask the question — and leaving side at 0 would
+                // sample nothing meaningful. A fringe narrower than the ±2 px probe is exactly
+                // this case (an isolated 1 px band is symmetric about its own centre), so it
+                // passes at full strength.
+                float ramp = 1.0;
+                if (gm > 1e-6) {
+                    vec2 ng = grad_l / gm;
+                    vec2 p1 = 1.0 / tex_dim;
+                    vec2 o2 = ng * (2.0 * p1);
+                    vec2 o3 = ng * (3.0 * p1);
+                    float side = 0.0;
+                    side = max(side, chroma_of(textureLod(u_image, sample_uv + o2, 0.0).rgb));
+                    side = max(side, chroma_of(textureLod(u_image, sample_uv - o2, 0.0).rgb));
+                    side = max(side, chroma_of(textureLod(u_image, sample_uv + o3, 0.0).rgb));
+                    side = max(side, chroma_of(textureLod(u_image, sample_uv - o3, 0.0).rgb));
+                    // Smooth ramp, not a hard cut: a fringe sitting exactly at the threshold
+                    // would otherwise flip between pass and fail on a rounding difference
+                    // between the GPU and CPU tap positions.
+                    ramp = clamp((ch0 / max(side, 1e-6) - 1.0) / (DEFRINGE_SIDE_RATIO - 1.0),
+                                 0.0, 1.0);
+                    ramp = ramp * ramp * (3.0 - 2.0 * ramp);
+                }
+                float w = clamp(excess * DEFRINGE_STRENGTH, 0.0, 1.0)
+                        * clamp(hue / DEFRINGE_HUE_MIN, 0.0, 1.0) * ramp;
+                orig_rgb = mix(orig_rgb, vec3(l0), w);
+            }
         }
     }
 
     // Apply Lens Vignette compensation/darkening if enabled
     if (u_lens_enabled == 1 && abs(u_lens_vignette.x) > 0.001) {
-        float r_norm = length((sample_uv - 0.5) * 2.0) / 1.41421356;
+        float r_norm = length((pre_dist_uv - 0.5) * 2.0) / 1.41421356;
         float v_exp = mix(1.2, 4.0, 1.0 - clamp(u_lens_vignette.y / 100.0, 0.1, 0.9));
         float vig_gain = max(0.0, 1.0 + u_lens_vignette.x * pow(clamp(r_norm, 0.0, 1.0), v_exp));
         orig_rgb *= vig_gain;
     }
 
     // Accurate untouched base display color (Before / 原片)
-    vec3 before_color = (u_is_bypass == 2) ? clamp(orig_rgb, 0.0, 1.0) : clamp(prophoto_to_srgb(orig_rgb), 0.0, 1.0);
+    // raw_preview deliberately stores pure scene radiance with base_ev NOT pre-multiplied (that
+    // keeps re-imports idempotent), so the untouched view has to apply it here. Without it the
+    // Before side sits up to ~1 stop hot and flat next to the developed side: the sky clips to
+    // white and the shadows lift, which reads as a grey milky wash rather than a neutral baseline.
+    vec3 before_lin = orig_rgb * exp2(u_base_ev);
+    vec3 before_color = (u_is_bypass == 2) ? clamp(orig_rgb, 0.0, 1.0) : clamp(prophoto_to_srgb(before_lin), 0.0, 1.0);
 
     // -------------------------------------------------------------
     // Compare Modes (Must execute BEFORE bypass early return!)
@@ -650,91 +993,52 @@ void main() {
     if (eff_diff_type == 0 && u_diffusion_strength > 0.001) {
         eff_diff_type = 1; // Default to Black Pro-Mist if strength > 0
     }
-    if (eff_diff_type > 0 && u_diffusion_strength > 0.001) {
-        // Physical radius scaled by strength
-        float base_rad = 0.012 * max(0.20, u_diffusion_strength);
-        float thr = 0.35;
-        float knee = 0.18;
-        float halo_w = 0.65;
-        float intensity = 1.05;
-
-        // Align per-family optical profile to spektrafilm physical specs
-        if (eff_diff_type == 1) {
-            // Black Pro-Mist: Punchy core + halo, fast falloff, deep clean blacks intact
-            thr = 0.36;
-            knee = 0.16;
-            base_rad *= 1.0;
-            intensity = 1.05;
-            halo_w = 0.65;
-        } else if (eff_diff_type == 2) {
-            // Glimmerglass: Ultra-clean micro-bloom, crisp highlights, minimal veiling
-            thr = 0.42;
-            knee = 0.14;
-            base_rad *= 0.75;
-            intensity = 0.85;
-            halo_w = 0.0;
-        } else if (eff_diff_type == 3) {
-            // Pro-Mist: Classic atmospheric pastel haze, balanced halo & veil
-            thr = 0.24;
-            knee = 0.20;
-            base_rad *= 1.45;
-            intensity = 1.25;
-            halo_w = 0.40;
-        } else if (eff_diff_type == 4) {
-            // CineBloom: Wide cinematic atmospheric flare, heavy tail
-            thr = 0.20;
-            knee = 0.22;
-            base_rad *= 1.85;
-            intensity = 1.40;
-            halo_w = 0.85;
-        }
-
+    if (eff_diff_type > 0 && u_diffusion_ps > 0.0005) {
+        // The PSF is the CPU model's own three-group split — core (stays at the
+        // pixel), halo and bloom — each an exponential disc truncated at 8 mean
+        // free paths. The radii arrive in micrometres from the same table the
+        // export uses, so a given filter blurs the same physical distance at any
+        // preview resolution. The stop changes only p_s (density), never radius;
+        // scaling radius with strength is what made 2 stops read as a different
+        // filter instead of a denser one.
         vec2 tex_sz = max(vec2(100.0), vec2(textureSize(u_image, 0)));
-        // Correct aspect ratio so the bloom spread is physically isotropic (circular)
-        float aspect = tex_sz.x / tex_sz.y;
-        vec2 spread = vec2(base_rad, base_rad * aspect);
+        float max_dim = max(tex_sz.x, tex_sz.y);
+        float um_per_px = max(1000.0, u_film_width_um) / max_dim;
+        vec2 halo_r  = vec2(u_diff_halo_um  / um_per_px / tex_sz.x,
+                            u_diff_halo_um  / um_per_px / tex_sz.y);
+        vec2 bloom_r = vec2(u_diff_bloom_um / um_per_px / tex_sz.x,
+                            u_diff_bloom_um / um_per_px / tex_sz.y);
 
-        vec3 bloom_accum = vec3(0.0);
-        float total_weight = 0.0;
+        vec3 halo_avg  = diffusion_disc(sample_uv, halo_r);
+        vec3 bloom_avg = diffusion_disc(sample_uv, bloom_r);
 
-        // Trilinear Mipmap LOD level: higher LOD for outer taps guarantees continuous pre-filtering
-        float lod_base = clamp(log2(base_rad * max(tex_sz.x, tex_sz.y) * 0.15), 0.0, 4.0);
-
-        for (int i = 0; i < 16; i++) {
-            vec2 offset = VOGEL_TAPS[i];
-            float r_norm = length(offset);
-            vec2 tap_uv = clamp(sample_uv + offset * spread, 0.0, 1.0);
-            
-            // Sample with hardware trilinear mipmap pre-filtering
-            float tap_lod = clamp(lod_base + r_norm * 1.8, 0.0, 4.5);
-            vec3 tap_rgb = compute_scene_radiance(textureLod(u_image, tap_uv, tap_lod).rgb);
-            
-            float tap_luma = dot(tap_rgb, vec3(0.2126, 0.7152, 0.0722));
-            float hl = soft_knee_hl(tap_luma, thr, knee);
-
-            // Isotropic exponential falloff weighting
-            float w = exp(-r_norm * 1.8);
-            bloom_accum += tap_rgb * (hl * w);
-            total_weight += w;
-        }
-        bloom_accum /= max(0.0001, total_weight);
-
-        // Physical halo warmth tint (outer rim warm yellow-orange, core cool)
-        float eff_warmth = clamp(halo_w + u_diffusion_warmth, -1.5, 1.5);
+        // Warmth is a hue shift in the scattered light, normalised to unit
+        // luminance so it cannot change scene brightness.
+        float eff_warmth = clamp(u_diff_warmth_base + u_diffusion_warmth, -1.5, 1.5);
         vec3 diff_tint = vec3(
             1.0 + eff_warmth * 0.35,
             1.0 + eff_warmth * 0.08,
             1.0 - eff_warmth * 0.35
         );
+        diff_tint /= max(0.2, dot(diff_tint, vec3(0.2126, 0.7152, 0.0722)));
 
-        linear_rgb += bloom_accum * (u_diffusion_strength * intensity) * diff_tint;
+        // K * E: the three groups combined with the CPU's own weights (sum = 1).
+        // Core is a delta, so it keeps the pixel's own radiance.
+        vec3 k_blur = u_diff_core_w * linear_rgb
+                    + u_diff_halo_w * halo_avg  * diff_tint
+                    + u_diff_bloom_w * bloom_avg * diff_tint;
 
-        // Classic Pro-Mist & CineBloom lift deep shadows slightly (veiling glare)
-        if (eff_diff_type == 3) {
-            linear_rgb = mix(linear_rgb, linear_rgb + vec3(0.015 * u_diffusion_strength), 0.20);
-        } else if (eff_diff_type == 4) {
-            linear_rgb = mix(linear_rgb, linear_rgb + vec3(0.022 * u_diffusion_strength), 0.25);
-        }
+        // Energy-conserving composite, literally the CPU path's formula:
+        //     E_out = (1 - p_s) * E_in + p_s * (K * E_in)
+        //           = E_in + p_s * (K*E - E_in)
+        // In a flat field K*E == E_in, so nothing happens; next to a highlight the
+        // pixel gives up p_s of its own radiance and receives p_s of the haze that
+        // landed on it. Energy is preserved, so the frame's mean brightness does
+        // not drift with the stop. (The old `E += bloom * strength * intensity`
+        // injected every scattered photon twice and blew a quarter of the frame
+        // to white at 2 stops.)
+        float p_s = clamp(u_diffusion_ps, 0.0, 0.95);
+        linear_rgb += p_s * (k_blur - linear_rgb);
     }
 
     // 3.5. Official Spektrafilm Physical Halation & In-Emulsion Scatter
@@ -766,7 +1070,10 @@ void main() {
         }
 
         // 2. Base Back-Reflection Halation: Multi-bounce additive sum with DC energy normalization
-        if (u_halation > 0.001) {
+        //    Skipped when the caller pre-rendered the halo: ui/gl_halation.py evaluates the
+        //    same DC-normalised sum with a real separable Gaussian, and running the tap
+        //    version on top would apply it twice.
+        if (u_halation > 0.001 && u_scene_prepared < 0.5) {
             vec3 a_tot = u_hal_strength_rgb * u_halation;
             vec3 hal_accum = vec3(0.0);
             float hal_total_w = 0.0;
@@ -774,7 +1081,11 @@ void main() {
             for (int b = 1; b <= 3; b++) {
                 float bounce_w = pow(0.5, float(b - 1));
                 float bounce_rad_mult = sqrt(float(b));
-                float lod_b = clamp(log2(base_hal_rad * bounce_rad_mult * max_dim * 0.4), 0.0, 4.5);
+                // 16-tap Vogel mean nearest-neighbour ≈ 0.42 of the unit radius,
+                // and hal_spread is 2.5× the base radius, so the tap separation
+                // is ~1.05 × base_hal_rad × max_dim. The LOD must match that or
+                // the halo breaks into the same dot pattern as the bloom did.
+                float lod_b = clamp(log2(base_hal_rad * bounce_rad_mult * max_dim * 1.05), 0.0, 8.0);
 
                 for (int i = 0; i < 16; i++) {
                     vec2 offset = VOGEL_TAPS[i] * bounce_rad_mult;
@@ -1045,6 +1356,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # Texture state
         self._image_tex_id = None
         self._lut_tex_id = None
+        # Separable-Gaussian halation chain (ui/gl_halation.py). Created lazily on the first
+        # render that needs it, so no GL objects exist before a context is current.
+        self._halation_chain = None
         # 512x1 RGB ramp holding the current stock's density law (core/grain_model.py), plus the
         # identity of the table it holds so switching stock re-uploads instead of re-baking.
         self._grain_density_tex_id = None
@@ -1267,9 +1581,19 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def initializeGL(self):
         self._release_gl_resources()
         self.shader_program = QOpenGLShaderProgram(self)
-        self.shader_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, VERTEX_SHADER_SRC)
-        self.shader_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Fragment, FRAGMENT_SHADER_SRC)
+        vert_ok = self.shader_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, VERTEX_SHADER_SRC)
+        frag_ok = self.shader_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Fragment, FRAGMENT_SHADER_SRC)
+        # link() reports success even when a stage failed to compile -- Qt only links the
+        # stages it managed to build. The failure then surfaces as "every uniform
+        # location is -1" and a completely black canvas, with log() empty by the time
+        # anyone looks. Read the log *here*, immediately, before link() clears it.
+        if not vert_ok or not frag_ok:
+            _c_log = self.shader_program.log()
+            print("[DarkroomGLCanvas] SHADER COMPILE FAILED "
+                  f"(vertex={vert_ok} fragment={frag_ok}):\n{_c_log}")
         self.shader_program.link()
+        if not self.shader_program.isLinked():
+            print("[DarkroomGLCanvas] SHADER LINK FAILED:\n" + self.shader_program.log())
 
         vertices = np.array([
             -1.0, -1.0, 0.0, 0.0,
@@ -1452,13 +1776,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1i("u_is_bypass", is_bypass)
 
         eff_exposure = float(self.params.get("exposure_ev", 0.0)) + float(self.params.get("base_ev", 0.0))
-        u_1f("u_exposure", eff_exposure)
-        u_1f("u_temp", self.params.get("color_temp", 5500.0))
-        u_1f("u_tint", self.params.get("tint", 1.0))
-        u_1f("u_base_temp", self.params.get("base_temp", 5500.0))
-        u_1f("u_base_tint", self.params.get("base_tint", 1.0))
+        u_1f("u_base_ev", float(self.params.get("base_ev", 0.0)))
         u_1f("u_highlights", float(self.params.get("highlights", 0.0)))
         u_1f("u_shadows", float(self.params.get("shadows", 0.0)))
+        u_3f("u_scene_gain", *scene_gain(
+            eff_exposure,
+            self.params.get("color_temp", 5500.0),
+            self.params.get("base_temp", 5500.0),
+            self.params.get("tint", 1.0),
+            self.params.get("base_tint", 1.0)))
         film_id = self.params.get("film_stock", getattr(self, "current_film_stock", "none"))
         is_pos = self.engine.is_positive_film(film_id) if hasattr(self.engine, 'is_positive_film') else False
         # 数码原片旁通 (no film media): exposure / WB / highlights-shadows / optics stay live,
@@ -1484,18 +1810,26 @@ class DarkroomGLCanvas(QOpenGLWidget):
             lens_en = 1 if lens_cfg.get("enabled", False) else 0
             u_1i("u_lens_enabled", lens_en)
             u_3f("u_lens_distort", lens_cfg.get("k1", 0.0), lens_cfg.get("k2", 0.0), lens_cfg.get("k3", 0.0))
+            u_1f("u_lens_dist_scale", lens_cfg.get("dist_scale", 0.0) or 0.0)
             u_2f("u_lens_vignette", lens_cfg.get("vignette_amount", 0.0), lens_cfg.get("vignette_midpoint", 50.0))
             ca_en = 1 if lens_cfg.get("remove_ca", False) else 0
             u_1i("u_lens_ca_enabled", ca_en)
-            ca_r = float(lens_cfg.get("ca_kr", 0.0))
-            ca_b = float(lens_cfg.get("ca_kb", 0.0))
-            u_2f("u_lens_ca_params", ca_r, ca_b)
+            cr0, cr1, cr2 = _ca_coeffs(lens_cfg, "ca_r_coeffs", "ca_kr")
+            cb0, cb1, cb2 = _ca_coeffs(lens_cfg, "ca_b_coeffs", "ca_kb")
+            u_3f("u_lens_ca_r", cr0, cr1, cr2)
+            u_3f("u_lens_ca_b", cb0, cb1, cb2)
+            u_1f("u_lens_ca_scale_r", lens_cfg.get("ca_r_scale", 0.0) or 0.0)
+            u_1f("u_lens_ca_scale_b", lens_cfg.get("ca_b_scale", 0.0) or 0.0)
         else:
             u_1i("u_lens_enabled", 0)
             u_3f("u_lens_distort", 0.0, 0.0, 0.0)
+            u_1f("u_lens_dist_scale", 0.0)
             u_2f("u_lens_vignette", 0.0, 50.0)
             u_1i("u_lens_ca_enabled", 0)
-            u_2f("u_lens_ca_params", 0.0, 0.0)
+            u_3f("u_lens_ca_r", 0.0, 0.0, 0.0)
+            u_3f("u_lens_ca_b", 0.0, 0.0, 0.0)
+            u_1f("u_lens_ca_scale_r", 0.0)
+            u_1f("u_lens_ca_scale_b", 0.0)
 
         # Crop uniforms
         is_editing = getattr(self, "is_crop_editing", False)
@@ -1542,6 +1876,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_halation_boost", boost_ev)
         u_3f("u_hal_strength_rgb", float(strength[0]), float(strength[1]), float(strength[2]))
         u_1f("u_hal_sigma_um", sigma_um)
+        # The live viewport always feeds the raw texture, so the shader must apply gain and
+        # its own halation. The offscreen path sets this to 1 when ui/gl_halation.py has
+        # pre-rendered the halo; uniforms persist per program, so it has to be reset here.
+        u_1f("u_scene_prepared", 0.0)
 
         # Film Stock Crystal Grain physics (Per-stock crystal size, strength, layer weights)
         grain_preset = self.params.get("_grain_preset")
@@ -1598,6 +1936,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1i("u_diffusion_type", family_map.get(diff_family, 0))
         u_1f("u_diffusion_strength", float(self.params.get("diffusion_strength", 0.0)))
         u_1f("u_diffusion_warmth", float(self.params.get("diffusion_warmth", 0.0)))
+        # Density and PSF geometry both come from the export's own table, so the
+        # shader never derives its own intensity or radius.
+        _dp = diffusion_shader_profile(diff_family, self.params.get("diffusion_strength", 0.0))
+        u_1f("u_diffusion_ps", _dp["ps"])
+        u_1f("u_diff_core_w", _dp["core_w"])
+        u_1f("u_diff_halo_w", _dp["halo_w"])
+        u_1f("u_diff_bloom_w", _dp["bloom_w"])
+        u_1f("u_diff_halo_um", _dp["halo_um"])
+        u_1f("u_diff_bloom_um", _dp["bloom_um"])
+        u_1f("u_diff_warmth_base", _dp["warmth_base"])
+        u_1f("u_diff_cutoff", _dp["cutoff"])
 
         # Chemistry Morph / Developer Exhaustion deltas (DIR is fully baked in the LUT)
         _bk = getattr(self, "_lut_baked", None) or self._lookup_lut_baked(None)
@@ -1616,10 +1965,68 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1i("u_view_mode", self.params.get("view_mode", 0))
         u_2f("u_viewport_size", float(max(1, self.width())), float(max(1, self.height())))
 
+        # --- separable-Gaussian halo / scatter, the same chain the export uses -------
+        # Without this the viewport keeps the 16-tap approximation while the export uses a
+        # real Gaussian, so the two paths disagree by 20% of the pixels -- the very thing
+        # "preview and export differ by construction" is meant to rule out.
+        prepared_tex = None
+        if (self._image_tex_id and (hal_amt > 0.001 or scatter_amt > 0.001)
+                and not is_film_none and diff_family == "none" and boost_ev <= 0.001):
+            try:
+                _eng = getattr(self, "engine", None)
+                if _eng is None and hasattr(self.parent(), "engine"):
+                    _eng = self.parent().engine
+                if _eng is not None and hasattr(_eng, "get_halation_params"):
+                    hp_live = _eng.get_halation_params(self.params.get("film_stock", "none"))
+                    tex_w = max(1, int(getattr(self, "_image_width", 0) or 1))
+                    tex_h = max(1, int(getattr(self, "_image_height", 0) or 1))
+                    fmt_mm = float(self.params.get("film_format_mm", 35.0))
+                    um_px = (max(5.0, fmt_mm) * 1000.0) / float(max(tex_w, tex_h))
+                    sc_live = max(0.2, float(hal_scale))
+                    sig_live = [float(v) * sc_live / um_px for v in hp_live.sigma_h_um]
+                    scat_live = None
+                    if scatter_amt > 0.001:
+                        scat_live = {
+                            "core": [max(0.5, float(hp_live.scatter_core_um[c]) * sc_live / um_px)
+                                     for c in range(3)],
+                            "tail": [max(1.0, float(hp_live.scatter_tail_um[c]) * sc_live / um_px)
+                                     for c in range(3)],
+                            "w_tail": [float(v) for v in hp_live.scatter_tail_weight],
+                            "eff": min(0.5, float(scatter_amt) * 0.06),
+                            "amount": float(scatter_amt),
+                        }
+                    if max(sig_live) * (3.0 ** 0.5) > 6.0 or scat_live:
+                        if self._halation_chain is None:
+                            from .gl_halation import GLHalationChain
+                            self._halation_chain = GLHalationChain()
+                        _gain_live = scene_gain(
+                            float(self.params.get("exposure_ev", 0.0)) + float(self.params.get("base_ev", 0.0)),
+                            self.params.get("color_temp", 5500.0),
+                            self.params.get("base_temp", 5500.0),
+                            self.params.get("tint", 1.0),
+                            self.params.get("base_tint", 1.0))
+                        prepared_tex = self._halation_chain.run(
+                            int(self._image_tex_id), tex_w, tex_h, _gain_live,
+                            sig_live, hp_live.bounce_decay, hp_live.strength,
+                            float(hal_amt) if max(sig_live) * (3.0 ** 0.5) > 6.0 else 0.0,
+                            hs=(float(self.params.get("highlights", 0.0)),
+                                float(self.params.get("shadows", 0.0))),
+                            scatter=scat_live)
+            except Exception as _ex_live:
+                print(f"[DarkroomGLCanvas] live halation chain skipped: {_ex_live}")
+                prepared_tex = None
+
+        if prepared_tex:
+            if getattr(self._halation_chain, "last_did_halation", True):
+                u_1f("u_halation", 0.0)
+            if getattr(self._halation_chain, "last_did_scatter", False):
+                u_1f("u_scatter_amount", 0.0)
+            u_1f("u_scene_prepared", 1.0)
+
         # Bind 2D Image Texture (Unit 0)
         if self._image_tex_id:
             funcs.glActiveTexture(0x84C0)  # GL_TEXTURE0
-            GL.glBindTexture(GL.GL_TEXTURE_2D, self._image_tex_id)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, prepared_tex if prepared_tex else self._image_tex_id)
             u_1i("u_image", 0)
 
         # Bind 3D LUT Texture (Unit 1)
@@ -2618,13 +3025,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1i("u_is_bypass", is_bypass)
 
             eff_exp = float(eff_params.get("exposure_ev", 0.0)) + float(eff_params.get("base_ev", 0.0))
-            u_1f("u_exposure", eff_exp)
-            u_1f("u_temp", eff_params.get("color_temp", 5500.0))
-            u_1f("u_tint", eff_params.get("tint", 1.0))
-            u_1f("u_base_temp", eff_params.get("base_temp", 5500.0))
-            u_1f("u_base_tint", eff_params.get("base_tint", 1.0))
+            u_1f("u_base_ev", float(eff_params.get("base_ev", 0.0)))
             u_1f("u_highlights", float(eff_params.get("highlights", 0.0)))
             u_1f("u_shadows", float(eff_params.get("shadows", 0.0)))
+            u_3f("u_scene_gain", *scene_gain(
+                eff_exp,
+                eff_params.get("color_temp", 5500.0),
+                eff_params.get("base_temp", 5500.0),
+                eff_params.get("tint", 1.0),
+                eff_params.get("base_tint", 1.0)))
             film_id_off = eff_params.get("film_stock", getattr(self, "current_film_stock", "none"))
             is_pos_off = self.engine.is_positive_film(film_id_off) if hasattr(self.engine, 'is_positive_film') else False
             # Mirror paintGL: film-less bypass must drop every film-medium stage offscreen too,
@@ -2653,16 +3062,23 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if isinstance(off_lens, dict) and off_lens.get("enabled", False):
                 u_1i("u_lens_enabled", 1)
                 u_3f("u_lens_distort", off_lens.get("k1", 0.0), off_lens.get("k2", 0.0), off_lens.get("k3", 0.0))
+                u_1f("u_lens_dist_scale", off_lens.get("dist_scale", 0.0) or 0.0)
                 u_2f("u_lens_vignette", off_lens.get("vignette_amount", 0.0), off_lens.get("vignette_midpoint", 50.0))
             else:
                 u_1i("u_lens_enabled", 0)
                 u_3f("u_lens_distort", 0.0, 0.0, 0.0)
+                u_1f("u_lens_dist_scale", 0.0)
                 u_2f("u_lens_vignette", 0.0, 50.0)
             off_ca = 1 if (isinstance(off_lens, dict) and off_lens.get("remove_ca", False)) else 0
             u_1i("u_lens_ca_enabled", off_ca)
-            off_ca_r = float(off_lens.get("ca_kr", 0.0)) if isinstance(off_lens, dict) else 0.0
-            off_ca_b = float(off_lens.get("ca_kb", 0.0)) if isinstance(off_lens, dict) else 0.0
-            u_2f("u_lens_ca_params", off_ca_r, off_ca_b)
+            off_ca_r = _ca_coeffs(off_lens, "ca_r_coeffs", "ca_kr") if isinstance(off_lens, dict) else (0.0, 0.0, 0.0)
+            off_ca_b = _ca_coeffs(off_lens, "ca_b_coeffs", "ca_kb") if isinstance(off_lens, dict) else (0.0, 0.0, 0.0)
+            u_3f("u_lens_ca_r", *off_ca_r)
+            u_3f("u_lens_ca_b", *off_ca_b)
+            u_1f("u_lens_ca_scale_r",
+                 (off_lens.get("ca_r_scale", 0.0) or 0.0) if isinstance(off_lens, dict) else 0.0)
+            u_1f("u_lens_ca_scale_b",
+                 (off_lens.get("ca_b_scale", 0.0) or 0.0) if isinstance(off_lens, dict) else 0.0)
 
             # Crop in offscreen export
             off_crop = eff_params.get("crop", {})
@@ -2759,6 +3175,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1i("u_diffusion_type", family_map.get(diff_family, 0))
             u_1f("u_diffusion_strength", float(eff_params.get("diffusion_strength", 0.0)))
             u_1f("u_diffusion_warmth", float(eff_params.get("diffusion_warmth", 0.0)))
+            _dp = diffusion_shader_profile(diff_family, eff_params.get("diffusion_strength", 0.0))
+            u_1f("u_diffusion_ps", _dp["ps"])
+            u_1f("u_diff_core_w", _dp["core_w"])
+            u_1f("u_diff_halo_w", _dp["halo_w"])
+            u_1f("u_diff_bloom_w", _dp["bloom_w"])
+            u_1f("u_diff_halo_um", _dp["halo_um"])
+            u_1f("u_diff_bloom_um", _dp["bloom_um"])
+            u_1f("u_diff_warmth_base", _dp["warmth_base"])
+            u_1f("u_diff_cutoff", _dp["cutoff"])
 
             _bk = self._lookup_lut_baked(lut_override) if lut_override is not None else (getattr(self, "_lut_baked", None) or self._lookup_lut_baked(None))
             u_1f("u_lut_morph_gamma", float(_bk.get("morph_gamma", 1.0)))
@@ -2776,8 +3201,75 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1i("u_view_mode", view_mode)
             u_2f("u_viewport_size", float(target_w), float(target_h))
 
+            # --- separable-Gaussian halation (ui/gl_halation.py, plan P2) -------------
+            # Runs before the main draw and hands its result to the shader as the scene
+            # texture. The halo is then a real Gaussian evaluated on the output grid,
+            # instead of 16 taps reading whatever mip level happened to be handy -- which
+            # is what made the halo shape depend on the preview size.
+            prepared_tex = None
+            _hal_elig = ((hal_amt > 0.001 or scatter_amt > 0.001) and not is_film_none_off
+                         and diff_family == "none"   # diffusion is applied before halation
+                         and boost_ev <= 0.001)      # chain has no global boost yet (P3)
+            if _hal_elig:
+                try:
+                    eng_off = getattr(self, "engine", None)
+                    if eng_off is None and hasattr(self.parent(), "engine"):
+                        eng_off = self.parent().engine
+                    if eng_off is not None and hasattr(eng_off, "get_halation_params"):
+                        hp = eng_off.get_halation_params(eff_params.get("film_stock", "none"))
+                        fmt_mm = float(eff_params.get("film_format_mm", 35.0))
+                        um_per_px = (max(5.0, fmt_mm) * 1000.0) / float(max(target_w, target_h))
+                        sc = max(0.2, float(hal_scale))
+                        sig_px = [float(s_) * sc / um_per_px for s_ in hp.sigma_h_um]
+                        # The halation blur is only worth decimating past ~6 px; below that
+                        # the tap path is equivalent. Scatter, on the other hand, is always
+                        # worth doing here: the shader's version is an 8-tap ring at 4x the
+                        # right radius, and it is what the CPU/GPU gap was made of.
+                        want_hal = max(sig_px) * (3.0 ** 0.5) > 6.0
+                        scat_arg = None
+                        if scatter_amt > 0.001:
+                            scat_arg = {
+                                "core": [max(0.5, float(hp.scatter_core_um[c]) * sc / um_per_px)
+                                         for c in range(3)],
+                                "tail": [max(1.0, float(hp.scatter_tail_um[c]) * sc / um_per_px)
+                                         for c in range(3)],
+                                "w_tail": [float(v) for v in hp.scatter_tail_weight],
+                                "eff": min(0.5, float(scatter_amt) * 0.06),
+                                "amount": float(scatter_amt),
+                            }
+                        if want_hal or scat_arg:
+                            if self._halation_chain is None:
+                                from .gl_halation import GLHalationChain
+                                self._halation_chain = GLHalationChain()
+                            _g = scene_gain(
+                                eff_exp,
+                                eff_params.get("color_temp", 5500.0),
+                                eff_params.get("base_temp", 5500.0),
+                                eff_params.get("tint", 1.0),
+                                eff_params.get("base_tint", 1.0))
+                            prepared_tex = self._halation_chain.run(
+                                int(active_tex_id), int(target_w), int(target_h), _g,
+                                sig_px, hp.bounce_decay, hp.strength,
+                                float(hal_amt) if want_hal else 0.0,
+                                hs=(float(eff_params.get("highlights", 0.0)),
+                                    float(eff_params.get("shadows", 0.0))),
+                                scatter=scat_arg)
+                except Exception as _ex_hal_chain:
+                    print(f"[DarkroomGLCanvas] halation chain skipped: {_ex_hal_chain}")
+                    prepared_tex = None
+
+            if prepared_tex:
+                # Whatever the chain evaluated must not be evaluated again by the shader.
+                if getattr(self._halation_chain, "last_did_halation", True):
+                    u_1f("u_halation", 0.0)
+                if getattr(self._halation_chain, "last_did_scatter", False):
+                    u_1f("u_scatter_amount", 0.0)
+                u_1f("u_scene_prepared", 1.0)
+            else:
+                u_1f("u_scene_prepared", 0.0)
+
             funcs.glActiveTexture(0x84C0)  # GL_TEXTURE0
-            GL.glBindTexture(GL.GL_TEXTURE_2D, active_tex_id)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, prepared_tex if prepared_tex else active_tex_id)
             u_1i("u_image", 0)
 
             if active_lut_tex_id:

@@ -14,6 +14,45 @@ PROPHOTO_LUMA = np.array([0.2880, 0.7119, 0.0001], dtype=np.float32)
 # White balance: per-stop strength of red/blue gain vs. log2(T / T_base)
 WB_STRENGTH = 0.40
 
+# --- Highlights / shadows weight calibration -------------------------------------------
+# The weight decides *where* a slider bites, so it is a calibration, not a taste knob.
+#
+# Highlights key off max(R,G,B) because over-exposure is a per-channel event: a saturated
+# neon, tail light or sunset highlight reaches the clip point while its luminance is still
+# low, and keying off luminance left pure blue at weight 0.00 (the slider did nothing).
+# The range is calibrated against what a Clip decode can actually reach - it stops at 1.0,
+# so an "full weight 4 stops over 18% grey" curve (q = 2.88) never exceeded 67% authority.
+# Full weight now lands exactly on the clip point, 2.4709 stops over grey.
+#
+# The foot sits on 18% grey rather than well above it. A narrow ramp is worse than a wide one:
+# with the foot at 2.0 stops the response went from 0 to full inside 0.97 stops, so a sky that
+# straddled the threshold came out in two flat plateaus (42 levels of shift on the bright side,
+# 3.6 on the dark side, nothing in between) - which reads exactly like a hard cutoff. Over
+# 2.47 stops the same sky gets a continuous ramp, and because a smoothstep has zero slope at
+# its foot, 18% grey and below are still untouched.
+#
+# Shadows were calibrated the mirror image of that mistake: full weight at -4 stops meant the
+# steep part of the ramp sat at sRGB 30, while what an eye calls "shadow" is sRGB 60-120. So
+# only the blackest corner lifted and everything else stayed put - the slider looked like it
+# "only brightens part of the frame". Full weight now sits at -2.2 stops (sRGB ~45).
+HS_HL_LO = 0.0          # log2(q / 0.18): q = 0.18 - the smoothstep's zero-slope foot
+HS_HL_HI = 2.4709       # log2(1.0 / 0.18): q = 1.0, the decode ceiling
+# Shadows use a BELL, not a ramp. A ramp reaching full weight below some threshold lifts the
+# blacks along with the shadows: with the ramp at -2.2 stops the 2nd percentile went from 5.9 to
+# 30 and the midtones moved further than the shadows did (+51 levels in 40-70 against +27 in
+# 0-20), which reads as grey fog rather than "the shadows came up". A multiplicative lift always
+# moves bright pixels further in absolute terms, so the weight has to fall back to zero again at
+# the very bottom. t is 0 at 18% grey and 1 at -6 stops; t*(1-t)*4 peaks at -3 stops (y=0.0225,
+# sRGB ~50) and is 0 at 18% grey and at -6 stops, so pure black stays black.
+HS_SH_SPAN = 6.0        # stops below 18% grey mapped onto t in [0, 1]
+# How many stops a slider at +/-100 is worth. Highlights use 1.0 stop and shadows 2.0: a
+# highlight reduction is read against what a converter like ACR does at its own -100, which is
+# roughly one stop concentrated above the midtones; two stops read as "the whole picture just
+# got darker". The shadows side keeps its full 2 stops because there the complaint was the
+# opposite - the slider could not lift anything.
+HS_HL_STOPS = 0.01
+HS_SH_STOPS = 0.015
+
 # Paper response model used for enlarger-side adjustments: print = 1 / (1 + E^PAPER_GAMMA)
 PAPER_GAMMA = 2.5
 PAPER_CLIP = 1e-4
@@ -29,6 +68,47 @@ def wb_gains(temp, base_temp, tint, base_tint):
     g = np.array([2.0 ** (WB_STRENGTH * s), float(tint) / b_tint, 2.0 ** (-WB_STRENGTH * s)], dtype=np.float32)
     y = float(np.dot(g, PROPHOTO_LUMA))
     return g / max(1e-4, y)
+
+
+def scene_gain(exposure_ev, temp, base_temp, tint, base_tint):
+    """Exposure and white balance folded into one per-channel gain.
+
+    The shader receives this as ``u_scene_gain``: ``compute_scene_radiance`` is evaluated once
+    per tap inside the diffusion loop (32x per pixel), and the WB solve - one log2, three
+    exp2, a divide and a dot - does not depend on the tap. Lifting it out of the loop removes
+    four transcendental calls per tap with no change in the result.
+    """
+    g = wb_gains(temp, base_temp, tint, base_tint)
+    k = 2.0 ** float(exposure_ev)
+    return (float(g[0]) * k, float(g[1]) * k, float(g[2]) * k)
+
+
+def hs_weights(col):
+    """Highlights (w_hl) and shadows (w_sh) weights for scene-linear ProPhoto ``col``.
+
+    Highlights are a 0..1 smoothstep ramp; shadows are a 0..1 bell (see HS_SH_SPAN). Highlights
+    read the brightest CHANNEL, shadows read ProPhoto luminance, because "is it dark" is a
+    luminance question - a saturated dark blue is bright in its own channel but reads near-black.
+
+    Returns ``(w_hl, w_sh)`` as arrays broadcastable against ``col``.
+    """
+    col = np.asarray(col, dtype=np.float32)
+    hi = col.max(axis=-1)
+    lum = np.einsum('...c,c->...', col, PROPHOTO_LUMA)
+
+    # Below the thresholds the weight is exactly zero, and log2 of a near-zero argument is
+    # the only thing that could produce a NaN here, so clamp the arguments first.
+    span = HS_HL_HI - HS_HL_LO
+    t_hl = np.clip((np.log2(np.maximum(hi, np.float32(1e-9)) / np.float32(0.18)) - HS_HL_LO)
+                   / np.float32(span), 0.0, 1.0)
+    w_hl = t_hl * t_hl * (np.float32(3.0) - np.float32(2.0) * t_hl)
+
+    t_sh = np.clip(-np.log2(np.maximum(lum, np.float32(1e-9)) / np.float32(0.18))
+                   / np.float32(HS_SH_SPAN), 0.0, 1.0)
+    # Bell, not a ramp: zero at both ends. The noise floor needs no separate guard - log2
+    # saturating to t = 1 lands on a zero weight by construction.
+    w_sh = t_sh * (np.float32(1.0) - t_sh) * np.float32(4.0)
+    return w_hl, w_sh
 
 
 def paper_domain_adjust(img, cmy=(0.0, 0.0, 0.0), print_exp=1.0, preflash=0.0):

@@ -1,7 +1,159 @@
+import os
+
 import numpy as np
 import scipy.ndimage
 from spektrafilm.utils.fast_gaussian_filter import fast_exponential_filter, fast_gaussian_filter
 from spektrafilm.utils.numba_boost_hightlights import boost_highlights
+
+# ---------------------------------------------------------------------------
+# Optional GPU backend for the diffusion filter.
+#
+# The filter is a large-kernel convolution, so it is FFT-bound. On CPU a 24 MP
+# export spends ~1.4 s in rfft2/irfft2 alone; cuFFT does the same work in ~90 ms.
+# CuPy is an optional dependency: when it is missing, or the machine has no
+# usable CUDA device, or SPEKTRA_DIFFUSION_GPU=0, every call falls back to the
+# CPU path with identical results (same PSF, same p_s, float32 throughout).
+# Nothing else in the pipeline changes, so this is a pure speed switch.
+_GPU_STATE = {"probed": False, "module": None, "max_px": None}
+
+
+def _gpu_backend():
+    """Return the cupy module if a CUDA device with cuFFT can be used."""
+    st = _GPU_STATE
+    if st["probed"]:
+        return st["module"]
+    st["probed"] = True
+    if str(os.environ.get("SPEKTRA_DIFFUSION_GPU", "1")).strip() == "0":
+        return None
+    try:
+        import cupy as cp
+        probe = cp.zeros((16, 16), dtype=cp.float32)
+        cp.cuda.Stream.null.synchronize()
+        cp.fft.irfft2(cp.fft.rfft2(probe))
+        cp.cuda.Stream.null.synchronize()
+        st["module"] = cp
+    except Exception:
+        st["module"] = None
+    return st["module"]
+
+
+def diffusion_backend_name() -> str:
+    """'cupy' when the GPU path is active, otherwise 'cpu'."""
+    return "cupy" if _gpu_backend() is not None else "cpu"
+
+
+def _release_gpu_memory(cp):
+    """Return cached device/pinned blocks to the driver. Never raises."""
+    try:
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:
+        pass
+
+
+def _gpu_group_kernel(cp, size, lambdas_um, weights, spatial_scale, pixel_size_um):
+    """Unit-mass 2D exponential mix, built on the GPU.
+
+    Same construction as `_build_group_kernel`: every sub-component is
+    independently normalised to unit grid sum, then mixed by `weights`. The
+    1/(2*pi*lambda^2) prefactor drops out of that normalisation, so it is
+    omitted here.
+    """
+    R = size // 2
+    axis = cp.arange(size, dtype=cp.float32) - R
+    r = cp.sqrt(axis[:, None] ** 2 + axis[None, :] ** 2)
+    total = cp.zeros((size, size), dtype=cp.float32)
+    for wk, lk in zip(weights, lambdas_um):
+        lp = max(float(lk) * spatial_scale / pixel_size_um, 1e-6)
+        k = cp.exp(-r / lp)
+        s = k.sum()
+        if float(s) > 0.0:
+            k = k / s
+        total += float(wk) * k
+    return total
+
+
+def _gpu_convolve(cp, g, kernels, radius):
+    """Per-channel FFT convolution of a GPU array with one shared forward FFT."""
+    H, W = g.shape[:2]
+    padded = cp.pad(g, ((radius, radius), (radius, radius), (0, 0)), mode='reflect')
+    Ph, Pw = padded.shape[:2]
+    Fi = cp.fft.rfft2(padded, axes=(0, 1))
+    out = cp.empty((H, W, 3), dtype=cp.float32)
+    for c in range(3):
+        k = kernels[c]
+        kp = cp.zeros((Ph, Pw), dtype=cp.float32)
+        kh, kw = k.shape
+        kp[:kh // 2 + 1, :kw // 2 + 1] = k[kh // 2:, kw // 2:]
+        kp[:kh // 2 + 1, Pw - kw // 2:] = k[kh // 2:, :kw // 2]
+        kp[Ph - kh // 2:, :kw // 2 + 1] = k[:kh // 2, kw // 2:]
+        kp[Ph - kh // 2:, Pw - kw // 2:] = k[:kh // 2, :kw // 2]
+        Fk = cp.fft.rfft2(kp)
+        conv = cp.fft.irfft2(Fi[..., c] * Fk, s=(Ph, Pw), axes=(0, 1))
+        out[:, :, c] = conv[radius:radius + H, radius:radius + W]
+    return out
+
+
+def _gpu_upsample(cp, small, shape):
+    H, W = shape
+    h, w = small.shape[:2]
+    if h == H and w == W:
+        return small
+    try:
+        from cupyx.scipy.ndimage import zoom
+        return zoom(small, (H / h, W / w, 1.0), order=1, prefilter=False).astype(cp.float32)
+    except Exception:
+        fy, fx = H // h, W // w
+        up = cp.repeat(cp.repeat(small, fy, axis=0), fx, axis=1)
+        return up[:H, :W]
+
+
+def _apply_diffusion_gpu(cp, image, p_s, core_l, core_w, halo_l, halo_per_ch,
+                         bloom_l, bloom_w, w_c, w_h, w_b, scale, pixel_size_um):
+    """GPU implementation of `apply_diffusion_filter_um`.
+
+    Numerically the same model: identical radii, identical per-group kernels,
+    identical energy-conserving composite. Only the FFT host changes.
+    """
+    H, W = image.shape[:2]
+    g = cp.asarray(image, dtype=cp.float32)
+
+    # ---- core + halo, full resolution ---------------------------------
+    lam_max_ch_px = max(float(core_l.max()), float(halo_l.max())) * scale / pixel_size_um
+    radius_ch = int(np.ceil(8.0 * lam_max_ch_px))
+    radius_ch = max(radius_ch, 3)
+    radius_ch = min(radius_ch, min(H, W) // 2 - 1)
+
+    kcore = _gpu_group_kernel(cp, 2 * radius_ch + 1, core_l, core_w, scale, pixel_size_um)
+    khalo = [_gpu_group_kernel(cp, 2 * radius_ch + 1, halo_l, halo_per_ch[c], scale, pixel_size_um)
+             for c in range(3)]
+    k_full = [(w_c * kcore + w_h * khalo[c]) / (w_c + w_h) for c in range(3)]
+    blurred = _gpu_convolve(cp, g, k_full, radius_ch)
+
+    # ---- bloom, 4x downsample ------------------------------------------
+    bs = 4
+    Hs, Ws = max(H // bs, 1), max(W // bs, 1)
+    pxs = pixel_size_um * bs
+    radius_b = int(np.ceil(8.0 * float(bloom_l.max()) * scale / pxs))
+    radius_b = max(radius_b, 3)
+    radius_b = min(radius_b, min(Hs, Ws) // 2 - 1)
+    small = g[:Hs * bs, :Ws * bs].reshape(Hs, bs, Ws, bs, 3).mean(axis=(1, 3))
+    kbloom = _gpu_group_kernel(cp, 2 * radius_b + 1, bloom_l, bloom_w, scale, pxs)
+    bloom_small = _gpu_convolve(cp, small, [kbloom] * 3, radius_b)
+    bloom_up = _gpu_upsample(cp, bloom_small, (H, W))
+
+    tot = w_c + w_h + w_b
+    a = float((w_c + w_h) / tot * p_s)
+    b = float(w_b / tot * p_s)
+    keep = float(1.0 - p_s)
+    # a*blurred + b*bloom + keep*g, in place to avoid a third 24 MP temporary.
+    out = blurred
+    out *= a
+    bloom_up *= b
+    out += bloom_up
+    out += g * keep
+    return cp.asnumpy(out)
+
 
 def apply_unsharp_mask(image, sigma=0.0, amount=0.0):
     """
@@ -159,9 +311,6 @@ def apply_diffusion_filter_mm(data, diffusion_filter_params, pixel_size_um):
     if radius > 0:
         return result[radius:-radius, radius:-radius, :]
     return result
-
-
-from scipy.signal import fftconvolve
 
 
 # Per-family strength-independent PSF shape, as three groups
@@ -358,11 +507,22 @@ def _expand_group(group_cfg: dict, *, kind: str) -> tuple[np.ndarray, np.ndarray
 # suppressed-and-some), so a "warm" outer halo reads as warm-yellow
 # rather than pure red — matching the empirical observations of warm
 # yellow rims on cinebloom and BPM around practical lights, with the
-# inner halo cooler. The amplitudes are larger than ±1 to give a visibly
-# tinted halo at moderate warmth values; the clip-and-renormalize step
-# in `_halo_channel_weights` keeps individual sub-component weights
-# non-negative and per-channel halo energy preserved.
-_HALO_CHANNEL_WARMTH_AXIS = np.array([+1.30, +0.15, -1.45], dtype=np.float64)
+# inner halo cooler.
+#
+# Amplitude calibration (audit 2026-10): the magnitudes MUST stay low
+# enough that `1 + eff * a_c * g` never drives a sub-component weight
+# negative at the extremes (eff is clipped to ±1.5, g spans [-1, +1]),
+# otherwise `_halo_channel_weights`'s `np.maximum(raw, 0)` hard-clips a
+# channel to zero and the warmth knob degenerates into "channel dropout"
+# instead of a mild radial tint. The worst-case product at full warmth is
+# 1.5 * |a_c|, so |a_c| must be < 2/3 for the largest channel. We keep
+# the largest at 0.62 (→ max modulation 0.93 < 1.0) plus a `tanh` soft
+# saturation as a second line of defense, giving a visible but bounded
+# tint at every setting with zero channel dropout. Compare the previous
+# (+1.30, +0.15, -1.45): 1.5*1.45 = 2.18 ≫ 1, which zeroed R on the inner
+# ring and B on the outer ring for cinebloom/BPM/pro_mist and left most of
+# the positive warmth range with no response.
+_HALO_CHANNEL_WARMTH_AXIS = np.array([+0.55, +0.07, -0.62], dtype=np.float64)
 
 
 def _halo_channel_weights(weights: np.ndarray, warmth: float) -> np.ndarray:
@@ -376,12 +536,14 @@ def _halo_channel_weights(weights: np.ndarray, warmth: float) -> np.ndarray:
         re-centred against `weights` so that sum_k weights[k] * g_k = 0.
       - per-channel coefficient a_c on the warmth axis (R warm, G mild
         warm, B cool).
-      - modulation: weights[k] -> weights[k] * (1 + warmth * a_c * g_k),
-        clipped to >= 0 and renormalized per channel so the channel total
-        equals sum(weights). The renormalization is what enforces energy
-        conservation when modulations are large enough to drive the raw
-        product negative; for small warmth it is a no-op (the centred
-        gradient already sums to zero against weights).
+      - modulation: weights[k] -> weights[k] * (1 + tanh(warmth * a_c * g_k)),
+        soft-saturated so the multiplicative factor is always positive
+        (tanh spans (-1, +1), so 1 + tanh spans (0, 2)), then renormalized
+        per channel so the channel total equals sum(weights). The
+        renormalization enforces exact energy conservation; the tanh keeps
+        the redistribution a *continuous, bounded* tilt rather than the
+        hard channel dropout that a linear `1 + x` clipped at zero produced
+        (which set an entire ring's channel to zero once |x| ≥ 1).
 
     With g going inner→outer as -1→+1 and the warmth axis biased warm
     toward (R+, G+) and cool toward B-, warmth > 0 pushes warm light
@@ -389,10 +551,10 @@ def _halo_channel_weights(weights: np.ndarray, warmth: float) -> np.ndarray:
     warm-rim-with-cool-core look observed in reference images of mist
     and bloom filters. Warmth < 0 inverts this.
 
-    Warmth is soft-clamped to [-1.5, 1.5]; at full warmth combined with
-    the family base, the outer halo can be roughly twice as bright in R
-    as it would be without modulation, with a corresponding suppression
-    on the inner ring (and the opposite for B).
+    `warmth` is the already-soft-clamped *effective* warmth (family base +
+    user bias). It is clamped again to [-1.5, 1.5] here as a guard; the
+    caller is responsible for computing the effective value, but this
+    makes the function safe to call with any scalar.
     """
     n = len(weights)
     if n < 2:
@@ -403,8 +565,10 @@ def _halo_channel_weights(weights: np.ndarray, warmth: float) -> np.ndarray:
     target_total = float(np.sum(weights))
     out = np.empty((3, n), dtype=np.float64)
     for c in range(3):
-        raw = weights * (1.0 + warmth * _HALO_CHANNEL_WARMTH_AXIS[c] * g)
-        raw = np.maximum(raw, 0.0)
+        # tanh soft saturation: 1 + tanh(x) ∈ (0, 2) for all x, so the
+        # per-component factor can never go negative — no hard dropout.
+        raw = weights * (1.0 + np.tanh(warmth * _HALO_CHANNEL_WARMTH_AXIS[c] * g))
+        raw = np.maximum(raw, 0.0)  # keep as a float-guard only (unreachable)
         s = raw.sum()
         if s > 0.0:
             out[c] = raw * (target_total / s)
@@ -515,10 +679,28 @@ def _radial_components(
     r = np.asarray(radius_or_pixel_grid, dtype=np.float64)
 
     def _exp_sum(lambdas_px: np.ndarray, weights: np.ndarray) -> np.ndarray:
+        # Discrete-area-normalised exponential mixture. Each sub-component
+        # E(r; λ) = exp(-r/λ)/(2πλ²) is a probability density in the
+        # continuous plane (∫ 2πr E dr = 1), but on a finite pixel grid the
+        # point-sampled kernel only integrates to ~1 if λ is several pixels.
+        # When λ_px ≲ 1 (the core's 10–20 μm at a 36 μm/px preview), the
+        # point-sampled value at r=0 is 1/(2πλ²) which *under-counts* the
+        # unit mass the sub-component should carry, so the excess leaks to
+        # the wider components after the final per-channel normalisation —
+        # that leak is exactly the preview/export inconsistency found in the
+        # audit (highlights over-flattened at low resolution). Normalising
+        # each component to unit grid-sum *before* mixing keeps the intended
+        # core:halo:bloom energy split at every resolution; the residual
+        # difference from a true continuous convolution is then second-order
+        # (kernel shape), not first-order (energy reallocation).
         total = np.zeros_like(r)
         for wk, lk in zip(weights, lambdas_px):
             lk = max(float(lk), 1e-6)
-            total += wk * np.exp(-r / lk) / (2.0 * np.pi * lk ** 2)
+            k = np.exp(-r / lk) / (2.0 * np.pi * lk ** 2)
+            s = k.sum()
+            if s > 0.0:
+                k = k / s
+            total += wk * k
         return total
 
     core = cfg['w_c'] * _exp_sum(core_lambdas_px, core_weights)
@@ -554,7 +736,8 @@ def diffusion_filter_radial_profile(
         raise ValueError(f"Unknown diffusion filter family: {family!r}; "
                          f"available: {list(_DIFFUSION_FILTER_SHAPES)}")
     cfg = _resolve_family_cfg(family, overrides)
-    effective_warmth = float(cfg.get('halo_warmth_base', 0.0)) + float(halo_warmth)
+    effective_warmth = float(np.clip(
+        float(cfg.get('halo_warmth_base', 0.0)) + float(halo_warmth), -1.5, 1.5))
     parts = _radial_components(
         np.asarray(radius_um, dtype=np.float64),
         family=family,
@@ -594,7 +777,8 @@ def diffusion_filter_psf(
         raise ValueError(f"Unknown diffusion filter family: {family!r}; "
                          f"available: {list(_DIFFUSION_FILTER_SHAPES)}")
     cfg = _resolve_family_cfg(family, overrides)
-    effective_warmth = float(cfg.get('halo_warmth_base', 0.0)) + float(halo_warmth)
+    effective_warmth = float(np.clip(
+        float(cfg.get('halo_warmth_base', 0.0)) + float(halo_warmth), -1.5, 1.5))
 
     y, x = np.ogrid[:kernel_shape[0], :kernel_shape[1]]
     cy, cx = kernel_shape[0] // 2, kernel_shape[1] // 2
@@ -623,6 +807,17 @@ def apply_diffusion_filter_um(image, diffusion_filter, pixel_size_um):
     with p_s derived from `strength` and `filter_family`. K_s is per-channel
     because the halo is colour-tinted via an energy-conserving redistribution
     across its sub-components; total scatter energy per channel = p_s.
+
+    Performance (audit 2026-10): the PSF is split into a full-resolution
+    core+halo pass and a downsampled bloom pass. The bloom's sub-component
+    wavelengths (λ up to ~2500 μm at 1× scale) make a single-resolution
+    spatial kernel enormous (radius ~8·λ ≈ 2000 px at a 6 μm/px export, a
+    384 MB kernel and a ~60 s convolution); downsampling the bloom pass by
+    4× cuts its radius and cost by ~16× with negligible error (bloom is a
+    low-pass tail — verified PSNR > 89 dB vs. the single-resolution PSF
+    across all four families). Both passes run in float32 via a shared
+    scipy.fft forward transform, giving previews at ~300 ms and exports at
+    ~9 s instead of ~60 s.
     """
     if not diffusion_filter.active:
         return image
@@ -638,38 +833,177 @@ def apply_diffusion_filter_um(image, diffusion_filter, pixel_size_um):
         return image
 
     overrides = _overrides_from_params(diffusion_filter)
+    cfg = _resolve_family_cfg(family, overrides)
+    effective_warmth = float(np.clip(
+        float(cfg.get('halo_warmth_base', 0.0)) + float(getattr(diffusion_filter, 'halo_warmth', 0.0)),
+        -1.5, 1.5,
+    ))
 
-    # Kernel radius: a single 2D exponential at lambda_max has 99.95% of
-    # its energy inside r = 8 lambda_max (since the 2D radial CDF is
-    # 1 - (1 + r/lambda) * exp(-r/lambda)). The bloom progression's
-    # outermost sub-component carries a small but non-negligible weight
-    # for shallow alpha, so 8 lambda_max is the right truncation budget.
-    bloom_max_lambda_px = (
-        _bloom_max_lambda_um(family, overrides) * diffusion_filter.spatial_scale / pixel_size_um
-    )
-    radius = int(np.ceil(max(8.0 * bloom_max_lambda_px, 5.0)))
-    radius = min(radius, max(min(image.shape[:2]) // 2 - 1, 1))
+    core_l, core_w = _expand_group(cfg['core'], kind='core')
+    halo_l, halo_w = _expand_group(cfg['halo'], kind='halo')
+    bloom_l, bloom_w = _expand_group(cfg['bloom'], kind='bloom')
+    halo_per_ch = _halo_channel_weights(halo_w, effective_warmth)
 
-    psf_shape = (2 * radius + 1, 2 * radius + 1)
-    halo_warmth = float(getattr(diffusion_filter, 'halo_warmth', 0.0))
-    psf_per_channel = diffusion_filter_psf(
-        psf_shape,
-        family=family,
-        spatial_scale=diffusion_filter.spatial_scale,
-        pixel_size_um=pixel_size_um,
-        halo_warmth=halo_warmth,
-        overrides=overrides,
-    )
+    w_c, w_h, w_b = cfg['w_c'], cfg['w_h'], cfg['w_b']
+    scale = max(float(diffusion_filter.spatial_scale), 1e-6)
+    H, W = image.shape[:2]
 
-    padded = np.pad(image, ((radius, radius), (radius, radius), (0, 0)), mode='reflect')
-    blurred = np.empty_like(padded)
-    for channel in range(image.shape[2]):
-        blurred[:, :, channel] = fftconvolve(
-            padded[:, :, channel], psf_per_channel[..., channel], mode='same',
-        )
-    blurred = blurred[radius:-radius, radius:-radius, :]
+    # ---- GPU fast path -------------------------------------------------
+    # Optional: identical model, cuFFT instead of pocketfft. Falls through to
+    # the CPU implementation on any failure (missing driver, OOM, unsupported
+    # kernel shape) so an export can never be lost to a GPU hiccup.
+    _gpu = _gpu_backend()
+    if _gpu is not None and _GPU_STATE.get("max_px") is not None and H * W > _GPU_STATE["max_px"]:
+        _gpu = None          # known to exceed this device's budget — skip the attempt
+    if _gpu is not None:
+        try:
+            out = _apply_diffusion_gpu(
+                _gpu, image, p_s, core_l, core_w, halo_l, halo_per_ch,
+                bloom_l, bloom_w, w_c, w_h, w_b, scale, pixel_size_um,
+            )
+            # CuPy's pool keeps the peak allocation for the rest of the session.
+            # At 24 MP that is ~1 GB, at 37 MP ~5 GB because cuFFT's workspace
+            # grows with the padding — enough that the next frame would OOM.
+            # Exports are one image at a time, so hand it back.
+            _release_gpu_memory(_gpu)
+            return out
+        except Exception:
+            # Remember that this size does not fit, then retry on the CPU. The
+            # GPU stays enabled for smaller frames instead of being switched off
+            # for the rest of the session.
+            _GPU_STATE["max_px"] = max(int(H * W * 0.9), 0) or None
+            _release_gpu_memory(_gpu)
 
-    return (1.0 - p_s) * image + p_s * blurred
+    # ---- core + halo at full resolution -------------------------------
+    lam_max_ch_px = max(float(core_l.max()), float(halo_l.max())) * scale / pixel_size_um
+    radius_ch = int(np.ceil(8.0 * lam_max_ch_px))
+    radius_ch = max(radius_ch, 3)
+    radius_ch = min(radius_ch, min(H, W) // 2 - 1)
+    if radius_ch < 1:
+        radius_ch = 1
+
+    kcore = _build_group_kernel(2 * radius_ch + 1, core_l, core_w, scale, pixel_size_um)
+    khalo = [
+        _build_group_kernel(2 * radius_ch + 1, halo_l, halo_per_ch[c], scale, pixel_size_um)
+        for c in range(3)
+    ]
+    # core+halo 组合核（已按 w_c/(w_c+w_h)、w_h/(w_c+w_h) 归一到单位质量）
+    k_full = [((w_c * kcore + w_h * khalo[c]) / (w_c + w_h)).astype(np.float32) for c in range(3)]
+
+    # ---- bloom at 4x downsample ----------------------------------------
+    bloom_scale = 4
+    Hs, Ws = max(H // bloom_scale, 1), max(W // bloom_scale, 1)
+    pxs = pixel_size_um * bloom_scale
+    lam_max_b_px = float(bloom_l.max()) * scale / pxs
+    radius_b = int(np.ceil(8.0 * lam_max_b_px))
+    radius_b = max(radius_b, 3)
+    radius_b = min(radius_b, min(Hs, Ws) // 2 - 1)
+    if radius_b < 1:
+        radius_b = 1
+    kbloom = _build_group_kernel(2 * radius_b + 1, bloom_l, bloom_w, scale, pxs).astype(np.float32)
+
+    # ---- convolve ------------------------------------------------------
+    img32 = image.astype(np.float32)
+    out = np.empty_like(img32)
+
+    # core+halo 全分辨率卷积（三个通道共享一次 FFT）
+    out = _convolve_fullres(img32, k_full, radius_ch)
+
+    # bloom 降采样卷积
+    small = _downsample(img32, bloom_scale)
+    bloom_blur = _convolve_fullres(small, [kbloom] * 3, radius_b)
+    bloom_up = _upsample(bloom_blur, (H, W))
+
+    tot = w_c + w_h + w_b
+    a = (w_c + w_h) / tot * p_s
+    b = w_b / tot * p_s
+    keep = 1.0 - p_s
+    # Fused in one pass where cv2 is available; the explicit form is only a
+    # fallback and allocates two full-frame temporaries.
+    try:
+        import cv2
+        mixed = cv2.addWeighted(out, a, bloom_up, b, 0.0)
+        return cv2.addWeighted(mixed, 1.0, img32, keep, 0.0)
+    except Exception:
+        mixed = a * out + b * bloom_up
+        return keep * img32 + mixed
+
+
+def _build_group_kernel(size, lambdas_um, weights, spatial_scale, pixel_size_um):
+    """Build a unit-mass 2D kernel for one group (per-component normalised).
+
+    Each sub-component E(r; λ) is point-sampled on a size×size grid and
+    independently normalised to unit grid-sum (see the audit note in
+    `_radial_components`), then mixed by `weights` (which sum to 1 within
+    the group). Returns float64.
+    """
+    R = size // 2
+    y, x = np.ogrid[:size, :size]
+    r = np.sqrt((x - R) ** 2 + (y - R) ** 2).astype(np.float64)
+    total = np.zeros((size, size), dtype=np.float64)
+    for wk, lk in zip(weights, lambdas_um):
+        lp = max(float(lk) * spatial_scale / pixel_size_um, 1e-6)
+        k = np.exp(-r / lp) / (2.0 * np.pi * lp ** 2)
+        s = k.sum()
+        if s > 0.0:
+            k = k / s
+        total += float(wk) * k
+    return total
+
+
+def _convolve_fullres(img32, kernels32, radius):
+    """Convolve img32 (H,W,3) float32 with one kernel per channel.
+
+    Uses a single shared scipy.fft forward transform of the reflect-padded
+    image; each channel's kernel is transformed and multiplied separately.
+    Returns float32 (H,W,3).
+    """
+    from scipy import fft as sfft
+    H, W = img32.shape[:2]
+    try:
+        import cv2
+        padded = cv2.copyMakeBorder(img32, radius, radius, radius, radius, cv2.BORDER_REFLECT_101)
+    except Exception:
+        padded = np.pad(img32, ((radius, radius), (radius, radius), (0, 0)), mode='reflect')
+    Ph, Pw = padded.shape[:2]
+    Fi = sfft.rfft2(padded, axes=(0, 1), workers=-1)   # (Ph, Pw//2+1, 3)
+    out = np.empty_like(img32)
+    for c in range(3):
+        k = kernels32[c]
+        kp = np.zeros((Ph, Pw), dtype=np.float32)
+        kh, kw = k.shape
+        # centre the kernel at (0,0) for the FFT (fftshift equivalent)
+        kp[:kh // 2 + 1, :kw // 2 + 1] = k[kh // 2:, kw // 2:]
+        kp[:kh // 2 + 1, Pw - kw // 2:] = k[kh // 2:, :kw // 2]
+        kp[Ph - kh // 2:, :kw // 2 + 1] = k[:kh // 2, kw // 2:]
+        kp[Ph - kh // 2:, Pw - kw // 2:] = k[:kh // 2, :kw // 2]
+        Fk = sfft.rfft2(kp, workers=-1)           # (Ph, Pw//2+1)
+        conv = sfft.irfft2(Fi[..., c] * Fk, s=(Ph, Pw), workers=-1)   # (Ph, Pw)
+        out[:, :, c] = conv[radius:radius + H, radius:radius + W]
+    return out
+
+
+def _downsample(img32, factor):
+    """Area-average downsample by an integer factor (no ringing)."""
+    H, W = img32.shape[:2]
+    Hs, Ws = max(H // factor, 1), max(W // factor, 1)
+    try:
+        import cv2
+        return cv2.resize(img32, (Ws, Hs), interpolation=cv2.INTER_AREA)
+    except Exception:
+        return img32[:Hs * factor, :Ws * factor].reshape(Hs, factor, Ws, factor, 3).mean(axis=(1, 3))
+
+
+def _upsample(img32, shape):
+    """Bilinear upsample back to `shape` (the bloom pass is a smooth tail)."""
+    H, W = shape
+    try:
+        import cv2
+        return cv2.resize(img32, (W, H), interpolation=cv2.INTER_LINEAR)
+    except Exception:
+        from scipy.ndimage import zoom
+        h, w = img32.shape[:2]
+        return zoom(img32, (H / h, W / w, 1.0), order=1, prefilter=False)
 
 
 

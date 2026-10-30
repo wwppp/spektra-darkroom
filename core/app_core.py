@@ -23,6 +23,29 @@ try:
 except ImportError:
     rawpy = None
 
+
+def _quality_demosaic():
+    """Demosaic used whenever the image is not a throwaway thumbnail.
+
+    Measured on DSC02642 (6024x4024, Tamron 28-200 @28mm f/4) by comparing the blue
+    channel against green on thin branches, where a correct demosaic can only reproduce
+    what the sky and the branch already contain:
+
+        AHD   B/G p99 = 6.98   0.80 s   <- was the default
+        AAHD           6.74    5.94 s
+        VNG            5.97    2.64 s
+        DCB            5.89    3.35 s
+        DHT            4.96    1.02 s   <- chosen: 29% less false colour for 0.2 s
+
+    The false colour AHD produces on high-contrast edges is what the defringe stage was
+    being asked to clean up, and it cannot: the artefact is a 4-6 px ramp, not the 1-2 px
+    fringe a defringe gate looks for. Better to not create it.
+    """
+    if rawpy is None:
+        return None
+    algo = getattr(rawpy.DemosaicAlgorithm, "DHT", None)
+    return algo if algo is not None else rawpy.DemosaicAlgorithm.AHD
+
 from .format_constants import (
     RAW_EXTENSIONS,
     STANDARD_IMAGE_EXTENSIONS,
@@ -162,6 +185,11 @@ class UnsupportedInputRange(ValueError):
     """Raised when a float image carries data outside the pipeline's display-referred model."""
 
 
+# DIR couplers must not tint neutral surfaces. Lattice chroma ((max-min)/max) below this
+# value fades the DIR response back to a DIR-neutral bake, so grey takes the DIR-off result.
+DIR_NEUTRAL_GATE_CHROMA = 0.09
+
+
 def _is_integer_scaled_float(arr):
     """True when the float values only ever land on whole numbers above 1.0.
 
@@ -225,95 +253,79 @@ def filmic_shoulder_np(c, threshold=0.75):
 
 
 def apply_highlights_shadows_np(linear_img, highlights, shadows):
-    """Pre-LUT Scene-Linear Highlights & Shadows Tone Shaping (Zone System EV Hermite Spline).
-    Strictly aligned with GLSL Shader & export pipeline.
+    """Scene-linear highlights & shadows shaping, applied before the film LUT.
+
+    The response is a per-pixel multiplicative scale in the log2 domain:
+    ``col *= 2 ** (hl * 0.02 * w_hl + sh * 0.02 * w_sh)``. Writing it as a scale rather than
+    as "re-aim the luminance at 0.18 * 2**(z + delta)" is algebraically identical (the old
+    form's ``y_target / y_lum`` *is* ``2 ** delta_z``) but drops a divide and one mul per
+    pixel, and it makes the authority obvious: at full weight, -100 is exactly two stops.
+
+    The weights come from ``core.darkroom_math.hs_weights`` so the CPU export, the viewport
+    shader and the thumbnails share one calibration.
     """
     hl_val = float(highlights)
     sh_val = float(shadows)
     if linear_img is None or (abs(hl_val) <= 0.001 and abs(sh_val) <= 0.001):
         return linear_img
 
-    out = linear_img.copy()
-    y_lum = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
-    mask = (y_lum > 1e-5)
-    z = np.zeros_like(y_lum)
-    z[mask] = np.log2(y_lum[mask] / 0.18)
+    from .darkroom_math import HS_HL_STOPS, HS_SH_STOPS, hs_weights
 
-    w_sh = np.clip(-z * 0.25, 0.0, 1.0)
-    w_sh = w_sh * w_sh * (3.0 - 2.0 * w_sh)
-
-    w_hl = np.clip(z * 0.25, 0.0, 1.0)
-    w_hl = w_hl * w_hl * (3.0 - 2.0 * w_hl)
-
-    delta_z = (sh_val * 0.02) * w_sh + (hl_val * 0.02) * w_hl
-    y_target = 0.18 * (2.0 ** (z + delta_z))
-
-    scale = np.ones_like(y_lum)
-    scale[mask] = y_target[mask] / y_lum[mask]
-    out *= scale[..., None]
+    out = linear_img.astype(np.float32, copy=True)
+    w_hl, w_sh = hs_weights(out)
+    delta_z = (np.float32(sh_val * HS_SH_STOPS) * w_sh
+               + np.float32(hl_val * HS_HL_STOPS) * w_hl)
+    out *= np.exp2(delta_z)[..., None]
     return out
 
 
 def apply_diffusion_np(linear_img, diff_family="none", diff_strength=0.0, diff_warmth=0.0):
-    """Optical Diffusion Filter (Black Pro-Mist, Glimmerglass, Pro-Mist, CineBloom).
-    Applied in scene-linear radiance space before 3D LUT.
-    Strictly aligned with GLSL fragment shader Vogel spiral bloom & export pipeline.
+    """Optical diffusion filter for the film-less (bypass) export path.
+
+    Delegates to the physical PSF model that the film pipeline already uses
+    (`spektrafilm.model.diffusion.apply_diffusion_filter_um`), so the bypass
+    export, the film export and the viewport all share one calibration table.
+    Bypass mode has no film gauge, so the image width is taken as a 35 mm
+    frame to supply the μm-per-pixel scale.
+
+    This used to be a hand-port of the viewport shader's *old* additive bloom
+    (`out += blur * strength * intensity`, radius ∝ strength, veil lift on
+    pro-mist/cinebloom). That model injected every scattered photon twice and
+    scaled without bound — at cinebloom 2 stops it raised the linear mean by
+    218% and *increased* the standard deviation by 170%, which is the opposite
+    of what a diffusion filter does. Keeping a second, divergent implementation
+    here is what let the bypass export drift away from the preview; there is now
+    one implementation and this is a thin adapter over it.
     """
     diff_fam = str(diff_family).lower()
     strength = float(diff_strength)
     if linear_img is None or diff_fam in ("none", "") or strength <= 0.001:
         return linear_img
 
-    out = linear_img.copy()
-    eff_type = 1
+    # Normalise the loose family strings used by stored sessions and presets.
+    family = "black_pro_mist"
     if "glimmer" in diff_fam:
-        eff_type = 2
+        family = "glimmerglass"
     elif "cine" in diff_fam:
-        eff_type = 4
+        family = "cinebloom"
     elif "pro_mist" in diff_fam or "promist" in diff_fam:
-        eff_type = 3 if "black" not in diff_fam else 1
+        family = "black_pro_mist" if "black" in diff_fam else "pro_mist"
 
-    base_rad = 0.012 * max(0.20, strength)
-    if eff_type == 1:
-        thr, knee, rad_mult, intensity, halo_w = 0.36, 0.16, 1.0, 1.05, 0.65
-    elif eff_type == 2:
-        thr, knee, rad_mult, intensity, halo_w = 0.42, 0.14, 0.75, 0.85, 0.0
-    elif eff_type == 3:
-        thr, knee, rad_mult, intensity, halo_w = 0.24, 0.20, 1.45, 1.25, 0.40
-    elif eff_type == 4:
-        thr, knee, rad_mult, intensity, halo_w = 0.20, 0.22, 1.85, 1.40, 0.85
-    else:
-        thr, knee, rad_mult, intensity, halo_w = 0.36, 0.16, 1.0, 1.05, 0.65
+    from types import SimpleNamespace
+    from spektrafilm.model.diffusion import apply_diffusion_filter_um
 
-    H, W = out.shape[:2]
-    luma = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
-    lo = max(0.001, thr - knee)
-    hi = thr + knee
-    t = np.clip((luma - lo) / max(0.0001, hi - lo), 0.0, 1.0)
-    smooth_t = t * t * (3.0 - 2.0 * t)
-    hl = smooth_t * np.maximum(0.0, luma - lo)
-    hl_factor = (hl / np.maximum(0.0001, luma))[..., None]
-    hl_img = out * hl_factor
-
-    sigma_px = max(1.0, base_rad * rad_mult * max(H, W) * 0.18)
-    ksize = int(sigma_px * 3.0) * 2 + 1
-    ksize = min(ksize, 301)
-    bloom = cv2.GaussianBlur(hl_img, (ksize, ksize), sigma_px)
-
-    eff_warmth = float(np.clip(halo_w + float(diff_warmth), -1.5, 1.5))
-    diff_tint = np.array([
-        1.0 + eff_warmth * 0.35,
-        1.0 + eff_warmth * 0.08,
-        1.0 - eff_warmth * 0.35
-    ], dtype=np.float32)
-
-    out += bloom * (strength * intensity) * diff_tint
-    if eff_type == 3:
-        out = out * 0.80 + (out + 0.015 * strength) * 0.20
-    elif eff_type == 4:
-        out = out * 0.75 + (out + 0.022 * strength) * 0.25
-
-    return out
+    params = SimpleNamespace(
+        active=True,
+        filter_family=family,
+        strength=strength,
+        spatial_scale=1.0,
+        halo_warmth=float(diff_warmth),
+        core_intensity=1.0, halo_intensity=1.0, bloom_intensity=1.0,
+        core_size=1.0, halo_size=1.0, bloom_size=1.0,
+    )
+    pixel_size_um = 36000.0 / max(1, int(linear_img.shape[1]))
+    out = apply_diffusion_filter_um(linear_img, params, pixel_size_um)
+    return out.astype(linear_img.dtype, copy=False)
 
 
 def convert_image_colorspace(img_rgb_float, target_colorspace="sRGB", bit_depth=8):
@@ -882,6 +894,33 @@ def _inject_tiff_subifds(tiff_path, pil_exif, strip_gps=True):
             f.write(struct.pack(endian + "I", pos))
     except Exception as e_sub:
         logger.debug(f"_inject_tiff_subifds: {e_sub}")
+
+
+def _available_physical_bytes():
+    """Free physical RAM in bytes, or a conservative 1 GiB if the query fails."""
+    try:
+        import ctypes
+
+        class _MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullAvailPhys)
+    except Exception:
+        pass
+    return 1 << 30
 
 
 def save_encoded_image(rendered_data, output_path, params_dict):
@@ -1871,6 +1910,43 @@ class SpektraEngine:
         except Exception:
             return {"sigma_h": 65.0, "strength": (0.015, 0.005, 0.0), "antihalation": "strong", "use": "still"}
 
+    def get_halation_params(self, film_stock):
+        """Resolved physical halation parameters, with provenance.
+
+        Unlike :meth:`get_film_halation_preset` this carries every field both
+        renderers need -- scatter sigmas, bounce decay, per-channel halo sigma --
+        and records whether each number is profile data, derived geometry, or an
+        engine calibration. `core/halation_model.py` is the only place that decides.
+
+        Reads the profile JSON directly rather than going through ``_load_profile``:
+        that parser builds a full processed profile (and warms spectral LUTs), which
+        is both pointless here and, when called from inside ``render_offscreen``,
+        destructive -- it mutates engine state mid-GL-frame and the very next
+        ``glBindTexture`` comes back GL_INVALID_OPERATION.
+        """
+        if not hasattr(self, "_halation_params_cache"):
+            self._halation_params_cache = {}
+        key = film_stock or "none"
+        cached = self._halation_params_cache.get(key)
+        if cached is not None:
+            return cached
+
+        from .halation_model import resolve_halation_params
+
+        def _raw_profile(name):
+            import json
+            for base in (self.profiles_dir,
+                         os.path.join(self.resources_dir, "spektrafilm", "data", "profiles")):
+                path = os.path.join(base, f"{name}.json")
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        return json.load(f)
+            return None
+
+        cached = resolve_halation_params(film_stock or "none", _raw_profile)
+        self._halation_params_cache[key] = cached
+        return cached
+
     def get_film_grain_preset(self, film_stock):
         """Extract physical crystal grain parameters (size_mm, strength, layer_weights, density_profile)
         from film profile JSON, or provide physically-calibrated fallbacks.
@@ -2348,6 +2424,17 @@ class SpektraEngine:
         elif is_pos:
             lut_3d = self._postprocess_positive_lut(lut_3d, film_stock)
 
+        # Neutral-chroma gate for the DIR couplers. Cross-layer inhibition is a chroma
+        # effect, so it must leave the R=G=B axis exactly alone; the fitted 3x3 inhibition
+        # matrix is not symmetric enough for that, and at full strength the neutral axis
+        # picks up ~4 C* of cast. Blending toward the DIR-neutral bake by input chroma
+        # makes the grey axis immune by construction while leaving saturated colours intact.
+        if has_dir and not is_bw and not is_pos and (
+            abs(dir_amt - 1.0) > 0.01 or abs(dir_intl - 1.0) > 0.01 or abs(dir_same - 1.0) > 0.01
+        ):
+            lut_3d = self._gate_dir_neutral_axis(
+                lut_3d, lattice, film_stock, paper_stock, lut_size, params_dict, print_mode)
+
         dir_baked = has_dir
         morph_baked = params.print is not None
         self._record_lut_baked(lut_3d, {
@@ -2371,6 +2458,30 @@ class SpektraEngine:
                 pass
         print(f"[SpektraEngine] 3D LUT 生成完毕，耗时: {round((time.time() - t0)*1000, 1)}ms")
         return lut_3d
+
+    def _gate_dir_neutral_axis(self, lut_3d, lattice, film_stock, paper_stock, lut_size,
+                               params_dict, print_mode):
+        """Fade the DIR bake back to its DIR-neutral reference along the neutral axis.
+
+        Weight is the input chroma of each lattice node, smoothstepped over
+        ``DIR_NEUTRAL_GATE_CHROMA``. A perfect grey (R=G=B) therefore takes the
+        DIR-off result bit-for-bit, so raising the cross-layer sliders can never tint
+        neutral surfaces; saturated colours keep the full coupler response.
+
+        Called with the LUT bake lock already held, so it must not re-enter
+        ``get_3d_lut`` (plain Lock) -- it calls ``_build_3d_lut`` directly instead.
+        """
+        neutral_params = dict(params_dict or {})
+        neutral_params.update({"dir_amount": 1.0, "dir_interlayer": 1.0, "dir_samelayer": 1.0})
+        ref = self._build_3d_lut(film_stock, paper_stock, lut_size, neutral_params, print_mode)
+        if getattr(ref, "shape", None) != lut_3d.shape:
+            return lut_3d
+        hi = lattice.max(axis=-1)
+        lo = lattice.min(axis=-1)
+        chroma = (hi - lo) / np.maximum(hi, 1e-4)
+        w = np.clip(chroma / DIR_NEUTRAL_GATE_CHROMA, 0.0, 1.0)
+        w = (w * w * (3.0 - 2.0 * w))[..., None]
+        return (ref + (lut_3d - ref) * w).astype(np.float32)
 
     @classmethod
     def _extract_cr3_exif(cls, file_path: str) -> dict:
@@ -2947,7 +3058,7 @@ class SpektraEngine:
                 span = p_bright - p_med
 
                 # Fotufilm retimeHighlight: diffuse highlight placed 2.5..3.5 stops over median
-                white = min(max(p_bright, p_med + 2.5), p_med + 3.5)
+                white = max(p_bright, p_med + 2.5)
                 ev_hl = 3.0 - white
                 ev_med = -0.67 - p_med
                 ev_target = min(ev_med, ev_hl)
@@ -2960,6 +3071,16 @@ class SpektraEngine:
                     ev_final = ev_center
             else:
                 ev_final = ev_center
+
+            # Expose-to-the-right ceiling: exposure cannot recover a value that already sits at
+            # the decode ceiling, it only pushes more of the frame into it. Before this cap a
+            # backlit interior (median 4 stops under mid-grey, window at 0.65) was lifted by the
+            # full +3 EV clip limit, which multiplied the window to 5.2 and burned it to pure
+            # white -- reported as "highlights blow out after switching photos". The cap keeps
+            # the diffuse highlight at or below the clip point, so the lift never costs detail.
+            p_hi = float(np.percentile(Y, 99.5)) if len(valid) > 100 else 0.0
+            if p_hi > 1e-4:
+                ev_final = min(ev_final, -float(np.log2(min(p_hi, 1.0))))
 
             return float(np.clip(round(ev_final, 2), -3.0, 3.0))
         except Exception as e:
@@ -3182,7 +3303,7 @@ class SpektraEngine:
 
                 # Use fast half_size demosaic for background batch loading to prevent OOM across worker pools
                 use_half = (not is_first) and (load_preview is not True) and (preview_max_edge > 0 and preview_max_edge <= 2048)
-                demosaic_algo = rawpy.DemosaicAlgorithm.LINEAR if use_half else rawpy.DemosaicAlgorithm.AHD
+                demosaic_algo = rawpy.DemosaicAlgorithm.LINEAR if use_half else _quality_demosaic()
 
                 with rawpy.imread(file_path) as raw:
                     rw, rh = raw.sizes.width, raw.sizes.height
@@ -3209,8 +3330,10 @@ class SpektraEngine:
                             highlight_mode=rawpy.HighlightMode.Clip
                         )
                     except Exception:
+                        # Same algorithm would fail the same way; drop to AHD which is
+                        # available on every LibRaw build.
                         rgb16 = raw.postprocess(
-                            demosaic_algorithm=demosaic_algo,
+                            demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
                             half_size=use_half,
                             four_color_rgb=False,
                             output_color=rawpy.ColorSpace.ProPhoto,
@@ -3498,7 +3621,7 @@ class SpektraEngine:
                 with rawpy.imread(fp) as raw:
                     try:
                         rgb16 = raw.postprocess(
-                            demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
+                            demosaic_algorithm=_quality_demosaic(),
                             half_size=False,
                             four_color_rgb=False,
                             output_color=rawpy.ColorSpace.ProPhoto,
@@ -3648,6 +3771,23 @@ class SpektraEngine:
             if raw_target is None:
                 return {"success": False, "error": "没有可导出的图像底片数据"}
 
+            # Lens geometry is an optical stage: distortion / lateral CA / vignetting must
+            # land on the scene-linear negative, before exposure, WB and the LUT — the same
+            # place the viewport applies it (on the texture sample, before the developed
+            # pipeline). Exporting through the CPU used to skip this block entirely, so with
+            # hardware acceleration off the frame came back un-corrected while the preview
+            # still showed the correction. Cropping stays last, on the corrected frame.
+            try:
+                lens_eff = params_dict.get("lens", {})
+                if isinstance(lens_eff, dict) and lens_eff:
+                    from .lens_warp import apply_lens_geometry, lens_warp_status
+                    if progress_cb:
+                        progress_cb(12, "正在应用镜头畸变与暗角校正...")
+                    raw_target = apply_lens_geometry(raw_target, lens_eff)
+                    print(f"[SpektraExport] {lens_warp_status(lens_eff)}")
+            except Exception as ex_lens:
+                print(f"[SpektraExport] 镜头矫正跳过: {ex_lens}")
+
             film_stock = params_dict.get("film_stock", "kodak_portra_400")
             paper_stock = params_dict.get("paper_stock", "kodak_2383")
             
@@ -3768,7 +3908,7 @@ class SpektraEngine:
             linear_full = (raw_target * float(np.exp2(eff_exp))).astype(np.float32)
             linear_full *= wb_g
 
-            # 1.5. Pre-LUT Scene-Linear Highlights & Shadows Tone Shaping (Zone System EV Hermite Spline)
+            # 1.5. Pre-LUT scene-linear highlights & shadows shaping (per-pixel exp2 scale)
             hl_val = float(params_dict.get("highlights", 0.0))
             sh_val = float(params_dict.get("shadows", 0.0))
             linear_full = apply_highlights_shadows_np(linear_full, hl_val, sh_val)
@@ -3791,49 +3931,28 @@ class SpektraEngine:
             if halation > 0.001 or scatter_amount > 0.001:
                 try:
                     if progress_cb:
-                        progress_cb(25, "正在模拟真实物理胶片光晕与防光晕层漫射 (Official Spektrafilm Dual-Pass)...")
+                        progress_cb(25, "正在模拟真实物理胶片光晕与防光晕层漫射 (Physical Dual-Pass)...")
 
-                    hal_preset = self.get_film_halation_preset(film_stock)
-                    hal_strength_rgb = np.array(hal_preset["strength"], dtype=np.float32)
-                    hal_sigma_um = float(hal_preset["sigma_h"])
-                    eff_strength = hal_strength_rgb * halation
-
-                    # 1. In-emulsion scatter pass: physical micro-diffusion (energy-preserving)
-                    if scatter_amount > 0.001:
-                        sigma_c_px = max(0.5, (2.0 * max(0.2, hal_spatial_scale)) / pixel_size_um)
-                        sigma_t_px = max(1.0, (9.5 * max(0.2, hal_spatial_scale)) / pixel_size_um)
-                        kc = int(sigma_c_px * 3.0) * 2 + 1
-                        kt = int(sigma_t_px * 3.0) * 2 + 1
-                        core = cv2.GaussianBlur(linear_full, (min(kc, 101), min(kc, 101)), sigma_c_px)
-                        tail = cv2.GaussianBlur(linear_full, (min(kt, 151), min(kt, 151)), sigma_t_px)
-                        w_tail = np.array([0.78, 0.65, 0.67], dtype=np.float32)
-                        scattered = core * (1.0 - w_tail) + tail * w_tail
-                        eff_s = min(0.5, scatter_amount * 0.06)
-                        linear_full = (1.0 - eff_s) * linear_full + eff_s * scattered
-
-                    # 2. Base back-reflection halation pass: Spektrafilm multi-bounce sum with DC normalization
-                    if halation > 0.001 and np.any(eff_strength > 0):
-                        sigma_h_px = (hal_sigma_um * max(0.2, hal_spatial_scale)) / pixel_size_um
-                        decay = np.array([0.5 ** (k - 1) for k in range(1, 4)], dtype=np.float32)
-                        decay /= decay.sum()
-
-                        # Highlight boost if enabled (0.0 by default)
-                        hal_input = linear_full
-                        if hal_boost > 0.001:
-                            luma_in = 0.2126 * linear_full[..., 0] + 0.7152 * linear_full[..., 1] + 0.0722 * linear_full[..., 2]
-                            boost_scale = 1.0 + np.maximum(0.0, luma_in - 0.7) * (hal_boost * 0.6)
-                            hal_input = linear_full * boost_scale[..., None]
-
-                        hal_blur = np.zeros_like(linear_full)
-                        for k, wk in zip(range(1, 4), decay):
-                            sigma_k = sigma_h_px * np.sqrt(k)
-                            ksize = int(sigma_k * 3.0) * 2 + 1
-                            ksize = min(ksize, 301)
-                            blur_k = cv2.GaussianBlur(hal_input, (ksize, ksize), sigma_k)
-                            hal_blur += blur_k * wk
-
-                        # Official Spektrafilm physical halation DC normalization:
-                        linear_full = (linear_full + eff_strength * hal_blur) / (1.0 + eff_strength)
+                    # Single source of truth: core/halation_model.py decides every
+                    # constant and records where it came from. The old inline block
+                    # hard-coded 2.0/9.5 um single-sigma scatter and 0.5^k decay here
+                    # while the shader had its own set -- that split is what produced
+                    # the 45 dB CPU/GPU gap.
+                    from .halation_model import apply_halation_np
+                    hal_params = self.get_halation_params(film_stock)
+                    # boost normalises by the image-wide max, so it needs one pass
+                    # over the frame -- only paid when the user actually enabled it.
+                    max_raw = float(linear_full.max()) if hal_boost > 0.001 else None
+                    linear_full = apply_halation_np(
+                        linear_full,
+                        hal_params,
+                        pixel_size_um,
+                        amount=halation,
+                        scatter_amount=scatter_amount,
+                        spatial_scale=hal_spatial_scale,
+                        boost_ev=hal_boost,
+                        max_raw=max_raw,
+                    )
                 except Exception as e_hal:
                     print(f"[SpektraExport] 光晕模拟异常: {e_hal}")
 
@@ -3843,8 +3962,25 @@ class SpektraEngine:
             # Multi-threaded High-Precision CPU Pipeline (3D LUT + DIR Coupler + CMY + Paper Morph + Halation + Pre-LUT Grain)
             import concurrent.futures
             import time
-            max_workers = max(1, min(16, (os.cpu_count() or 4) - 1))
-            chunk_size = 256
+
+            # Peak resident set of one worker. A chunk holds chunk_linear, the LUT
+            # coords, two int32 index triples, eight gather results, the lerp chain
+            # and the output slice -- roughly 22 float32 planes of
+            # chunk_rows x W x 3. At 24 MP a 256-row chunk peaks near 300 MB, so
+            # the old fixed `min(16, cpu_count - 1)` could ask for 5 GB and then
+            # die inside a worker with "Unable to allocate 17.6 MiB", which is a
+            # hard failure for the whole export.
+            chunk_size = 256  # fixed: grain synthesis depends on chunk height
+            _plane_bytes = W * 3 * 4
+            _planes_per_chunk = 22
+            _per_worker = chunk_size * _plane_bytes * _planes_per_chunk
+            # Half of free RAM goes to the workers; the rest has to cover the loaded
+            # negative, the output plane, the halation buffers and the encoder.
+            # Running a few workers short only costs time; overshooting loses the
+            # export, so this leans conservative.
+            _budget = max(int(_available_physical_bytes() * 0.5), _per_worker)
+            _workers_by_mem = max(1, int(_budget // _per_worker))
+            max_workers = max(1, min(16, (os.cpu_count() or 4) - 1, _workers_by_mem))
             chunks = [(y0, min(y0 + chunk_size, H)) for y0 in range(0, H, chunk_size)]
             # A sliver chunk (a few rows at the bottom) would get its grain blurred against a
             # field far smaller than the grain's own sigma, which both wastes a worker and

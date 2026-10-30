@@ -94,7 +94,12 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'IPython', 'pytest'],
+    excludes=['tkinter', 'matplotlib', 'IPython', 'pytest',
+              # Optional GPU backend for the diffusion filter. Pulling it in
+              # adds ~780 MB (cupy + cuFFT/cuRAND/NVRTC) and only helps on
+              # CUDA machines, so the shipped build stays CPU-only. The code
+              # detects the missing module and falls back automatically.
+              'cupy', 'cupyx', 'cuda', 'nvidia'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

@@ -77,6 +77,12 @@ def load_sdc(image_path: str) -> dict | None:
             # null or a string here would raise AttributeError deep in the UI.
             if not isinstance(data.get("params"), dict):
                 data["params"] = {}
+            # base_ev is the auto-metering anchor for the *file*, not a user edit. It is
+            # derived from the decoded preview and cached against the file's mtime+size.
+            # Older sidecars carry a copy; honouring it made the rendered exposure depend on
+            # visit history (session entry / sidecar / cache could disagree by stops), which
+            # showed up as "the photo got brighter after I switched away and back".
+            data["params"].pop("base_ev", None)
             return data
     except Exception as e:
         logger.warning(f"Failed to read SDC sidecar {sdc_path}: {e}")
@@ -125,7 +131,9 @@ def save_sdc(
             "film_profile": film_profile or "",
             "paper_profile": paper_profile or "",
             "print_mode": resolved_pm,
-            "params": params or {},
+            # The metering anchor is stripped on the way out as well: it is re-derived from
+            # the file (see load_sdc) and must never be restored from a sidecar.
+            "params": {k: v for k, v in (params or {}).items() if k != "base_ev"},
             "saved_at": datetime.now().isoformat()
         }
 

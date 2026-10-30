@@ -29,6 +29,7 @@ Conventions
 from __future__ import annotations
 
 import numpy as np
+import threading
 
 # ---------------------------------------------------------------------------
 # Octave structure
@@ -596,6 +597,12 @@ def derive(grain_slider, stock_strength, layer_weights, cloud_blur, rho,
 _GAUSS_GAIN_CACHE = {}
 _NUMBA_RNG = None
 _NUMBA_RNG_TRIED = False
+# Compiling the kernel takes a second or two. Export workers hit this
+# concurrently on the very first frame, and without the lock the threads that
+# arrive mid-compile see `_NUMBA_RNG is None` and silently fall back to numpy
+# noise -- so different chunks of the same frame got different grain fields.
+# The second export was then stable, which made it look like a one-off.
+_NUMBA_RNG_LOCK = threading.Lock()
 
 
 def _gauss_ksize(sigma):
@@ -625,17 +632,23 @@ def gauss_white_gain(sigma):
     return gain
 
 
-def _randn_field(seed, height, width, channels):
-    """Unit-variance Gaussian noise field.
+def _ensure_numba_rng():
+    """Compile the numba kernel once, blocking other workers until it exists.
 
-    numpy's generator is the most expensive single step of the whole synthesis (~232 ms for a
-    4K RGB field).  This numba kernel builds each sample from twelve uniforms, which has
-    exactly unit variance by construction, needs no transcendental, and runs ~5x faster.  It
-    also lets us drop the per-octave ``std()`` reduction (see :func:`gauss_white_gain`).
+    Returns the kernel, or None when numba is unavailable.  The double-checked
+    lock matters: export runs this from a thread pool on the first frame, and
+    the old code published `_NUMBA_RNG_TRIED = True` *before* compiling, so
+    every worker that arrived during the one-to-two second compile saw
+    `_NUMBA_RNG is None` and fell back to numpy noise.  Chunks of the same
+    frame then carried two different grain fields, which is why the first
+    export of a session did not match the next one.
     """
     global _NUMBA_RNG, _NUMBA_RNG_TRIED
-    if not _NUMBA_RNG_TRIED:
-        _NUMBA_RNG_TRIED = True
+    if _NUMBA_RNG_TRIED:
+        return _NUMBA_RNG
+    with _NUMBA_RNG_LOCK:
+        if _NUMBA_RNG_TRIED:
+            return _NUMBA_RNG
         try:
             from numba import njit, prange
 
@@ -661,12 +674,26 @@ def _randn_field(seed, height, width, channels):
             _NUMBA_RNG = _kernel
         except Exception:
             _NUMBA_RNG = None
-    if _NUMBA_RNG is None:
+        # Only publish "decided" once the decision is final.
+        _NUMBA_RNG_TRIED = True
+    return _NUMBA_RNG
+
+
+def _randn_field(seed, height, width, channels):
+    """Unit-variance Gaussian noise field.
+
+    numpy's generator is the most expensive single step of the whole synthesis (~232 ms for a
+    4K RGB field).  This numba kernel builds each sample from twelve uniforms, which has
+    exactly unit variance by construction, needs no transcendental, and runs ~5x faster.  It
+    also lets us drop the per-octave ``std()`` reduction (see :func:`gauss_white_gain`).
+    """
+    kernel = _ensure_numba_rng()
+    if kernel is None:
         # fallback: numpy generator rescaled to unit variance
         n = np.random.default_rng(seed).standard_normal((height, width, channels)).astype(np.float32)
         sd = float(n.std())
         return (n / sd).astype(np.float32) if sd > 1e-9 else n
-    return _NUMBA_RNG(int(seed) & 0x7FFFFFFF, height, width, channels)
+    return kernel(int(seed) & 0x7FFFFFFF, height, width, channels)
 
 
 def _gaussian_blur(x, sigma):

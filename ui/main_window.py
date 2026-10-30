@@ -572,6 +572,44 @@ class BatchImportWorker(QThread):
         self.importFinished.emit(int(loaded_count or 0))
 
 
+# A measurement is only complete when all four keys are present: sidecars written before the
+# constant-magnification term existed carry only the two polynomial triplets, and reusing them
+# would silently apply the old (corner-only) model.
+_AUTO_CA_KEYS = ("auto_ca_r", "auto_ca_b", "auto_ca_scale_r", "auto_ca_scale_b")
+
+
+class CAEstimateWorker(QThread):
+    """Measures lateral CA for the current frame off the GUI thread.
+
+    The estimate costs ~1 s on a 2048 px preview (it fits a radial model over a few
+    hundred thousand edge pixels), which is far too long to run inside a checkbox slot.
+    The result is cached in the sidecar, so this runs once per photo at most.
+    """
+    caReady = Signal(str, dict)  # photo_id, result dict
+
+    def __init__(self, photo_id: str, image, parent=None):
+        super().__init__(parent)
+        self.photo_id = photo_id
+        self.image = image
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
+
+    def run(self):
+        try:
+            from core.ca_estimate import estimate_lateral_ca
+            res = estimate_lateral_ca(self.image)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"自动色差估计失败: {e}")
+            res = {"applied": False, "confidence": 0.0,
+                   "ca_r_coeffs": (0.0, 0.0, 0.0), "ca_b_coeffs": (0.0, 0.0, 0.0),
+                   "r_shift_px": 0.0, "b_shift_px": 0.0}
+        self.image = None
+        if not self._stopped:
+            self.caReady.emit(self.photo_id, res)
+
+
 class SlotDecodeWorker(QThread):
     """Background worker for session restoration: decodes uncached photos directly
     into pre-allocated slot indices, streaming thumbnail pixmaps without affecting list order.
@@ -1892,6 +1930,7 @@ class DarkroomMainWindow(QMainWindow):
         self._import_worker = None
         self._single_photo_loader = None
         self._slot_decode_worker = None
+        self._ca_worker = None
         self.current_film_stock = "none"
         self.current_paper_stock = "none"
         self.current_print_mode = "optical"
@@ -3996,10 +4035,30 @@ class DarkroomMainWindow(QMainWindow):
         chk_layout.setContentsMargins(0, 2, 0, 2)
         self.chk_remove_ca = QCheckBox("删除色差")
         self.chk_remove_ca.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.chk_remove_ca.setToolTip("通过反向色差径向位移算法校正横向色差（紫边/绿边）")
+        self.chk_remove_ca.setToolTip("通过反向色差径向位移算法校正横向色差（紫边/绿边）\n"
+                                      "系数由画面自动测量（LCP 未提供色差模型时）")
         self.chk_remove_ca.toggled.connect(self._on_lens_remove_ca_toggled)
         chk_layout.addWidget(self.chk_remove_ca)
+        self.btn_recull_ca = QPushButton("重新估计")
+        self.btn_recull_ca.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_recull_ca.setFixedHeight(18)
+        self.btn_recull_ca.setFlat(True)
+        self.btn_recull_ca.setStyleSheet(
+            f"QPushButton {{ border: none; background: transparent; padding: 0; "
+            f"color: {theme_manager.color('text_muted')}; font-size: 11px; "
+            f"text-decoration: underline; }}"
+        )
+        self.btn_recull_ca.clicked.connect(self._on_reestimate_ca)
+        chk_layout.addStretch(1)
+        chk_layout.addWidget(self.btn_recull_ca)
         self.sec_optics.addLayout(chk_layout)
+
+        # 2b. 自动色差测量结果（仅在启用删除色差时可见）
+        self.lbl_auto_ca = QLabel("")
+        self.lbl_auto_ca.setStyleSheet(
+            f"color: {theme_manager.color('text_muted')}; font-size: 11px;")
+        self.lbl_auto_ca.setVisible(False)
+        self.sec_optics.addWidget(self.lbl_auto_ca)
 
         # 3. Profile Panel Container
         self.panel_lens_profile = QWidget()
@@ -4038,7 +4097,7 @@ class DarkroomMainWindow(QMainWindow):
         db = LCPDatabase.get_instance()
         db.index_installed_profiles()
         makes = db.get_available_makes()
-        make_items = [("无", "")] + [(m, m) for m in makes]
+        make_items = [("无", "")] + [(m, m) for m in makes] + [("内置（RAW 内）", "__builtin__")]
 
         self.combo_lens_make = ComboBoxRow(
             "品牌",
@@ -4206,24 +4265,24 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_chemistry.resetClicked.connect(lambda: self.reset_track("chemistry"))
 
         self.slider_dir_amount = AdobeScrubSlider(
-            "抑制剂总量", 0.0, 2.0, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="DIR 显影抑制耦合剂全局强度乘数 (1.0 为出厂标准值)"
+            "抑制剂总量", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
+            tooltip="显影抑制剂的总体强度，影响色彩密度。"
         )
         self.slider_dir_amount.valueChanged.connect(lambda v: self._on_slider_live("dir_amount", v))
         self.slider_dir_amount.sliderReleased.connect(self._on_slider_committed)
         self.sec_chemistry.addWidget(self.slider_dir_amount)
 
         self.slider_dir_interlayer = AdobeScrubSlider(
-            "跨层色彩纯度", 0.0, 2.0, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="相邻感光层相互抑制释放，形成高纯度通透色彩分离"
+            "跨层色彩纯度", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
+            tooltip="相邻感光层的相互抑制程度，决定色彩纯度。"
         )
         self.slider_dir_interlayer.valueChanged.connect(lambda v: self._on_slider_live("dir_interlayer", v))
         self.slider_dir_interlayer.sliderReleased.connect(self._on_slider_committed)
         self.sec_chemistry.addWidget(self.slider_dir_interlayer)
 
         self.slider_dir_samelayer = AdobeScrubSlider(
-            "同层边缘反差", 0.0, 2.0, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="单色层自抑制微反差控制，防止大光比下色彩密度堆积过厚"
+            "同层抑制", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
+            tooltip="单色层自抑制强度，影响高密度区的色彩堆积。"
         )
         self.slider_dir_samelayer.valueChanged.connect(lambda v: self._on_slider_live("dir_samelayer", v))
         self.slider_dir_samelayer.sliderReleased.connect(self._on_slider_committed)
@@ -4302,7 +4361,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_morph_gamma = AdobeScrubSlider(
             "显影形态反差", 0.70, 1.30, 1.0, step=0.02, unit="", decimals=2,
-            tooltip="相纸 D-logH 显影曲线斜率形态，影响中间调与暗部陡峭度"
+            tooltip="相纸显影曲线斜率，决定画面反差。"
         )
         self.slider_morph_gamma.valueChanged.connect(lambda v: self._on_slider_live("morph_gamma", v))
         self.slider_morph_gamma.sliderReleased.connect(self._on_slider_committed)
@@ -4310,7 +4369,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_exhaustion = AdobeScrubSlider(
             "显影液疲劳度", 0.0, 1.00, 0.0, step=0.02, unit="", decimals=2,
-            tooltip="相纸显影液耗尽效应 (Gumbel 极值分布混合)：锁定纸白与最大黑度，柔化高光与深暗部过渡斜率"
+            tooltip="显影液疲劳对相纸肩部的轻微塑形。"
         )
         self.slider_exhaustion.valueChanged.connect(lambda v: self._on_slider_live("developer_exhaustion", v))
         self.slider_exhaustion.sliderReleased.connect(self._on_slider_committed)
@@ -5708,6 +5767,11 @@ class DarkroomMainWindow(QMainWindow):
         path_updated = False
 
         for p in photo_entries:
+            # base_ev is re-derived from the file on every load -- it is a metering result,
+            # not an edit. Sessions written by an older build may still carry one, and
+            # restoring it would pin the exposure to a stale value forever.
+            if isinstance(p.get("params"), dict):
+                p["params"].pop("base_ev", None)
             orig_p = p.get("path", "")
             rel_p = p.get("rel_path")
             fname = p.get("filename") or (os.path.basename(orig_p) if orig_p else "")
@@ -6532,7 +6596,9 @@ class DarkroomMainWindow(QMainWindow):
                 eff_lens = compute_effective_lens_params(
                     lens_cfg,
                     focal_length=exif.get("focal_length"),
-                    aperture=exif.get("aperture")
+                    aperture=exif.get("aperture"),
+aspect_ratio=self._lens_frame_aspect(photo),
+                    source_path=(photo or {}).get("path")
                 )
                 lens_cfg.update(eff_lens)
 
@@ -7748,6 +7814,8 @@ class DarkroomMainWindow(QMainWindow):
         finally:
             self._is_updating_sliders = False
         self._update_reset_buttons_state()
+        self._update_auto_ca_ui()
+        self._ensure_auto_ca()
         self._update_diffusion_ui_state()
         self._update_lens_ui_state()
 
@@ -9270,6 +9338,23 @@ class DarkroomMainWindow(QMainWindow):
             else:
                 self.slider_diff_warmth.setToolTip(getattr(self.slider_diff_warmth, "default_tooltip", "柔光光晕波长能量再分配，正值偏复古暖金，负值偏清冷晨光"))
 
+    @staticmethod
+    def _lens_frame_aspect(photo):
+        """Frame height/width, used for the vignette corner radius (3:2 landscape = 0.6667).
+
+        A portrait 3:2 frame is 1.5, not 0.6667 — feeding the landscape value biased the
+        corner r² and therefore the compensated gain for every upright photo.
+        """
+        if isinstance(photo, dict):
+            w = photo.get("width") or (photo.get("meta") or {}).get("width")
+            h = photo.get("height") or (photo.get("meta") or {}).get("height")
+            try:
+                if w and h and float(w) > 0:
+                    return float(h) / float(w)
+            except (TypeError, ValueError):
+                pass
+        return 0.6667
+
     def _get_default_lens_params(self):
         return {
             "profile_enabled": False,
@@ -9326,9 +9411,125 @@ class DarkroomMainWindow(QMainWindow):
             return
         lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
         lens_cfg["remove_ca"] = checked
+        self._update_auto_ca_ui()
+        self._ensure_auto_ca()
         self._apply_lens_to_canvas()
         self._mark_current_photo_dirty()
         self._save_current_photo_sdc()
+
+    # ------------------------------------------------------------------ 自动色差估计
+    def _active_photo(self):
+        if not self.active_photo_id:
+            return None
+        return next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
+
+    def _ensure_auto_ca(self, force: bool = False):
+        """Measure lateral CA for the active frame if it has never been measured.
+
+        Cached in the sidecar under ``auto_ca_r`` / ``auto_ca_b``; presence of the keys
+        means "already measured", including a measured zero. Nothing happens unless
+        删除色差 is on, so the cost is only ever paid by users who asked for it.
+        """
+        photo = self._active_photo()
+        lens_cfg = self.current_params.get("lens", {})
+        if not photo or not isinstance(lens_cfg, dict):
+            return
+        if not lens_cfg.get("remove_ca", False):
+            self._update_auto_ca_ui()
+            return
+        if getattr(self, "_ca_worker", None) is not None and self._ca_worker.isRunning():
+            return
+        if not force and all(k in lens_cfg for k in _AUTO_CA_KEYS):
+            self._update_auto_ca_ui()
+            return
+        img = getattr(self.engine, "raw_preview", None)
+        if img is None or getattr(img, "ndim", 0) != 3 or max(img.shape[:2]) < 640:
+            self._update_auto_ca_ui(no_image=True)
+            return
+        # The engine may still be holding the previous frame while the switch settles;
+        # measuring that would cache one photo's CA onto another.
+        cur_path = getattr(self.engine, "current_file_path", None)
+        try:
+            if cur_path and os.path.normcase(os.path.abspath(cur_path)) != \
+                    os.path.normcase(os.path.abspath(photo.get("path", ""))):
+                return
+        except Exception:
+            pass
+        # Copy: the worker outlives this call, and the engine may rebind or mutate
+        # raw_preview while the estimate runs (~33 MB at 2048 px, one-off).
+        self._ca_worker = CAEstimateWorker(
+            photo.get("id"), np.array(img, dtype=np.float32, copy=True))
+        self._ca_worker.caReady.connect(self._on_auto_ca_ready)
+        self._ca_pending_id = photo.get("id")
+        self.lbl_auto_ca.setText("自动色差: 正在测量画面色边…")
+        self.lbl_auto_ca.setVisible(True)
+        self.btn_recull_ca.setEnabled(False)
+        self._ca_worker.start(QThread.Priority.LowPriority)
+
+    def _on_reestimate_ca(self):
+        lens_cfg = self.current_params.get("lens", {})
+        if isinstance(lens_cfg, dict):
+            for k in _AUTO_CA_KEYS:
+                lens_cfg.pop(k, None)
+        self._ensure_auto_ca(force=True)
+
+    def _on_auto_ca_ready(self, photo_id, result):
+        self.btn_recull_ca.setEnabled(True)
+        photo = next((p for p in self.photos if p and p.get("id") == photo_id), None)
+        if not photo:
+            self._update_auto_ca_ui()
+            return
+        is_active = (photo_id == self.active_photo_id)
+        params = self.current_params if is_active else (photo.get("params") or {})
+        if not isinstance(params, dict):
+            params = {}
+        lens_cfg = params.get("lens")
+        if not isinstance(lens_cfg, dict):
+            lens_cfg = params.setdefault("lens", self._get_default_lens_params())
+
+        lens_cfg["auto_ca_r"] = tuple(float(c) for c in result.get("ca_r_coeffs", (0.0, 0.0, 0.0)))
+        lens_cfg["auto_ca_b"] = tuple(float(c) for c in result.get("ca_b_coeffs", (0.0, 0.0, 0.0)))
+        lens_cfg["auto_ca_scale_r"] = round(float(result.get("ca_r_scale", 0.0)), 7)
+        lens_cfg["auto_ca_scale_b"] = round(float(result.get("ca_b_scale", 0.0)), 7)
+        lens_cfg["auto_ca_shift"] = (round(float(result.get("r_shift_px", 0.0)), 2),
+                                     round(float(result.get("b_shift_px", 0.0)), 2))
+        lens_cfg["auto_ca_confidence"] = round(float(result.get("confidence", 0.0)), 3)
+
+        if is_active:
+            self._apply_lens_to_canvas()
+            self._update_auto_ca_ui()
+            self._mark_current_photo_dirty()
+        try:
+            from core.sdc_manager import save_sdc
+            save_sdc(photo["path"], photo.get("film_profile", self.current_film_stock),
+                     photo.get("paper_profile", self.current_paper_stock), params,
+                     thumbnail_rgb=photo.get("thumbnail_rgb"),
+                     print_mode=photo.get("print_mode", self.current_print_mode))
+        except Exception as e:
+            logger.debug(f"自动色差结果写入旁车失败: {e}")
+
+    def _update_auto_ca_ui(self, no_image: bool = False):
+        if not hasattr(self, "lbl_auto_ca"):
+            return
+        lens_cfg = self.current_params.get("lens", {})
+        on = isinstance(lens_cfg, dict) and bool(lens_cfg.get("remove_ca", False))
+        self.lbl_auto_ca.setVisible(on)
+        self.btn_recull_ca.setVisible(on)
+        if not on:
+            return
+        if no_image:
+            self.lbl_auto_ca.setText("自动色差: 当前画面不可用")
+            return
+        if all(k in lens_cfg for k in _AUTO_CA_KEYS):
+            shift = lens_cfg.get("auto_ca_shift") or (0.0, 0.0)
+            conf = float(lens_cfg.get("auto_ca_confidence", 0.0) or 0.0)
+            if abs(shift[0]) < 0.05 and abs(shift[1]) < 0.05:
+                self.lbl_auto_ca.setText("自动色差: 未检出明显色边")
+            else:
+                self.lbl_auto_ca.setText(
+                    f"自动色差: R {shift[0]:+.2f}px / B {shift[1]:+.2f}px · 拟合 {conf*100:.0f}%")
+        else:
+            self.lbl_auto_ca.setText("自动色差: 待测量")
         self.push_undo_state()
 
     def _on_lens_profile_enabled_toggled(self, checked):
@@ -9359,6 +9560,29 @@ class DarkroomMainWindow(QMainWindow):
             return
         lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
         lens_cfg["make"] = make
+
+        # "内置（RAW 内）": the tables are written per frame, so there is nothing to pick —
+        # core/sony_lens.py reads them from the file being edited every time.
+        if make == "__builtin__":
+            lens_cfg["setup"] = "custom"
+            lens_cfg["model"] = ""
+            lens_cfg["profile_name"] = "内置（RAW 内）"
+            lens_cfg["profile_path"] = "@builtin"
+            self._is_updating_sliders = True
+            try:
+                if hasattr(self, 'combo_lens_setup'):
+                    self.combo_lens_setup.set_value("custom")
+                self.combo_lens_model.set_items([("无", "")], default_val="")
+                self.combo_lens_profile.set_items(
+                    [("内置（RAW 内）", "@builtin"), ("[+ 添加配置文件 (.lcp)...]", "__import_lcp__")],
+                    default_val="@builtin")
+            finally:
+                self._is_updating_sliders = False
+            self._apply_lens_to_canvas()
+            self._mark_current_photo_dirty()
+            self._save_current_photo_sdc()
+            self.push_undo_state()
+            return
         # If user manually selects a make while in auto mode, switch setup to custom
         if lens_cfg.get("setup") == "auto":
             lens_cfg["setup"] = "custom"
@@ -9524,6 +9748,7 @@ class DarkroomMainWindow(QMainWindow):
         lens_cfg[key] = val
         fl = None
         ap = None
+        photo = None
         if self.active_photo_id:
             photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
             if photo:
@@ -9532,7 +9757,9 @@ class DarkroomMainWindow(QMainWindow):
                 ap = exif.get("aperture")
         from core.lens_correction import compute_effective_lens_params
         try:
-            eff = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap)
+            eff = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap,
+aspect_ratio=self._lens_frame_aspect(photo),
+                                                source_path=(photo or {}).get("path"))
             lens_cfg.update(eff)
             self.canvas.update_params(lens=eff)
         except Exception as e:
@@ -9544,6 +9771,7 @@ class DarkroomMainWindow(QMainWindow):
         lens_cfg = self.current_params.setdefault("lens", self._get_default_lens_params())
         fl = None
         ap = None
+        photo = None
         if self.active_photo_id:
             photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
             if photo:
@@ -9552,7 +9780,9 @@ class DarkroomMainWindow(QMainWindow):
                 ap = exif.get("aperture")
         from core.lens_correction import compute_effective_lens_params
         try:
-            eff = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap)
+            eff = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap,
+aspect_ratio=self._lens_frame_aspect(photo),
+                                                source_path=(photo or {}).get("path"))
             lens_cfg.update(eff)
             self.canvas.update_params(lens=eff)
         except Exception as e:
@@ -9570,7 +9800,7 @@ class DarkroomMainWindow(QMainWindow):
 
             # 1. Populate makes
             makes = db.get_available_makes()
-            make_items = [("无", "")] + [(m, m) for m in makes]
+            make_items = [("无", "")] + [(m, m) for m in makes] + [("内置（RAW 内）", "__builtin__")]
             if make and make not in [m for _, m in make_items]:
                 make_items.append((make, make))
             self.combo_lens_make.set_items(make_items, default_val=make)
@@ -9925,7 +10155,9 @@ class DarkroomMainWindow(QMainWindow):
             fl = exif_data.get("focal_length") if exif_data else None
             ap = exif_data.get("aperture") if exif_data else None
             from core.lens_correction import compute_effective_lens_params
-            eff_lens = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap)
+            eff_lens = compute_effective_lens_params(lens_cfg, focal_length=fl, aperture=ap,
+aspect_ratio=self._lens_frame_aspect(photo),
+                                                     source_path=(photo or {}).get("path"))
             lens_cfg.update(eff_lens)
 
             self._update_stock_mode_ui()
@@ -10163,7 +10395,9 @@ class DarkroomMainWindow(QMainWindow):
                     eff_lens = compute_effective_lens_params(
                         lens_cfg,
                         focal_length=exif_meta.get("focal_length"),
-                        aperture=exif_meta.get("aperture")
+                        aperture=exif_meta.get("aperture"),
+aspect_ratio=self._lens_frame_aspect(target_photo),
+                        source_path=(target_photo or {}).get("path")
                     )
                     lens_cfg.update(eff_lens)
 
@@ -10609,6 +10843,11 @@ class DarkroomMainWindow(QMainWindow):
             self.current_params.update(defaults)
             self.current_params["print_mode"] = "scan"
             self.current_params["crop"] = dict(default_crop)
+            # Clearing the sidecar must not throw away the metering anchor: base_ev is derived
+            # from the file, not a saved edit, and dropping it here silently shifted the
+            # exposure by up to 3 stops (that is why "delete the .sdc" appeared to fix a
+            # brightness problem that had nothing to do with the sidecar).
+            self.current_params["base_ev"] = float(getattr(self, "_active_base_ev", 0.0))
 
             active_p = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
             if active_p:
@@ -11621,6 +11860,9 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, '_session_restore_worker') and self._session_restore_worker:
                 self._safely_terminate_worker(self._session_restore_worker, wait_ms=1000)
                 self._session_restore_worker = None
+            if getattr(self, '_ca_worker', None):
+                self._safely_terminate_worker(self._ca_worker, wait_ms=2000)
+                self._ca_worker = None
             # Workers that overran the 1 s budget were parked in _retained_zombie_workers and
             # never waited on again, so the window could be destroyed while they were still
             # running ("QThread: Destroyed while thread is still running"). Give them one
