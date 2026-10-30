@@ -547,28 +547,34 @@ def _sample_density_lut(lut, density):
     return out
 
 
-_BELL_LUT = None
+_BELL_LUT_CACHE = {}
 
 
-def bake_bell_lut():
-    """The P0 bell as a table, in the same units as ``bake_density_lut``.
+def bake_bell_lut(preset=None):
+    """The P0 bell as a table, in the same units as ``bake_density_lut``: ``(512, 3)``.
 
-    Only used to build the layered table for callers with no declared law (no film selected,
-    thumbnails, offline probes): the layered path needs a total law to redistribute, and it must
-    be the same bell both renderers already fall back to.
+    Used when a caller has no declared law (no film selected, or a profile that declares no
+    ``density_law``).  The bell used to fade out at the global :data:`DENS_DMAX` whatever the
+    stock was; it now takes the stock's own per-record ``density_max`` when one is available, so
+    a slow stock with a 3.8 Dmax does not lose its shoulder at 2.04 (P3).
     """
-    global _BELL_LUT
-    if _BELL_LUT is not None:
-        return _BELL_LUT
+    d_max = (preset or {}).get("density_max")
+    ceilings = tuple(round(max(_layer_value(d_max, c, DEFAULT_DENSITY_MAX), 0.05), 4)
+                     for c in range(3))
+    cached = _BELL_LUT_CACHE.get(ceilings)
+    if cached is not None:
+        return cached
     grid = np.linspace(0.0, DENSITY_LUT_MAX, DENSITY_LUT_SIZE, dtype=np.float64)
     z = grid - DENS_PEAK
     w = np.where(z > 0.0, DENS_W_SHOULDER, DENS_W_TOE)
     bell = DENS_FLOOR + (1.0 - DENS_FLOOR) * np.exp(-0.5 * (z / w) ** 2)
-    t = np.clip((grid - (DENS_DMAX - DENS_W_SAT)) / DENS_W_SAT, 0.0, 1.0)
-    roll = 1.0 - (3.0 * t * t - 2.0 * t * t * t)
-    column = (DENS_GAIN * bell * roll).astype(np.float32)
-    _BELL_LUT = np.repeat(column[:, None], 3, axis=1)
-    return _BELL_LUT
+    lut = np.empty((DENSITY_LUT_SIZE, 3), dtype=np.float32)
+    for record, ceiling in enumerate(ceilings):
+        t = np.clip((grid - (ceiling - DENS_W_SAT)) / DENS_W_SAT, 0.0, 1.0)
+        roll = 1.0 - (3.0 * t * t - 2.0 * t * t * t)
+        lut[:, record] = (DENS_GAIN * bell * roll).astype(np.float32)
+    _BELL_LUT_CACHE[ceilings] = lut
+    return lut
 
 
 def _layer_geometry(preset):
@@ -704,7 +710,7 @@ def bake_layer_lut(preset, octave_weights=None, rho=None, layer_weights=None):
 
     base = bake_density_lut(preset) if preset else None
     if base is None:
-        base = bake_bell_lut()
+        base = bake_bell_lut(preset)
     geometry = _layer_geometry(preset)
     shares = _layer_share_weights(preset)
     signal = _octave_signal(weights, rho, layer_weights)
