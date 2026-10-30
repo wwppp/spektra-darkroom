@@ -487,13 +487,19 @@ class GLHalationChain:
                         GL.GL_RGBA, GL.GL_FLOAT, None)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
-        # Legacy B (docs/push-grain-plan.md 14.2): the CPU side blurs with
-        # cv2.BORDER_REFLECT_101 while GL clamps to the edge, so the border ring differs.
-        # On the 47 px working grid that ring is ~8 % of the area -- the right order to
-        # explain the remaining 1.5 dB on cinebloom 1.0.  HAL_BORDER=mirror switches the
-        # intermediate targets to mirroring so the hypothesis can be tested without a patch.
-        _wrap = (GL.GL_MIRRORED_REPEAT if os.environ.get("HAL_BORDER") == "mirror"
-                 else GL.GL_CLAMP_TO_EDGE)
+        # Border mode must match the CPU's cv2.BORDER_REFLECT_101, which is the "mirror without
+        # repeating the edge sample" convention that GL_MIRRORED_REPEAT implements.  Clamping to
+        # the edge instead (the old default) leaves a wrong ring on the 47 px working grid, about
+        # 8 % of its area.  Measured on cinebloom 1.0 at 24 MP (scratch/_diff_border_ab.py,
+        # lens chain excluded):
+        #
+        #   clamp   48.52 dB   dE00 0.309   15.4 % of pixels off by >1 level
+        #   mirror  51.62 dB   dE00 0.241   10.1 %
+        #
+        # mirror clears the 50 dB / dE00 0.3 gate, clamp does not.  HAL_BORDER=clamp keeps the old
+        # behaviour for the A/B experiment.
+        _wrap = (GL.GL_CLAMP_TO_EDGE if os.environ.get("HAL_BORDER") == "clamp"
+                 else GL.GL_MIRRORED_REPEAT)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, _wrap)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, _wrap)
         GL.glBindTexture(GL.GL_TEXTURE_2D, 0)

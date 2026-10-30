@@ -1388,6 +1388,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
     requestReset = Signal()
     requestResetToOpen = Signal()
     requestClearCrop = Signal()
+    # Emitted when a render had to leave the GPU (currently only the >16384 px texture limit).
+    # The console line alone was invisible: the user saw "export finished" with no hint that it
+    # went through the CPU, i.e. that it took minutes instead of seconds.
+    gpuFallback = Signal(str)
     requestExport = Signal()
     requestQuickExport = Signal()
     requestToggleSplit = Signal()
@@ -3013,9 +3017,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # black export; the tile renderer (with the 3-sigma overlap from
         # halation_model.halation_overlap_px) is the planned fix.
         if max(int(target_w), int(target_h)) > 16384:
-            print(f"[DarkroomGLCanvas] render_offscreen: {target_w}x{target_h} exceeds the "
-                  f"16384 px GL texture limit; falling back to CPU export. "
-                  f"(tiled GPU rendering not implemented yet)")
+            message = (f"{target_w}x{target_h} 超出 GPU 16384 px 纹理上限，"
+                       f"已改用 CPU 导出（会明显变慢）")
+            print(f"[DarkroomGLCanvas] render_offscreen: {message}")
+            self.gpuFallback.emit(message)
             return None
         if is_16bit is not None:
             bit_depth = 16 if is_16bit else 8

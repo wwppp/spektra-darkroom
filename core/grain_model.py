@@ -933,8 +933,8 @@ class GrainSpec:
     """Everything the two renderers need to agree on, computed in one place."""
 
     __slots__ = ("scale_px", "sigmas", "w_fine", "w_cloud", "w_mottle", "rho", "lw",
-                 "lw_mean", "strength", "amplitude", "active", "density_lut", "layer_lut",
-                 "luma_correlation", "film_density")
+                 "lw_mean", "strength", "amplitude", "active", "density_lut",
+                 "layer_lut", "luma_correlation", "film_density")
 
     def __init__(self, scale_px, sigmas, weights, rho, layer_weights, strength, amplitude, active,
                  density_lut=None, luma_correlation=None, film_density=None, layer_lut=None):
@@ -946,6 +946,16 @@ class GrainSpec:
         self.lw_mean = float(self.lw.mean())
         self.strength = strength
         self.amplitude = amplitude
+        # A2 note (sub-pixel footprint): the shader attenuates grain by 1/max(1, footprint), and
+        # this object used to have no counterpart -- so the obvious fix was to add
+        # ``min(1, scale_px)`` here and to the synthesiser.  That was measured and reverted: the
+        # CPU already attenuates, implicitly.  Its octaves are Gaussian-blurred with
+        # sigma = octave_sigma * scale_px, so at scale < 1 the smoothing itself removes variance.
+        # At 1600 px (scale 0.55) the unattenuated CPU sits at 0.67 of the GPU, not 1.00, and
+        # adding the explicit factor on top leaves it 2.7x weaker (0.0102 vs 0.0280).  Closing
+        # this properly means convolving with a footprint kernel instead of a per-octave
+        # Gaussian; the residual today is ~1.5x on exports below ~2300 px long edge, and zero
+        # for every size at or above it (docs/push-grain-plan.md 14.1.2).
         self.active = active
         # Per-stock density law as a (DENSITY_LUT_SIZE, 3) response table, or None for the P0
         # bell.  Both renderers read this one table (texture on the GPU, interpolation on the CPU).
@@ -964,7 +974,8 @@ class GrainSpec:
         layers = "layered" if self.layer_lut is not None else "flat"
         return (f"GrainSpec(scale_px={self.scale_px:.4f}, sigmas={tuple(round(s, 3) for s in self.sigmas)}, "
                 f"w=({self.w_fine:.3f},{self.w_cloud:.3f},{self.w_mottle:.3f}), rho={self.rho:.3f}, "
-                f"strength={self.strength:.4f}, amplitude={self.amplitude:.4f}, density={law}, "
+                f"strength={self.strength:.4f}, amplitude={self.amplitude:.4f}, "
+                f"density={law}, "
                 f"domain={dens}, response={layers})")
 
 

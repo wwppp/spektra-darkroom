@@ -184,6 +184,42 @@ def resolve_halation_params(film_stock: str,
         strength = _engine_strength_for(antihalation)
         sources["strength"] = SOURCE_ENGINE
 
+    # --- look scale and the return matrix ------------------------------------------------
+    # The reference engine applies `halationLookScale` as a plain multiplier on the return
+    # triple, deliberately kept outside the calibrated numbers ("a scale of 1/lookScale
+    # recovers it exactly").  Our profiles do not carry it yet, so this defaults to 1 and
+    # changes nothing -- it is wired so a stock that does declare it is honoured instead of
+    # silently ignored.
+    look_scale = 1.0
+    for holder in (block, phys if isinstance(phys, Mapping) else None):
+        if isinstance(holder, Mapping) and holder.get("halationLookScale") is not None:
+            try:
+                look_scale = max(float(holder["halationLookScale"]), 0.0)
+            except (TypeError, ValueError):
+                look_scale = 1.0
+            break
+    if look_scale != 1.0:
+        strength = tuple(v * look_scale for v in strength)
+        sources["strength"] = f"{sources['strength']}*lookScale{look_scale:g}"
+
+    # `halationReturnMatrix` is *distribution only*: the engine normalises each row and spreads
+    # that receiver's share across the source records, amplitude stays the strength's.  Its one
+    # qualitative case is a monochrome stock, where every row is uniform -- the returned light
+    # goes neutral whatever colour came in.  We cannot reproduce a general 3x3 without a
+    # cross-channel pass, but the monochrome case is exact and free: a uniform row is what a
+    # neutral triple already is.  Measured over the 39 stocks that ship a matrix: colour stocks
+    # move a median 5.9% of the halo across records (max 100% on one near-empty blue row of
+    # Aerocolor), monochrome stocks move 66.7% today and 0% after this line.
+    channel_model = ""
+    if info is not None:
+        channel_model = str(getattr(info, "channel_model", "") or "")
+    if not channel_model and isinstance(prof, Mapping):
+        channel_model = str((prof.get("info") or {}).get("channel_model", "") or "")
+    if channel_model == "bw":
+        mean_strength = sum(strength) / 3.0
+        strength = (mean_strength, mean_strength, mean_strength)
+        sources["strength"] = f"{sources['strength']} (neutralised: monochrome return matrix)"
+
     # --- sigma_h: derived from geometry (thickness/refractive index) ---
     # Three tiers, and the label says which one fired:
     #   derived          -> both numbers came from the profile

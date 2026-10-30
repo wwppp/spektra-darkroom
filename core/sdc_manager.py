@@ -22,6 +22,36 @@ def get_sdc_path(image_path: str) -> str:
     return f"{image_path}.sdc"
 
 
+# The two Portra 800 push stocks used to be full profiles, i.e. pushing was expressed by picking a
+# different film from the list.  Push is a development condition now (one profile + a table), so
+# those ids are retired: a sidecar written back then means "Portra 800, developed +1/+2".
+# The profile files stay on disk (old sessions must still load) and stay in BUILTIN_FILM_IDS so
+# they are never mistaken for user-deleted customs -- they are only unreachable from the film list.
+LEGACY_PUSH_PROFILES = {
+    "kodak_portra_800_push1": ("kodak_portra_800", 1),
+    "kodak_portra_800_push2": ("kodak_portra_800", 2),
+}
+
+
+def migrate_legacy_push(data: dict) -> dict:
+    """Rewrite a retired push stock id as its base stock plus ``push_ev``.
+
+    Idempotent: a sidecar that already names the base stock is left untouched.  Applying it on
+    *load* (not on save) is what makes it free -- the next save writes the new form.
+    """
+    if not isinstance(data, dict):
+        return data
+    film = data.get("film_profile")
+    if film in LEGACY_PUSH_PROFILES:
+        base, stops = LEGACY_PUSH_PROFILES[film]
+        data["film_profile"] = base
+        params = data.get("params")
+        if isinstance(params, dict):
+            params["push_ev"] = stops
+        logger.info(f"Migrated legacy push stock {film} -> {base} push_ev={stops}")
+    return data
+
+
 def has_sdc(image_path: str) -> bool:
     sdc_path = get_sdc_path(image_path)
     return bool(sdc_path and os.path.isfile(sdc_path))
@@ -83,7 +113,7 @@ def load_sdc(image_path: str) -> dict | None:
             # visit history (session entry / sidecar / cache could disagree by stops), which
             # showed up as "the photo got brighter after I switched away and back".
             data["params"].pop("base_ev", None)
-            return data
+            return migrate_legacy_push(data)
     except Exception as e:
         logger.warning(f"Failed to read SDC sidecar {sdc_path}: {e}")
         # Quarantine instead of silently pretending the photo was never edited: the next

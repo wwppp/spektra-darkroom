@@ -1449,18 +1449,6 @@ class SpektraEngine:
                         "desc": "高感人像负片，弱光环境与柔和暗部过渡，色彩表现极具温度。"
                     },
                     {
-                        "id": "kodak_portra_800_push1",
-                        "name": "Kodak Portra 800 (Push +1)",
-                        "badge": "迫冲1档",
-                        "desc": "迫冲 1 档显影，反差与微粒质感适度提升，戏剧化影调。"
-                    },
-                    {
-                        "id": "kodak_portra_800_push2",
-                        "name": "Kodak Portra 800 (Push +2)",
-                        "badge": "迫冲2档",
-                        "desc": "迫冲 2 档显影，戏剧性强烈反差与粗粝微粒质感，极具表现力。"
-                    },
-                    {
                         "id": "kodak_gold_200",
                         "name": "Kodak Gold 200",
                         "badge": "怀旧金黄",

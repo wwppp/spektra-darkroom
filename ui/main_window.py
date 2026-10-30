@@ -1990,6 +1990,11 @@ class DarkroomMainWindow(QMainWindow):
         # Central canvas & widgets
         self.thumb_controller = ThumbnailController(self.engine, self)
         self.canvas = DarkroomGLCanvas(self)
+        # Surface a GPU->CPU fallback in the status bar: it is not an error (the export still
+        # succeeds) but it changes the wait from seconds to minutes, and the console line was
+        # invisible from inside the app.
+        self.canvas.gpuFallback.connect(
+            lambda msg: self.statusBar().showMessage(f"{msg}（画面与 CPU 导出结果一致）", 10000))
         self.film_cards = {}
         self.paper_cards = {}
         self._current_session_path = None
@@ -4351,9 +4356,13 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_cyan.sliderReleased.connect(self._on_slider_committed)
         self.sec_enlarger.addWidget(self.slider_cyan)
 
+        # Range is +-2 stops, not the old +1 / -0.58: this slider is the *only* correct way to make
+        # a pushed frame brighter again (scene exposure would cancel the underexposure and turn the
+        # recipe into plain over-development), so it has to have the room to do that.
         self.slider_print_exp = AdobeScrubSlider(
-            "相纸曝光", 0.5, 1.5, 1.0, step=0.02, unit="x", decimals=2,
-            tooltip="放大机相纸曝光时间，调节相纸整体显影浓度",
+            "相纸曝光", 0.25, 4.0, 1.0, step=0.02, unit="x", decimals=2,
+            tooltip="放大机相纸曝光时间，调节相纸整体显影浓度（0.25x ~ 4x，约 ±2 档）\n"
+                    "迫冲后要提亮画面，用这一档，不要拉场景曝光——那会取消欠曝",
             track_gradient=[(0.0, QColor("#14161d")), (1.0, QColor("#f1f5f9"))],
             has_center_detent=True
         )
@@ -7196,6 +7205,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.current_params["boost_ev"] = val
         if param_key in ("color_temp", "tint"):
             self.current_params["custom_wb"] = True
+        if param_key == "exposure_ev" and int(round(float(self.current_params.get("push_ev", 0) or 0))):
+            # The 迫冲 readout is arithmetic on the exposure, so it has to follow it.
+            self._refresh_push_readout()
         # DIR / morph / exhaustion are baked into the 3D LUT: preview them by rebaking the same
         # full-resolution LUT in the background, everything else is applied post-LUT by the shader.
         if param_key in ("dir_amount", "dir_interlayer", "dir_samelayer", "morph_gamma", "developer_exhaustion"):
@@ -7348,9 +7360,29 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
         if self._bypass_blocks_param(param_key):
             return
+        # Read before the write: the push branch below needs to know which stop count we came from.
+        prev_push = int(round(float(self.current_params.get("push_ev", 0) or 0)))
         self.current_params[param_key] = val
         self.canvas.update_params(**{param_key: val})
         if param_key == "push_ev":
+            # Exposure coupling, once per change and never on load. Raising the push by N stops
+            # means the film was *shot* N stops under, so the scene exposure takes that offset now.
+            # Deliberately not a standing constraint: the exposure slider stays free afterwards,
+            # and `push_ref_exposure` remembers where it landed so the readout can say how much of
+            # the underexposure the user has since given back.
+            delta = int(round(float(val))) - prev_push
+            if delta:
+                ev = round(float(self.current_params.get("exposure_ev", 0.0) or 0.0) - delta, 2)
+                ev = max(-3.0, min(3.0, ev))
+                self.current_params["exposure_ev"] = ev
+                self.current_params["push_ref_exposure"] = ev
+                self.canvas.update_params(exposure_ev=ev)
+                if hasattr(self, "slider_ev"):
+                    self._is_updating_sliders = True
+                    try:
+                        self.slider_ev.set_value(ev)
+                    finally:
+                        self._is_updating_sliders = False
             # A different development condition is a different film: the LUT has to be rebaked,
             # not just re-shaded. Same path the DIR sliders take.
             self._pending_lut_refresh = True
@@ -7358,6 +7390,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._schedule_histogram_update()
             self._mark_current_photo_dirty()
             self._update_reset_buttons_state()
+            self._refresh_push_readout()
             return
         if param_key == "diffusion_family":
             # The strength combo no longer carries a 0 marker ("no filter" is expressed by
@@ -7788,6 +7821,60 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         self.set_app_status("已恢复至原始底片状态", timeout_ms=1500)
 
+    def _push_readout(self, stops):
+        """Tooltip text for the 迫冲显影 row: the table's provenance plus the exposure arithmetic.
+
+        A +2 push means the film was *shot* two stops under and developed two stops longer. The
+        exposure slider stays live, so by the time the user reads this they may have given some of
+        that underexposure back -- in which case what they are rendering is a partly over-developed
+        frame, not a push. Saying so is the only way that stays honest without disabling a control.
+        """
+        if not stops:
+            return "该胶卷没有迫冲数据（材料上无通行迫冲表，或未收录）"
+        engine = getattr(self, "engine", None)
+        label = ""
+        if engine is not None:
+            try:
+                label = engine.push_status(getattr(self, "current_film_stock", "none"))[1]
+            except Exception:                       # noqa: BLE001 - never break a paint
+                label = ""
+        current = int(round(float(self.current_params.get("push_ev", 0) or 0)))
+        if not current:
+            return label
+        exposure = float(self.current_params.get("exposure_ev", 0.0) or 0.0)
+        ref = self.current_params.get("push_ref_exposure")
+        if ref is None:
+            # No record of where the exposure landed (sidecar from before this feature): take "now"
+            # as the reference, which reads as a clean +N underexposure and never replays an offset.
+            ref = exposure
+            self.current_params["push_ref_exposure"] = ref
+        given_back = exposure - float(ref)
+        underexposed = current - given_back
+        if underexposed <= 0.0:
+            body = f"当前：欠曝 0 EV，显影 +{current} 档 —— 属过显影，不是迫冲"
+        elif abs(given_back) < 0.05:
+            body = f"当前：欠曝 {underexposed:.0f} EV，显影补偿 +{current} 档"
+        else:
+            body = (f"当前：欠曝 {underexposed:.1f} EV，显影补偿 +{current} 档"
+                    f"（曝光已补回 {given_back:+.1f} EV）")
+        return f"{label}\n{body}" if label else body
+
+    def _apply_push_tooltip(self, stops):
+        combo = getattr(self, "combo_push", None)
+        if combo is None:
+            return
+        text = self._push_readout(stops)
+        combo.setToolTip(text)
+        combo.combo.setToolTip(text)
+        combo.label.setToolTip(text)
+
+    def _refresh_push_readout(self):
+        combo = getattr(self, "combo_push", None)
+        if combo is None:
+            return
+        stops = [combo.combo.itemData(i) for i in range(combo.combo.count())]
+        self._apply_push_tooltip([s for s in stops if s])
+
     def _update_push_ui_state(self):
         """Rebuild the 迫冲显影 row for the current stock.
 
@@ -7800,14 +7887,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if combo is None:
             return
         stock = getattr(self, "current_film_stock", "none")
-        stops, label = [], ""
+        stops = []
         engine = getattr(self, "engine", None)
         if engine is not None and stock not in (None, "", "none"):
             try:
-                label = engine.push_status(stock)[1]
                 stops = list(engine.push_stops(stock))
             except Exception:                       # noqa: BLE001 - never break a film switch
-                stops, label = [], ""
+                stops = []
         current = int(round(float(self.current_params.get("push_ev", 0) or 0)))
         if current not in stops:
             current = 0
@@ -7815,19 +7901,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                         default_val=current)
         combo.setEnabled(bool(stops))
         combo.label.setEnabled(bool(stops))
-        if stops:
-            text = label
-            if current:
-                # Say what the setting means in exposure terms instead of only naming it: a +2
-                # push is a two-stop underexposure compensated in development, and the user needs
-                # that number to judge the frame. The exposure sliders stay live on purpose --
-                # the exposure is a separate decision from the development.
-                text += f"\n当前：欠曝 {current} EV，显影补偿 +{current} 档"
-        else:
-            text = "该胶卷没有迫冲数据（材料上无通行迫冲表，或未收录）"
-        combo.setToolTip(text)
-        combo.combo.setToolTip(text)
-        combo.label.setToolTip(text)
+        self._apply_push_tooltip(stops)
         if int(round(float(self.current_params.get("push_ev", 0) or 0))) != current:
             self.current_params["push_ev"] = current
             canvas = getattr(self, "canvas", None)
@@ -8063,6 +8137,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._refresh_card_previews()
 
     def on_switch_film(self, stock_id, push_undo=True):
+        # Retired push stocks arrive here from old sessions and dropped folders: "Portra 800 Push 1"
+        # is Portra 800 developed +1 now, so the id is rewritten before anything touches the LUT.
+        from core.sdc_manager import LEGACY_PUSH_PROFILES
+        if stock_id in LEGACY_PUSH_PROFILES:
+            base, stops = LEGACY_PUSH_PROFILES[stock_id]
+            self.current_params["push_ev"] = stops
+            stock_id = base
         if hasattr(self, "_hover_timer"):
             self._hover_timer.stop()
         self._hover_pending_stock = None
