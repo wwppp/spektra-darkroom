@@ -44,10 +44,30 @@ OCTAVE_FREQ = (0.75, 0.45, 0.22)
 # Per-octave contrast gains applied in the shader before weighting.
 OCTAVE_GAIN = (2.0, 1.8, 1.6)
 
-# Standard deviation of GLSL ``smooth_cloud_noise``: smoothstep-bilinear interpolation of a
-# uniform [0,1) hash lattice.  Measured empirically over 10.5 M samples (see
-# docs/grain-calibration.md); the theoretical uniform lattice value is 1/sqrt(12) = 0.2887,
-# interpolation smooths it down to this constant.
+# Standard deviation of one unit of GLSL ``smooth_cloud_noise`` -- i.e. the value the shader
+# multiplies by ``(noise - 0.5) * 2`` before applying the octave gain.
+#
+# 0.2144 is analytic, not a fit: value noise is ``sum w_i u_i`` with ``u_i ~ U[0,1]`` and
+# smoothstep weights, so ``std = (1/sqrt(12)) * sqrt(E[sum w_i^2])``.  For smoothstep,
+# ``E[(1-s)^2 + s^2] = 1 - 2E[s] + 2E[s^2] = 0.7428`` with ``s = 3f^2-2f^3``, hence
+# ``E[sum w^2] = 0.7428^2 = 0.5518`` and ``std = 0.2887 * 0.7428 = 0.2144``.
+# Measured in numpy over 512..1024 px fields: 0.2141 .. 0.2161, matching.
+VALUE_NOISE_REALISED_STD = 0.2144
+
+# Ratio the *preview* must scale its noise by so its realised std matches the CPU's.
+#
+# VALUE_NOISE_STD below is 0.144287, which is exactly half of 1/sqrt(12).  The CPU multiplies
+# its Gaussian-blurred white noise (normalised to unit variance) by that number, so its octave
+# std is 0.144287 * gain.  The shader's value noise really carries 0.2144 per unit, so at the
+# same nominal sigma the preview ran 1.46x louder than the export -- at *every* grain size and
+# every resolution, which is what the amplitude sweep (scratch/grain_amp_matrix.py) measured.
+#
+# Applied in the shader rather than by raising the CPU constant: the export carries the P0
+# calibration and must not drift.  Calibrated against the measured 1.4606 ratio.
+PREVIEW_NOISE_FIX = 0.685
+
+# Legacy name, kept because the shader-side octave scaling and the calibration docs refer to it.
+# It is the *per-unit* std the CPU stream is normalised to, not the value noise's real std.
 VALUE_NOISE_STD = 0.144287
 
 # ---------------------------------------------------------------------------

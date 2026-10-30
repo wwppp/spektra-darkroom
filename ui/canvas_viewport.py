@@ -198,6 +198,7 @@ uniform float u_grain_w_mottle;
 // Density response (bell in negative optical density) and the physical amplitude law.
 // Values come from core/grain_model.py so the CPU export uses exactly the same numbers (P2).
 uniform float u_grain_amplitude;
+uniform float u_preview_noise_fix;    // value-noise std vs VALUE_NOISE_STD (Layer A)
 uniform float u_grain_dens_gain;
 uniform float u_grain_dens_floor;
 uniform float u_grain_dens_peak;
@@ -1188,8 +1189,18 @@ void main() {
         // u_grain_amplitude is the physical amplitude law from core/grain_model.py: per-pixel
         // density noise is proportional to the long edge (fewer crystals per pixel as sampling
         // gets finer). It is 1.0 at the calibration size, so the preview is unchanged there.
+        //
+        // u_preview_noise_fix reconciles the *noise std* of the two renderers. value noise is
+        // uniform [0,1] on its lattice, and core/grain_model.VALUE_NOISE_STD is 0.144287 --
+        // the std of a *point* sample. smoothstep interpolation is a low-pass filter, so the
+        // realised std is 0.2160 (0.5/sqrt(12) * sqrt(E[sum w^2]) with E[sum w^2] = 0.552).
+        // Left uncorrected the preview runs 1.46x louder than the export at every grain size.
+        // The factor is applied here, not in the export, because the export carries the P0
+        // calibration and must not drift.
+        float noise_fix = (u_preview_noise_fix > 0.01) ? u_preview_noise_fix : 1.0;
         vec3 layer_grain = (sqrt(1.0 - rho) * raw_noise * u_stock_layer_weights
-                          + sqrt(rho) * vec3(shared_noise * lw_mean)) * u_grain_amplitude;
+                          + sqrt(rho) * vec3(shared_noise * lw_mean))
+                         * u_grain_amplitude * noise_fix;
 
         // Stock strength & user slider modulation
         float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
@@ -2002,6 +2013,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_grain_w_cloud", _spec.w_cloud)
         u_1f("u_grain_w_mottle", _spec.w_mottle)
         u_1f("u_grain_amplitude", _spec.amplitude)
+        u_1f("u_preview_noise_fix", grain_model_ref.PREVIEW_NOISE_FIX)
         _bind_density_uniforms(u_1f)
         self._bind_grain_density_lut(funcs, u_1f, u_1i, _spec)
         self._bind_film_density(funcs, u_1f, u_1i, _spec)
@@ -3274,6 +3286,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_grain_w_cloud", _spec.w_cloud)
             u_1f("u_grain_w_mottle", _spec.w_mottle)
             u_1f("u_grain_amplitude", _spec.amplitude)
+            u_1f("u_preview_noise_fix", grain_model_ref.PREVIEW_NOISE_FIX)
             _bind_density_uniforms(u_1f)
             self._bind_grain_density_lut(funcs, u_1f, u_1i, _spec)
             self._bind_film_density(funcs, u_1f, u_1i, _spec)
