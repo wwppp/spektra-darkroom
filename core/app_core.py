@@ -54,6 +54,7 @@ from .format_constants import (
 )
 from . import colorspace as color_space
 from . import grain_model
+from . import push_model
 
 
 # Color matrices for accurate gamut transitions
@@ -1297,6 +1298,7 @@ class SpektraEngine:
         self.original_meta = {}
 
         # Performance caches
+        self._push_profile_cache = {}
         self._lut_cache = collections.OrderedDict()  # (film, paper, size, ...) -> np.ndarray [N, N, N, 3] float32
         self._max_lut_cache_size = 64
         self._profile_cache = {}
@@ -1336,6 +1338,52 @@ class SpektraEngine:
                 self._warmup_done.set()
 
         threading.Thread(target=_warm, name="engine-warmup", daemon=True).start()
+
+    # --- push / pull development -------------------------------------------------------
+    def push_stops(self, film_stock):
+        """Push stops this stock has a table for (empty list when it has none)."""
+        return push_model.available_stops(self.resources_dir, film_stock)
+
+    def push_status(self, film_stock):
+        """(max_stops, label) for the UI -- the label says how much of the table is measured."""
+        stops = self.push_stops(film_stock)
+        if stops:
+            table = push_model.load_table(self.resources_dir, film_stock) or {}
+            entries = table.get("conditions", {}).values()
+            measured = sum(1 for entry in entries if entry.get("basis") == "measured")
+            return max(stops), (f"实测 {measured} 档 / 共 {len(stops)} 档" if measured
+                                else "估计曲线")
+        return 0, "该胶卷无迫冲数据"
+
+    def _pushed_profile(self, film_stock, stops):
+        """(profile, applied_stops) with ``stops`` of push applied, cached per (stock, stops).
+
+        The applied count is cached with the profile because a +3 request on a +1/+2 table has to
+        key the bake by what was actually used -- otherwise two dropdown positions would share one
+        cache entry and the "+3" position would silently render +2.
+        """
+        if not stops:
+            return self._load_profile(film_stock), 0
+        key = (film_stock, int(stops))
+        cached = self._push_profile_cache.get(key)
+        if cached is not None:
+            return cached
+        profile = self._load_profile(film_stock)
+        table = push_model.load_table(self.resources_dir, film_stock)
+        result = push_model.apply_to_profile(profile, table, int(stops))
+        self._push_profile_cache[key] = result
+        return result
+
+    @staticmethod
+    def _push_cache_tag(stops):
+        """Filename fragment for a pushed bake -- empty for the stock's standard development."""
+        return f"push{int(stops)}__" if stops else ""
+
+    def pushed_film_stops(self, film_stock, stops):
+        """The stop count that will actually be baked for this request."""
+        if not stops:
+            return 0
+        return self._pushed_profile(film_stock, stops)[1]
 
     def _load_profile(self, stock_id):
         if not stock_id or stock_id == "none":
@@ -1921,7 +1969,39 @@ class SpektraEngine:
         self._halation_params_cache[key] = cached
         return cached
 
-    def get_film_grain_preset(self, film_stock):
+    def get_film_grain_preset(self, film_stock, push_stops=0):
+        """Grain preset for ``film_stock`` at the given push development.
+
+        Push raises the negative's density, and the grain law is a function of density (P1), so a
+        pushed frame gets dirtier shadows for free -- but the law's Dmax fade also has to move, or
+        the pushed curve would be cut where the standard curve ended.  Only those two numbers are
+        overridden; the stock's granularity-vs-density *shape* is measured data and is not pushed
+        by guesswork.
+        """
+        preset = self._grain_preset_base(film_stock)
+        if not push_stops or not preset:
+            return preset
+        key = (film_stock, int(push_stops))
+        cache = getattr(self, "_grain_push_cache", None)
+        if cache is None:
+            cache = self._grain_push_cache = {}
+        if key in cache:
+            return cache[key]
+        table = push_model.load_table(self.resources_dir, film_stock)
+        entry, applied = push_model.condition(table, int(push_stops))
+        if entry is None:
+            cache[key] = preset
+            return preset
+        curves = np.asarray(entry["curves"], dtype=np.float64)
+        pushed = dict(preset)
+        pushed["density_max"] = [float(v) for v in np.nanmax(curves, axis=0)]
+        pushed["density_min"] = [float(v) + float(entry.get("dMin") or 0.0)
+                                 for v in np.nanmin(curves, axis=0)]
+        pushed["push_stops"] = applied
+        cache[key] = pushed
+        return pushed
+
+    def _grain_preset_base(self, film_stock):
         """Extract physical crystal grain parameters (size_mm, strength, layer_weights, density_profile)
         from film profile JSON, or provide physically-calibrated fallbacks.
         """
@@ -2276,7 +2356,11 @@ class SpektraEngine:
         )
 
         eff_paper = "none" if self.is_positive_film(film_stock) else ("scan" if print_mode == "scan" else paper_stock)
-        cache_key = (film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same, morph_gamma, dev_exh)
+        # Push development is baked into the curve, so it must be part of the identity of this
+        # table: the same stock at +0 and +2 is two different films, not one cached twice.
+        push_stops = self.pushed_film_stops(film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))
+        cache_key = (film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same,
+                     morph_gamma, dev_exh, push_stops)
         with self._render_lock:
             if cache_key in self._lut_cache:
                 self._lut_cache.move_to_end(cache_key)
@@ -2310,15 +2394,17 @@ class SpektraEngine:
         from .path_utils import get_user_lut_cache_dir
         cache_dir = get_user_lut_cache_dir()
         bundled_cache_dir = os.path.join(self.resources_dir, ".lut_cache")
-        if is_default_params:
-            cache_file = os.path.join(cache_dir, f"v4_shaper__{film_stock}__{eff_paper}__{lut_size}.npy")
+        # The bundled tables are all standard development; a pushed bake must never be served one.
+        if is_default_params and not push_stops:
+            cache_file = os.path.join(cache_dir, f"v4_shaper__{self._push_cache_tag(push_stops)}{film_stock}__{eff_paper}__{lut_size}.npy")
             bundled_file = os.path.join(bundled_cache_dir, f"v4_shaper__{film_stock}__{eff_paper}__{lut_size}.npy")
             load_target = cache_file if os.path.exists(cache_file) else (bundled_file if os.path.exists(bundled_file) else None)
             # The grain law reads the negative density, not the LUT. Serving a cached LUT without
             # its density cube would silently drop the grain back to the -log10(lin) domain, so a
             # cache hit only counts when both files are there; otherwise fall through and rebake
             # (one extra develop-only pass, once per stock).
-            dens_name = f"density_v2__{film_stock}__{eff_paper}__{lut_size}__1.0_1.0_1.0.npy"
+            dens_name = (f"density_v2__{self._push_cache_tag(push_stops)}{film_stock}"
+                         f"__{eff_paper}__{lut_size}__1.0_1.0_1.0.npy")
             dens_file = os.path.join(cache_dir, dens_name)
             dens_bundled = os.path.join(bundled_cache_dir, dens_name)
             dens_target = dens_file if os.path.exists(dens_file) else (
@@ -2339,7 +2425,7 @@ class SpektraEngine:
                     if not hasattr(self, "_film_density_cache"):
                         self._film_density_cache = {}
                     self._film_density_cache[
-                        (film_stock, eff_paper, lut_size, illuminant, 1.0, 1.0, 1.0)] = grid
+                        (film_stock, eff_paper, lut_size, illuminant, 1.0, 1.0, 1.0, push_stops)] = grid
                     with self._render_lock:
                         self._lut_cache[cache_key] = lut_3d
                         self._lut_cache.move_to_end(cache_key)
@@ -2356,7 +2442,7 @@ class SpektraEngine:
         flat_input = lattice.reshape(lut_size, lut_size * lut_size, 3)
 
         from spektrafilm.runtime.params_schema import RuntimePhotoParams
-        film_prof = self._load_profile(film_stock)
+        film_prof, push_stops = self._pushed_profile(film_stock, push_stops)
 
         # Check if positive (slide/reversal), B&W (monochrome), or negative film
         is_pos = (film_prof and hasattr(film_prof, 'is_positive') and film_prof.is_positive) or \
@@ -2436,7 +2522,10 @@ class SpektraEngine:
         params.film_render.grain.active = False
 
         from spektrafilm.runtime.topology import Tap
-        sim_key = (film_stock, base_paper, illuminant, is_pos, is_bw)
+        # The simulator carries the film profile, and a pushed bake uses a different profile, so
+        # push belongs in the key -- without it the second push setting silently reuses the first
+        # one's pipeline and renders the same curve (measured: +1 and +2 came out bit-identical).
+        sim_key = (film_stock, base_paper, illuminant, is_pos, is_bw, push_stops)
         if not hasattr(self, "_lut_sim_cache"):
             self._lut_sim_cache = {}
         if not hasattr(self, "_lut_loge_cache"):
@@ -2459,7 +2548,8 @@ class SpektraEngine:
             p_pipe.film_render.dir_couplers.inhibition_samelayer = dir_same
             p_pipe.print_render.density_curves_morph = params.print_render.density_curves_morph
 
-        loge_key = (film_stock, lut_size)
+        # Same reasoning: log-E film is the exposure at the emulsion, which the pushed curve moves.
+        loge_key = (film_stock, lut_size, push_stops)
         log_e_film = self._lut_loge_cache.get(loge_key)
         if log_e_film is None:
             log_e_film = sim._pipeline.process(flat_input, collect=Tap.LOG_E_FILM)
@@ -2476,7 +2566,7 @@ class SpektraEngine:
         # the grain law expects physical density, so flip here while the stock's range is known.
         positive_ceiling = None
         if is_pos:
-            _gp = self.get_film_grain_preset(film_stock)
+            _gp = self.get_film_grain_preset(film_stock, push_stops)
             _dmax = _gp.get("density_max")
             positive_ceiling = [
                 grain_model._layer_value(_dmax, layer, grain_model.DEFAULT_DENSITY_MAX)
@@ -2484,7 +2574,7 @@ class SpektraEngine:
             ]
         film_density = self._bake_film_density(
             sim, log_e_film, lut_size,
-            key=(film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same),
+            key=(film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same, push_stops),
             is_default_params=is_default_params,
             cache_dir=cache_dir if is_default_params else None,
             bundled_dir=bundled_cache_dir if is_default_params else None,
@@ -2565,7 +2655,12 @@ class SpektraEngine:
         if cached is not None:
             return cached
 
-        fname = f"density_v2__{key[0]}__{key[1]}__{lut_size}__{key[4]}_{key[5]}_{key[6]}.npy"
+        # The push count is the last element of the key and it changes the cube, so it has to be
+        # in the filename too: with it missing, a pushed bake loaded the standard cube from disk
+        # and every push setting produced the same densities (measured: +0/+1/+2 identical).
+        push_tag = self._push_cache_tag(key[-1]) if isinstance(key[-1], int) else ""
+        fname = (f"density_v2__{push_tag}{key[0]}__{key[1]}__{lut_size}"
+                 f"__{key[4]}_{key[5]}_{key[6]}.npy")
         for directory in (cache_dir, bundled_dir):
             if not directory:
                 continue
@@ -2621,6 +2716,8 @@ class SpektraEngine:
             round(float(params_dict.get("dir_amount", 1.0)), 2),
             round(float(params_dict.get("dir_interlayer", 1.0)), 2),
             round(float(params_dict.get("dir_samelayer", 1.0)), 2),
+            self.pushed_film_stops(film_stock,
+                                   int(round(float(params_dict.get("push_ev", 0) or 0)))),
         )
         return getattr(self, "_film_density_cache", {}).get(key)
 
@@ -4167,7 +4264,8 @@ class SpektraEngine:
                 chem_params["morph_gamma"] = 1.0
                 chem_params["developer_exhaustion"] = 0.0
 
-            grain_preset = self.get_film_grain_preset(film_stock)
+            grain_preset = self.get_film_grain_preset(
+                film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))
             st_size = float(grain_preset.get("size_mm", 0.005))
             st_strength = float(grain_preset.get("strength", 0.010))
             st_lw = np.array(grain_preset.get("layer_weights", [0.70, 1.0, 1.35]), dtype=np.float32)
@@ -4403,7 +4501,10 @@ class SpektraEngine:
         lattice = np.stack([r, g, b], axis=-1).reshape(-1, 1, 3)
 
         params = init_params()
-        params.film = self._load_profile(film_stock)
+        # Same pushed curve the preview's LUT was baked from, or the exported cube would render a
+        # pushed frame as standard development.
+        params.film = self._pushed_profile(
+            film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))[0]
         is_pos = (params.film and hasattr(params.film, 'is_positive') and params.film.is_positive) or \
                  (params.film and hasattr(params.film, 'info') and getattr(params.film.info, 'type', None) == 'positive')
         is_bw = (params.film and hasattr(params.film, 'info') and getattr(params.film.info, 'channel_model', None) == 'bw')

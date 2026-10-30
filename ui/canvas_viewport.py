@@ -2005,7 +2005,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 eng = self.parent().engine
             if eng and hasattr(eng, "get_film_grain_preset"):
                 stock = self.params.get("film_stock", "kodak_portra_400")
-                grain_preset = eng.get_film_grain_preset(stock)
+                grain_preset = eng.get_film_grain_preset(
+                    stock, int(round(float(self.params.get("push_ev", 0) or 0))))
         if not grain_preset:
             grain_preset = {"size_mm": 0.005, "strength": 0.010, "layer_weights": [0.70, 1.0, 1.35]}
 
@@ -3271,7 +3272,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                     eng = self.parent().engine
                 if eng and hasattr(eng, "get_film_grain_preset"):
                     stock = eff_params.get("film_stock", "kodak_portra_400")
-                    grain_preset = eng.get_film_grain_preset(stock)
+                    grain_preset = eng.get_film_grain_preset(
+                        stock, int(round(float(eff_params.get("push_ev", 0) or 0))))
             if not grain_preset:
                 grain_preset = {"size_mm": 0.005, "strength": 0.010, "layer_weights": [0.70, 1.0, 1.35]}
 

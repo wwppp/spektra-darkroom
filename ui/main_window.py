@@ -1969,6 +1969,7 @@ class DarkroomMainWindow(QMainWindow):
             "grain_size": 1.0,
             "grain_cloud_blur": 1.0,
             "grain_colour": 1.0,
+            "push_ev": 0,
             "lens": self._get_default_lens_params(),
             "split_x": 0.5,
             "view_mode": 0
@@ -4259,6 +4260,19 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_chemistry = AccordionSection("胶片化学 (DIR)")
         self.sec_chemistry.resetClicked.connect(lambda: self.reset_track("chemistry"))
 
+        # 迫冲显影 sits here rather than with the print controls because it *is* film chemistry:
+        # it rewrites the stock's characteristic curve and base fog, so it invalidates the LUT
+        # exactly like the DIR sliders do.
+        self.combo_push = ComboBoxRow(
+            "迫冲显影",
+            [("标准冲洗 (0)", 0)],
+            default_val=0,
+            tooltip="按胶卷的迫冲表改变特性曲线与灰雾：+1 档相当于提高一档感光度，"
+                    "反差上升，暗部颗粒变粗"
+        )
+        self.combo_push.valueChanged.connect(lambda v: self._on_combo_changed("push_ev", v))
+        self.sec_chemistry.addWidget(self.combo_push)
+
         self.slider_dir_amount = AdobeScrubSlider(
             "抑制剂总量", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
             tooltip="显影抑制剂的总体强度，影响色彩密度。"
@@ -4284,6 +4298,7 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_chemistry.addWidget(self.slider_dir_samelayer)
 
         self.sidebar_layout.addWidget(self.sec_chemistry)
+        self._update_push_ui_state()
         self._update_chemistry_ui_state()
 
     def _init_enlarger_section(self):
@@ -7146,7 +7161,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
     # diffusion_*) are deliberately NOT listed: they remain fully live in bypass.
     BYPASS_INERT_PARAMS = frozenset({
         # 胶片化学 (DIR)
-        "dir_amount", "dir_interlayer", "dir_samelayer",
+        "dir_amount", "dir_interlayer", "dir_samelayer", "push_ev",
         # 放大机与相纸显影
         "enlarger_illuminant", "enlarger_cyan", "enlarger_magenta", "enlarger_yellow",
         "print_exposure", "pre_flash",
@@ -7193,7 +7208,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._update_reset_buttons_state()
 
     LUT_CHEM_KEYS = ("dir_amount", "dir_interlayer", "dir_samelayer",
-                     "morph_gamma", "developer_exhaustion")
+                     "morph_gamma", "developer_exhaustion", "push_ev")
 
     def _apply_lut(self, lut_3d):
         """Upload a committed LUT and record which parameter key it represents, so the live
@@ -7254,6 +7269,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             round(float(p.get("dir_samelayer", 1.0)), 2),
             round(float(p.get("morph_gamma", 1.0)), 2),
             round(float(p.get("developer_exhaustion", 0.0)), 2),
+            int(round(float(p.get("push_ev", 0) or 0))),
         )
 
     def _schedule_live_lut_preview(self):
@@ -7334,6 +7350,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
         self.current_params[param_key] = val
         self.canvas.update_params(**{param_key: val})
+        if param_key == "push_ev":
+            # A different development condition is a different film: the LUT has to be rebaked,
+            # not just re-shaded. Same path the DIR sliders take.
+            self._pending_lut_refresh = True
+            self._schedule_live_lut_preview()
+            self._schedule_histogram_update()
+            self._mark_current_photo_dirty()
+            self._update_reset_buttons_state()
+            return
         if param_key == "diffusion_family":
             # The strength combo no longer carries a 0 marker ("no filter" is expressed by
             # the family itself), so picking a family always lands on a real density.
@@ -7514,7 +7539,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 "diffusion_family": "none", "diffusion_strength": 0.0, "diffusion_warmth": 0.0
             },
             "chemistry": {
-                "dir_amount": 1.0, "dir_interlayer": 1.0, "dir_samelayer": 1.0
+                "dir_amount": 1.0, "dir_interlayer": 1.0, "dir_samelayer": 1.0,
+                # Push is a development condition, so it belongs to this track's reset: dragging
+                # "复原" here must return the film to standard development, not leave a +2 baked in.
+                "push_ev": 0,
             },
             "enlarger": {
                 "enlarger_illuminant": "TH-KG3",
@@ -7760,6 +7788,52 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         self.set_app_status("已恢复至原始底片状态", timeout_ms=1500)
 
+    def _update_push_ui_state(self):
+        """Rebuild the 迫冲显影 row for the current stock.
+
+        The option list is the stock's actual table, never a fixed 0/+1/+2/+3: offering +3 on a
+        +1/+2 stock would silently render +2 (the label would lie), and offering anything at all on
+        a stock with no table would invent data. When there is no table the row is disabled and
+        says why.
+        """
+        combo = getattr(self, "combo_push", None)
+        if combo is None:
+            return
+        stock = getattr(self, "current_film_stock", "none")
+        stops, label = [], ""
+        engine = getattr(self, "engine", None)
+        if engine is not None and stock not in (None, "", "none"):
+            try:
+                label = engine.push_status(stock)[1]
+                stops = list(engine.push_stops(stock))
+            except Exception:                       # noqa: BLE001 - never break a film switch
+                stops, label = [], ""
+        current = int(round(float(self.current_params.get("push_ev", 0) or 0)))
+        if current not in stops:
+            current = 0
+        combo.set_items([("标准冲洗 (0)", 0)] + [(f"+{s} 档", s) for s in stops],
+                        default_val=current)
+        combo.setEnabled(bool(stops))
+        combo.label.setEnabled(bool(stops))
+        if stops:
+            text = label
+            if current:
+                # Say what the setting means in exposure terms instead of only naming it: a +2
+                # push is a two-stop underexposure compensated in development, and the user needs
+                # that number to judge the frame. The exposure sliders stay live on purpose --
+                # the exposure is a separate decision from the development.
+                text += f"\n当前：欠曝 {current} EV，显影补偿 +{current} 档"
+        else:
+            text = "该胶卷没有迫冲数据（材料上无通行迫冲表，或未收录）"
+        combo.setToolTip(text)
+        combo.combo.setToolTip(text)
+        combo.label.setToolTip(text)
+        if int(round(float(self.current_params.get("push_ev", 0) or 0))) != current:
+            self.current_params["push_ev"] = current
+            canvas = getattr(self, "canvas", None)
+            if canvas is not None:
+                canvas.update_params(push_ev=current)
+
     def _update_all_sliders_from_params(self):
         self._is_updating_sliders = True
         try:
@@ -7786,6 +7860,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'slider_dir_amount'): self.slider_dir_amount.set_value(p.get("dir_amount", 1.0))
             if hasattr(self, 'slider_dir_interlayer'): self.slider_dir_interlayer.set_value(p.get("dir_interlayer", 1.0))
             if hasattr(self, 'slider_dir_samelayer'): self.slider_dir_samelayer.set_value(p.get("dir_samelayer", 1.0))
+            if hasattr(self, 'combo_push'): self._update_push_ui_state()
 
             if hasattr(self, 'combo_illuminant'): self.combo_illuminant.set_value(p.get("enlarger_illuminant", "TH-KG3"))
             if hasattr(self, 'slider_magenta'): self.slider_magenta.set_value(p.get("enlarger_magenta", 0.0))
@@ -7998,6 +8073,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if push_undo and stock_id != self.current_film_stock:
             self._mark_current_photo_dirty()
         self.current_film_stock = stock_id
+        self._update_push_ui_state()
 
         # Selecting "none" film (Bypass / original raw) or positive reversal slide film locks paper to "none" (scan / bypass)
         is_pos = self.engine.is_positive_film(stock_id) if hasattr(self.engine, 'is_positive_film') else False
