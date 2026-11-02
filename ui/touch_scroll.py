@@ -13,6 +13,7 @@ under the finger does not.
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QApplication, QComboBox,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 _CONTROL_TYPES = (QAbstractSlider, QAbstractButton, QAbstractSpinBox, QComboBox, QLineEdit, QTextEdit)
 
 SLOP_PX = 10.0          # a finger may wander this far and still be a tap
+LONG_PRESS_MS = 550     # held still this long, the finger asks for the context menu
 TAP_MS = 600            # and must lift within this long
 FRICTION = 0.90         # per 16 ms tick, matching the wheel's momentum
 STOP_VELOCITY = 0.4     # px/tick below which the fling is over
@@ -61,6 +63,10 @@ class _SynthesizedClickGuard(QObject):
             return False
         try:
             if event.source() != Qt.MouseEventSource.MouseEventSynthesizedBySystem:
+                return False
+            if event.button() == Qt.MouseButton.RightButton:
+                # A press-and-hold arrives from the system as a right click; that is a menu,
+                # not a selection, and it must reach the card.
                 return False
         except AttributeError:
             return False
@@ -103,6 +109,14 @@ class TouchPanFilter(QObject):
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
 
+        # A finger held still is a press-and-hold: the menu it used to raise came from the touch
+        # being turned into a right click, which the pan filter now swallows.  Raise it here.
+        self._long_press_timer = QTimer(self)
+        self._long_press_timer.setSingleShot(True)
+        self._long_press_timer.setInterval(LONG_PRESS_MS)
+        self._long_press_timer.timeout.connect(self._long_press)
+        self._long_pressed = False
+
     # -- touch ------------------------------------------------------------------------------
     def eventFilter(self, obj, event):  # noqa: N802 (Qt naming)
         if obj is not self._viewport:
@@ -127,7 +141,9 @@ class TouchPanFilter(QObject):
             self._last = position
             self._press_ms = event.timestamp()
             self._dragging = False
+            self._long_pressed = False
             self._horizontal = self._scrolls_horizontally()
+            self._long_press_timer.start()
             return True
 
         if kind == QEvent.Type.TouchUpdate:
@@ -140,6 +156,7 @@ class TouchPanFilter(QObject):
                     return True
                 self._dragging = True
                 self._velocity = 0.0
+                self._long_press_timer.stop()
             delta = (position.x() - self._last.x()) if self._horizontal \
                 else (position.y() - self._last.y())
             self._scroll_by(-delta)
@@ -149,11 +166,16 @@ class TouchPanFilter(QObject):
             return True
 
         # TouchEnd / TouchCancel
+        self._long_press_timer.stop()
         was_drag = self._dragging
+        was_long = self._long_pressed
+        self._long_pressed = False
         press = self._press
         self._press = None
         self._last = None
         self._dragging = False
+        if was_long:
+            return True
         if not was_drag:
             if kind == QEvent.Type.TouchEnd and press is not None \
                     and event.timestamp() - self._press_ms <= TAP_MS:
@@ -163,6 +185,22 @@ class TouchPanFilter(QObject):
             self._position = float(self._bar().value())
             self._timer.start()
         return True
+
+    def _long_press(self) -> None:
+        if self._press is None or self._dragging:
+            return
+        self._long_pressed = True
+        target = self._viewport.childAt(self._press.toPoint())
+        if target is None:
+            return
+        local = target.mapFrom(self._viewport, self._press.toPoint())
+        event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, local,
+                                  target.mapToGlobal(local))
+        QApplication.sendEvent(target, event)
+        # The gesture is spent: a finger that keeps travelling now must not scroll behind the
+        # menu it just opened.
+        self._press = None
+        self._last = None
 
     def _control_at(self, position: QPointF) -> bool:
         node = self._viewport.childAt(position.toPoint())
