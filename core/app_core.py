@@ -1385,6 +1385,46 @@ class SpektraEngine:
             return 0
         return self._pushed_profile(film_stock, stops)[1]
 
+    def push_speed_gain(self, film_stock, stops):
+        """How much of the underexposure the pushed curve actually gives back, in EV.
+
+        A push is sold as "one stop of extra speed", but a characteristic curve can only slide
+        sideways: measured tables give back roughly 0.2-0.6 EV per stop and pay for the rest in
+        contrast and grain.  The number here is the horizontal shift that best maps the pushed
+        curve onto the standard one, so the UI can tell the user how much darker a linked push
+        will actually come out instead of implying the underexposure is fully made up.
+        """
+        stops = int(stops or 0)
+        if not stops or not film_stock or film_stock == "none":
+            return 0.0
+        key = (film_stock, stops)
+        cache = getattr(self, "_push_gain_cache", None)
+        if cache is None:
+            cache = self._push_gain_cache = {}
+        if key in cache:
+            return cache[key]
+
+        gain = 0.0
+        base, _ = self._pushed_profile(film_stock, 0)
+        pushed, applied = self._pushed_profile(film_stock, stops)
+        if applied and base is not None and pushed is not None:
+            axis = np.asarray(base.data.log_exposure, dtype=np.float64).ravel()
+            reference = np.asarray(base.data.density_curves, dtype=np.float64)
+            reference = reference - np.nanmin(reference, axis=0, keepdims=True)
+            target = np.asarray(pushed.data.density_curves, dtype=np.float64)
+            target = target - np.nanmin(target, axis=0, keepdims=True)
+            # The record with the widest range carries the cleanest shoulder to align on.
+            record = int(np.argmax(np.nanmax(reference, axis=0)))
+            best = None
+            for shift in np.arange(0.0, 3.001, 0.05):
+                sampled = np.interp(axis - shift, axis, target[:, record])
+                error = float(np.sqrt(np.nanmean((sampled - reference[:, record]) ** 2)))
+                if best is None or error < best[0]:
+                    best = (error, float(shift))
+            gain = best[1] if best else 0.0
+        cache[key] = gain
+        return gain
+
     def _load_profile(self, stock_id):
         if not stock_id or stock_id == "none":
             return None

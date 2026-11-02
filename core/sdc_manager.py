@@ -52,6 +52,21 @@ def migrate_legacy_push(data: dict) -> dict:
     return data
 
 
+def migrate_push_coupling(data: dict) -> dict:
+    """Give a pre-flag sidecar its old meaning: push used to drag the exposure down by itself.
+
+    ``push_underexpose`` is what makes that linkage optional.  A sidecar written before it
+    existed was already rendered with the underexposure baked into ``exposure_ev``, so restoring
+    it as "unlinked" would make the next +N click subtract the stops a second time.
+    """
+    params = data.get("params") if isinstance(data, dict) else None
+    if not isinstance(params, dict):
+        return data
+    if "push_underexpose" not in params and int(params.get("push_ev", 0) or 0):
+        params["push_underexpose"] = True
+    return data
+
+
 def has_sdc(image_path: str) -> bool:
     sdc_path = get_sdc_path(image_path)
     return bool(sdc_path and os.path.isfile(sdc_path))
@@ -113,7 +128,7 @@ def load_sdc(image_path: str) -> dict | None:
             # visit history (session entry / sidecar / cache could disagree by stops), which
             # showed up as "the photo got brighter after I switched away and back".
             data["params"].pop("base_ev", None)
-            return migrate_legacy_push(data)
+            return migrate_push_coupling(migrate_legacy_push(data))
     except Exception as e:
         logger.warning(f"Failed to read SDC sidecar {sdc_path}: {e}")
         # Quarantine instead of silently pretending the photo was never edited: the next

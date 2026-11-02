@@ -1970,6 +1970,9 @@ class DarkroomMainWindow(QMainWindow):
             "grain_cloud_blur": 1.0,
             "grain_colour": 1.0,
             "push_ev": 0,
+            # Push is a development condition; "shot N stops under" is a capture decision. They
+            # are linked only when the user asks for the whole workflow (see 模拟欠曝).
+            "push_underexpose": False,
             "lens": self._get_default_lens_params(),
             "split_x": 0.5,
             "view_mode": 0
@@ -2951,7 +2954,8 @@ class DarkroomMainWindow(QMainWindow):
 
         chk_ss = get_standard_checkbox_style(is_dark)
 
-        for chk in (getattr(self, 'chk_remove_ca', None), getattr(self, 'chk_lens_profile_enabled', None)):
+        for chk in (getattr(self, 'chk_remove_ca', None), getattr(self, 'chk_lens_profile_enabled', None),
+                    getattr(self, 'chk_push_under', None)):
             if chk:
                 chk.setStyleSheet(chk_ss)
 
@@ -4277,6 +4281,22 @@ class DarkroomMainWindow(QMainWindow):
         )
         self.combo_push.valueChanged.connect(lambda v: self._on_combo_changed("push_ev", v))
         self.sec_chemistry.addWidget(self.combo_push)
+
+        # Push and underexposure are two different things.  The table is a *development* condition
+        # (same exposure, longer development); "shot two stops under" is a capture decision that
+        # happens before the film ever reaches the tank.  Linking them by default made every push
+        # silently darken the frame -- the curve only gives back a fraction of the missing light --
+        # so the link is now explicit and off by default.
+        self.chk_push_under = QCheckBox("模拟欠曝（曝光随档位下调）")
+        self.chk_push_under.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_push_under.setToolTip(
+            "勾选后，选 +N 档会同时把场景曝光下调 N EV，即完整的“欠曝 N 档再迫冲”。\n"
+            "注意显影只能补回一部分（实测 0.2–0.6 EV/档），所以画面仍会比标准冲洗更暗、\n"
+            "暗部更实、反差更大 —— 这正是迫冲的样子。\n"
+            "不勾选时只更换显影曲线，曝光不动。")
+        self.chk_push_under.toggled.connect(self._on_push_underexpose_toggled)
+        self.chk_push_under.setStyleSheet(get_standard_checkbox_style())
+        self.sec_chemistry.addWidget(self.chk_push_under)
 
         self.slider_dir_amount = AdobeScrubSlider(
             "抑制剂总量", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
@@ -7365,24 +7385,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.current_params[param_key] = val
         self.canvas.update_params(**{param_key: val})
         if param_key == "push_ev":
-            # Exposure coupling, once per change and never on load. Raising the push by N stops
-            # means the film was *shot* N stops under, so the scene exposure takes that offset now.
+            # The development condition itself never touches the scene exposure.  Only the linked
+            # workflow does, and only when 模拟欠曝 is on: raising the push by N stops means the
+            # film was *shot* N stops under, so the exposure takes that offset now.
             # Deliberately not a standing constraint: the exposure slider stays free afterwards,
             # and `push_ref_exposure` remembers where it landed so the readout can say how much of
             # the underexposure the user has since given back.
             delta = int(round(float(val))) - prev_push
-            if delta:
-                ev = round(float(self.current_params.get("exposure_ev", 0.0) or 0.0) - delta, 2)
-                ev = max(-3.0, min(3.0, ev))
-                self.current_params["exposure_ev"] = ev
-                self.current_params["push_ref_exposure"] = ev
-                self.canvas.update_params(exposure_ev=ev)
-                if hasattr(self, "slider_ev"):
-                    self._is_updating_sliders = True
-                    try:
-                        self.slider_ev.set_value(ev)
-                    finally:
-                        self._is_updating_sliders = False
+            if delta and self.current_params.get("push_underexpose"):
+                self._apply_push_exposure_offset(-delta)
             # A different development condition is a different film: the LUT has to be rebaked,
             # not just re-shaded. Same path the DIR sliders take.
             self._pending_lut_refresh = True
@@ -7575,7 +7586,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 "dir_amount": 1.0, "dir_interlayer": 1.0, "dir_samelayer": 1.0,
                 # Push is a development condition, so it belongs to this track's reset: dragging
                 # "复原" here must return the film to standard development, not leave a +2 baked in.
-                "push_ev": 0,
+                "push_ev": 0, "push_underexpose": False,
             },
             "enlarger": {
                 "enlarger_illuminant": "TH-KG3",
@@ -7821,13 +7832,35 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         self.set_app_status("已恢复至原始底片状态", timeout_ms=1500)
 
-    def _push_readout(self, stops):
-        """Tooltip text for the 迫冲显影 row: the table's provenance plus the exposure arithmetic.
+    def _push_speed_gain(self, stops):
+        """EV the pushed curve actually gives back on this stock (0 when unknown)."""
+        engine = getattr(self, "engine", None)
+        if engine is None or not stops:
+            return 0.0
+        try:
+            return float(engine.push_speed_gain(getattr(self, "current_film_stock", "none"), stops))
+        except Exception:                           # noqa: BLE001 - never break a paint
+            return 0.0
 
-        A +2 push means the film was *shot* two stops under and developed two stops longer. The
-        exposure slider stays live, so by the time the user reads this they may have given some of
-        that underexposure back -- in which case what they are rendering is a partly over-developed
-        frame, not a push. Saying so is the only way that stays honest without disabling a control.
+    def _push_underexposure_outstanding(self):
+        """How much of the N-stop underexposure the user has not given back yet, in EV."""
+        current = int(round(float(self.current_params.get("push_ev", 0) or 0)))
+        if not current:
+            return 0.0
+        exposure = float(self.current_params.get("exposure_ev", 0.0) or 0.0)
+        ref = self.current_params.get("push_ref_exposure")
+        if ref is None:
+            return float(current)
+        return max(0.0, float(current) - (exposure - float(ref)))
+
+    def _push_readout(self, stops):
+        """Tooltip text for the 迫冲显影 row: provenance, and what the setting does to exposure.
+
+        Two different statements live here, and conflating them is what made the control feel
+        mysterious.  Unlinked (the default) the row only swaps the development curve, so the
+        frame keeps its exposure and gains contrast.  Linked, it also models "shot N stops under",
+        and then the honest number is *not* "+N stops of speed": measured tables give back only
+        0.2-0.6 EV per stop, which is exactly why a pushed frame comes out darker.
         """
         if not stops:
             return "该胶卷没有迫冲数据（材料上无通行迫冲表，或未收录）"
@@ -7841,6 +7874,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
         current = int(round(float(self.current_params.get("push_ev", 0) or 0)))
         if not current:
             return label
+        gain = self._push_speed_gain(current)
+        linked = bool(self.current_params.get("push_underexpose"))
+
+        if not linked:
+            body = (f"当前：显影 +{current} 档，曝光不联动（只换特性曲线）\n"
+                    f"显影实测补回约 {gain:.1f} EV；要模拟“欠曝 {current} 档再迫冲”请勾选「模拟欠曝」")
+            return f"{label}\n{body}" if label else body
+
         exposure = float(self.current_params.get("exposure_ev", 0.0) or 0.0)
         ref = self.current_params.get("push_ref_exposure")
         if ref is None:
@@ -7852,12 +7893,50 @@ aspect_ratio=self._lens_frame_aspect(photo),
         underexposed = current - given_back
         if underexposed <= 0.0:
             body = f"当前：欠曝 0 EV，显影 +{current} 档 —— 属过显影，不是迫冲"
-        elif abs(given_back) < 0.05:
-            body = f"当前：欠曝 {underexposed:.0f} EV，显影补偿 +{current} 档"
         else:
-            body = (f"当前：欠曝 {underexposed:.1f} EV，显影补偿 +{current} 档"
-                    f"（曝光已补回 {given_back:+.1f} EV）")
+            net = max(0.0, underexposed - gain)
+            body = (f"当前：欠曝 {underexposed:.1f} EV，显影 +{current} 档"
+                    f"（实测补回 {gain:.1f} EV，净暗约 {net:.1f} 档）")
+            if abs(given_back) >= 0.05:
+                body += f"\n曝光已手动补回 {given_back:+.1f} EV"
         return f"{label}\n{body}" if label else body
+
+    def _apply_push_exposure_offset(self, dv):
+        """Move the scene exposure by ``dv`` EV for a linked push change."""
+        if not dv:
+            return
+        ev = round(float(self.current_params.get("exposure_ev", 0.0) or 0.0) + dv, 2)
+        ev = max(-3.0, min(3.0, ev))
+        self.current_params["exposure_ev"] = ev
+        self.current_params["push_ref_exposure"] = ev
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            canvas.update_params(exposure_ev=ev)
+        if hasattr(self, "slider_ev"):
+            was_quiet = getattr(self, "_is_updating_sliders", False)
+            self._is_updating_sliders = True
+            try:
+                self.slider_ev.set_value(ev)
+            finally:
+                self._is_updating_sliders = was_quiet
+
+    def _on_push_underexpose_toggled(self, checked):
+        """Linked workflow on/off. Turning it off gives back what is still owed, nothing more."""
+        if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
+            return
+        self.current_params["push_underexpose"] = bool(checked)
+        if checked:
+            # Start the workflow from "the film was shot N stops under" if we have not already.
+            if self.current_params.get("push_ref_exposure") is None:
+                stops = int(round(float(self.current_params.get("push_ev", 0) or 0)))
+                if stops:
+                    self._apply_push_exposure_offset(-stops)
+        else:
+            owed = self._push_underexposure_outstanding()
+            if owed > 0.01:
+                self._apply_push_exposure_offset(owed)
+        self._refresh_push_readout()
+        self._mark_current_photo_dirty()
 
     def _apply_push_tooltip(self, stops):
         combo = getattr(self, "combo_push", None)
@@ -7901,8 +7980,26 @@ aspect_ratio=self._lens_frame_aspect(photo),
                         default_val=current)
         combo.setEnabled(bool(stops))
         combo.label.setEnabled(bool(stops))
+        # The switch is meaningless without a table, and it is the thing that explains the
+        # darkening -- leaving it enabled on a stock with no push would offer a lie.
+        chk = getattr(self, "chk_push_under", None)
+        if chk is not None:
+            chk.setEnabled(bool(stops))
+            was_quiet = getattr(self, "_is_updating_sliders", False)
+            self._is_updating_sliders = True
+            try:
+                chk.setChecked(bool(self.current_params.get("push_underexpose")))
+            finally:
+                self._is_updating_sliders = was_quiet
         self._apply_push_tooltip(stops)
         if int(round(float(self.current_params.get("push_ev", 0) or 0))) != current:
+            # Losing the stop count (film switch to a stock without that table, or to none) also
+            # ends the linked underexposure: what is still owed goes back instead of being
+            # stranded on the exposure slider with nothing left to explain it.
+            if self.current_params.get("push_underexpose"):
+                owed = self._push_underexposure_outstanding()
+                if owed > 0.01:
+                    self._apply_push_exposure_offset(owed)
             self.current_params["push_ev"] = current
             canvas = getattr(self, "canvas", None)
             if canvas is not None:
