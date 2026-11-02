@@ -38,9 +38,9 @@ _LOCK = threading.Lock()
 # both are 0 at standard development -- a stock at 0 stops must render exactly as it did before
 # this existed.
 PUSH_TOE_PER_STOP = 0.068      # display-domain toe: black lift and shadow compression
-GRAIN_SCALE_PER_STOP = 0.30    # overall grain amplitude
-GRAIN_SHADOW_PER_STOP = 1.00   # extra amplitude at zero density, fading to 0 at the anchor
-GRAIN_FOG_PER_STOP = 0.55      # additive shadow grain (the fog's own grain), in DENS_GAIN units
+GRAIN_SCALE_PER_STOP = 0.60    # overall grain amplitude
+GRAIN_SHADOW_PER_STOP = 1.60   # extra amplitude at zero density, fading to 0 at the anchor
+GRAIN_FOG_PER_STOP = 1.20      # additive shadow grain (the fog's own grain), in DENS_GAIN units
 
 
 def toe_amount_for(stops):
@@ -70,8 +70,8 @@ def grain_shape_for(stops):
     """
     stops = max(0, int(stops))
     return (1.0 + GRAIN_SCALE_PER_STOP * stops,
-            min(2.0, GRAIN_SHADOW_PER_STOP * stops),
-            min(1.2, GRAIN_FOG_PER_STOP * stops))
+            min(3.0, GRAIN_SHADOW_PER_STOP * stops),
+            min(2.2, GRAIN_FOG_PER_STOP * stops))
 
 
 def push_dir(resources_dir):
