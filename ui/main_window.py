@@ -9570,7 +9570,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if is_none:
             grain_hint = "当前处于数码原片旁通模式，无胶片银盐结晶微粒"
         elif not GRAIN_IMPLEMENTATION_READY:
-            grain_hint = "颗粒模型正在移植：旧实现已移除，fotufilm 影像片模型接入中，此期间的成片不含颗粒"
+            grain_hint = ("颗粒已接入导出（按默认量铺 fotufilm 影像片），画布预览待 P3 接入；"
+                          "此期间先不要用滑块调颗粒")
         else:
             grain_hint = ""
         if sec_grain is not None and hasattr(sec_grain, "set_available"):

@@ -4349,17 +4349,21 @@ class SpektraEngine:
 
                 # Pre-LUT transmittance grain: the pixel is light that went through one small
                 # patch of the stock's film tile, so the stage has to run on the negative side of
-                # the LUT, exactly where the reference implementation puts it.  Inert until the
-                # sampler lands (P2); the wiring is already the final shape.
-                if film_grain.FILM_GRAIN_ACTIVE:
+                # the LUT, exactly where the reference implementation puts it.  The tile level a
+                # pixel reads is its own developed density, so it comes from the same density cube
+                # the LUT was baked with -- not from -log10(linear), which carries the base.
+                if film_grain.FILM_GRAIN_ACTIVE and grain > 0:
+                    _pre = np.clip(shaper_forward(chunk_linear) * (lut_size - 1),
+                                   0.0, lut_size - 1.0).astype(np.int32)
+                    _net = film_density[_pre[..., 2], _pre[..., 1], _pre[..., 0]]
                     chunk_linear = film_grain.apply_block(
                         chunk_linear, grain_params,
                         stock=film_stock,
-                        fmt_mm=fmt_mm,
-                        long_edge_px=max(H, W),
-                        film_density=film_density,
-                        push_stops=int(round(float(params_dict.get("push_ev", 0) or 0))),
+                        net_density=_net,
+                        px_per_mm=max(H, W) / max(fmt_mm, 1.0),
+                        row_offset=y0,
                     )
+                    del _pre, _net
 
                 coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
                 idx0 = coords.astype(np.int32)

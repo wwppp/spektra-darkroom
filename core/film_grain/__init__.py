@@ -1,10 +1,8 @@
 """Film grain, ported from fotufilm-engine's film-tile model.
 
-Status: **P1 done** (2026-11-02).  The old octave model (``core/grain_model.py`` + shader stage
-3.5) is gone; ``population.py`` now fits the crystal population off each stock's curve and
-``tile_build.py`` lays a record's film tile, both checked against the reference in
-``tests/test_film_tile_build.py``.  ``apply_block`` is still a pass-through: the CPU sampler that
-reads the tiles is P2.  See ``docs/grain-port-plan.md``.
+Status: **P2** (2026-11-02).  ``population.py`` fits the crystal population off each stock's
+curve, ``tile_build.py`` lays the film, ``tiles_cache.py`` keeps it, ``sampler.py`` reads it for a
+frame.  ``apply_block`` is the export's entry point.  See ``docs/grain-port-plan.md``.
 
 Why a port and not a patch
 --------------------------
@@ -22,12 +20,14 @@ Consequences that matter here:
   correlates > 0.9), which is what makes preview and export agree;
 * black-and-white is silver (no chroma) and colour is dye clouds; the two are not one mix.
 
-Layout (filled in by P1/P2)
----------------------------
-``population.py``   crystal population per stock, from the characteristic curves
-``tile_build.py``   256x256 texel tile (1 texel = 1 um) x 17 density layers
-``tiles_cache.py``  disk cache, keyed by (stock, record, seed, version)
-``sampler.py``      CPU sampling: 128 um blocks, two lays, layer blending, aperture mean
+Layout
+------
+``curve.py``         the H&D curve a population is read off
+``population.py``    crystal population per stock, from the characteristic curve
+``tile_build.py``    256x256 texel tile (1 texel = 1 um) x 17 density layers
+``tiles_cache.py``   disk cache, keyed by (stock, record, seed, version)
+``sampler.py``       CPU sampling: 128 um blocks, two layings, layer blending, aperture mean
+``profiles.py``      which grain a stock id carries, from ``resources/profiles/grain_params.json``
 
 The tile data and the constants live in exactly one place so the GPU sampler (``ui/``) and the
 CPU sampler cannot drift apart.
@@ -45,12 +45,14 @@ __all__ = [
     "params_for",
     "apply_block",
     "layer_value",
+    "grain_source",
     "DEFAULT_DENSITY_MAX",
 ]
 
-# Flip to True when the tile sampler can render.  Until then every entry point is inert, which
-# keeps the stage wired end to end (params -> export -> preview) with nothing to switch on.
-FILM_GRAIN_ACTIVE = False
+# The sampler renders, so the stage is live: a stock whose grain is in ``grain_params.json`` gets
+# its film's grain through the export.  Stocks that are not in the table stay clean -- see
+# ``profiles.stock_for``.
+FILM_GRAIN_ACTIVE = True
 
 # Reversal films' develop stage returns ``dmax - D``; this is the fallback ceiling when a profile
 # declares no density range.  Same number the removed model used (DENS_DMAX).
@@ -64,7 +66,8 @@ class GrainParams:
     ``amount``   Grain slider (0..1); the amount of developed crystal the tile is read at.
     ``size``     Film Grain Size multiplier on the physical crystal radius.
     ``colour``   Colour Grain (0 = monochrome silver, 1 = independent dye clouds per record).
-    ``scan_softness``  Reading aperture, in um; the mean is taken over it before -log10.
+    ``scan_softness``  Reading aperture, in pixels; the mean is taken over it before -log10.
+    ``layers``   Each record's share of the grain (red, green, blue).
 
     ``grain_cloud_blur`` from the old model is deliberately absent: fotufilm has no such control,
     so keeping it would have meant inventing a knob the reference cannot answer for.
@@ -74,16 +77,24 @@ class GrainParams:
     size: float = 1.0
     colour: float = 1.0
     scan_softness: float = 1.0
+    layers: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
 
 def params_for(params: Mapping[str, Any] | None) -> GrainParams:
     """Read the grain controls out of a parameter dict, with fotufilm's defaults."""
     p = params or {}
+
+    def number(key: str, default: float) -> float:
+        value = p.get(key)
+        return float(default if value is None else value)
+
     return GrainParams(
-        amount=float(p.get("grain", 0.4) or 0.0),
-        size=float(p.get("grain_size", 1.0) or 1.0),
-        colour=float(p.get("grain_colour", 1.0) or 0.0),
-        scan_softness=float(p.get("scan_softness", 1.0) or 1.0),
+        amount=number("grain", 0.4),
+        size=number("grain_size", 1.0) or 1.0,
+        colour=number("grain_colour", 1.0),
+        scan_softness=number("scan_softness", 1.0) or 1.0,
+        layers=(number("grain_layer_r", 1.0), number("grain_layer_g", 1.0),
+                number("grain_layer_b", 1.0)),
     )
 
 
@@ -102,14 +113,83 @@ def layer_value(spec, layer: int, default: float) -> float:
     return float(value[0]) if isinstance(value, (tuple, list)) else float(value)
 
 
-def apply_block(linear: np.ndarray, params: GrainParams, **kwargs) -> np.ndarray:
-    """Apply grain to a block of scene-linear transmittance.
+# -- the sampler's caches ---------------------------------------------------------------------
+_STORE = None            # tiles_cache.TileStore
+_SAMPLERS: dict = {}     # (stock, pitch key, size, softness) -> sampler.TileSampler
+_LAST: dict = {}         # stock id -> what the last call did, for the UI / the report
 
-    P0: returns ``linear`` unchanged.  P2 replaces the body with the tile sampler; the caller
-    already passes everything it needs (the negative's density cube, the stock, the frame size),
-    so only this function changes.
+
+def grain_source(stock_id: str | None) -> str | None:
+    """Where a stock's grain parameters came from, or ``None`` when it has none."""
+    from . import profiles
+    return profiles.source_for(stock_id)
+
+
+def _store():
+    global _STORE
+    if _STORE is None:
+        from .tiles_cache import TileStore
+        _STORE = TileStore()
+    return _STORE
+
+
+def _sampler(stock, tiles, px_per_mm: float, params: GrainParams, seed: int):
+    key = (stock.stock_id, round(px_per_mm, 3), round(params.size, 3),
+           round(params.scan_softness, 3), seed)
+    cached = _SAMPLERS.get(key)
+    if cached is None:
+        from .sampler import TileSampler
+        cached = TileSampler(tiles, px_per_mm, seed=seed, size=params.size,
+                             softness=params.scan_softness)
+        if len(_SAMPLERS) > 4:
+            _SAMPLERS.pop(next(iter(_SAMPLERS)))
+        _SAMPLERS[key] = cached
+    return cached
+
+
+def apply_block(linear: np.ndarray, params: GrainParams, *, stock: str | None = None,
+                net_density: np.ndarray | None = None, px_per_mm: float = 0.0,
+                row_offset: int = 0, seed: int = 1) -> np.ndarray:
+    """Multiply scene-linear transmittance by the stock's grain.
+
+    ``linear``      ``(height, width, 3)`` negative transmittance for one chunk of the frame.
+    ``net_density`` ``(height, width, 3)`` the negative's developed density above base per record,
+                    in the stock's own units -- what picks the tile level.  ``None`` falls back to
+                    ``-log10(linear)`` less the stock's base, which is close but not the same.
+    ``px_per_mm``   the frame's sampling: ``long edge in pixels / the frame's long edge in mm``.
+    ``row_offset``  the chunk's first row in the frame, so the grain does not restart at every
+                    chunk.
+
+    The grain is applied where the reference applies it -- on the negative, before the enlarger --
+    so the print's spread applies to it as it does to the film's own.
     """
-    if not FILM_GRAIN_ACTIVE:
+    if not FILM_GRAIN_ACTIVE or params.amount <= 0 or linear.size == 0:
         return linear
-    raise NotImplementedError(
-        "film grain sampler not ported yet -- see docs/grain-port-plan.md P2")
+    from . import profiles
+    grain_stock = profiles.stock_for(stock)
+    if grain_stock is None:
+        _LAST[str(stock)] = {"active": False, "reason": "no baked grain parameters"}
+        return linear
+
+    tiles = _store().get(grain_stock)
+    pitch = px_per_mm if px_per_mm and px_per_mm > 0 else 1.0 / 0.035
+    sampler = _sampler(grain_stock, tiles, pitch, params, seed)
+
+    density = net_density
+    if density is None:
+        density = -np.log10(np.maximum(linear, 1e-6)) - np.asarray(tiles.d_min, dtype=np.float32)
+    fluctuation = sampler.apply(density, row_offset, params.amount, params.colour,
+                                params.layers, monochrome=grain_stock.is_monochrome)
+    _LAST[str(stock)] = {
+        "active": True,
+        "pitch": float(sampler.pitch),
+        "footprint": float(sampler.footprint),
+        "source": profiles.source_for(stock),
+        "sigma": float(fluctuation[..., 1].std()) if fluctuation.size else 0.0,
+    }
+    return (linear * np.power(10.0, -fluctuation.astype(np.float32))).astype(linear.dtype)
+
+
+def last_report() -> dict:
+    """What the last ``apply_block`` call did, per stock: pitch, source, measured σ."""
+    return dict(_LAST)
