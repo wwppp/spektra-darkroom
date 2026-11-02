@@ -162,6 +162,17 @@ out vec4 fragColor;
 #define CHROMA_MAX 0.09
 // Per-channel density-response spread is physical but over-driven for a scan-like look.
 #define CHROMA_RESP 0.13
+// Amplitude of the per-pixel crystal stream, calibrated so a flat 18 % grey matches a
+// scanned reference frame at grain 0.4.
+#define CRYSTAL_STD 2.6
+// Dye-cloud kernel (sample spacing, decay length) in master pixels, calibrated to the reference
+// render's 1.4 px correlation half-width.
+#define CLOUD_STEP_PX 0.95
+#define CLOUD_K_PX 1.15
+// How strongly the dye-cloud octaves modulate crystal amplitude (0 = even static).
+#define CRYSTAL_CLUMP 0.90
+// Direct additive share of the coarse octaves (was 1.15 before they became an envelope).
+#define CLOUD_DIRECT 0.35
 
 uniform sampler2D u_image;
 uniform sampler3D u_lut;
@@ -408,6 +419,40 @@ vec3 perlin3(vec2 p) {
     vec3 nx1 = mix(g01, g11, u.x);
     // Unit-gradient Perlin has std ~0.2; scale so callers keep the old value-noise amplitude.
     return mix(nx0, nx1, u.y) * PERLIN_TO_UNIT_STD;
+}
+
+// Individual silver crystals: one independent value per master pixel, no interpolation.
+//
+// Every smooth field that can be evaluated here -- value noise, gradient noise, even blurred
+// white noise -- is a *blob* whose size is the cell size, and a sum of blobs is exactly the
+// "plastic pellet" look: the eye picks up the cell, not a grain distribution.  A real emulsion
+// is a scatter of independent develop / not-develop events at pixel scale, so the finest octave
+// has to be white noise on the master grid.  The CPU renderer already does this: its finest
+// octave has Gaussian sigma pinned at MIN_OCTAVE_SIGMA_PX = 0.35 px, i.e. white.
+float crystal_field(vec2 mp) {
+    return (pcg_float(uvec2(ivec2(floor(mp)))) - 0.5) * 3.4641016;   // signed, unit std
+}
+
+// One crystal's dye cloud, after fotufilm-engine/Sources/FotufilmHalide/Stages/Grain.h: a
+// developed crystal releases oxidised developer that spreads as exp(-r / k) and forms dye
+// (Jarvis, J. Photogr. Sci. 40:105).  A pixel never sees a bare crystal, it sees the cloud
+// around it -- which is why the reference render measures a 1.4 px correlation half-width while
+// raw per-pixel white noise measures 0.5 px and reads as digital static.
+//
+// Normalised by sqrt(sum w^2) rather than sum w so the cloud keeps unit variance: contrast is
+// then set by the density response alone and does not depend on how wide the cloud is.
+float crystal_cloud(vec2 mp, float step_px, float k_px) {
+    float acc = 0.0;
+    float wsq = 0.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 o = vec2(float(i), float(j)) * step_px;
+            float w = exp(-length(o) / k_px);
+            acc += crystal_field(mp + o) * w;
+            wsq += w * w;
+        }
+    }
+    return acc / sqrt(max(1e-6, wsq));
 }
 
 // Digital (no-film) display transform - must stay in step with core.app_core:
@@ -1203,12 +1248,18 @@ void main() {
         // reduces its std ~ 1/f (2D: f^2 cells, sqrt averaging) - matches downscaled export.
         float grain_att = 1.0 / max(1.0, footprint);
 
-        // Multi-scale organic dye cloud clusters & micro-crystals, sampled from a gradient
-        // (Perlin) field instead of a value lattice.  Non-integer octave ratios and a fresh
-        // offset per octave keep the three lattices from lining up.
-        vec3 p_fine   = perlin3(gcoord * 0.30 + vec2(53.2, 19.8));
-        vec3 p_cloud  = perlin3(gcoord * 0.16 + vec2(11.7, 73.2));
-        vec3 p_mottle = perlin3(gcoord * 0.08 + vec2(91.2, 53.4));
+        // Finest octave: the crystals themselves, white noise on the master pixel grid.  The
+        // coarse octaves stay gradient noise, but at core.grain_model.OCTAVE_FREQ (0.45 / 0.22
+        // grain cells) -- the same feature sizes the CPU renderer blurs to, ~1.5 px and ~3 px at
+        // a 35 mm frame.  Anything much coarser than that stops reading as clustering and starts
+        // reading as lumps.
+        float crystal = crystal_field(film_coord);
+        vec3 p_cloud  = perlin3(gcoord * 0.45 + vec2(11.7, 73.2));
+        vec3 p_mottle = perlin3(gcoord * 0.22 + vec2(91.2, 53.4));
+        // Clump scale.  This one *is* allowed to be coarse (~9 px) because it only modulates the
+        // amplitude of the crystal stream: coarse-and-additive is what read as pellets, while
+        // coarse-as-envelope is what real grain actually does (density patches of sand).
+        vec3 p_env = perlin3(gcoord * 0.09 + vec2(7.3, 41.9));
 
         // Additive physical mixture governed by "染料云团柔化 (u_grain_blur)".
         // Weights come from core/grain_model.octave_weights() so the CPU export renderer uses
@@ -1226,18 +1277,28 @@ void main() {
 
         // Split each octave into a shared (luminance) scalar and a per-channel deviation.
         // Volume grain is the *same* developed silver seen by all three records; only the
-        // deviation from that mean is colour mottling.  The old layout gave every channel its
-        // own independently seeded field, which measured chroma/luma 1.1-1.4 against 0.24-0.49
-        // on real scans - that is what read as coloured blotches.
-        float sf = dot(p_fine, vec3(1.0 / 3.0));
+        // deviation from that mean is colour mottling.
+        // Spread each crystal into its dye cloud before anything else happens to it.
+        crystal = crystal_cloud(film_coord, CLOUD_STEP_PX, CLOUD_K_PX);
+
+        // Crystals clump: the coarse octaves modulate the *amplitude* of the crystal stream
+        // instead of adding lumps of their own.  Additive blobs are what made the old build read
+        // as plastic pellets; as an envelope the same field shows up as density variation in a
+        // sand of specks, which is what a developed emulsion actually looks like.
         float sc = dot(p_cloud, vec3(1.0 / 3.0));
         float sm = dot(p_mottle, vec3(1.0 / 3.0));
+
+        float se = dot(p_env, vec3(1.0 / 3.0));
+        float env = 1.0 + CRYSTAL_CLUMP * (se * 2.2 + 0.45 * sc + 0.25 * sm);
+        crystal *= clamp(env, 0.0, 2.2);
+
+        float sf = crystal * CRYSTAL_STD;
         vec3 dc = p_cloud - vec3(sc);
         vec3 dm = p_mottle - vec3(sm);
 
         vec3 g_fine   = vec3(sf * w_fine) * amp_fix;
-        vec3 g_cloud  = vec3(sc * (w_cloud * 1.15)) * amp_fix;
-        vec3 g_mottle = vec3(sm * (w_mottle * 1.15)) * amp_fix;
+        vec3 g_cloud  = vec3(sc * (w_cloud * CLOUD_DIRECT)) * amp_fix;
+        vec3 g_mottle = vec3(sm * (w_mottle * CLOUD_DIRECT)) * amp_fix;
         // Colour mottling rides the dye-cloud scales, scaled to the measured real-film ratio.
         float chroma_norm = (1.0 - rho) / 0.21;
         float chroma_k = CHROMA_MAX * chroma_norm;
@@ -1314,14 +1375,19 @@ void main() {
         }
 
         // Transmittance modulation: T = T_in * 10^(-dD) = T_in * exp(-dD * 2.3025851)
-        vec3 d_base = g_fine * resp_fine + g_cloud * resp_cloud + g_mottle * resp_mottle;
-        // Keep the luminance part neutral: every channel gets the same mean, and only the
-        // deviation from it is allowed to colour the frame.
-        vec3 d_lum = vec3(dot(d_base, vec3(1.0 / 3.0)));
+        vec3 d_fine = g_fine * resp_fine;
+        vec3 d_coarse = g_cloud * resp_cloud + g_mottle * resp_mottle;
+        // Luminance stream: neutral by construction, every channel identical.
+        vec3 d_lum = vec3(dot(d_fine + d_coarse, vec3(1.0 / 3.0)));
         // Layer weights may tint, but only mildly - applied to the chroma part alone.
         vec3 tint = mix(vec3(1.0), u_stock_layer_weights / max(1e-4, lw_mean), 0.35);
-        // Both chroma sources follow the colour slider, so colour_grain = 0 is truly neutral.
-        vec3 d_chr = ((d_base - d_lum) * CHROMA_RESP
+        // Colour comes from the *dye cloud* scales only.  The pixel-level crystals are silver:
+        // the same developed grain is seen by all three records, so letting the fine octave into
+        // this term sprayed single-pixel coloured dots over flat skies, which read as sharp
+        // comma-shaped marks once the frame was looked at closely.  Real scans have no
+        // pixel-level chroma at all.
+        vec3 d_coarse_lum = vec3(dot(d_coarse, vec3(1.0 / 3.0)));
+        vec3 d_chr = ((d_coarse - d_coarse_lum) * CHROMA_RESP
                       + g_chr * ((resp_cloud + resp_mottle) * 0.5)) * chroma_norm;
         vec3 dD = (d_lum + d_chr * tint) * (eff_strength * 0.35 * grain_att);
         linear_rgb = max(vec3(0.0), linear_rgb * exp(-dD * 2.3025851));
