@@ -2633,16 +2633,12 @@ class SpektraEngine:
         # from the same cached log-exposure film plane, so it costs one develop-only pass.
         # NOTE: CMY_FILM sits *after* the DIR couplers, so the cache key must carry them --
         # loge_key cannot be reused, because LOG_E_FILM is before DIR.
-        # Reversal stocks come out of develop() as dmax - D (the scanner inverts them later), and
-        # the grain law expects physical density, so flip here while the stock's range is known.
+        # Reversal stocks: develop() returns *physical* density here, not dmax - D.  Measured on
+        # Provia 100F -- the cube's darkest input comes back at d_max and its brightest at ~0.85,
+        # i.e. scene-dark is dense, which is what a slide is.  Flipping it again turned that round
+        # and put the grain on the wrong end of the ladder, so the ceiling stays None and the cube
+        # is used as baked.
         positive_ceiling = None
-        if is_pos:
-            _gp = self.get_film_grain_preset(film_stock, push_stops)
-            _dmax = _gp.get("density_max")
-            positive_ceiling = [
-                film_grain.layer_value(_dmax, layer, film_grain.DEFAULT_DENSITY_MAX)
-                for layer in range(3)
-            ]
         film_density = self._bake_film_density(
             sim, log_e_film, lut_size,
             key=(film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same, push_stops),
@@ -2708,11 +2704,10 @@ class SpektraEngine:
         It is a *net* density (the profile curves are baseline-zeroed); the grain sampler
         adds the fog when it picks a tile layer.
 
-        ``positive_ceiling`` is ``(dmax_C, dmax_M, dmax_Y)`` for reversal films.  Their stored
-        curves run the other way round -- the develop stage returns ``dmax - D`` for a slide
-        (measured: Fuji Velvia 100 at -6 EV returns exactly its per-layer dmax), because the
-        scanner inverts them downstream.  The grain law is written against *physical* density,
-        so the cube is flipped here, once, rather than in each of the two renderers.
+        ``positive_ceiling`` is left ``None``: develop() hands back *physical* density for a
+        reversal too (measured on Provia 100F -- the darkest input returns d_max, the brightest
+        ~0.85), so there is nothing to flip.  The parameter is kept because a future stock whose
+        curves really do come back inverted would need it.
 
         Costs one develop-only pass on the cached ``log_e_film`` plane: the expose and spectral
         upsampling stages are shared with the LUT bake.

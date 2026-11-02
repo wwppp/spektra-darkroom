@@ -280,14 +280,18 @@ def sublayers_for(model: CrystalPopulation, levels: int = TABLE_SAMPLES,
                   d_min: float | None = None, d_max: float | None = None) -> FilmRecord:
     """Turn a fitted population into the sublayers a tile lays.
 
-    The developed-fraction table runs over gross density from D-min to D-max, exactly as the
-    reference builds it, so a level reads the fraction its own density implies.
+    The developed-fraction table is indexed by *net* density, level 0 at D-min and the last level
+    at D-max, because that is what the sampler hands it: a pixel's own developed density above
+    base.  The exposure it implies has to come from ``log_exposure_for``, which turns a slide
+    around -- a reversal's dense end is its *least* exposed, so reading the curve at the density
+    directly gave a slide the same table as a negative and laid its dye on the wrong end of the
+    ladder (measured on Provia 100F: 0.98 formed at net 0, 0.00 at net D-max).
     """
     curve = model.developed_curve
     lo = curve.d_min if d_min is None else d_min
     hi = max(curve.d_max if d_max is None else d_max, lo + 1e-3)
-    densities = lo + (hi - lo) * np.arange(levels) / (levels - 1)
-    fractions = np.array([model.bin_fractions(curve.log_exposure(float(d))) for d in densities])
+    nets = (hi - lo) * np.arange(levels) / (levels - 1)
+    fractions = np.array([model.bin_fractions(model.log_exposure_for(float(net))) for net in nets])
 
     silver = model.is_silver
     radii = [b.cloud_radius_mm for b in model.bins]

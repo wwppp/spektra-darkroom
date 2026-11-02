@@ -33,7 +33,7 @@ from .population import CrystalPopulation, GrainStock
 
 __all__ = ["StockTiles", "build_tiles", "load_or_build", "is_cached", "TileStore"]
 
-CACHE_VERSION = 3
+CACHE_VERSION = 5          # 5: reversal fraction table by net density, anchor at d_min + net
 
 
 def _cache_root() -> Path:
@@ -141,8 +141,14 @@ class StockTiles:
 
 
 def _anchor(record: tb.FilmRecord, model: CrystalPopulation) -> tb.FilmRecord:
-    gross = float(model.developed_curve.density(
-        model.log_exposure_for(model.read_net_density)))
+    """Re-solve the dye until the tile reads the sheet's granularity at the read density.
+
+    The read density is a *net* density -- one above base -- so the gross density to lay is
+    simply ``d_min + read_net``.  Going through ``log_exposure_for`` and back would put a
+    reversal on the far end of its ladder (net 1.0 → gross 2.42 on Provia 100F), and the anchor
+    would then be taken somewhere the sheet never measured.
+    """
+    gross = float(record.d_min + model.read_net_density)
     return tb.anchor_to_sheet(record, gross, model.read_sigma)
 
 
