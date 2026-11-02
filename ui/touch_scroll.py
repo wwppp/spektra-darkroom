@@ -14,7 +14,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QAbstractScrollArea, QApplication
+from PySide6.QtWidgets import (
+    QAbstractButton, QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QApplication, QComboBox,
+    QLineEdit, QTextEdit,
+)
+
+#: Widgets that want the finger themselves: dragging a slider, typing, picking from a combo.  A
+#: touch that lands on one is left to Qt's own touch-to-mouse translation.
+_CONTROL_TYPES = (QAbstractSlider, QAbstractButton, QAbstractSpinBox, QComboBox, QLineEdit, QTextEdit)
 
 SLOP_PX = 10.0          # a finger may wander this far and still be a tap
 TAP_MS = 600            # and must lift within this long
@@ -23,6 +30,53 @@ STOP_VELOCITY = 0.4     # px/tick below which the fling is over
 MAX_VELOCITY = 60.0     # px/tick; a fast flick cannot launch the list into orbit
 
 _INSTALLED: set[int] = set()
+_TOUCH_AREAS: set[int] = set()      # areas whose viewport took the touch ourselves
+
+
+def _in_pan_area(widget) -> bool:
+    """Whether ``widget`` sits inside a scroll area a finger drives, and not on a control."""
+    node = widget
+    while node is not None:
+        if isinstance(node, _CONTROL_TYPES):
+            return False
+        if id(node) in _TOUCH_AREAS:
+            return True
+        node = node.parentWidget()
+    return False
+
+
+class _SynthesizedClickGuard(QObject):
+    """Drop the mouse press Qt invents from a touch inside a pan area.
+
+    A touch on a card is not accepted by the card, so Qt replays it as a mouse press on the card
+    -- which selects it before the finger has moved far enough to decide between a tap and a
+    drag.  The pan filter replays the tap itself once it knows, so the invented one is dropped.
+    Events from a real mouse carry `MouseEventNotSynthesized` and pass straight through.
+    """
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt naming)
+        kind = event.type()
+        if kind not in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                        QEvent.Type.MouseButtonDblClick):
+            return False
+        try:
+            if event.source() != Qt.MouseEventSource.MouseEventSynthesizedBySystem:
+                return False
+        except AttributeError:
+            return False
+        app = QApplication.instance()
+        if app is None:
+            return False
+        return _in_pan_area(app.widgetAt(event.globalPosition().toPoint()))
+
+
+def guard_touch_clicks(app) -> None:
+    """Install the guard once, on the application, after it exists."""
+    if getattr(app, "_touch_click_guard", None) is not None:
+        return
+    guard = _SynthesizedClickGuard(app)
+    app.installEventFilter(guard)
+    app._touch_click_guard = guard
 
 
 class TouchPanFilter(QObject):
@@ -65,6 +119,10 @@ class TouchPanFilter(QObject):
 
         if kind == QEvent.Type.TouchBegin:
             self._stop()
+            if self._control_at(position):
+                # A slider or a field under the finger: the touch is not ours to scroll.
+                self._press = None
+                return False
             self._press = position
             self._last = position
             self._press_ms = event.timestamp()
@@ -105,6 +163,14 @@ class TouchPanFilter(QObject):
             self._position = float(self._bar().value())
             self._timer.start()
         return True
+
+    def _control_at(self, position: QPointF) -> bool:
+        node = self._viewport.childAt(position.toPoint())
+        while node is not None and node is not self._viewport:
+            if isinstance(node, _CONTROL_TYPES):
+                return True
+            node = node.parentWidget()
+        return False
 
     # -- scrolling --------------------------------------------------------------------------
     def _bar(self):
@@ -176,4 +242,5 @@ def install_touch_scroll(area: QAbstractScrollArea | None) -> TouchPanFilter | N
     if key in _INSTALLED:
         return None
     _INSTALLED.add(key)
+    _TOUCH_AREAS.add(key)
     return TouchPanFilter(area)
