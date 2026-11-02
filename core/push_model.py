@@ -40,6 +40,7 @@ _LOCK = threading.Lock()
 PUSH_TOE_PER_STOP = 0.068      # display-domain toe: black lift and shadow compression
 GRAIN_SCALE_PER_STOP = 0.30    # overall grain amplitude
 GRAIN_SHADOW_PER_STOP = 1.00   # extra amplitude at zero density, fading to 0 at the anchor
+GRAIN_FOG_PER_STOP = 0.55      # additive shadow grain (the fog's own grain), in DENS_GAIN units
 
 
 def toe_amount_for(stops):
@@ -60,10 +61,17 @@ def toe_amount_for(stops):
 
 
 def grain_shape_for(stops):
-    """(overall amplitude, extra shadow amplitude) for a push, both 1.0/0.0 at standard."""
+    """(overall amplitude, extra shadow amplitude, shadow floor) for a push.
+
+    1.0 / 0.0 / 0.0 at standard development.  The third number is the fog's own grain, in units
+    of ``DENS_GAIN``: it is added (not multiplied) at low density, because the stock's law is a
+    function of density and reports no fluctuation where nothing was developed -- which is the
+    one place a pushed frame is actually the grainiest.
+    """
     stops = max(0, int(stops))
     return (1.0 + GRAIN_SCALE_PER_STOP * stops,
-            min(2.0, GRAIN_SHADOW_PER_STOP * stops))
+            min(2.0, GRAIN_SHADOW_PER_STOP * stops),
+            min(1.2, GRAIN_FOG_PER_STOP * stops))
 
 
 def push_dir(resources_dir):

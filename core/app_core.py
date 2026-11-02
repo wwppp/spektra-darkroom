@@ -1783,15 +1783,51 @@ class SpektraEngine:
                 return list(bucket[film_stock])
         return None
 
-    def get_neutral_filter(self, paper_stock, film_stock):
-        measured = self._lookup_neutral_table(paper_stock, film_stock)
-        if measured is not None:
-            return measured
+    def get_neutral_filter(self, paper_stock, film_stock, push_stops=0):
+        """Print filtration that neutralises this film on this paper, at this development.
+
+        A push swaps the characteristic curve, and the three records do not move by the same
+        amount, so the neutral point moves with it: using the standard condition's filtration on a
+        pushed negative is what a darkroom printer would call "never re-balancing the filters".
+        Measured on a neutral ramp, +2 on Portra 800 drifted R-B by 8/255 (cool -11 -> -3).
+
+        The correction is a *delta* against the same solver run on the standard profile, not an
+        absolute solve, so a stock whose measured table disagrees with the solver still renders
+        exactly as it did at 0 stops.
+        """
+        stops = int(push_stops or 0)
+        key = (paper_stock, film_stock, stops)
+        cache = getattr(self, "_neutral_push_cache", None)
+        if cache is None:
+            cache = self._neutral_push_cache = {}
+        if key in cache:
+            return list(cache[key])
+
+        base = self._neutral_filter_base(paper_stock, film_stock)
+        if stops and not self.is_positive_film(film_stock):
+            pushed, applied = self._pushed_profile(film_stock, stops)
+            if applied and pushed is not None:
+                p0 = self._neutral_filter_base(paper_stock, film_stock, force_solve=True)
+                p1 = self._neutral_filter_base(paper_stock, film_stock,
+                                               profile_override=pushed, force_solve=True)
+                if p0 is not None and p1 is not None:
+                    base = [float(base[0]),
+                            float(np.clip(base[1] + (p1[1] - p0[1]), 0.0, 100.0)),
+                            float(np.clip(base[2] + (p1[2] - p0[2]), 0.0, 100.0))]
+        cache[key] = list(base)
+        return list(base)
+
+    def _neutral_filter_base(self, paper_stock, film_stock, profile_override=None, force_solve=False):
+        """Standard-condition filtration, or the solver's answer for ``profile_override``."""
+        if not force_solve:
+            measured = self._lookup_neutral_table(paper_stock, film_stock)
+            if measured is not None:
+                return measured
 
         # If positive / reversal slide film or monochrome, return neutral baseline
         if self.is_positive_film(film_stock):
             return [0.0, 50.0, 50.0]
-        prof = self._load_profile(film_stock)
+        prof = profile_override if profile_override is not None else self._load_profile(film_stock)
         if prof and hasattr(prof, 'info') and getattr(prof.info, 'channel_model', 'color') == 'bw':
             return [0.0, 0.0, 0.0]
 
@@ -1847,6 +1883,10 @@ class SpektraEngine:
                     sol = root(obj, [60.0, 60.0], method='hybr')
                     if sol.success and np.all(np.isfinite(sol.x)):
                         res = [0.0, float(sol.x[0]), float(sol.x[1])]
+                        if profile_override is not None:
+                            # A pushed profile's answer must never be cached as the stock's
+                            # standard filtration; the caller only wants the delta.
+                            return res
                         if paper_stock not in self.neutral_filters:
                             self.neutral_filters[paper_stock] = {}
                         if "TH-KG3" not in self.neutral_filters[paper_stock]:
@@ -2028,9 +2068,10 @@ class SpektraEngine:
         # The law itself is measured data, but the *amplitude* is not: a pushed frame is grainier
         # everywhere and most of all where it is thinnest.  Without this the print's tone curve
         # compressed the shadow grain back to invisibility (sigma 0.48 -> 0.54 at +2).
-        scale, shadow = push_model.grain_shape_for(applied)
+        scale, shadow, fog_grain = push_model.grain_shape_for(applied)
         pushed["grain_scale"] = scale
         pushed["grain_shadow_gain"] = shadow
+        pushed["grain_shadow_floor"] = fog_grain
         pushed["push_stops"] = applied
         cache[key] = pushed
         return pushed
@@ -2547,7 +2588,7 @@ class SpektraEngine:
         if is_bw:
             base_filter = [0.0, 0.0, 0.0]
         else:
-            base_filter = self.get_neutral_filter(base_paper, film_stock)
+            base_filter = self.get_neutral_filter(base_paper, film_stock, push_stops)
         params.enlarger.c_filter_neutral = float(base_filter[0])
         params.enlarger.m_filter_neutral = float(base_filter[1])
         params.enlarger.y_filter_neutral = float(base_filter[2])
@@ -4573,7 +4614,8 @@ class SpektraEngine:
         if is_bw:
             base_filter = [0.0, 0.0, 0.0]
         else:
-            base_filter = self.get_neutral_filter(paper_stock, film_stock)
+            base_filter = self.get_neutral_filter(
+                paper_stock, film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))
         params.settings.neutral_print_filters_from_database = False
         params.enlarger.c_filter_neutral = float(base_filter[0])
         params.enlarger.m_filter_neutral = float(base_filter[1])

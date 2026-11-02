@@ -7880,7 +7880,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         if not linked:
             toe = push_model.toe_amount_for(current) * 255.0
-            scale, _ = push_model.grain_shape_for(current)
+            scale, _, _ = push_model.grain_shape_for(current)
             body = (f"当前：显影 +{current} 档，曝光不联动（只换特性曲线）\n"
                     f"自动：黑位 +{toe:.0f}/255、暗部压缩、颗粒 ×{scale:.1f}"
                     f"（显影实测补回约 {gain:.1f} EV）\n"

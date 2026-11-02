@@ -432,6 +432,7 @@ def _preset_signature(preset):
         # Push amplitude: without these two, +1 and +2 would share one baked table.
         round(float(preset.get("grain_scale") or 1.0), 6),
         round(float(preset.get("grain_shadow_gain") or 0.0), 6),
+        round(float(preset.get("grain_shadow_floor") or 0.0), 6),
     )
 
 
@@ -488,7 +489,7 @@ def bake_density_lut(preset):
     if cached is not None:
         return cached
 
-    law, profile, d_min, d_max, read, fog, reversal, _scale, _shadow = key
+    law, profile, d_min, d_max, read, fog, reversal, _scale, _shadow, _floor = key
     if profile is None:
         profile = DEFAULT_DENSITY_RECORDS
     grid = np.linspace(0.0, DENSITY_LUT_MAX, DENSITY_LUT_SIZE, dtype=np.float64)
@@ -528,15 +529,21 @@ def bake_density_lut(preset):
 def _apply_push_shape(lut, preset, read, limits):
     """Amplify grain for a push, most of all in the shadows.  Identity at standard development.
 
-    A pushed negative is grainier because it was developed longer, and the shadow end is where
-    that shows first: those crystals got the least light, so the same development leaves them
-    far apart.  The print's tone curve then compresses exactly that end, which is why the push
-    measured flat (sigma 0.48 -> 0.54 in the darkest patch).  The weight is 1.0 at the granularity
-    anchor, so the P5 calibration of the mid-density amplitude is untouched.
+    Two terms, both tied to the *development*, not to the image:
+
+    * a multiplicative weight that is 1.0 at the granularity anchor and grows towards zero
+      density, so the P5 mid-density calibration is untouched;
+    * an **additive floor** proportional to ``DENS_GAIN`` that takes over as the density goes to
+      zero.  This one is not cosmetic: the stock's law says a dye cloud carries no fluctuation
+      where nothing was developed, so a heavily underexposed frame used to render perfectly clean
+      shadows (measured sigma 0.08 at -3 EV) even though a pushed negative is fogged and grainy
+      exactly there.  The floor is the fog's own grain, which the law cannot express because it
+      is a function of density alone.
     """
     scale = float(preset.get("grain_scale") or 1.0)
     shadow = float(preset.get("grain_shadow_gain") or 0.0)
-    if abs(scale - 1.0) < 1e-6 and shadow <= 0.0:
+    floor = float(preset.get("grain_shadow_floor") or 0.0)
+    if abs(scale - 1.0) < 1e-6 and shadow <= 0.0 and floor <= 0.0:
         return
     d_min, d_max = limits
     grid = np.linspace(0.0, DENSITY_LUT_MAX, DENSITY_LUT_SIZE, dtype=np.float64)
@@ -544,8 +551,11 @@ def _apply_push_shape(lut, preset, read, limits):
         lo = _layer_value(d_min, record, DEFAULT_DENSITY_MIN)
         hi = _layer_value(d_max, record, DEFAULT_DENSITY_MAX)
         anchor = max(granularity_anchor_density(read, lo, hi), 1e-4)
-        weight = 1.0 + shadow * np.clip((anchor - grid) / anchor, 0.0, 1.0)
-        lut[:, record] = (lut[:, record] * (scale * weight)).astype(np.float32)
+        t = np.clip((anchor - grid) / anchor, 0.0, 1.0)
+        shaped = lut[:, record] * (scale * (1.0 + shadow * t))
+        if floor > 0.0:
+            shaped = shaped + (DENS_GAIN * floor) * t ** 1.5
+        lut[:, record] = shaped.astype(np.float32)
 
 
 def _lattice_index(density):
