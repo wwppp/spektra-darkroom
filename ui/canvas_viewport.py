@@ -11,10 +11,7 @@ from PySide6.QtOpenGL import (
 )
 from core.path_utils import get_resource_dir
 from core import config_manager
-from core.darkroom_math import grain_scale_px, grain_colour_rho, scene_gain
-from core import push_model
-from core import grain_model as grain_model_ref
-from core.grain_model import octave_weights as grain_octave_weights
+from core.darkroom_math import scene_gain
 from OpenGL import GL
 
 
@@ -91,52 +88,6 @@ def diffusion_shader_profile(family, strength):
     return out
 
 
-def grain_derive_spec(params, stock_strength, stock_layer_weights, stock_size_mm,
-                      fmt_mm, long_edge_px, grain_preset=None, film_density=None):
-    """Build the shared GrainSpec for a shader draw.
-
-    Everything the shader needs about grain amplitude, octave mixing, layer correlation and
-    the density curve comes from core/grain_model.py; this helper is only the adapter between
-    the parameter dict and the model (P1/P2).
-
-    ``grain_preset`` is the stock's crystal_grain dict: it selects the stock's own density law
-    and its declared luma correlation.  Without it the P0 bell and the global correlation target
-    are used, which is the behaviour every stock had before the law was wired up.
-    """
-    return grain_model_ref.derive(
-        grain_slider=params.get("grain", 0.4),
-        stock_strength=stock_strength,
-        layer_weights=stock_layer_weights,
-        cloud_blur=params.get("grain_cloud_blur", 1.0),
-        rho=grain_colour_rho(stock_strength, float(params.get("grain_colour", 1.0))),
-        fmt_mm=fmt_mm,
-        long_edge_px=long_edge_px,
-        grain_size=params.get("grain_size", 1.0),
-        stock_size_mm=stock_size_mm,
-        grain_colour=float(params.get("grain_colour", 1.0)),
-        density_preset=grain_preset,
-        film_density=film_density,
-    )
-
-
-def _bind_density_uniforms(u_1f):
-    """Density-response constants, from the single definition in core/grain_model.py."""
-    u_1f("u_grain_dens_gain", grain_model_ref.DENS_GAIN)
-    u_1f("u_grain_dens_floor", grain_model_ref.DENS_FLOOR)
-    u_1f("u_grain_dens_peak", grain_model_ref.DENS_PEAK)
-    u_1f("u_grain_dens_wtoe", grain_model_ref.DENS_W_TOE)
-    u_1f("u_grain_dens_wshoulder", grain_model_ref.DENS_W_SHOULDER)
-    u_1f("u_grain_dens_dmax", grain_model_ref.DENS_DMAX)
-    u_1f("u_grain_dens_wsat", grain_model_ref.DENS_W_SAT)
-    u_1f("u_grain_density_scale", 1.0 / grain_model_ref.DENSITY_LUT_MAX)
-
-
-# The density-law ramp lives on its own texture unit, clear of the image (0) and the 3D LUT (1).
-GRAIN_DENSITY_TEX_UNIT = 2
-# The negative-density cube (the law's *input*) gets a fourth unit.
-FILM_DENSITY_TEX_UNIT = 3
-
-
 VERTEX_SHADER_SRC = """
 #version 330 core
 layout(location = 0) in vec2 a_pos;
@@ -155,14 +106,6 @@ FRAGMENT_SHADER_SRC = """
 in vec2 v_texcoord;
 out vec4 fragColor;
 
-// Scales unit-gradient Perlin (std ~0.2) to the amplitude the old value-noise field carried,
-// so the calibrated density law and the fog-grain factor keep their meaning.
-#define PERLIN_TO_UNIT_STD 2.20
-// Fraction of the real-film chroma/luma ratio the mottling stream is allowed to add.
-#define CHROMA_MAX 0.09
-// Per-channel density-response spread is physical but over-driven for a scan-like look.
-#define CHROMA_RESP 0.13
-
 uniform sampler2D u_image;
 uniform sampler3D u_lut;
 uniform int u_has_image;
@@ -180,8 +123,6 @@ uniform vec3 u_cmy;
 uniform float u_print_exposure;
 uniform float u_preflash;
 uniform float u_black_lift;
-uniform float u_push_toe;
-uniform float u_push_fog;
 
 // Halation physics (Official Spektrafilm Model)
 uniform float u_halation;           // halation_amount (1.0 = physical default)
@@ -194,49 +135,6 @@ uniform float u_hal_sigma_um;       // profile-driven first bounce sigma (um)
 // tap-based path below must stay off and the gain must not be re-multiplied.
 uniform float u_scene_prepared;
 
-// Grain physics & format
-uniform float u_grain;
-uniform float u_grain_scale;
-uniform float u_grain_size;
-uniform float u_grain_blur;
-uniform float u_grain_colour;
-// Derived once on the CPU by core/grain_model.py and shared with the CPU export renderer:
-// per-octave mixing weights.  Keeping these out of the shader is what stops preview and
-// export drifting apart (P1).
-uniform float u_grain_w_fine;
-uniform float u_grain_w_cloud;
-uniform float u_grain_w_mottle;
-// Density response (bell in negative optical density) and the physical amplitude law.
-// Values come from core/grain_model.py so the CPU export uses exactly the same numbers (P2).
-uniform float u_grain_amplitude;
-uniform float u_preview_noise_fix;    // value-noise std vs VALUE_NOISE_STD (Layer A)
-uniform float u_grain_dens_gain;
-uniform float u_grain_dens_floor;
-uniform float u_grain_dens_peak;
-uniform float u_grain_dens_wtoe;
-uniform float u_grain_dens_wshoulder;
-uniform float u_grain_dens_dmax;
-uniform float u_grain_dens_wsat;
-// Per-octave density response, baked by core/grain_model.bake_layer_lut() into a 512x3 table
-// (row = C/M/Y record, rgb = fine/cloud/mottle response at that density) over D = 0..4 and
-// sampled here once per record.  Keeping it in a texture rather than in GLSL means a stock's
-// law is implemented exactly once (in Python) and both renderers read the same numbers -- and
-// P2's split across the three coated sub-layers cannot drift between preview and export either.
-// u_grain_density_enable == 0 falls back to the P0 bell above for all three octaves, so a
-// missing texture can never blank the grain.
-uniform sampler2D u_grain_density_lut;
-uniform float u_grain_density_scale;
-uniform float u_grain_density_enable;
-// Negative net density (C/M/Y) on the 3D LUT's own shaper lattice, baked by the engine from the
-// same film pipeline that produced u_lut.  The density law above is a function of *density*, so
-// this is what it should be indexed by; u_film_density_enable == 0 keeps the historical
-// D = -log10(lin) reading for callers with no LUT context (thumbnails, offline probes).
-uniform sampler3D u_film_density;
-uniform float u_film_density_enable;
-uniform float u_stock_grain_size;
-uniform float u_stock_grain_strength;
-uniform vec3  u_stock_layer_weights;
-uniform vec2 u_master_resolution;
 
 // Diffusion filter
 // u_diffusion_ps is the deflected-photon fraction p_s, computed on the CPU by
@@ -274,7 +172,6 @@ uniform float u_developer_exhaustion;
 // Values already baked into the current 3D LUT (only the delta is approximated post-LUT)
 uniform float u_lut_morph_gamma;
 uniform float u_lut_dev_exh;
-uniform float u_grain_rho;
 uniform float u_film_width_um;
 
 // Lens Optical & Geometric Correction
@@ -319,96 +216,6 @@ uniform float u_native_aspect;
 uniform vec2 u_pan;
 uniform float u_zoom;
 uniform vec2 u_viewport_size;
-
-// 32-bit Integer PCG (Permuted Congruential Generator) Hash
-// Cryptographic quality pseudo-randomness with ZERO periodic banding or grid artifacts
-uint pcg_hash(uvec2 v) {
-    v = v * 1664525u + 1013904223u;
-    v.x += v.y * 1664525u;
-    v.y += v.x * 1664525u;
-    v = v ^ (v >> 16u);
-    v.x += v.y * 1664525u;
-    v.y += v.x * 1664525u;
-    v = v ^ (v >> 16u);
-    return v.x ^ v.y;
-}
-
-float pcg_float(uvec2 p) {
-    return float(pcg_hash(p)) * (1.0 / 4294967296.0);
-}
-
-// Fast 3-channel decorrelated pseudo-random vector from 32-bit PCG hash
-vec3 pcg_vec3(uvec2 p) {
-    uint h = pcg_hash(p);
-    float r = float(h & 0x3FFu) * (1.0 / 1023.0);
-    float g = float((h >> 10u) & 0x3FFu) * (1.0 / 1023.0);
-    float b = float((h >> 20u) & 0x3FFu) * (1.0 / 1023.0);
-    return vec3(r, g, b);
-}
-
-// Smooth continuous organic dye cloud noise with Hermite interpolation
-float smooth_cloud_noise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 s = f * f * (3.0 - 2.0 * f);
-    
-    uvec2 u = uvec2(ivec2(i));
-    float n00 = pcg_float(u);
-    float n10 = pcg_float(u + uvec2(1u, 0u));
-    float n01 = pcg_float(u + uvec2(0u, 1u));
-    float n11 = pcg_float(u + uvec2(1u, 1u));
-    
-    float nx0 = mix(n00, n10, s.x);
-    float nx1 = mix(n01, n11, s.x);
-    return mix(nx0, nx1, s.y);
-}
-
-// Multi-channel organic dye cloud noise vector with Hermite interpolation
-vec3 smooth_cloud_noise_rgb(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 s = f * f * (3.0 - 2.0 * f);
-    
-    uvec2 u = uvec2(ivec2(i));
-    vec3 n00 = pcg_vec3(u);
-    vec3 n10 = pcg_vec3(u + uvec2(1u, 0u));
-    vec3 n01 = pcg_vec3(u + uvec2(0u, 1u));
-    vec3 n11 = pcg_vec3(u + uvec2(1u, 1u));
-    
-    vec3 nx0 = mix(n00, n10, s.x);
-    vec3 nx1 = mix(n01, n11, s.x);
-    return mix(nx0, nx1, s.y);
-}
-
-// Gradient (Perlin-style) noise, quintic fade.
-//
-// Value noise interpolates *values* left on a lattice, so every cell interior is a flat
-// plateau and the cell edges are where all the change happens: at 1:1 that reads as a field
-// of little squares, and the residual histogram is flat-topped (kurtosis ~2.4 where scanned
-// film sits at 4-17).  Interpolating *gradients* instead has no plateau, no preferred axis in
-// the interior, and a residual that is much closer to a sum of independent grains.
-vec3 pcg_grad_dot(uvec2 c, vec2 d) {
-    vec3 r = pcg_vec3(c) * 12.5663706;   // three independent angles
-    return vec3(dot(vec2(cos(r.x), sin(r.x)), d),
-                dot(vec2(cos(r.y), sin(r.y)), d),
-                dot(vec2(cos(r.z), sin(r.z)), d));
-}
-
-vec3 perlin3(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    // Quintic fade: C2 continuity, so no creases along the lattice lines.
-    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    uvec2 c = uvec2(ivec2(i));
-    vec3 g00 = pcg_grad_dot(c, f);
-    vec3 g10 = pcg_grad_dot(c + uvec2(1u, 0u), f - vec2(1.0, 0.0));
-    vec3 g01 = pcg_grad_dot(c + uvec2(0u, 1u), f - vec2(0.0, 1.0));
-    vec3 g11 = pcg_grad_dot(c + uvec2(1u, 1u), f - vec2(1.0, 1.0));
-    vec3 nx0 = mix(g00, g10, u.x);
-    vec3 nx1 = mix(g01, g11, u.x);
-    // Unit-gradient Perlin has std ~0.2; scale so callers keep the old value-noise amplitude.
-    return mix(nx0, nx1, u.y) * PERLIN_TO_UNIT_STD;
-}
 
 // Digital (no-film) display transform - must stay in step with core.app_core:
 // DIGITAL_TOE_LINEAR / DIGITAL_KNEE_LINEAR / DIGITAL_WHITE_LINEAR / DIGITAL_WHITE_COMP /
@@ -1171,161 +978,11 @@ void main() {
         }
     }
 
-    // 3.5. Silver Halide Organic Film Grain & Multi-Octave Dye Cloud Mottle (Pre-LUT Transmittance Space)
-    // Fog field for the push toe below: the lifted black point is developed silver, so it has to
-    // be granular.  Without it a frame that renders under the paper's black point comes out as a
-    // single flat value at any zoom -- measured sigma 0.00 with the grain slider at 1.0.
-    float push_fog_n = 0.0;
-    // How empty the negative is here, per pixel: 1 at fog level, 0 once the image starts.  Read
-    // from dens_D below, which is the film's own density -- the print's brightness says nothing
-    // about it (a flat patch can be bright and still carry no dye clouds at all).
-    vec3 push_blank = vec3(0.0);
-    if (u_grain > 0.01) {
-        // Golden-ratio irrational rotation matrix (breaks all raster / coordinate grid alignment)
-        const mat2 rot = mat2(0.9114, -0.4115, 0.4115, 0.9114);
-        float base_stock_size = (u_stock_grain_size > 0.0001) ? u_stock_grain_size : 0.005;
-        float scale = max(0.20, u_grain_scale * max(0.2, u_grain_size) * (base_stock_size / 0.005));
-
-        // Anchor grain coordinate to image/film master pixel space (WYSIWYG preview & export)
-        vec2 master_res = (u_master_resolution.x > 1.0) ? u_master_resolution : vec2(textureSize(u_image, 0));
-        vec2 film_coord = sample_uv * master_res;
-        vec2 gcoord = rot * (film_coord / scale);
-
-        // Anti-aliasing / Central Limit Theorem screen downsampling integration
-        // Averages micro-crystals across screen pixel footprint:
-        // - At 100%/91% zoom (footprint ~ 1.0): 100% full tactile micro-crystal bite & dye clouds.
-        // - At Fit view (15% zoom, footprint ~ 6.7): micro-crystals average down by CLT ~ 1/sqrt(N),
-        //   producing smooth, velvety, delicate 35mm negative film texture instead of coarse static!
-        vec2 g_dx = rot * (d_sample_dx * master_res / scale);
-        vec2 g_dy = rot * (d_sample_dy * master_res / scale);
-        float footprint = max(length(g_dx), length(g_dy));
-        // Box-filter averaging of spatially correlated grain over a footprint of f grain cells
-        // reduces its std ~ 1/f (2D: f^2 cells, sqrt averaging) - matches downscaled export.
-        float grain_att = 1.0 / max(1.0, footprint);
-
-        // Multi-scale organic dye cloud clusters & micro-crystals, sampled from a gradient
-        // (Perlin) field instead of a value lattice.  Non-integer octave ratios and a fresh
-        // offset per octave keep the three lattices from lining up.
-        vec3 p_fine   = perlin3(gcoord * 0.30 + vec2(53.2, 19.8));
-        vec3 p_cloud  = perlin3(gcoord * 0.16 + vec2(11.7, 73.2));
-        vec3 p_mottle = perlin3(gcoord * 0.08 + vec2(91.2, 53.4));
-
-        // Additive physical mixture governed by "染料云团柔化 (u_grain_blur)".
-        // Weights come from core/grain_model.octave_weights() so the CPU export renderer uses
-        // exactly the same numbers (P1: single source of truth).
-        float w_fine = u_grain_w_fine;
-        float w_cloud = u_grain_w_cloud;
-        float w_mottle = u_grain_w_mottle;
-
-        // Coupled C-41 emulsion layer correlation.  colour_grain = 0 collapses to pure
-        // monochrome grain; 1 is the most chromatic the stock gets.
-        float rho = clamp(u_grain_rho, 0.0, 1.0);
-        float lw_mean = dot(u_stock_layer_weights, vec3(1.0 / 3.0));
-        float noise_fix = (u_preview_noise_fix > 0.01) ? u_preview_noise_fix : 1.0;
-        float amp_fix = u_grain_amplitude * noise_fix;
-
-        // Split each octave into a shared (luminance) scalar and a per-channel deviation.
-        // Volume grain is the *same* developed silver seen by all three records; only the
-        // deviation from that mean is colour mottling.  The old layout gave every channel its
-        // own independently seeded field, which measured chroma/luma 1.1-1.4 against 0.24-0.49
-        // on real scans - that is what read as coloured blotches.
-        float sf = dot(p_fine, vec3(1.0 / 3.0));
-        float sc = dot(p_cloud, vec3(1.0 / 3.0));
-        float sm = dot(p_mottle, vec3(1.0 / 3.0));
-        vec3 dc = p_cloud - vec3(sc);
-        vec3 dm = p_mottle - vec3(sm);
-
-        vec3 g_fine   = vec3(sf * w_fine) * amp_fix;
-        vec3 g_cloud  = vec3(sc * (w_cloud * 1.15)) * amp_fix;
-        vec3 g_mottle = vec3(sm * (w_mottle * 1.15)) * amp_fix;
-        // Colour mottling rides the dye-cloud scales, scaled to the measured real-film ratio.
-        float chroma_norm = (1.0 - rho) / 0.21;
-        float chroma_k = CHROMA_MAX * chroma_norm;
-        vec3 g_chr = (dc * (w_cloud * 1.15) + dm * (w_mottle * 1.15)) * amp_fix * chroma_k;
-
-        // Stock strength & user slider modulation
-        float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
-        float eff_strength = (u_grain / 0.40) * (base_stock_strength / 0.010);
-        // The toe's own grain, at the fine octave's scale and attenuated by the screen footprint
-        // like everything else, so a fit-view preview stays smooth instead of turning to static.
-        // Match darkroom_math.fog_noise()'s realised std, measured against the export rather than
-        // derived: on a blank frame at 100% the export reads sigma 6.64 while this shader read
-        // 9.45 with the old 2.31, and the ratio held linearly as the factor came down (2.31 ->
-        // 1.97 -> 8.06).  1.62 is where the two agree.
-        push_fog_n = sf * grain_att * clamp(u_grain / 0.4, 0.0, 2.5) * 1.62;
-
-        // Granularity vs negative optical density.  Two possible sources for D:
-        //   u_film_density_enable == 1: the negative's own net density, read from the cube the
-        //     engine baked through the same film pipeline as u_lut.  This is the physical input:
-        //     exposure maps to density through the film's characteristic curve, and the grain
-        //     law is a function of density, so it must be indexed by that -- not by exposure.
-        //   u_film_density_enable == 0: the legacy reading D = -log10(lin), which treats the
-        //     scene-linear value as transmittance.  Kept only for callers with no LUT context.
-        vec3 dens_D;
-        if (u_film_density_enable > 0.5) {
-            float dens_dim = float(textureSize(u_film_density, 0).x);
-            vec3 dens_t = linear_to_shaper(linear_rgb);
-            // Same texel-centre mapping the LUT sampler uses, but with the cube's own dimension.
-            vec3 dens_coord = dens_t * ((dens_dim - 1.0) / dens_dim) + (0.5 / dens_dim);
-            dens_D = textureLod(u_film_density, dens_coord, 0.0).rgb;
-        } else {
-            dens_D = -log(clamp(linear_rgb, vec3(1e-4), vec3(1.0))) * (1.0 / 2.302585092994046);
-        }
-        // Mirrors push_model.blank_weight(): smoothstep down from BLANK_IMAGE_DENSITY to
-        // BLANK_FOG_DENSITY on the record-mean density.
-        {
-            float d_bar = dot(dens_D, vec3(1.0 / 3.0));
-            float t_blank = clamp((0.30 - d_bar) / (0.30 - 0.06), 0.0, 1.0);
-            push_blank = vec3(t_blank * t_blank * (3.0 - 2.0 * t_blank));
-        }
-        // Per-octave responses.  The table is 512 wide (density) by 3 tall (record), and each
-        // texel's rgb carries the fine / cloud / mottle response at that density, so one fetch
-        // per record returns all three octaves.  Row centres are exactly (r + 0.5) / 3.
-        vec3 resp_fine, resp_cloud, resp_mottle;
-        if (u_grain_density_enable > 0.5) {
-            float row = 1.0 / 3.0;
-            vec3 t_r = textureLod(u_grain_density_lut,
-                                  vec2(dens_D.r * u_grain_density_scale, 0.5 * row), 0.0).rgb;
-            vec3 t_g = textureLod(u_grain_density_lut,
-                                  vec2(dens_D.g * u_grain_density_scale, 1.5 * row), 0.0).rgb;
-            vec3 t_b = textureLod(u_grain_density_lut,
-                                  vec2(dens_D.b * u_grain_density_scale, 2.5 * row), 0.0).rgb;
-            resp_fine   = vec3(t_r.x, t_g.x, t_b.x);
-            resp_cloud  = vec3(t_r.y, t_g.y, t_b.y);
-            resp_mottle = vec3(t_r.z, t_g.z, t_b.z);
-        } else {
-            vec3 dens_z = dens_D - vec3(u_grain_dens_peak);
-            vec3 dens_w = mix(vec3(u_grain_dens_wtoe), vec3(u_grain_dens_wshoulder),
-                              step(vec3(0.0), dens_z));
-            vec3 dens_bell = vec3(u_grain_dens_floor)
-                           + (vec3(1.0) - vec3(u_grain_dens_floor))
-                             * exp(-0.5 * (dens_z / dens_w) * (dens_z / dens_w));
-            // Film saturation: fade to zero just below the stock's Dmax. Above it the particle-model
-            // reference returns a constant saturated field (every crystal developed), so extending
-            // the Gaussian there would put grain into fully clipped highlights.
-            vec3 sat_t = clamp((dens_D - vec3(u_grain_dens_dmax - u_grain_dens_wsat))
-                               / vec3(u_grain_dens_wsat), 0.0, 1.0);
-            vec3 dens_roll = vec3(1.0) - (vec3(3.0) * sat_t * sat_t
-                                          - vec3(2.0) * sat_t * sat_t * sat_t);
-            vec3 dens_bell_total = vec3(u_grain_dens_gain) * dens_bell * dens_roll;
-            resp_fine = dens_bell_total;
-            resp_cloud = dens_bell_total;
-            resp_mottle = dens_bell_total;
-        }
-
-        // Transmittance modulation: T = T_in * 10^(-dD) = T_in * exp(-dD * 2.3025851)
-        vec3 d_base = g_fine * resp_fine + g_cloud * resp_cloud + g_mottle * resp_mottle;
-        // Keep the luminance part neutral: every channel gets the same mean, and only the
-        // deviation from it is allowed to colour the frame.
-        vec3 d_lum = vec3(dot(d_base, vec3(1.0 / 3.0)));
-        // Layer weights may tint, but only mildly - applied to the chroma part alone.
-        vec3 tint = mix(vec3(1.0), u_stock_layer_weights / max(1e-4, lw_mean), 0.35);
-        // Both chroma sources follow the colour slider, so colour_grain = 0 is truly neutral.
-        vec3 d_chr = ((d_base - d_lum) * CHROMA_RESP
-                      + g_chr * ((resp_cloud + resp_mottle) * 0.5)) * chroma_norm;
-        vec3 dD = (d_lum + d_chr * tint) * (eff_strength * 0.35 * grain_att);
-        linear_rgb = max(vec3(0.0), linear_rgb * exp(-dD * 2.3025851));
-    }
+    // 3.6. Film grain belongs here: the pixel is the mean transmittance of one small patch of
+    // the stock's pre-rendered film tile, so it has to run on the negative's side of the LUT.
+    // The old octave model was removed in one piece (docs/grain-port-plan.md P0); the tile
+    // sampler takes this slot back in P3 (ui/gl_film_grain.py), sampling the same tile data the
+    // CPU export uses.
 
     // 4. Physical 3D LUT sampling with Log Shaper (Film emulsion + Paper D-max)
     vec3 film_rgb;
@@ -1372,21 +1029,6 @@ void main() {
         float c_blk = min(0.95, -u_black_lift);
         film_rgb = max(vec3(0.0), (film_rgb - vec3(c_blk)) / (1.0 - c_blk));
     }
-    // 9. Push development toe: lifted black point and compressed shadows, white preserved.
-    //    Same formula as darkroom_math.apply_push_toe(), which the CPU export runs.
-    if (u_push_toe > 0.0001) {
-        vec3 inv = vec3(1.0) - clamp(film_rgb, 0.0, 1.0);
-        // The fog gets the same weight squared: it is strongest where the print actually
-        // crushed the frame and fades out of the midtones, instead of laying a constant
-        // fluctuation over the whole image.
-        vec3 inv3 = inv * inv * inv;
-        // Either reason is enough for the fog grain: the print crushed this pixel, or the
-        // negative was empty here.  They overlap in deep shadow, so take the larger, never the sum.
-        vec3 fog_w = max(inv3 * inv3, push_blank);
-        vec3 pedestal = inv3 + vec3(u_push_fog * push_fog_n) * fog_w;
-        film_rgb = clamp(film_rgb + u_push_toe * pedestal, 0.0, 1.0);
-    }
-
     fragColor = vec4(clamp(film_rgb, 0.0, 1.0), 1.0);
 }
 """
@@ -1486,10 +1128,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # Separable-Gaussian halation chain (ui/gl_halation.py). Created lazily on the first
         # render that needs it, so no GL objects exist before a context is current.
         self._halation_chain = None
-        # 512x1 RGB ramp holding the current stock's density law (core/grain_model.py), plus the
-        # identity of the table it holds so switching stock re-uploads instead of re-baking.
-        self._grain_density_tex_id = None
-        self._grain_density_lut_id = None
         self._image_width = 0
         self._image_height = 0
         self._master_width = 0
@@ -1500,7 +1138,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._has_library_photos = False
         self._pending_image = None
         self._pending_lut = None
-        # Negative-density cube travelling with _pending_lut: the grain law is indexed by it.
+        # Negative-density cube travelling with _pending_lut: the P2 grain sampler indexes
+        # its density layers by it, so it keeps riding along with the LUT bake.
         self._film_density = None
         self._gl_initialized = False
 
@@ -1545,7 +1184,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
             "_halation_preset": None,
             "grain": 0.4,
             "grain_size": 1.0,
-            "grain_cloud_blur": 1.0,
             "grain_colour": 1.0,
             "split_x": 0.5,
             "view_mode": 0   # 0: single, 1: split
@@ -1768,119 +1406,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def resizeGL(self, w, h):
         pass
 
-    def _upload_grain_density_lut(self, lut):
-        """Upload (or refresh) the per-octave response table and return its texture id.
-
-        Shape is ``(3 records, DENSITY_LUT_SIZE, 3 octaves)`` -- row = record, rgb = the fine /
-        cloud / mottle response at that density (P2).  Baking happens in
-        ``core/grain_model.bake_layer_lut()``, which caches per (stock, layer geometry, octave
-        weights), so the same array object comes back every frame and ``id()`` is enough to notice
-        a stock or blur-slider change without re-uploading 6 KB of constants on every paint.
-        """
-        if lut is None:
-            return None
-        key = (id(lut), lut.shape)
-        tex = getattr(self, "_grain_density_tex_id", None)
-        if tex and getattr(self, "_grain_density_lut_id", None) == key:
-            return tex
-        data = np.ascontiguousarray(lut, dtype=np.float32)
-        height, width = int(data.shape[0]), int(data.shape[1])
-        if not tex:
-            tex = GL.glGenTextures(1)
-            GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
-            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
-            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
-            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
-            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
-            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB16F, width, height, 0,
-                            GL.GL_RGB, GL.GL_FLOAT, data)
-            self._grain_density_tex_id = tex
-        else:
-            GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
-            GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, width, height,
-                               GL.GL_RGB, GL.GL_FLOAT, data)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
-        self._grain_density_lut_id = key
-        return tex
-
-    def _upload_film_density(self, grid):
-        """Upload (or refresh) the negative-density cube as a 3D texture, return its id.
-
-        Keyed on ``id()`` like the density ramp: the engine caches one array per
-        (film, paper, size, DIR) and hands back the same object, so a stock or DIR change is
-        noticed without re-uploading 421 KB on every paint.
-        """
-        if grid is None:
-            return None
-        key = (id(grid), grid.shape)
-        tex = getattr(self, "_film_density_tex_id", None)
-        if tex and getattr(self, "_film_density_key", None) == key:
-            return tex
-        data = np.ascontiguousarray(grid, dtype=np.float32)
-        size = int(data.shape[0])
-        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
-        if not tex:
-            tex = GL.glGenTextures(1)
-            GL.glBindTexture(GL.GL_TEXTURE_3D, tex)
-            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
-            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
-            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
-            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
-            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
-            # 32F, not 16F: density runs to ~3.5 and the law's slope is order 1, so half-float
-            # quantisation (~0.002 in D) would show up as a systematic amplitude error, and the
-            # table is only 421 KB.
-            GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGB32F, size, size, size, 0,
-                            GL.GL_RGB, GL.GL_FLOAT, data)
-            self._film_density_tex_id = tex
-        else:
-            GL.glBindTexture(GL.GL_TEXTURE_3D, tex)
-            GL.glTexSubImage3D(GL.GL_TEXTURE_3D, 0, 0, 0, 0, size, size, size,
-                               GL.GL_RGB, GL.GL_FLOAT, data)
-        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
-        self._film_density_key = key
-        return tex
-
-    def _bind_film_density(self, funcs, u_1f, u_1i, spec):
-        """Bind the density cube, or switch the shader back to the -log10(lin) reading."""
-        grid = getattr(spec, "film_density", None)
-        tex = None
-        if grid is not None:
-            try:
-                tex = self._upload_film_density(grid)
-            except Exception as exc:                # noqa: BLE001 - never break a paint
-                print(f"[SpektraGrain] 密度表纹理上传失败，回退 -log10(lin): {exc}")
-                tex = None
-        if not tex:
-            u_1f("u_film_density_enable", 0.0)
-            return
-        funcs.glActiveTexture(0x84C0 + FILM_DENSITY_TEX_UNIT)
-        GL.glBindTexture(GL.GL_TEXTURE_3D, tex)
-        u_1i("u_film_density", FILM_DENSITY_TEX_UNIT)
-        u_1f("u_film_density_enable", 1.0)
-        funcs.glActiveTexture(0x84C0)
-
-    def _bind_grain_density_lut(self, funcs, u_1f, u_1i, spec):
-        """Bind the stock's per-octave response table, or switch back to the P0 bell."""
-        tex = None
-        lut = getattr(spec, "layer_lut", None)
-        if lut is not None:
-            try:
-                tex = self._upload_grain_density_lut(lut)
-            except Exception as exc:                # noqa: BLE001 - never break a paint
-                print(f"[SpektraGrain] 分层响应表纹理上传失败，回退 P0 钟形: {exc}")
-                tex = None
-        if not tex:
-            # No table: the shader keeps the global P0 bell.  Both branches return the same
-            # quantity in the same units, so the grain stays continuous either way.
-            u_1f("u_grain_density_enable", 0.0)
-            return
-        funcs.glActiveTexture(0x84C0 + GRAIN_DENSITY_TEX_UNIT)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
-        u_1i("u_grain_density_lut", GRAIN_DENSITY_TEX_UNIT)
-        u_1f("u_grain_density_enable", 1.0)
-        funcs.glActiveTexture(0x84C0)   # callers bind the image on unit 0 right after this
-
     def paintGL(self):
         if not self.shader_program or not self.vbo:
             return
@@ -1986,15 +1511,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_print_exposure", 1.0)
             u_1f("u_preflash", 0.0)
             u_1f("u_black_lift", float(self.params.get("black_lift", 0.0)))
-            u_1f("u_push_toe", push_model.toe_amount_for(self.params.get("push_ev", 0)))
-            u_1f("u_push_fog", push_model.fog_grain_for(self.params.get("push_ev", 0)))
         else:
             u_3f("u_cmy", float(self.params.get("enlarger_cyan", 0.0)), float(self.params.get("enlarger_magenta", 0.0)), float(self.params.get("enlarger_yellow", 0.0)))
             u_1f("u_print_exposure", float(self.params.get("print_exposure", 1.0)))
             u_1f("u_preflash", float(self.params.get("pre_flash", 0.0)))
             u_1f("u_black_lift", float(self.params.get("black_lift", 0.0)))
-            u_1f("u_push_toe", push_model.toe_amount_for(self.params.get("push_ev", 0)))
-            u_1f("u_push_fog", push_model.fog_grain_for(self.params.get("push_ev", 0)))
 
         # Lens correction uniforms
         lens_cfg = self.params.get("lens", {})
@@ -2074,58 +1595,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # pre-rendered the halo; uniforms persist per program, so it has to be reset here.
         u_1f("u_scene_prepared", 0.0)
 
-        # Film Stock Crystal Grain physics (Per-stock crystal size, strength, layer weights)
-        # The engine is asked first, always with the current push stops: a push raises the grain
-        # preset's amplitude (grain_scale / shadow gain / fog floor), and the cached ``_grain_preset``
-        # the film change hands over is the *standard development* one.  Reading that cache first
-        # made the preview ignore the push entirely while the export honoured it -- the pushed
-        # frame looked no grainier on screen.
-        grain_preset = None
-        eng = getattr(self, "engine", None)
-        if not eng and hasattr(self.parent(), "engine"):
-            eng = self.parent().engine
-        if eng and hasattr(eng, "get_film_grain_preset"):
-            stock = self.params.get("film_stock", "kodak_portra_400")
-            grain_preset = eng.get_film_grain_preset(
-                stock, int(round(float(self.params.get("push_ev", 0) or 0))))
-        if not grain_preset:
-            grain_preset = self.params.get("_grain_preset")
-        if not grain_preset:
-            grain_preset = {"size_mm": 0.005, "strength": 0.010, "layer_weights": [0.70, 1.0, 1.35]}
-
-        st_size = float(grain_preset.get("size_mm", 0.005))
-        st_strength = float(grain_preset.get("strength", 0.010))
-        st_lw = grain_preset.get("layer_weights", [0.70, 1.0, 1.35])
-
-        u_1f("u_stock_grain_size", st_size)
-        u_1f("u_stock_grain_strength", st_strength)
-        u_3f("u_stock_layer_weights", float(st_lw[0]), float(st_lw[1]), float(st_lw[2]))
-
-        # Grain physics & format
-        u_1f("u_grain", 0.0 if is_film_none else self.params.get("grain", 0.4))
-        fmt_mm = float(self.params.get("film_format_mm", 35.0))
-        _mw = float(getattr(self, "_master_width", 0) or self._image_width or 6024)
-        _mh = float(getattr(self, "_master_height", 0) or self._image_height or 4024)
-        u_1f("u_grain_scale", grain_scale_px(fmt_mm, max(_mw, _mh)))
-        u_1f("u_film_width_um", max(5.0, fmt_mm) * 1000.0)
-        u_1f("u_grain_size", float(self.params.get("grain_size", 1.0)))
-        u_1f("u_grain_blur", self.params.get("grain_cloud_blur", 1.0))
-        u_1f("u_grain_colour", float(self.params.get("grain_colour", 1.0)))
-        _spec = grain_derive_spec(self.params, st_strength, st_lw, st_size, fmt_mm,
-                                 max(_mw, _mh), grain_preset,
-                                 film_density=getattr(self, "_film_density", None))
-        u_1f("u_grain_rho", _spec.rho)
-        u_1f("u_grain_w_fine", _spec.w_fine)
-        u_1f("u_grain_w_cloud", _spec.w_cloud)
-        u_1f("u_grain_w_mottle", _spec.w_mottle)
-        u_1f("u_grain_amplitude", _spec.amplitude)
-        u_1f("u_preview_noise_fix", grain_model_ref.PREVIEW_NOISE_FIX)
-        _bind_density_uniforms(u_1f)
-        self._bind_grain_density_lut(funcs, u_1f, u_1i, _spec)
-        self._bind_film_density(funcs, u_1f, u_1i, _spec)
-        master_w = float(getattr(self, "_master_width", 0) or self._image_width)
-        master_h = float(getattr(self, "_master_height", 0) or self._image_height)
-        u_2f("u_master_resolution", master_w, master_h)
+        # Grain: removed with the old octave model (see docs/grain-port-plan.md P0).
+        # The film-tile sampler lands in P3; until then the stage is a pass-through.
+        u_1f("u_film_width_um", max(5.0, float(self.params.get("film_format_mm", 35.0))) * 1000.0)
 
         # Diffusion filter
         diff_family = str(self.params.get("diffusion_family", "none")).lower()
@@ -3267,25 +2739,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
             paper_id_off = eff_params.get("paper_profile", getattr(self, "current_paper_stock", "none"))
             pmode_off = eff_params.get("print_mode", getattr(self, "current_print_mode", "optical"))
             is_scan_off = (paper_id_off == "none" or pmode_off == "scan")
-            # The push toe / fog are uniforms too: without these the offscreen render (export,
-            # thumbnails, histogram) silently reused whatever the last paintGL happened to leave
-            # behind, which is only right by luck - and wrong after a push change with no repaint.
-            push_toe_off = push_model.toe_amount_for(eff_params.get("push_ev", 0))
-            push_fog_off = push_model.fog_grain_for(eff_params.get("push_ev", 0))
             if is_pos_off or is_scan_off:
                 u_3f("u_cmy", 0.0, 0.0, 0.0)
                 u_1f("u_print_exposure", 1.0)
                 u_1f("u_preflash", 0.0)
                 u_1f("u_black_lift", float(eff_params.get("black_lift", 0.0)))
-                u_1f("u_push_toe", push_toe_off)
-                u_1f("u_push_fog", push_fog_off)
             else:
                 u_3f("u_cmy", float(eff_params.get("enlarger_cyan", 0.0)), float(eff_params.get("enlarger_magenta", 0.0)), float(eff_params.get("enlarger_yellow", 0.0)))
                 u_1f("u_print_exposure", float(eff_params.get("print_exposure", 1.0)))
                 u_1f("u_preflash", float(eff_params.get("pre_flash", 0.0)))
                 u_1f("u_black_lift", float(eff_params.get("black_lift", 0.0)))
-                u_1f("u_push_toe", push_toe_off)
-                u_1f("u_push_fog", push_fog_off)
 
             def u_4f(name, x, y, z, w):
                 loc = self.shader_program.uniformLocation(name)
@@ -3357,60 +2820,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_3f("u_hal_strength_rgb", float(strength[0]), float(strength[1]), float(strength[2]))
             u_1f("u_hal_sigma_um", sigma_um)
 
-            # Film Stock Crystal Grain physics (Per-stock crystal size, strength, layer weights)
-            # Same order as the live path: the push must reach the preset, so the engine's
-            # push-aware answer wins over the standard-development cache.
-            grain_preset = None
-            eng = getattr(self, "engine", None)
-            if not eng and hasattr(self.parent(), "engine"):
-                eng = self.parent().engine
-            if eng and hasattr(eng, "get_film_grain_preset"):
-                stock = eff_params.get("film_stock", "kodak_portra_400")
-                grain_preset = eng.get_film_grain_preset(
-                    stock, int(round(float(eff_params.get("push_ev", 0) or 0))))
-            if not grain_preset:
-                grain_preset = eff_params.get("_grain_preset")
-            if not grain_preset:
-                grain_preset = {"size_mm": 0.005, "strength": 0.010, "layer_weights": [0.70, 1.0, 1.35]}
-
-            st_size = float(grain_preset.get("size_mm", 0.005))
-            st_strength = float(grain_preset.get("strength", 0.010))
-            st_lw = grain_preset.get("layer_weights", [0.70, 1.0, 1.35])
-
-            u_1f("u_stock_grain_size", st_size)
-            u_1f("u_stock_grain_strength", st_strength)
-            u_3f("u_stock_layer_weights", float(st_lw[0]), float(st_lw[1]), float(st_lw[2]))
-
-            # Grain is a property of the film, never of the output size. The old
-            # `max(w, h) <= 512` heuristic silently stripped grain from small exports;
-            # callers that want a clean thumbnail (strip, histogram) say so explicitly.
-            is_thumbnail = bool(eff_params.get("is_thumbnail", False)) or bool(
-                params_override and params_override.get("grain") == 0.0)
-            if is_thumbnail or is_film_none_off:
-                u_1f("u_grain", 0.0)
-            else:
-                u_1f("u_grain", eff_params.get("grain", 0.4))
-            fmt_mm = float(eff_params.get("film_format_mm", 35.0))
-            u_1f("u_grain_scale", grain_scale_px(fmt_mm, max(float(target_w), float(target_h))))
-            u_1f("u_film_width_um", max(5.0, fmt_mm) * 1000.0)
-            u_1f("u_grain_size", float(eff_params.get("grain_size", 1.0)))
-            u_1f("u_grain_blur", eff_params.get("grain_cloud_blur", 1.0))
-            u_1f("u_grain_colour", float(eff_params.get("grain_colour", 1.0)))
-            # The offscreen pass renders at the export resolution, so the spec is derived with
-            # the target long edge -- that is what applies the physical amplitude law.
-            _spec = grain_derive_spec(eff_params, st_strength, st_lw, st_size, fmt_mm,
-                                     max(float(target_w), float(target_h)), grain_preset,
-                                     film_density=getattr(self, "_film_density", None))
-            u_1f("u_grain_rho", _spec.rho)
-            u_1f("u_grain_w_fine", _spec.w_fine)
-            u_1f("u_grain_w_cloud", _spec.w_cloud)
-            u_1f("u_grain_w_mottle", _spec.w_mottle)
-            u_1f("u_grain_amplitude", _spec.amplitude)
-            u_1f("u_preview_noise_fix", grain_model_ref.PREVIEW_NOISE_FIX)
-            _bind_density_uniforms(u_1f)
-            self._bind_grain_density_lut(funcs, u_1f, u_1i, _spec)
-            self._bind_film_density(funcs, u_1f, u_1i, _spec)
-            u_2f("u_master_resolution", float(target_w), float(target_h))
+            # Grain: removed with the old octave model (see docs/grain-port-plan.md P0).
+            u_1f("u_film_width_um", max(5.0, float(eff_params.get("film_format_mm", 35.0))) * 1000.0)
 
             diff_family = str(eff_params.get("diffusion_family", "none")).lower()
             family_map = {"none": 0, "black_pro_mist": 1, "glimmerglass": 2, "pro_mist": 3, "cinebloom": 4}

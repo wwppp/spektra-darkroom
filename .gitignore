@@ -96,3 +96,6 @@ CHANGELOG.md
 
 # 会话工作日志与本地记忆（仅本机，不入库）
 .workbuddy/
+
+# Local cache of the fotufilm web demo (tools/fotufilm_mirror.py)
+.fotufilm-mirror/

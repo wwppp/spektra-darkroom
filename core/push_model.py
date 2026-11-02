@@ -34,89 +34,6 @@ import numpy as np
 _TABLE_CACHE: dict[str, tuple[float, dict | None]] = {}
 _LOCK = threading.Lock()
 
-# How a push changes the *look* beyond the measured curve.  Both are per stop, both saturate, and
-# both are 0 at standard development -- a stock at 0 stops must render exactly as it did before
-# this existed.
-PUSH_TOE_PER_STOP = 0.068      # display-domain toe: black lift and shadow compression
-GRAIN_SCALE_PER_STOP = 0.60    # overall grain amplitude
-GRAIN_SHADOW_PER_STOP = 1.60   # extra amplitude at zero density, fading to 0 at the anchor
-GRAIN_FOG_PER_STOP = 2.60      # additive shadow grain (the fog's own grain), in DENS_GAIN units
-FOG_GRAIN_RELATIVE = 0.15      # fluctuation of the lifted black, as a fraction of the lift itself
-FOG_GRAIN_AT_FULL_SLIDER = 2.5 # the 颗粒 slider multiplies it, up to this, over its 0.40 default
-
-
-def toe_amount_for(stops):
-    """Display-domain toe for a push: lift the black point and flatten the shadows.
-
-    Two things a pushed frame shows that the print stage will not carry.  The fog cannot ride in
-    ``base_density`` -- it is a spatially uniform, spectrally fixed attenuation there, and the
-    print's per-channel exposure correction is its exact inverse (measured: bit-identical output
-    with and without, Tri-X +2, grey patches 31.0/59.0/107.0/154.0/189.0 both ways).  Nor can the
-    toe ride in the characteristic curve: flattening it there measured as a no-op on the print
-    (p50 61 -> 62, shadow detail 1.89 -> 1.87) because the print rebalances the whole curve.
-
-    So both are applied where they survive, after the LUT: ``v + a(1-v)^3`` leaves white at 1.0,
-    lifts the black point to ``a``, and drops the deepest shadow slope to ``1 - 3a`` -- the
-    muddy-shoulder look, with the highlights untouched.
-    """
-    return float(min(0.20, PUSH_TOE_PER_STOP * max(0, int(stops))))
-
-
-def grain_shape_for(stops):
-    """(overall amplitude, extra shadow amplitude, shadow floor) for a push.
-
-    1.0 / 0.0 / 0.0 at standard development.  The third number is the fog's own grain, in units
-    of ``DENS_GAIN``: it is added (not multiplied) at low density, because the stock's law is a
-    function of density and reports no fluctuation where nothing was developed -- which is the
-    one place a pushed frame is actually the grainiest.
-    """
-    stops = max(0, int(stops))
-    return (1.0 + GRAIN_SCALE_PER_STOP * stops,
-            min(3.0, GRAIN_SHADOW_PER_STOP * stops),
-            min(4.2, GRAIN_FOG_PER_STOP * stops))
-
-
-def fog_grain_for(stops):
-    """Fluctuation of the lifted black point, relative to the lift itself.  0 at standard.
-
-    The toe lifts the crushed end of the frame to a constant ``a``.  Measured on a frame that
-    renders below the paper's black point, that end is *exactly* one value: every pixel the same,
-    sigma 0.00, 100% zoom included -- because the grain stage multiplies the film's transmittance
-    before the LUT, and a transmittance of ~0 stays ~0 through the print whatever you multiply it
-    by, while the lift is painted on afterwards as a constant.
-
-    Developed fog is not a constant, though: it is silver, and it is granular.  This factor is
-    that granularity, expressed against the lift so it scales with the push and vanishes with it.
-    """
-    if not stops:
-        return 0.0
-    return FOG_GRAIN_RELATIVE
-
-
-# A negative this empty carries nothing but fog; from BLANK_IMAGE_DENSITY up it has image of its
-# own and the ordinary density law already gives it grain.  Between the two the weight fades.
-BLANK_FOG_DENSITY = 0.06
-BLANK_IMAGE_DENSITY = 0.30
-
-
-def blank_weight(density):
-    """How empty the negative is at each pixel: 1 at fog level, 0 once the image starts.
-
-    The display-domain grain cannot be keyed on print brightness.  Measured on a real frame
-    (Gold 200 / Endura, -2 EV, +2): one patch went sigma 0.95 -> 0.14 as the paper exposure rose
-    from x2.6 to x4.0, because that patch sat on a flat part of the paper curve -- and a flat
-    curve turns any density modulation into no brightness change at all.  Stepping back to the
-    film shows what actually separates the two cases: an empty negative (D at fog level) has no
-    dye clouds, only silver fog, and silver fog is grainy no matter where the print places it.
-    So the weight is the negative's emptiness, not the print's darkness.
-    """
-    d = np.asarray(density, dtype=np.float32)
-    if d.ndim == 3:
-        d = d.mean(axis=2)
-    t = np.clip((BLANK_IMAGE_DENSITY - d) / (BLANK_IMAGE_DENSITY - BLANK_FOG_DENSITY), 0.0, 1.0)
-    return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
-
-
 def push_dir(resources_dir):
     return os.path.join(resources_dir, "profiles", "push")
 
@@ -199,10 +116,9 @@ def curve_ratio(base_curves, pushed_curves):
 def apply_to_profile(profile, table, stops):
     """Clone ``profile`` with the pushed curve and its sub-layer split.  ``profile`` is untouched.
 
-    The table's ``dMin`` no longer goes into ``base_density``: measured, the print stage's
-    exposure correction cancels a uniform neutral fog exactly (bit-identical output), so the fog
-    is applied after the LUT by :func:`black_lift_for` instead.  ``dMin`` still moves the grain
-    preset's ``density_min``, which is where it does have an effect.
+    The table's ``dMin`` does not go into ``base_density``: measured, the print stage's exposure
+    correction cancels a uniform neutral fog exactly (bit-identical output).  It still sets the
+    negative's density floor for the grain sampler, which is where it does have an effect.
     """
     entry, applied = condition(table, stops)
     if entry is None or profile is None:

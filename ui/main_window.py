@@ -55,8 +55,12 @@ from core.format_constants import (
 from core.version import get_app_title, get_full_version_info
 from core.app_core import SpektraEngine
 from core import sdc_manager
-from core import push_model
 from core import config_manager
+
+# The grain stage is being replaced wholesale (docs/grain-port-plan.md).  Until the film-tile
+# sampler is wired into both renderers, the grain controls are shown but inert, so nothing here
+# can pretend to work.
+GRAIN_IMPLEMENTATION_READY = False
 from core import session_cache_manager
 from ui.export_queue_manager import ExportQueueManager, ExportQueueDialog, ExportTask
 from ui.unsaved_session_dialog import UnsavedSessionDialog
@@ -1968,7 +1972,6 @@ class DarkroomMainWindow(QMainWindow):
             "halation_boost": 0.0,
             "grain": 0.4,
             "grain_size": 1.0,
-            "grain_cloud_blur": 1.0,
             "grain_colour": 1.0,
             "push_ev": 0,
             # Push is a development condition; "shot N stops under" is a capture decision. They
@@ -4489,14 +4492,6 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_grain_size.valueChanged.connect(lambda v: self._on_slider_live("grain_size", v))
         self.slider_grain_size.sliderReleased.connect(self._on_slider_committed)
         self.sec_grain.addWidget(self.slider_grain_size)
-
-        self.slider_grain_cloud = AdobeScrubSlider(
-            "染料云团柔化", 0.5, 2.5, 1.0, step=0.05, unit=" um", decimals=2,
-            tooltip="柔化噪点边缘，呈现彩色胶片发色染料云团 (Dye Clouds) 真实形态"
-        )
-        self.slider_grain_cloud.valueChanged.connect(lambda v: self._on_slider_live("grain_cloud_blur", v))
-        self.slider_grain_cloud.sliderReleased.connect(self._on_slider_committed)
-        self.sec_grain.addWidget(self.slider_grain_cloud)
 
         self.slider_grain_colour = AdobeScrubSlider(
             "色彩微粒 (彩噪)", 0.0, 1.0, 1.0, step=0.05, unit="", decimals=2,
@@ -7177,7 +7172,6 @@ aspect_ratio=self._lens_frame_aspect(photo),
             "halation_boost": 0.0,
             "grain": 0.4,
             "grain_size": 1.0,
-            "grain_cloud_blur": 1.0,
             "grain_colour": 1.0,
             "lens": self._get_default_lens_params(),
             "split_x": 0.5,
@@ -7200,7 +7194,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         "halation", "halation_amount", "halation_boost", "boost_ev",
         "halation_spatial_scale", "scatter_amount",
         # 银盐颗粒
-        "grain", "grain_size", "grain_cloud_blur", "grain_colour",
+        "grain", "grain_size", "grain_colour",
         # 画幅规格只用于推导银盐晶体 / 弥散圈的物理相对尺度，无胶片时无意义
         "film_format_mm",
     })
@@ -7601,13 +7595,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 "halation": 1.0, "halation_boost": 0.0
             },
             "grain": {
-                "grain": 0.4, "grain_size": 1.0, "grain_cloud_blur": 1.0, "grain_colour": 1.0
+                "grain": 0.4, "grain_size": 1.0, "grain_colour": 1.0
             },
             "texture": {
                 "halation_amount": 1.0, "halation_spatial_scale": 1.0,
                 "scatter_amount": 1.0, "boost_ev": 0.0,
                 "halation": 1.0, "halation_boost": 0.0,
-                "grain": 0.4, "grain_size": 1.0, "grain_cloud_blur": 1.0, "grain_colour": 1.0
+                "grain": 0.4, "grain_size": 1.0, "grain_colour": 1.0
             }
         }
 
@@ -7879,11 +7873,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         linked = bool(self.current_params.get("push_underexpose"))
 
         if not linked:
-            toe = push_model.toe_amount_for(current) * 255.0
-            scale, _, _ = push_model.grain_shape_for(current)
+            # Nothing is applied on top of the measured curve any more: no lifted black, no
+            # grain multiplier.  A pushed negative is denser, and both the tone and the grain
+            # follow from that -- which is also why fotufilm can be used as a reference.
             body = (f"当前：显影 +{current} 档，曝光不联动（只换特性曲线）\n"
-                    f"自动：黑位 +{toe:.0f}/255、暗部压缩、颗粒 ×{scale:.1f}"
-                    f"（显影实测补回约 {gain:.1f} EV）\n"
+                    f"实测：显影补回约 {gain:.1f} EV，暗部更密、颗粒自然变粗\n"
                     f"要模拟“欠曝 {current} 档再迫冲”请勾选「模拟欠曝」")
             return f"{label}\n{body}" if label else body
 
@@ -8056,7 +8050,6 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'slider_halation_boost'): self.slider_halation_boost.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
             if hasattr(self, 'slider_grain'): self.slider_grain.set_value(p.get("grain", 0.4))
             if hasattr(self, 'slider_grain_size'): self.slider_grain_size.set_value(p.get("grain_size", 1.0))
-            if hasattr(self, 'slider_grain_cloud'): self.slider_grain_cloud.set_value(p.get("grain_cloud_blur", 1.0))
             if hasattr(self, 'slider_grain_colour'): self.slider_grain_colour.set_value(p.get("grain_colour", 1.0))
 
             # Lens correction controls
@@ -8296,8 +8289,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._apply_lut(lut_3d)
         self.canvas.update_params(paper_profile=self.current_paper_stock, print_mode=self.current_print_mode)
         hal_preset = self.engine.get_film_halation_preset(stock_id) if hasattr(self.engine, 'get_film_halation_preset') else None
-        grain_preset = self.engine.get_film_grain_preset(stock_id) if hasattr(self.engine, 'get_film_grain_preset') else None
-        self.canvas.update_params(film_stock=stock_id, _halation_preset=hal_preset, _grain_preset=grain_preset)
+        self.canvas.update_params(film_stock=stock_id, _halation_preset=hal_preset)
         self._schedule_histogram_update()
         if self._current_photo_path:
             self._update_active_thumbnails()
@@ -9568,10 +9560,19 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 for child in [s] + s.findChildren(QWidget):
                     child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not hal_available)
 
-        # 6. 银盐颗粒 (Grain) - Only available with real film media
+        # 6. 银盐颗粒 (Grain)
+        # The controls stay on screen but inert while the port lands: the old octave model was
+        # removed in one piece (docs/grain-port-plan.md P0) and the film-tile sampler is not in
+        # yet, so there is nothing for them to drive.  Flip GRAIN_IMPLEMENTATION_READY when P3
+        # ships instead of leaving a slider that silently does nothing.
         sec_grain = getattr(self, "sec_grain", None)
-        grain_available = not is_none
-        grain_hint = "" if grain_available else "当前处于数码原片旁通模式，无胶片银盐结晶微粒"
+        grain_available = GRAIN_IMPLEMENTATION_READY and not is_none
+        if is_none:
+            grain_hint = "当前处于数码原片旁通模式，无胶片银盐结晶微粒"
+        elif not GRAIN_IMPLEMENTATION_READY:
+            grain_hint = "颗粒模型正在移植：旧实现已移除，fotufilm 影像片模型接入中，此期间的成片不含颗粒"
+        else:
+            grain_hint = ""
         if sec_grain is not None and hasattr(sec_grain, "set_available"):
             sec_grain.set_available(grain_available, grain_hint)
             if not grain_available:
@@ -9579,7 +9580,6 @@ aspect_ratio=self._lens_frame_aspect(photo),
         grain_sliders = [
             getattr(self, "slider_grain", None),
             getattr(self, "slider_grain_size", None),
-            getattr(self, "slider_grain_cloud", None),
             getattr(self, "slider_grain_colour", None),
         ]
         for s in grain_sliders:
@@ -10523,8 +10523,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._apply_lut(lut_3d)
 
             hal_preset = self.engine.get_film_halation_preset(self.current_film_stock) if hasattr(self.engine, 'get_film_halation_preset') else None
-            grain_preset = self.engine.get_film_grain_preset(self.current_film_stock) if hasattr(self.engine, 'get_film_grain_preset') else None
-            self.canvas.update_params(film_stock=self.current_film_stock, _halation_preset=hal_preset, _grain_preset=grain_preset)
+            self.canvas.update_params(film_stock=self.current_film_stock, _halation_preset=hal_preset)
 
             # Sync active card highlights
             for sid, card in self.film_cards.items():

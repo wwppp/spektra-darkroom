@@ -53,7 +53,7 @@ from .format_constants import (
     IMPORTABLE_IMAGE_EXTENSIONS
 )
 from . import colorspace as color_space
-from . import grain_model
+from . import film_grain
 from . import push_model
 
 
@@ -80,7 +80,7 @@ PROPHOTO_TO_SRGB = np.array([
 ], dtype=np.float32)
 
 
-# Log Shaper: the definition now lives in core/shaper.py so core/grain_model.py can use the
+# Log Shaper: the definition now lives in core/shaper.py so the grain modules can use the
 # same lattice without importing the engine.  Re-exported here because a lot of code (and
 # every scratch script) imports it from this module.
 from .shaper import (  # noqa: E402  (kept next to the constants it describes)
@@ -2065,13 +2065,9 @@ class SpektraEngine:
         pushed["density_max"] = [float(v) for v in np.nanmax(curves, axis=0)]
         pushed["density_min"] = [float(v) + float(entry.get("dMin") or 0.0)
                                  for v in np.nanmin(curves, axis=0)]
-        # The law itself is measured data, but the *amplitude* is not: a pushed frame is grainier
-        # everywhere and most of all where it is thinnest.  Without this the print's tone curve
-        # compressed the shadow grain back to invisibility (sigma 0.48 -> 0.54 at +2).
-        scale, shadow, fog_grain = push_model.grain_shape_for(applied)
-        pushed["grain_scale"] = scale
-        pushed["grain_shadow_gain"] = shadow
-        pushed["grain_shadow_floor"] = fog_grain
+        # No amplitude patch: the ported model derives grain from the negative's density, and a
+        # pushed negative *is* denser, so the grain coarsens on its own.  Anything added here
+        # would be counted twice.
         pushed["push_stops"] = applied
         cache[key] = pushed
         return pushed
@@ -2089,8 +2085,8 @@ class SpektraEngine:
                 "strength": 0.010,
                 "layer_weights": [0.70, 1.0, 1.35],
                 "density_profile": None,
-                # No stock, so no declared law: grain_model then uses the P0 bell, which is the
-                # calibrated global curve.  A law here would be an invention.
+                # No stock, so no declared density range: the reversal flip and the grain
+                # sampler fall back to the model default rather than to an invented curve.
                 "density_law": None,
             }
 
@@ -2113,7 +2109,7 @@ class SpektraEngine:
                         # Density range of the stock's characteristic curves, which the density
                         # law needs for its reading-density anchor and for the Dmax fade.  The
                         # stored curves are baseline-zeroed net density, so the minimum is ~0 and
-                        # the span is what matters; see core/grain_model.bake_density_lut().
+                        # the span is what matters; the grain sampler indexes layers by it.
                         d_min, d_max = self._profile_density_range(d)
                         preset = {
                             "size_mm": float(cg.get("size_mm", 0.005)),
@@ -2224,7 +2220,7 @@ class SpektraEngine:
                           how sharp that peak is.
 
         Returns ``None`` when the profile carries no layer curves.  A sub-layer with no density at
-        all yields ``[0, 0, 0]``; ``grain_model._layer_geometry`` treats that (and any three
+        all yields ``[0, 0, 0]``; the grain sampler treats that (and any three
         sub-layers that half-develop at the same density) as "not separable" and uses its
         structural fallback.
         """
@@ -2644,7 +2640,7 @@ class SpektraEngine:
             _gp = self.get_film_grain_preset(film_stock, push_stops)
             _dmax = _gp.get("density_max")
             positive_ceiling = [
-                grain_model._layer_value(_dmax, layer, grain_model.DEFAULT_DENSITY_MAX)
+                film_grain.layer_value(_dmax, layer, film_grain.DEFAULT_DENSITY_MAX)
                 for layer in range(3)
             ]
         film_density = self._bake_film_density(
@@ -2708,10 +2704,9 @@ class SpektraEngine:
         """Return the negative net density cube on the LUT's shaper lattice.
 
         Shape ``(lut_size, lut_size, lut_size, 3)`` in **C, M, Y** order -- exactly the channel
-        order ``spektrafilm.model.develop`` returns, and the same order ``grain_model``'s
-        per-record response table expects (C absorbs red, so C is the R record).  It is a
-        *net* density (the profile curves are baseline-zeroed), which is also what
-        ``bake_density_lut`` indexes, since it adds the fog itself.
+        order ``spektrafilm.model.develop`` returns (C absorbs red, so C is the R record).
+        It is a *net* density (the profile curves are baseline-zeroed); the grain sampler
+        adds the fog when it picks a tile layer.
 
         ``positive_ceiling`` is ``(dmax_C, dmax_M, dmax_Y)`` for reversal films.  Their stored
         curves run the other way round -- the develop stage returns ``dmax - D`` for a slide
@@ -4152,12 +4147,6 @@ class SpektraEngine:
                 print_exp = float(params_dict.get("print_exposure", 1.0))
                 preflash = float(params_dict.get("pre_flash", 0.0))
             black_lift = float(params_dict.get("black_lift", 0.0))
-            # Push's fog and toe ride after the LUT: inside the film or the curve both are
-            # cancelled by the print's renormalisation (see push_model.toe_amount_for).
-            push_toe = push_model.toe_amount_for(params_dict.get("push_ev", 0))
-            push_fog = (push_model.fog_grain_for(params_dict.get("push_ev", 0))
-                        * min(push_model.FOG_GRAIN_AT_FULL_SLIDER,
-                              max(0.0, float(params_dict.get("grain", 0.4))) / 0.4))
             halation = float(params_dict.get("halation_amount", params_dict.get("halation", 1.0)))
             hal_spatial_scale = float(params_dict.get("halation_spatial_scale", 1.0))
             scatter_amount = float(params_dict.get("scatter_amount", 1.0))
@@ -4179,7 +4168,7 @@ class SpektraEngine:
                     progress_cb(15, "正在计算场景曝光与光学参数...")
                 base_temp = float(params_dict.get("base_temp", 5500.0))
                 base_tint = float(params_dict.get("base_tint", 1.0))
-                from .darkroom_math import wb_gains, apply_black_point, apply_push_toe
+                from .darkroom_math import wb_gains, apply_black_point
                 wb_g = wb_gains(temp_val, base_temp, tint_val, base_tint)
                 eff_exp = exp_val + base_ev
                 linear_full = (raw_target * float(np.exp2(eff_exp))).astype(np.float32) * wb_g
@@ -4204,8 +4193,6 @@ class SpektraEngine:
                 # export would ignore 黑场 while the viewport honoured it.
                 if abs(black_lift) > 1e-4:
                     rendered_float = apply_black_point(rendered_float, black_lift)
-                if push_toe > 1e-4:
-                    rendered_float = apply_push_toe(rendered_float, push_toe, push_fog)
 
                 # Crop, flips and straighten exactly as the film pipeline does below
                 rendered_float = self._apply_export_crop(rendered_float, params_dict)
@@ -4241,7 +4228,7 @@ class SpektraEngine:
             base_temp = float(params_dict.get("base_temp", 5500.0))
             base_tint = float(params_dict.get("base_tint", 1.0))
             from .darkroom_math import (wb_gains, paper_domain_adjust, chemistry_delta,
-                                       grain_colour_rho, apply_black_point, apply_push_toe)
+                                       apply_black_point)
             wb_g = wb_gains(temp_val, base_temp, tint_val, base_tint)
             lut_baked = self.get_lut_baked_params(lut_3d)
 
@@ -4348,36 +4335,9 @@ class SpektraEngine:
                 chem_params["morph_gamma"] = 1.0
                 chem_params["developer_exhaustion"] = 0.0
 
-            grain_preset = self.get_film_grain_preset(
-                film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))
-            st_size = float(grain_preset.get("size_mm", 0.005))
-            st_strength = float(grain_preset.get("strength", 0.010))
-            st_lw = np.array(grain_preset.get("layer_weights", [0.70, 1.0, 1.35]), dtype=np.float32)
-            # Grain weights, density response and amplitude normalisation all come from
-            # core/grain_model.py -- the same module the preview shader takes its uniforms
-            # from. Scaling the long edge to the *output* size keeps the physical grain size
-            # tied to the film plane, and grain_model's octave floor stops small exports from
-            # degenerating into unfiltered white noise.
-            grain_colour = float(params_dict.get("grain_colour", 1.0))
-            grain_spec = grain_model.derive(
-                grain_slider=grain,
-                stock_strength=st_strength,
-                layer_weights=st_lw,
-                cloud_blur=params_dict.get("grain_cloud_blur", 1.0),
-                # rho is solved inside derive() from the stock's correlation target
-                rho=grain_colour_rho(st_strength, grain_colour),
-                fmt_mm=fmt_mm,
-                long_edge_px=max(H, W),
-                grain_size=grain_size,
-                stock_size_mm=st_size,
-                grain_colour=grain_colour,
-                density_preset=grain_preset,
-                film_density=film_density,
-            )
-            # One Generator per chunk, seeded from the chunk's own row offset. A single
-            # shared Generator was both thread-unsafe and non-reproducible: the same
-            # parameters produced different grain on every export.
-            grain_seed_base = 20260127
+            # Grain parameters, in fotufilm's own terms.  The tile sampler (P2) reads the same
+            # object; the stock's crystal population and tile data come from the engine.
+            grain_params = film_grain.params_for(params_dict)
 
             def _process_chunk(y_range):
                 y0, y1 = y_range
@@ -4386,21 +4346,20 @@ class SpektraEngine:
                 if cancel_cb and cancel_cb():
                     return
                 chunk_linear = linear_full[y0:y1].copy()
-                chunk_rng = np.random.default_rng(grain_seed_base + y0 * 7919)
 
-                # Pre-LUT physical transmittance grain (shared model with the GPU shader).  The
-                # call goes through grain_model.apply_block so the export cannot fall behind the
-                # preview: density lookup, per-octave response and transmittance live there (P2).
-                # The push's display-domain grain is keyed on the negative's emptiness, so the
-                # block's density has to survive the grain stage (it is read before the grain is
-                # applied -- that is the negative's own density, not the grainy transmittance).
-                chunk_density = None
-                if grain_spec.active:
-                    if push_toe > 1e-4:
-                        chunk_linear, chunk_density = grain_model.apply_block(
-                            chunk_linear, grain_spec, chunk_rng, return_density=True)
-                    else:
-                        chunk_linear = grain_model.apply_block(chunk_linear, grain_spec, chunk_rng)
+                # Pre-LUT transmittance grain: the pixel is light that went through one small
+                # patch of the stock's film tile, so the stage has to run on the negative side of
+                # the LUT, exactly where the reference implementation puts it.  Inert until the
+                # sampler lands (P2); the wiring is already the final shape.
+                if film_grain.FILM_GRAIN_ACTIVE:
+                    chunk_linear = film_grain.apply_block(
+                        chunk_linear, grain_params,
+                        stock=film_stock,
+                        fmt_mm=fmt_mm,
+                        long_edge_px=max(H, W),
+                        film_density=film_density,
+                        push_stops=int(round(float(params_dict.get("push_ev", 0) or 0))),
+                    )
 
                 coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
                 idx0 = coords.astype(np.int32)
@@ -4444,14 +4403,6 @@ class SpektraEngine:
 
                 # Bidirectional Black Point calibration (white-point preserving: >0 lifts shadows/fades, <0 subtracts base fog/deepens blacks)
                 chunk_film = apply_black_point(chunk_film, black_lift)
-                chunk_blank = None
-                if push_toe > 1e-4:
-                    if chunk_density is None:
-                        chunk_density = grain_model.density_for_linear(
-                            linear_full[y0:y1], film_density)
-                    chunk_blank = push_model.blank_weight(chunk_density)
-                chunk_film = apply_push_toe(chunk_film, push_toe, push_fog,
-                                            origin=(y0, 0), blank=chunk_blank)
 
                 rendered_float[y0:y1] = np.clip(chunk_film, 0.0, 1.0)
 

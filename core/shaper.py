@@ -2,8 +2,8 @@
 
 Both the LUT bake and the grain density cube are sampled on this lattice, and the shader
 re-implements it as GLSL ``linear_to_shaper``.  It used to live in ``core/app_core.py``;
-it moved here so ``core/grain_model.py`` can use it without importing the engine (which
-imports grain_model, so that would be a cycle).
+it moved here so the grain modules can use it without importing the engine (which
+imports them, so that would be a cycle).
 
 ``core.app_core`` re-exports these names, so ``from core.app_core import shaper_forward``
 keeps working.

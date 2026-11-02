@@ -40,7 +40,7 @@ added_hidden = [
     'core.darkroom_math',
     'core.lens_correction',
     'core.colorspace',
-    'core.grain_model',
+    'core.film_grain',
     'core.version',
     'ui',
     'ui.about_dialog',
