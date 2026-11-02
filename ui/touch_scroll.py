@@ -16,13 +16,15 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
-    QAbstractButton, QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QApplication, QComboBox,
+    QAbstractItemView, QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QApplication,
     QLineEdit, QTextEdit,
 )
 
-#: Widgets that want the finger themselves: dragging a slider, typing, picking from a combo.  A
-#: touch that lands on one is left to Qt's own touch-to-mouse translation.
-_CONTROL_TYPES = (QAbstractSlider, QAbstractButton, QAbstractSpinBox, QComboBox, QLineEdit, QTextEdit)
+#: Widgets that want the finger themselves: a slider needs a continuous drag, a field needs to
+#: select text.  A touch landing on one is left to Qt's own touch-to-mouse translation.
+#: Buttons and combo boxes are *not* here: they only need a click, and a click is what a tap
+#: replays -- otherwise a swipe that starts on a combo opens it.
+_PAN_THROUGH_TYPES = (QAbstractSlider, QAbstractSpinBox, QLineEdit, QTextEdit)
 
 SLOP_PX = 10.0          # a finger may wander this far and still be a tap
 LONG_PRESS_MS = 550     # held still this long, the finger asks for the context menu
@@ -31,20 +33,24 @@ FRICTION = 0.90         # per 16 ms tick, matching the wheel's momentum
 STOP_VELOCITY = 0.4     # px/tick below which the fling is over
 MAX_VELOCITY = 60.0     # px/tick; a fast flick cannot launch the list into orbit
 
-_INSTALLED: set[int] = set()
-_TOUCH_AREAS: set[int] = set()      # areas whose viewport took the touch ourselves
+def _pan_area(node):
+    """The filter of the scroll area ``node`` sits in, if a finger drives it."""
+    while node is not None:
+        if isinstance(node, _PAN_THROUGH_TYPES):
+            return None
+        try:
+            pan = getattr(node, "_touch_pan", None)
+        except RuntimeError:            # the C++ side is already gone
+            return None
+        if pan is not None:
+            return pan
+        node = node.parentWidget()
+    return None
 
 
 def _in_pan_area(widget) -> bool:
     """Whether ``widget`` sits inside a scroll area a finger drives, and not on a control."""
-    node = widget
-    while node is not None:
-        if isinstance(node, _CONTROL_TYPES):
-            return False
-        if id(node) in _TOUCH_AREAS:
-            return True
-        node = node.parentWidget()
-    return False
+    return _pan_area(widget) is not None
 
 
 class _SynthesizedClickGuard(QObject):
@@ -74,6 +80,26 @@ class _SynthesizedClickGuard(QObject):
         if app is None:
             return False
         return _in_pan_area(app.widgetAt(event.globalPosition().toPoint()))
+
+
+class _PopupWatcher(QObject):
+    """A combo's drop-down is a QListView created on demand; give it a finger as it appears."""
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt naming)
+        if event.type() == QEvent.Type.Show and isinstance(obj, QAbstractItemView):
+            window = obj.window()
+            if window is not None and window.windowFlags() & Qt.WindowType.Popup:
+                install_touch_scroll(obj)
+        return False
+
+
+def watch_combo_popups(app) -> None:
+    """Install the popup watcher once, on the application."""
+    if getattr(app, "_touch_popup_watcher", None) is not None:
+        return
+    watcher = _PopupWatcher(app)
+    app.installEventFilter(watcher)
+    app._touch_popup_watcher = watcher
 
 
 def guard_touch_clicks(app) -> None:
@@ -205,7 +231,7 @@ class TouchPanFilter(QObject):
     def _control_at(self, position: QPointF) -> bool:
         node = self._viewport.childAt(position.toPoint())
         while node is not None and node is not self._viewport:
-            if isinstance(node, _CONTROL_TYPES):
+            if isinstance(node, _PAN_THROUGH_TYPES):
                 return True
             node = node.parentWidget()
         return False
@@ -260,8 +286,10 @@ class TouchPanFilter(QObject):
     def _click_at(self, position: QPointF) -> None:
         """Replay a tap as a click on whatever child the finger is over."""
         point = QPoint(int(position.x()), int(position.y()))
-        target = self._viewport.childAt(point)
-        if target is None or not target.isEnabled():
+        # An item view (a combo's list, a table) has no child widgets: the click goes to the
+        # viewport, whose own handler picks the item by position.
+        target = self._viewport.childAt(point) or self._viewport
+        if not target.isEnabled():
             return
         local = target.mapFrom(self._viewport, point)
         global_pos = target.mapToGlobal(local)
@@ -276,9 +304,11 @@ def install_touch_scroll(area: QAbstractScrollArea | None) -> TouchPanFilter | N
     """Give one scroll area finger scrolling.  Safe to call twice for the same widget."""
     if area is None or area.viewport() is None:
         return None
-    key = id(area)
-    if key in _INSTALLED:
+    try:
+        if getattr(area, "_touch_pan", None) is not None:
+            return None
+    except RuntimeError:
         return None
-    _INSTALLED.add(key)
-    _TOUCH_AREAS.add(key)
-    return TouchPanFilter(area)
+    pan = TouchPanFilter(area)
+    area._touch_pan = pan            # also how the click guard finds the area
+    return pan

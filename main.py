@@ -231,8 +231,9 @@ def main():
     # A finger on a card makes Qt invent a mouse press, which selects the card before the finger
     # has moved far enough to tell a tap from a drag.  The pan filter replays the tap itself, so
     # the invented clicks inside a scrolling area are dropped.
-    from ui.touch_scroll import guard_touch_clicks
+    from ui.touch_scroll import guard_touch_clicks, watch_combo_popups
     guard_touch_clicks(app)
+    watch_combo_popups(app)
 
     # Anything that escapes to the top level during startup goes to the log as well: in the
     # windowed build there is no console to print it to.
