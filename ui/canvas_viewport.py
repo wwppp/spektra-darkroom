@@ -2045,15 +2045,21 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_scene_prepared", 0.0)
 
         # Film Stock Crystal Grain physics (Per-stock crystal size, strength, layer weights)
-        grain_preset = self.params.get("_grain_preset")
+        # The engine is asked first, always with the current push stops: a push raises the grain
+        # preset's amplitude (grain_scale / shadow gain / fog floor), and the cached ``_grain_preset``
+        # the film change hands over is the *standard development* one.  Reading that cache first
+        # made the preview ignore the push entirely while the export honoured it -- the pushed
+        # frame looked no grainier on screen.
+        grain_preset = None
+        eng = getattr(self, "engine", None)
+        if not eng and hasattr(self.parent(), "engine"):
+            eng = self.parent().engine
+        if eng and hasattr(eng, "get_film_grain_preset"):
+            stock = self.params.get("film_stock", "kodak_portra_400")
+            grain_preset = eng.get_film_grain_preset(
+                stock, int(round(float(self.params.get("push_ev", 0) or 0))))
         if not grain_preset:
-            eng = getattr(self, "engine", None)
-            if not eng and hasattr(self.parent(), "engine"):
-                eng = self.parent().engine
-            if eng and hasattr(eng, "get_film_grain_preset"):
-                stock = self.params.get("film_stock", "kodak_portra_400")
-                grain_preset = eng.get_film_grain_preset(
-                    stock, int(round(float(self.params.get("push_ev", 0) or 0))))
+            grain_preset = self.params.get("_grain_preset")
         if not grain_preset:
             grain_preset = {"size_mm": 0.005, "strength": 0.010, "layer_weights": [0.70, 1.0, 1.35]}
 
@@ -3313,15 +3319,18 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_hal_sigma_um", sigma_um)
 
             # Film Stock Crystal Grain physics (Per-stock crystal size, strength, layer weights)
-            grain_preset = eff_params.get("_grain_preset")
+            # Same order as the live path: the push must reach the preset, so the engine's
+            # push-aware answer wins over the standard-development cache.
+            grain_preset = None
+            eng = getattr(self, "engine", None)
+            if not eng and hasattr(self.parent(), "engine"):
+                eng = self.parent().engine
+            if eng and hasattr(eng, "get_film_grain_preset"):
+                stock = eff_params.get("film_stock", "kodak_portra_400")
+                grain_preset = eng.get_film_grain_preset(
+                    stock, int(round(float(eff_params.get("push_ev", 0) or 0))))
             if not grain_preset:
-                eng = getattr(self, "engine", None)
-                if not eng and hasattr(self.parent(), "engine"):
-                    eng = self.parent().engine
-                if eng and hasattr(eng, "get_film_grain_preset"):
-                    stock = eff_params.get("film_stock", "kodak_portra_400")
-                    grain_preset = eng.get_film_grain_preset(
-                        stock, int(round(float(eff_params.get("push_ev", 0) or 0))))
+                grain_preset = eff_params.get("_grain_preset")
             if not grain_preset:
                 grain_preset = {"size_mm": 0.005, "strength": 0.010, "layer_weights": [0.70, 1.0, 1.35]}
 
