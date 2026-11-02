@@ -107,6 +107,11 @@ in vec2 v_texcoord;
 out vec4 fragColor;
 
 uniform sampler2D u_image;
+// The file as it was imported.  When the halation chain has run, u_image is its shaped output
+// -- exposure, white balance, highlight/shadow shaping and the boost baked in -- so the Before
+// side cannot read it: it would show the grade it is meant to be compared against.
+uniform sampler2D u_raw_image;
+uniform int u_has_raw;
 uniform sampler3D u_lut;
 uniform int u_has_image;
 uniform int u_has_lut;
@@ -730,6 +735,14 @@ void main() {
     
     vec3 orig_rgb = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).rgb;
 
+    // The Before side reads the file, not the shaped preview: no exposure, no white balance, no
+    // highlight/shadow shaping, no boost, and none of the lens repairs below (CA, defringing,
+    // vignette) -- those are edits too.  It keeps the geometry: the same sample_uv carries the
+    // crop, the rotation and the distortion correction, so a split compare does not slide.
+    vec3 before_rgb = (u_has_raw == 1)
+        ? textureGrad(u_raw_image, sample_uv, d_sample_dx, d_sample_dy).rgb
+        : orig_rgb;
+
     // 1. Lateral CA Radial Shift (only when calibrated non-zero params provided)
     if (u_lens_ca_enabled == 1 &&
         (abs(u_lens_ca_scale_r) + abs(u_lens_ca_scale_b) +
@@ -860,8 +873,8 @@ void main() {
     // keeps re-imports idempotent), so the untouched view has to apply it here. Without it the
     // Before side sits up to ~1 stop hot and flat next to the developed side: the sky clips to
     // white and the shadows lift, which reads as a grey milky wash rather than a neutral baseline.
-    vec3 before_lin = orig_rgb * exp2(u_base_ev);
-    vec3 before_color = (u_is_bypass == 2) ? clamp(orig_rgb, 0.0, 1.0) : clamp(prophoto_to_srgb(before_lin), 0.0, 1.0);
+    vec3 before_lin = before_rgb * exp2(u_base_ev);
+    vec3 before_color = (u_is_bypass == 2) ? clamp(before_rgb, 0.0, 1.0) : clamp(prophoto_to_srgb(before_lin), 0.0, 1.0);
 
     // -------------------------------------------------------------
     // Compare Modes (Must execute BEFORE bypass early return!)
@@ -1780,6 +1793,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
             funcs.glActiveTexture(0x84C0)  # GL_TEXTURE0
             GL.glBindTexture(GL.GL_TEXTURE_2D, prepared_tex if prepared_tex else self._image_tex_id)
             u_1i("u_image", 0)
+            # Unit 2: the file itself, for the Before side.  Only needed when the chain replaced
+            # the texture; otherwise u_image already is the file.
+            funcs.glActiveTexture(0x84C2)  # GL_TEXTURE2
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._image_tex_id)
+            u_1i("u_raw_image", 2)
+            u_1i("u_has_raw", 1 if prepared_tex else 0)
 
         # Bind 3D LUT Texture (Unit 1)
         if self._lut_tex_id:
@@ -3106,6 +3125,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             funcs.glActiveTexture(0x84C0)  # GL_TEXTURE0
             GL.glBindTexture(GL.GL_TEXTURE_2D, prepared_tex if prepared_tex else active_tex_id)
             u_1i("u_image", 0)
+            funcs.glActiveTexture(0x84C2)  # GL_TEXTURE2
+            GL.glBindTexture(GL.GL_TEXTURE_2D, active_tex_id)
+            u_1i("u_raw_image", 2)
+            u_1i("u_has_raw", 1 if prepared_tex else 0)
 
             if active_lut_tex_id:
                 funcs.glActiveTexture(0x84C1)  # GL_TEXTURE1
