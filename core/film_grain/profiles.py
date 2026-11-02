@@ -4,8 +4,9 @@ The table is baked from fotufilm packs by ``tools/sync_fotufilm_grain_params.py`
 reads it.  A stock that is not in it gets **no grain** rather than somebody else's: a film whose
 grain we have not measured is better off clean than wearing another stock's emulsion.
 
-``source`` in the table is ``fotufilm:<pack>`` for a stock we took a same-name counterpart from,
-and ``family:<family>`` where only a family default exists (P2 step three fills those in).  The UI
+``source`` in the table is ``fotufilm:<pack>`` for a stock we took from that pack's sheet, and
+``derived:<sibling>`` for a stock no pack covers: it borrows a relative's coating (population,
+layer weights, crystal size) and carries its own strength, with ``derivation`` saying how.  The UI
 is meant to show the difference, so the value travels with the lookup.
 """
 from __future__ import annotations

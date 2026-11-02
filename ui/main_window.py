@@ -9577,8 +9577,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 from core.film_grain import grain_source
                 if grain_source(getattr(self, "current_film_stock", None)) is None:
                     grain_available = False
-                    grain_hint = ("这支胶卷的颗粒参数尚未固化（移植期先做了 Gold 200 / Portra 400 / "
-                                  "Tri-X 400 三支做验收），换这三支以外的胶卷暂时无颗粒")
+                    grain_hint = ("这支胶卷还没有颗粒参数：推冲的 Portra 800（Push 1 / Push 2）要等"
+                                  "推冲显影模型移植后才铺，其余胶卷均已固化")
             except Exception:
                 pass
         if sec_grain is not None and hasattr(sec_grain, "set_available"):

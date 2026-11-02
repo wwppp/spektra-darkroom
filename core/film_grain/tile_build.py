@@ -559,16 +559,23 @@ def anchor_to_sheet(record: FilmRecord, gross: float, target_sigma: float, seed:
     slope = 0.5
     last: tuple[float, float] | None = None
     current = record
+    best = record                                   # the closest reading so far
+    best_miss = np.inf
     for _ in range(passes):
         measured = sigma48(build_level(current, gross, seed=seed, side=side))
         if measured <= 0:
             break
-        miss = np.log(target_sigma / measured)
+        miss = float(np.log(target_sigma / measured))
         if verbose:
             print("  anchor: measured %.5f, target %.5f, factor %.4f"
                   % (measured, target_sigma, solved))
+        # Where the clouds have merged, sigma is not monotone in the dye: a step can overshoot and
+        # the next one overshoot back, and the loop leaves the last record -- which may be much
+        # further from the sheet than one it passed through.  Keep the closest instead.
+        if abs(miss) < best_miss:
+            best, best_miss = current, abs(miss)
         if abs(miss) < tolerance:
-            break
+            return current
         if last is not None and abs(np.log(solved / last[0])) > 1e-3:
             slope = float(min(max(np.log(measured / last[1]) / np.log(solved / last[0]), 0.25), 1.5))
         last = (solved, measured)
@@ -576,7 +583,7 @@ def anchor_to_sheet(record: FilmRecord, gross: float, target_sigma: float, seed:
         current = replace(current, sublayers=tuple(layer.with_dye(step)
                                                    for layer in current.sublayers))
         solved *= step
-    return current
+    return best
 
 
 def build_levels(record: FilmRecord, grosses: Sequence[float] | None = None, seed: int = 1,

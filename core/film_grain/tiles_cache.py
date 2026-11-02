@@ -33,7 +33,7 @@ from .population import CrystalPopulation, GrainStock
 
 __all__ = ["StockTiles", "build_tiles", "load_or_build", "is_cached", "TileStore"]
 
-CACHE_VERSION = 5          # 5: reversal fraction table by net density, anchor at d_min + net
+CACHE_VERSION = 6          # 6: anchor keeps its closest pass (sigma is not monotone in dye)
 
 
 def _cache_root() -> Path:
