@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import hashlib
 import time
 import io
 import collections
@@ -1438,6 +1439,35 @@ class SpektraEngine:
                 self._profile_cache[stock_id] = load_processed_profile(stock_id)
         return self._profile_cache[stock_id]
 
+    def _profile_fingerprint(self, stock_id):
+        """Short digest of the numbers a LUT is baked from, for the cache file name.
+
+        The cache is keyed by stock id, but a stock id survives a correction to the profile
+        itself -- curves re-laid, base dropped, a pack re-converted -- and the engine would then
+        keep serving the table baked from the old numbers.  That happened to harman_phoenix_200:
+        its curve was fixed and nothing changed on screen until the cache was deleted by hand.
+        Hashing what the bake actually reads makes a corrected profile miss the old table.
+        """
+        cache = getattr(self, "_profile_fp_cache", None)
+        if cache is None:
+            cache = self._profile_fp_cache = {}
+        key = (stock_id, id(self._profile_cache.get(stock_id)))
+        fingerprint = cache.get(key)
+        if fingerprint is not None:
+            return fingerprint
+        digest = hashlib.sha1()
+        profile = self._load_profile(stock_id)
+        if profile is not None:
+            data = getattr(profile, "data", None)
+            for name in ("density_curves", "density_curves_layers", "base_density",
+                         "channel_density", "log_sensitivity", "log_exposure"):
+                array = np.asarray(getattr(data, name, np.empty(0)), dtype=np.float64)
+                digest.update(name.encode())
+                digest.update(np.round(array, 6).tobytes())
+        fingerprint = digest.hexdigest()[:8]
+        cache[key] = fingerprint
+        return fingerprint
+
     BUILTIN_FILM_IDS = {
         "none", "kodak_portra_400", "kodak_portra_160", "kodak_portra_800",
         "kodak_portra_800_push1", "kodak_portra_800_push2", "kodak_gold_200",
@@ -2470,16 +2500,22 @@ class SpektraEngine:
         from .path_utils import get_user_lut_cache_dir
         cache_dir = get_user_lut_cache_dir()
         bundled_cache_dir = os.path.join(self.resources_dir, ".lut_cache")
+        # A profile can be corrected without its name changing -- hand-edited curves, a repaired
+        # pack, a re-converted stock.  The cache used to be keyed by the stock id alone, so a
+        # corrected profile kept rendering from the table baked for the old one: harman_phoenix_200
+        # looked unchanged after its curve was fixed until the cache was cleared by hand.  The
+        # fingerprint below is what the table was actually baked from.
+        fingerprint = self._profile_fingerprint(film_stock)
         # The bundled tables are all standard development; a pushed bake must never be served one.
         if is_default_params and not push_stops:
-            cache_file = os.path.join(cache_dir, f"v4_shaper__{self._push_cache_tag(push_stops)}{film_stock}__{eff_paper}__{lut_size}.npy")
-            bundled_file = os.path.join(bundled_cache_dir, f"v4_shaper__{film_stock}__{eff_paper}__{lut_size}.npy")
+            cache_file = os.path.join(cache_dir, f"v5_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}.npy")
+            bundled_file = os.path.join(bundled_cache_dir, f"v5_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}.npy")
             load_target = cache_file if os.path.exists(cache_file) else (bundled_file if os.path.exists(bundled_file) else None)
             # The grain law reads the negative density, not the LUT. Serving a cached LUT without
             # its density cube would silently drop the grain back to the -log10(lin) domain, so a
             # cache hit only counts when both files are there; otherwise fall through and rebake
             # (one extra develop-only pass, once per stock).
-            dens_name = (f"density_v2__{self._push_cache_tag(push_stops)}{film_stock}"
+            dens_name = (f"density_v3__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}"
                          f"__{eff_paper}__{lut_size}__1.0_1.0_1.0.npy")
             dens_file = os.path.join(cache_dir, dens_name)
             dens_bundled = os.path.join(bundled_cache_dir, dens_name)
@@ -2729,8 +2765,8 @@ class SpektraEngine:
         # in the filename too: with it missing, a pushed bake loaded the standard cube from disk
         # and every push setting produced the same densities (measured: +0/+1/+2 identical).
         push_tag = self._push_cache_tag(key[-1]) if isinstance(key[-1], int) else ""
-        fname = (f"density_v2__{push_tag}{key[0]}__{key[1]}__{lut_size}"
-                 f"__{key[4]}_{key[5]}_{key[6]}.npy")
+        fname = (f"density_v3__{push_tag}{self._profile_fingerprint(key[0])}_{key[0]}"
+                 f"__{key[1]}__{lut_size}__{key[4]}_{key[5]}_{key[6]}.npy")
         for directory in (cache_dir, bundled_dir):
             if not directory:
                 continue
