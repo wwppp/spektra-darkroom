@@ -1138,6 +1138,10 @@ void main() {
     // be granular.  Without it a frame that renders under the paper's black point comes out as a
     // single flat value at any zoom -- measured sigma 0.00 with the grain slider at 1.0.
     float push_fog_n = 0.0;
+    // How empty the negative is here, per pixel: 1 at fog level, 0 once the image starts.  Read
+    // from dens_D below, which is the film's own density -- the print's brightness says nothing
+    // about it (a flat patch can be bright and still carry no dye clouds at all).
+    vec3 push_blank = vec3(0.0);
     if (u_grain > 0.01) {
         // Golden-ratio irrational rotation matrix (breaks all raster / coordinate grid alignment)
         const mat2 rot = mat2(0.9114, -0.4115, 0.4115, 0.9114);
@@ -1222,9 +1226,11 @@ void main() {
         float eff_strength = (u_grain / 0.40) * (base_stock_strength / 0.010);
         // The toe's own grain, at the fine octave's scale and attenuated by the screen footprint
         // like everything else, so a fit-view preview stays smooth instead of turning to static.
-        // 2.31 normalises the fine octave's realised std (0.432 after smoothstep interpolation)
-        // to 1.0, so this term matches darkroom_math.fog_noise() at the same amplitude.
-        push_fog_n = shared_fine * grain_att * clamp(u_grain / 0.4, 0.0, 2.0) * 2.31;
+        // Match darkroom_math.fog_noise()'s realised std, measured against the export rather than
+        // derived: on a blank frame at 100% the export reads sigma 6.64 while this shader read
+        // 9.45 with the old 2.31, and the ratio held linearly as the factor came down (2.31 ->
+        // 1.97 -> 8.06).  1.62 is where the two agree.
+        push_fog_n = shared_fine * grain_att * clamp(u_grain / 0.4, 0.0, 2.5) * 1.62;
 
         // Granularity vs negative optical density.  Two possible sources for D:
         //   u_film_density_enable == 1: the negative's own net density, read from the cube the
@@ -1242,6 +1248,13 @@ void main() {
             dens_D = textureLod(u_film_density, dens_coord, 0.0).rgb;
         } else {
             dens_D = -log(clamp(linear_rgb, vec3(1e-4), vec3(1.0))) * (1.0 / 2.302585092994046);
+        }
+        // Mirrors push_model.blank_weight(): smoothstep down from BLANK_IMAGE_DENSITY to
+        // BLANK_FOG_DENSITY on the record-mean density.
+        {
+            float d_bar = dot(dens_D, vec3(1.0 / 3.0));
+            float t_blank = clamp((0.30 - d_bar) / (0.30 - 0.06), 0.0, 1.0);
+            push_blank = vec3(t_blank * t_blank * (3.0 - 2.0 * t_blank));
         }
         // Per-octave responses.  The table is 512 wide (density) by 3 tall (record), and each
         // texel's rgb carries the fine / cloud / mottle response at that density, so one fetch
@@ -1337,7 +1350,10 @@ void main() {
         // crushed the frame and fades out of the midtones, instead of laying a constant
         // fluctuation over the whole image.
         vec3 inv3 = inv * inv * inv;
-        vec3 pedestal = inv3 + vec3(u_push_fog * push_fog_n) * inv3 * inv3;
+        // Either reason is enough for the fog grain: the print crushed this pixel, or the
+        // negative was empty here.  They overlap in deep shadow, so take the larger, never the sum.
+        vec3 fog_w = max(inv3 * inv3, push_blank);
+        vec3 pedestal = inv3 + vec3(u_push_fog * push_fog_n) * fog_w;
         film_rgb = clamp(film_rgb + u_push_toe * pedestal, 0.0, 1.0);
     }
 

@@ -42,7 +42,7 @@ GRAIN_SCALE_PER_STOP = 0.60    # overall grain amplitude
 GRAIN_SHADOW_PER_STOP = 1.60   # extra amplitude at zero density, fading to 0 at the anchor
 GRAIN_FOG_PER_STOP = 2.60      # additive shadow grain (the fog's own grain), in DENS_GAIN units
 FOG_GRAIN_RELATIVE = 0.15      # fluctuation of the lifted black, as a fraction of the lift itself
-FOG_GRAIN_AT_FULL_SLIDER = 2.0 # the 颗粒 slider multiplies it, up to this, over its 0.40 default
+FOG_GRAIN_AT_FULL_SLIDER = 2.5 # the 颗粒 slider multiplies it, up to this, over its 0.40 default
 
 
 def toe_amount_for(stops):
@@ -91,6 +91,30 @@ def fog_grain_for(stops):
     if not stops:
         return 0.0
     return FOG_GRAIN_RELATIVE
+
+
+# A negative this empty carries nothing but fog; from BLANK_IMAGE_DENSITY up it has image of its
+# own and the ordinary density law already gives it grain.  Between the two the weight fades.
+BLANK_FOG_DENSITY = 0.06
+BLANK_IMAGE_DENSITY = 0.30
+
+
+def blank_weight(density):
+    """How empty the negative is at each pixel: 1 at fog level, 0 once the image starts.
+
+    The display-domain grain cannot be keyed on print brightness.  Measured on a real frame
+    (Gold 200 / Endura, -2 EV, +2): one patch went sigma 0.95 -> 0.14 as the paper exposure rose
+    from x2.6 to x4.0, because that patch sat on a flat part of the paper curve -- and a flat
+    curve turns any density modulation into no brightness change at all.  Stepping back to the
+    film shows what actually separates the two cases: an empty negative (D at fog level) has no
+    dye clouds, only silver fog, and silver fog is grainy no matter where the print places it.
+    So the weight is the negative's emptiness, not the print's darkness.
+    """
+    d = np.asarray(density, dtype=np.float32)
+    if d.ndim == 3:
+        d = d.mean(axis=2)
+    t = np.clip((BLANK_IMAGE_DENSITY - d) / (BLANK_IMAGE_DENSITY - BLANK_FOG_DENSITY), 0.0, 1.0)
+    return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
 
 
 def push_dir(resources_dir):

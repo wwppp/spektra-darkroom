@@ -257,7 +257,7 @@ def fog_noise(h, w, origin_y=0, origin_x=0):
     return 2.0 * np.tanh(n * 0.5)
 
 
-def apply_push_toe(img, amount=0.0, fog_grain=0.0, origin=(0, 0)):
+def apply_push_toe(img, amount=0.0, fog_grain=0.0, origin=(0, 0), blank=None):
     """Push development's display-domain toe: lift the black point, soften the shadows.
 
     ``v + a(1-v)^3`` keeps white at 1.0 (the term vanishes there), lifts the deepest tone to
@@ -271,6 +271,14 @@ def apply_push_toe(img, amount=0.0, fog_grain=0.0, origin=(0, 0)):
     black point comes out as a perfectly flat card: measured, one unique RGB value, sigma 0.00,
     at 100% zoom with the grain slider at 1.0.  Real fog is silver and is granular, so the lift
     gets a zero-mean field scaled against itself.
+
+    ``blank`` is the negative's emptiness per pixel (``push_model.blank_weight``), in [0, 1].
+    It exists because the weight above cannot cover the other dead case: a *flat* area that the
+    print does not crush but merely renders on a flat part of its curve.  Measured on Gold 200 /
+    Endura at +2, one such patch fell from sigma 0.95 to 0.14 as the paper exposure went from
+    x2.6 to x4.0 -- raising the print pushed it further onto the flat section, where no density
+    modulation reaches the paper.  The film, not the print, says which pixels are empty, so where
+    the negative has nothing the fog grain is laid down regardless of how bright the print is.
     """
     a = float(amount)
     if a <= 1e-4:
@@ -284,7 +292,15 @@ def apply_push_toe(img, amount=0.0, fog_grain=0.0, origin=(0, 0)):
         n = fog_noise(h, w, origin[0], origin[1])
         # Weighted by the pedestal's own cube: strongest where the print crushed the frame,
         # gone from the midtones.  A flat fluctuation everywhere just reads as noise.
-        pedestal = pedestal + (n * g)[:, :, None] * inv3 * inv3
+        weight = inv3 * inv3
+        if blank is not None:
+            b = np.asarray(blank, dtype=np.float32)
+            if b.ndim == 1:
+                b = b.reshape(h, w)
+            # Either reason is enough: the print crushed this pixel, or the negative was empty
+            # here.  They overlap in deep shadow, so take the larger, never the sum.
+            weight = np.maximum(weight, b[:, :, None] if b.ndim == 2 else b)
+        pedestal = pedestal + (n * g)[:, :, None] * weight
     return np.clip(img + a * pedestal, 0.0, 1.0).astype(np.float32)
 
 

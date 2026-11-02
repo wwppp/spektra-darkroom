@@ -4156,7 +4156,8 @@ class SpektraEngine:
             # cancelled by the print's renormalisation (see push_model.toe_amount_for).
             push_toe = push_model.toe_amount_for(params_dict.get("push_ev", 0))
             push_fog = (push_model.fog_grain_for(params_dict.get("push_ev", 0))
-                        * min(2.0, max(0.0, float(params_dict.get("grain", 0.4))) / 0.4))
+                        * min(push_model.FOG_GRAIN_AT_FULL_SLIDER,
+                              max(0.0, float(params_dict.get("grain", 0.4))) / 0.4))
             halation = float(params_dict.get("halation_amount", params_dict.get("halation", 1.0)))
             hal_spatial_scale = float(params_dict.get("halation_spatial_scale", 1.0))
             scatter_amount = float(params_dict.get("scatter_amount", 1.0))
@@ -4390,8 +4391,16 @@ class SpektraEngine:
                 # Pre-LUT physical transmittance grain (shared model with the GPU shader).  The
                 # call goes through grain_model.apply_block so the export cannot fall behind the
                 # preview: density lookup, per-octave response and transmittance live there (P2).
+                # The push's display-domain grain is keyed on the negative's emptiness, so the
+                # block's density has to survive the grain stage (it is read before the grain is
+                # applied -- that is the negative's own density, not the grainy transmittance).
+                chunk_density = None
                 if grain_spec.active:
-                    chunk_linear = grain_model.apply_block(chunk_linear, grain_spec, chunk_rng)
+                    if push_toe > 1e-4:
+                        chunk_linear, chunk_density = grain_model.apply_block(
+                            chunk_linear, grain_spec, chunk_rng, return_density=True)
+                    else:
+                        chunk_linear = grain_model.apply_block(chunk_linear, grain_spec, chunk_rng)
 
                 coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
                 idx0 = coords.astype(np.int32)
@@ -4435,7 +4444,14 @@ class SpektraEngine:
 
                 # Bidirectional Black Point calibration (white-point preserving: >0 lifts shadows/fades, <0 subtracts base fog/deepens blacks)
                 chunk_film = apply_black_point(chunk_film, black_lift)
-                chunk_film = apply_push_toe(chunk_film, push_toe, push_fog, origin=(y0, 0))
+                chunk_blank = None
+                if push_toe > 1e-4:
+                    if chunk_density is None:
+                        chunk_density = grain_model.density_for_linear(
+                            linear_full[y0:y1], film_density)
+                    chunk_blank = push_model.blank_weight(chunk_density)
+                chunk_film = apply_push_toe(chunk_film, push_toe, push_fog,
+                                            origin=(y0, 0), blank=chunk_blank)
 
                 rendered_float[y0:y1] = np.clip(chunk_film, 0.0, 1.0)
 

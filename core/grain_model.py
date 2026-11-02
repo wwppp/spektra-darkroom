@@ -970,7 +970,7 @@ def density_for_linear(linear_rgb, film_density=None):
     return (-np.log10(lin)).astype(np.float32)
 
 
-def density_response(linear_rgb, lut=None, film_density=None):
+def density_response(linear_rgb, lut=None, film_density=None, density=None):
     """Granularity as a function of negative optical density (per channel).
 
     ``film_density`` (baked density cube) is the physically right input: the negative's own net
@@ -1319,7 +1319,7 @@ def synthesize_layer_grain(spec, height, width, rng):
     return (fine + cloud + mottle).astype(np.float32)
 
 
-def apply_block(linear_rgb, spec, rng):
+def apply_block(linear_rgb, spec, rng, return_density=False):
     """Apply pre-LUT transmittance grain to one block, in place-safe fashion.
 
     ``T_out = T_in * 10^(-dD)`` with ``dD = sum_o layer_grain_o * response_o * (strength * GAIN)``.
@@ -1329,17 +1329,22 @@ def apply_block(linear_rgb, spec, rng):
     takes over in the shoulder.  Without one the three octaves are summed first and scaled by the
     single total response, which is the P1 behaviour and still the path used by callers that pass
     no stock.
+
+    ``return_density`` also hands back the negative's net density for the block.  The display
+    domain needs it *after* the print: whether a pixel has any grain to show at all depends on how
+    empty the negative was there, not on how bright the print came out (see
+    ``push_model.blank_weight``).
     """
     h, w = linear_rgb.shape[:2]
     gain = np.float32(spec.strength * STRENGTH_GAIN)
+    density = density_for_linear(linear_rgb, spec.film_density)
 
     if spec.layer_lut is None:
         layer = synthesize_layer_grain(spec, h, w, rng)
-        response = density_response(linear_rgb, spec.density_lut, spec.film_density)
+        response = density_response(linear_rgb, spec.density_lut, spec.film_density, density=density)
         dD = layer * gain * response
     else:
         octaves = synthesize_octave_grain(spec, h, w, rng)
-        density = density_for_linear(linear_rgb, spec.film_density)
         dD = layer_response_dd(spec.layer_lut, density, *octaves)
         dD *= gain
     # Bound the density excursion.  Unbounded, the sum of three octaves times the response can
@@ -1347,7 +1352,10 @@ def apply_block(linear_rgb, spec, rng):
     # region it renders as sparse saturated dots (measured on a blank sky at 100%, where the
     # area is one tone and every excursion shows).  Real grain modulates density by hundredths.
     dD = np.clip(dD, -DD_CLAMP, DD_CLAMP)
-    return np.maximum(0.0, linear_rgb * np.exp(-dD * LOG10_E)).astype(np.float32)
+    out = np.maximum(0.0, linear_rgb * np.exp(-dD * LOG10_E)).astype(np.float32)
+    if return_density:
+        return out, density
+    return out
 
 
 def apply_to_linear(linear_rgb, spec, rng, chunk_rows=512):
