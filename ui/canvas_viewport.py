@@ -155,6 +155,14 @@ FRAGMENT_SHADER_SRC = """
 in vec2 v_texcoord;
 out vec4 fragColor;
 
+// Scales unit-gradient Perlin (std ~0.2) to the amplitude the old value-noise field carried,
+// so the calibrated density law and the fog-grain factor keep their meaning.
+#define PERLIN_TO_UNIT_STD 2.20
+// Fraction of the real-film chroma/luma ratio the mottling stream is allowed to add.
+#define CHROMA_MAX 0.09
+// Per-channel density-response spread is physical but over-driven for a scan-like look.
+#define CHROMA_RESP 0.13
+
 uniform sampler2D u_image;
 uniform sampler3D u_lut;
 uniform int u_has_image;
@@ -370,6 +378,36 @@ vec3 smooth_cloud_noise_rgb(vec2 p) {
     vec3 nx0 = mix(n00, n10, s.x);
     vec3 nx1 = mix(n01, n11, s.x);
     return mix(nx0, nx1, s.y);
+}
+
+// Gradient (Perlin-style) noise, quintic fade.
+//
+// Value noise interpolates *values* left on a lattice, so every cell interior is a flat
+// plateau and the cell edges are where all the change happens: at 1:1 that reads as a field
+// of little squares, and the residual histogram is flat-topped (kurtosis ~2.4 where scanned
+// film sits at 4-17).  Interpolating *gradients* instead has no plateau, no preferred axis in
+// the interior, and a residual that is much closer to a sum of independent grains.
+vec3 pcg_grad_dot(uvec2 c, vec2 d) {
+    vec3 r = pcg_vec3(c) * 12.5663706;   // three independent angles
+    return vec3(dot(vec2(cos(r.x), sin(r.x)), d),
+                dot(vec2(cos(r.y), sin(r.y)), d),
+                dot(vec2(cos(r.z), sin(r.z)), d));
+}
+
+vec3 perlin3(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    // Quintic fade: C2 continuity, so no creases along the lattice lines.
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    uvec2 c = uvec2(ivec2(i));
+    vec3 g00 = pcg_grad_dot(c, f);
+    vec3 g10 = pcg_grad_dot(c + uvec2(1u, 0u), f - vec2(1.0, 0.0));
+    vec3 g01 = pcg_grad_dot(c + uvec2(0u, 1u), f - vec2(0.0, 1.0));
+    vec3 g11 = pcg_grad_dot(c + uvec2(1u, 1u), f - vec2(1.0, 1.0));
+    vec3 nx0 = mix(g00, g10, u.x);
+    vec3 nx1 = mix(g01, g11, u.x);
+    // Unit-gradient Perlin has std ~0.2; scale so callers keep the old value-noise amplitude.
+    return mix(nx0, nx1, u.y) * PERLIN_TO_UNIT_STD;
 }
 
 // Digital (no-film) display transform - must stay in step with core.app_core:
@@ -1165,12 +1203,12 @@ void main() {
         // reduces its std ~ 1/f (2D: f^2 cells, sqrt averaging) - matches downscaled export.
         float grain_att = 1.0 / max(1.0, footprint);
 
-        // Multi-scale organic dye cloud clusters & micro-crystals:
-        // 1. High-frequency micro-crystals (~1.2 master px, ~7 um): luminance only, sampled below.
-        // 2. Mid-frequency dye clouds (~1.8 master px, ~11 um)
-        vec3 cloud_rgb = (smooth_cloud_noise_rgb(gcoord * 0.45 + vec2(43.1, 89.4)) - vec3(0.5)) * 1.8;
-        // 3. Low-frequency organic dye mottle (~3.5 master px, ~21 um)
-        vec3 mottle_rgb = (smooth_cloud_noise_rgb(gcoord * 0.22 + vec2(17.3, 31.7)) - vec3(0.5)) * 1.6;
+        // Multi-scale organic dye cloud clusters & micro-crystals, sampled from a gradient
+        // (Perlin) field instead of a value lattice.  Non-integer octave ratios and a fresh
+        // offset per octave keep the three lattices from lining up.
+        vec3 p_fine   = perlin3(gcoord * 0.30 + vec2(53.2, 19.8));
+        vec3 p_cloud  = perlin3(gcoord * 0.16 + vec2(11.7, 73.2));
+        vec3 p_mottle = perlin3(gcoord * 0.08 + vec2(91.2, 53.4));
 
         // Additive physical mixture governed by "染料云团柔化 (u_grain_blur)".
         // Weights come from core/grain_model.octave_weights() so the CPU export renderer uses
@@ -1179,47 +1217,31 @@ void main() {
         float w_cloud = u_grain_w_cloud;
         float w_mottle = u_grain_w_mottle;
 
-        // Coupled C-41 emulsion layer correlation (organic dye clouds vs digital chroma noise).
-        // u_grain_rho is not a literal: core/grain_model.rho_for_target_correlation() solves it
-        // so the *measured* mean inter-channel correlation lands on the calibrated target
-        // (0.79 at colour_grain = 1.0, from the P0 reference), whatever the stock's layer
-        // weights are. colour_grain = 0 (B&W) collapses rho to 1.0 (pure monochrome grain).
+        // Coupled C-41 emulsion layer correlation.  colour_grain = 0 collapses to pure
+        // monochrome grain; 1 is the most chromatic the stock gets.
         float rho = clamp(u_grain_rho, 0.0, 1.0);
-        // Apply film stock layer weights (e.g. [0.70, 1.0, 1.35] or [0.90, 1.0, 2.71]).
-        // The shared (luminance) stream uses the mean weight so it stays neutral; the per-layer
-        // spread only shapes the independent chroma mottle (avoids blue/yellow pixel speckle).
         float lw_mean = dot(u_stock_layer_weights, vec3(1.0 / 3.0));
-        // u_grain_amplitude is the physical amplitude law from core/grain_model.py: per-pixel
-        // density noise is proportional to the long edge (fewer crystals per pixel as sampling
-        // gets finer). It is 1.0 at the calibration size, so the preview is unchanged there.
-        //
-        // u_preview_noise_fix reconciles the *noise std* of the two renderers. value noise is
-        // uniform [0,1] on its lattice, and core/grain_model.VALUE_NOISE_STD is 0.144287 --
-        // the std of a *point* sample. smoothstep interpolation is a low-pass filter, so the
-        // realised std is 0.2160 (0.5/sqrt(12) * sqrt(E[sum w^2]) with E[sum w^2] = 0.552).
-        // Left uncorrected the preview runs 1.46x louder than the export at every grain size.
-        // The factor is applied here, not in the export, because the export carries the P0
-        // calibration and must not drift.
         float noise_fix = (u_preview_noise_fix > 0.01) ? u_preview_noise_fix : 1.0;
         float amp_fix = u_grain_amplitude * noise_fix;
-        float chroma_gain = sqrt(1.0 - rho);
-        float shared_gain = sqrt(rho) * lw_mean;
 
-        // P2: the three octaves are the three coated sub-layers (coarse/mid/fine), so each one is
-        // scaled by its own density response below instead of sharing one. They must therefore
-        // stay separate here.  Per-layer (chroma) stream excludes the fine micro-crystal octave,
-        // exactly as the CPU synthesiser does -- no RGB pixel speckle.  cloud_rgb / mottle_rgb /
-        // shared_* already carry their OCTAVE_GAIN, so only the slider weight is applied now.
-        vec3 cloud_rgb_scaled = cloud_rgb * (w_cloud * 1.15);
-        vec3 mottle_rgb_scaled = mottle_rgb * (w_mottle * 1.15);
-        float shared_fine = (smooth_cloud_noise(gcoord * 0.75 + vec2(53.2, 19.8)) - 0.5) * 2.0;
-        float shared_cloud = (smooth_cloud_noise(gcoord * 0.45 + vec2(11.7, 73.2)) - 0.5) * 1.8;
-        float shared_mottle = (smooth_cloud_noise(gcoord * 0.22 + vec2(91.2, 53.4)) - 0.5) * 1.6;
-        vec3 g_fine = vec3(shared_fine * w_fine * shared_gain) * amp_fix;
-        vec3 g_cloud = (chroma_gain * cloud_rgb_scaled * u_stock_layer_weights
-                        + shared_cloud * w_cloud * shared_gain) * amp_fix;
-        vec3 g_mottle = (chroma_gain * mottle_rgb_scaled * u_stock_layer_weights
-                         + shared_mottle * w_mottle * shared_gain) * amp_fix;
+        // Split each octave into a shared (luminance) scalar and a per-channel deviation.
+        // Volume grain is the *same* developed silver seen by all three records; only the
+        // deviation from that mean is colour mottling.  The old layout gave every channel its
+        // own independently seeded field, which measured chroma/luma 1.1-1.4 against 0.24-0.49
+        // on real scans - that is what read as coloured blotches.
+        float sf = dot(p_fine, vec3(1.0 / 3.0));
+        float sc = dot(p_cloud, vec3(1.0 / 3.0));
+        float sm = dot(p_mottle, vec3(1.0 / 3.0));
+        vec3 dc = p_cloud - vec3(sc);
+        vec3 dm = p_mottle - vec3(sm);
+
+        vec3 g_fine   = vec3(sf * w_fine) * amp_fix;
+        vec3 g_cloud  = vec3(sc * (w_cloud * 1.15)) * amp_fix;
+        vec3 g_mottle = vec3(sm * (w_mottle * 1.15)) * amp_fix;
+        // Colour mottling rides the dye-cloud scales, scaled to the measured real-film ratio.
+        float chroma_norm = (1.0 - rho) / 0.21;
+        float chroma_k = CHROMA_MAX * chroma_norm;
+        vec3 g_chr = (dc * (w_cloud * 1.15) + dm * (w_mottle * 1.15)) * amp_fix * chroma_k;
 
         // Stock strength & user slider modulation
         float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
@@ -1230,7 +1252,7 @@ void main() {
         // derived: on a blank frame at 100% the export reads sigma 6.64 while this shader read
         // 9.45 with the old 2.31, and the ratio held linearly as the factor came down (2.31 ->
         // 1.97 -> 8.06).  1.62 is where the two agree.
-        push_fog_n = shared_fine * grain_att * clamp(u_grain / 0.4, 0.0, 2.5) * 1.62;
+        push_fog_n = sf * grain_att * clamp(u_grain / 0.4, 0.0, 2.5) * 1.62;
 
         // Granularity vs negative optical density.  Two possible sources for D:
         //   u_film_density_enable == 1: the negative's own net density, read from the cube the
@@ -1292,8 +1314,16 @@ void main() {
         }
 
         // Transmittance modulation: T = T_in * 10^(-dD) = T_in * exp(-dD * 2.3025851)
-        vec3 dD = (g_fine * resp_fine + g_cloud * resp_cloud + g_mottle * resp_mottle)
-                  * (eff_strength * 0.35 * grain_att);
+        vec3 d_base = g_fine * resp_fine + g_cloud * resp_cloud + g_mottle * resp_mottle;
+        // Keep the luminance part neutral: every channel gets the same mean, and only the
+        // deviation from it is allowed to colour the frame.
+        vec3 d_lum = vec3(dot(d_base, vec3(1.0 / 3.0)));
+        // Layer weights may tint, but only mildly - applied to the chroma part alone.
+        vec3 tint = mix(vec3(1.0), u_stock_layer_weights / max(1e-4, lw_mean), 0.35);
+        // Both chroma sources follow the colour slider, so colour_grain = 0 is truly neutral.
+        vec3 d_chr = ((d_base - d_lum) * CHROMA_RESP
+                      + g_chr * ((resp_cloud + resp_mottle) * 0.5)) * chroma_norm;
+        vec3 dD = (d_lum + d_chr * tint) * (eff_strength * 0.35 * grain_att);
         linear_rgb = max(vec3(0.0), linear_rgb * exp(-dD * 2.3025851));
     }
 
