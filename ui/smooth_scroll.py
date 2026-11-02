@@ -8,6 +8,7 @@ from PySide6.QtGui import QPainter, QColor, QLinearGradient
 from PySide6.QtWidgets import QScrollArea, QWidget
 
 from ui.theme_manager import theme_manager
+from ui.touch_scroll import install_touch_scroll
 
 
 class SmoothScrollArea(QScrollArea):
@@ -75,6 +76,9 @@ class SmoothScrollArea(QScrollArea):
 
         self.apply_theme()
         theme_manager.themeChanged.connect(self.apply_theme)
+
+        # A touch panel has no wheel: a finger drag has to scroll, and still click on a tap.
+        install_touch_scroll(self)
 
     def eventFilter(self, obj, event):
         if obj == self.viewport():
