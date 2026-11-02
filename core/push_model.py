@@ -40,7 +40,7 @@ _LOCK = threading.Lock()
 PUSH_TOE_PER_STOP = 0.068      # display-domain toe: black lift and shadow compression
 GRAIN_SCALE_PER_STOP = 0.60    # overall grain amplitude
 GRAIN_SHADOW_PER_STOP = 1.60   # extra amplitude at zero density, fading to 0 at the anchor
-GRAIN_FOG_PER_STOP = 1.20      # additive shadow grain (the fog's own grain), in DENS_GAIN units
+GRAIN_FOG_PER_STOP = 2.60      # additive shadow grain (the fog's own grain), in DENS_GAIN units
 FOG_GRAIN_RELATIVE = 0.15      # fluctuation of the lifted black, as a fraction of the lift itself
 FOG_GRAIN_AT_FULL_SLIDER = 2.0 # the 颗粒 slider multiplies it, up to this, over its 0.40 default
 
@@ -73,7 +73,7 @@ def grain_shape_for(stops):
     stops = max(0, int(stops))
     return (1.0 + GRAIN_SCALE_PER_STOP * stops,
             min(3.0, GRAIN_SHADOW_PER_STOP * stops),
-            min(2.2, GRAIN_FOG_PER_STOP * stops))
+            min(4.2, GRAIN_FOG_PER_STOP * stops))
 
 
 def fog_grain_for(stops):

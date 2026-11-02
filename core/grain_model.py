@@ -89,6 +89,7 @@ DENS_FLOOR = 0.0
 DENS_PEAK = 0.8382
 DENS_W_TOE = 0.6149
 DENS_W_SHOULDER = 1.4884
+CHROMA_GATE_DENSITY = 0.15   # below this the negative is fog, not image: coarse octaves fade
 DENS_MIN_TRANSMITTANCE = 1e-4    # clamp before the log
 # Film saturation.  The profiles declare density_max_curves = 2.2 and density_min ~ 0.04, so a
 # stock cannot exceed D ~ 2.24.  The particle-model reference collapses there (once every crystal
@@ -466,7 +467,7 @@ def _layer_value(spec, layer, default):
     return float(value[0]) if isinstance(value, tuple) else float(value)
 
 
-def bake_density_lut(preset):
+def bake_density_lut(preset, push_floor=True):
     """Bake a preset's density law into a ``(DENSITY_LUT_SIZE, 3)`` response table.
 
     The table holds ``DENS_GAIN * sqrt(V(here)/V(anchor)) * saturation`` per record, evaluated on
@@ -484,12 +485,14 @@ def bake_density_lut(preset):
     """
     if not preset or preset.get("density_law") is None:
         return None
-    key = _preset_signature(preset)
+    # The floor is baked in only for the legacy single-table readers; the layer table adds it to
+    # the fine octave itself (see bake_layer_lut), so the two must not share a cache entry.
+    key = _preset_signature(preset) + (bool(push_floor),)
     cached = _LUT_CACHE.get(key)
     if cached is not None:
         return cached
 
-    law, profile, d_min, d_max, read, fog, reversal, _scale, _shadow, _floor = key
+    law, profile, d_min, d_max, read, fog, reversal, _scale, _shadow, _floor, _pf = key
     if profile is None:
         profile = DEFAULT_DENSITY_RECORDS
     grid = np.linspace(0.0, DENSITY_LUT_MAX, DENSITY_LUT_SIZE, dtype=np.float64)
@@ -521,12 +524,12 @@ def bake_density_lut(preset):
         roll = 1.0 - (3.0 * sat * sat - 2.0 * sat * sat * sat)
         lut[:, layer] = (DENS_GAIN * modulation * roll).astype(np.float32)
 
-    _apply_push_shape(lut, preset, read, (d_min, d_max))
+    _apply_push_shape(lut, preset, read, (d_min, d_max), floor=push_floor)
     _LUT_CACHE[key] = lut
     return lut
 
 
-def _apply_push_shape(lut, preset, read, limits):
+def _apply_push_shape(lut, preset, read, limits, floor=True):
     """Amplify grain for a push, most of all in the shadows.  Identity at standard development.
 
     Two terms, both tied to the *development*, not to the image:
@@ -543,6 +546,7 @@ def _apply_push_shape(lut, preset, read, limits):
     scale = float(preset.get("grain_scale") or 1.0)
     shadow = float(preset.get("grain_shadow_gain") or 0.0)
     floor = float(preset.get("grain_shadow_floor") or 0.0)
+    apply_floor = bool(floor)
     if abs(scale - 1.0) < 1e-6 and shadow <= 0.0 and floor <= 0.0:
         return
     d_min, d_max = limits
@@ -553,7 +557,7 @@ def _apply_push_shape(lut, preset, read, limits):
         anchor = max(granularity_anchor_density(read, lo, hi), 1e-4)
         t = np.clip((anchor - grid) / anchor, 0.0, 1.0)
         shaped = lut[:, record] * (scale * (1.0 + shadow * t))
-        if floor > 0.0:
+        if floor > 0.0 and apply_floor:
             shaped = shaped + (DENS_GAIN * floor) * t ** 1.5
         lut[:, record] = shaped.astype(np.float32)
 
@@ -745,7 +749,11 @@ def bake_layer_lut(preset, octave_weights=None, rho=None, layer_weights=None):
     if cached is not None:
         return cached
 
-    base = bake_density_lut(preset) if preset else None
+    # The push floor is deliberately excluded here: bake_layer_lut adds it to the fine octave
+    # only, below.  Distributing it across all three octaves put it into the dye-cloud octaves,
+    # which are the *chroma* ones -- a blank negative printed long then read as coloured confetti
+    # instead of silver grain (measured on a real frame: red/green/blue clumps 4-8 px wide).
+    base = bake_density_lut(preset, push_floor=False) if preset else None
     if base is None:
         base = bake_bell_lut(preset)
     geometry = _layer_geometry(preset)
@@ -753,6 +761,7 @@ def bake_layer_lut(preset, octave_weights=None, rho=None, layer_weights=None):
     signal = _octave_signal(weights, rho, layer_weights)
     grid = np.linspace(0.0, DENSITY_LUT_MAX, DENSITY_LUT_SIZE, dtype=np.float64)
     d_max = (preset or {}).get("density_max")
+    d_min = (preset or {}).get("density_min")
 
     out = np.zeros((3, DENSITY_LUT_SIZE, 3), dtype=np.float32)
     for record in range(3):
@@ -777,6 +786,41 @@ def bake_layer_lut(preset, octave_weights=None, rho=None, layer_weights=None):
         gain = np.where(carried > 1e-9, total / np.maximum(carried, 1e-9), 0.0)
         for octave in range(3):
             out[record, :, octave] = (base[:, record] * shape[octave] * gain).astype(np.float32)
+
+    # Fog grain belongs to the fine octave.  The fine octave feeds only the shared (luminance)
+    # stream in both renderers, so this stays monochrome, and it is the finest scale -- which is
+    # what silver fog actually looks like.  It sits outside the law on purpose: the law is a
+    # function of density and reports nothing where nothing was developed, which is exactly the
+    # region a heavily underexposed negative occupies.
+    floor = float((preset or {}).get("grain_shadow_floor") or 0.0)
+    if floor > 0.0:
+        read = _preset_value(preset, "granularity_read_density", "net")
+        for record in range(3):
+            lo = _layer_value(d_min, record, DEFAULT_DENSITY_MIN)
+            hi = _layer_value(d_max, record, DEFAULT_DENSITY_MAX)
+            anchor = max(granularity_anchor_density(read, lo, hi), 1e-4)
+            t = np.clip((anchor - grid) / anchor, 0.0, 1.0)
+            out[record, :, 0] += (DENS_GAIN * floor) * t ** 1.5
+
+    # Below ~0.15 D the negative carries fog, not image: there are no dye clouds yet, so the
+    # two coarse octaves -- which are the only ones that carry the per-channel (chroma) stream --
+    # must fade out and leave the fine octave alone.  Without this, a blank negative printed long
+    # renders its fog as red/green/blue clumps 4-8 px wide instead of silver grain; measured on a
+    # real underexposed frame at 3968 px, the channel spread reached 120/255 before this gate.
+    gate = np.clip(grid / CHROMA_GATE_DENSITY, 0.0, 1.0)
+    gate = gate * gate * (3.0 - 2.0 * gate)
+    if floor > 0.0 and np.any(gate < 0.999):
+        for record in range(3):
+            sig = signal[record]
+            out[record, :, 1] *= gate.astype(np.float32)
+            out[record, :, 2] *= gate.astype(np.float32)
+            # Re-solve the fine octave so the signal-weighted total still equals the law exactly.
+            # The energy the coarse octaves gave up moves to the fine one, because the fog is
+            # grainier than the law says -- it just is not coarser, and it is not coloured.
+            coarse_sq = ((sig[1] * out[record, :, 1]) ** 2
+                         + (sig[2] * out[record, :, 2]) ** 2)
+            need = np.maximum(base[:, record].astype(np.float64) ** 2 - coarse_sq, 0.0)
+            out[record, :, 0] = (np.sqrt(need) / max(float(sig[0]), 1e-9)).astype(np.float32)
 
     _LAYER_LUT_CACHE[key] = out
     return out
