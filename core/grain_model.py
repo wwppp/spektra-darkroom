@@ -90,6 +90,7 @@ DENS_PEAK = 0.8382
 DENS_W_TOE = 0.6149
 DENS_W_SHOULDER = 1.4884
 CHROMA_GATE_DENSITY = 0.15   # below this the negative is fog, not image: coarse octaves fade
+DD_CLAMP = 0.50                  # max |dD| one grain excursion may add, in density
 DENS_MIN_TRANSMITTANCE = 1e-4    # clamp before the log
 # Film saturation.  The profiles declare density_max_curves = 2.2 and density_min ~ 0.04, so a
 # stock cannot exceed D ~ 2.24.  The particle-model reference collapses there (once every crystal
@@ -787,20 +788,7 @@ def bake_layer_lut(preset, octave_weights=None, rho=None, layer_weights=None):
         for octave in range(3):
             out[record, :, octave] = (base[:, record] * shape[octave] * gain).astype(np.float32)
 
-    # Fog grain belongs to the fine octave.  The fine octave feeds only the shared (luminance)
-    # stream in both renderers, so this stays monochrome, and it is the finest scale -- which is
-    # what silver fog actually looks like.  It sits outside the law on purpose: the law is a
-    # function of density and reports nothing where nothing was developed, which is exactly the
-    # region a heavily underexposed negative occupies.
     floor = float((preset or {}).get("grain_shadow_floor") or 0.0)
-    if floor > 0.0:
-        read = _preset_value(preset, "granularity_read_density", "net")
-        for record in range(3):
-            lo = _layer_value(d_min, record, DEFAULT_DENSITY_MIN)
-            hi = _layer_value(d_max, record, DEFAULT_DENSITY_MAX)
-            anchor = max(granularity_anchor_density(read, lo, hi), 1e-4)
-            t = np.clip((anchor - grid) / anchor, 0.0, 1.0)
-            out[record, :, 0] += (DENS_GAIN * floor) * t ** 1.5
 
     # Below ~0.15 D the negative carries fog, not image: there are no dye clouds yet, so the
     # two coarse octaves -- which are the only ones that carry the per-channel (chroma) stream --
@@ -821,6 +809,18 @@ def bake_layer_lut(preset, octave_weights=None, rho=None, layer_weights=None):
                          + (sig[2] * out[record, :, 2]) ** 2)
             need = np.maximum(base[:, record].astype(np.float64) ** 2 - coarse_sq, 0.0)
             out[record, :, 0] = (np.sqrt(need) / max(float(sig[0]), 1e-9)).astype(np.float32)
+
+    # Fog grain belongs to the fine octave -- and is added *after* the gate above.  Adding it
+    # before would let the gate's re-solve treat it as part of the law and hand the whole thing to
+    # the fine octave, which turns the fog into sparse saturated dots instead of grain.
+    if floor > 0.0:
+        read = _preset_value(preset, "granularity_read_density", "net")
+        for record in range(3):
+            lo = _layer_value(d_min, record, DEFAULT_DENSITY_MIN)
+            hi = _layer_value(d_max, record, DEFAULT_DENSITY_MAX)
+            anchor = max(granularity_anchor_density(read, lo, hi), 1e-4)
+            t = np.clip((anchor - grid) / anchor, 0.0, 1.0)
+            out[record, :, 0] += (DENS_GAIN * floor) * t ** 1.5
 
     _LAYER_LUT_CACHE[key] = out
     return out
@@ -1342,6 +1342,11 @@ def apply_block(linear_rgb, spec, rng):
         density = density_for_linear(linear_rgb, spec.film_density)
         dD = layer_response_dd(spec.layer_lut, density, *octaves)
         dD *= gain
+    # Bound the density excursion.  Unbounded, the sum of three octaves times the response can
+    # reach +-2.3 D -- a 200x transmittance swing -- which is not grain but a hole: in a flat
+    # region it renders as sparse saturated dots (measured on a blank sky at 100%, where the
+    # area is one tone and every excursion shows).  Real grain modulates density by hundredths.
+    dD = np.clip(dD, -DD_CLAMP, DD_CLAMP)
     return np.maximum(0.0, linear_rgb * np.exp(-dD * LOG10_E)).astype(np.float32)
 
 
