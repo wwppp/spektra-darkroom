@@ -2025,6 +2025,12 @@ class SpektraEngine:
         pushed["density_max"] = [float(v) for v in np.nanmax(curves, axis=0)]
         pushed["density_min"] = [float(v) + float(entry.get("dMin") or 0.0)
                                  for v in np.nanmin(curves, axis=0)]
+        # The law itself is measured data, but the *amplitude* is not: a pushed frame is grainier
+        # everywhere and most of all where it is thinnest.  Without this the print's tone curve
+        # compressed the shadow grain back to invisibility (sigma 0.48 -> 0.54 at +2).
+        scale, shadow = push_model.grain_shape_for(applied)
+        pushed["grain_scale"] = scale
+        pushed["grain_shadow_gain"] = shadow
         pushed["push_stops"] = applied
         cache[key] = pushed
         return pushed
@@ -4105,6 +4111,9 @@ class SpektraEngine:
                 print_exp = float(params_dict.get("print_exposure", 1.0))
                 preflash = float(params_dict.get("pre_flash", 0.0))
             black_lift = float(params_dict.get("black_lift", 0.0))
+            # Push's fog and toe ride after the LUT: inside the film or the curve both are
+            # cancelled by the print's renormalisation (see push_model.toe_amount_for).
+            push_toe = push_model.toe_amount_for(params_dict.get("push_ev", 0))
             halation = float(params_dict.get("halation_amount", params_dict.get("halation", 1.0)))
             hal_spatial_scale = float(params_dict.get("halation_spatial_scale", 1.0))
             scatter_amount = float(params_dict.get("scatter_amount", 1.0))
@@ -4126,7 +4135,7 @@ class SpektraEngine:
                     progress_cb(15, "正在计算场景曝光与光学参数...")
                 base_temp = float(params_dict.get("base_temp", 5500.0))
                 base_tint = float(params_dict.get("base_tint", 1.0))
-                from .darkroom_math import wb_gains, apply_black_point
+                from .darkroom_math import wb_gains, apply_black_point, apply_push_toe
                 wb_g = wb_gains(temp_val, base_temp, tint_val, base_tint)
                 eff_exp = exp_val + base_ev
                 linear_full = (raw_target * float(np.exp2(eff_exp))).astype(np.float32) * wb_g
@@ -4151,6 +4160,8 @@ class SpektraEngine:
                 # export would ignore 黑场 while the viewport honoured it.
                 if abs(black_lift) > 1e-4:
                     rendered_float = apply_black_point(rendered_float, black_lift)
+                if push_toe > 1e-4:
+                    rendered_float = apply_push_toe(rendered_float, push_toe)
 
                 # Crop, flips and straighten exactly as the film pipeline does below
                 rendered_float = self._apply_export_crop(rendered_float, params_dict)
@@ -4185,7 +4196,8 @@ class SpektraEngine:
 
             base_temp = float(params_dict.get("base_temp", 5500.0))
             base_tint = float(params_dict.get("base_tint", 1.0))
-            from .darkroom_math import wb_gains, paper_domain_adjust, chemistry_delta, grain_colour_rho, apply_black_point
+            from .darkroom_math import (wb_gains, paper_domain_adjust, chemistry_delta,
+                                       grain_colour_rho, apply_black_point, apply_push_toe)
             wb_g = wb_gains(temp_val, base_temp, tint_val, base_tint)
             lut_baked = self.get_lut_baked_params(lut_3d)
 
@@ -4380,6 +4392,7 @@ class SpektraEngine:
 
                 # Bidirectional Black Point calibration (white-point preserving: >0 lifts shadows/fades, <0 subtracts base fog/deepens blacks)
                 chunk_film = apply_black_point(chunk_film, black_lift)
+                chunk_film = apply_push_toe(chunk_film, push_toe)
 
                 rendered_float[y0:y1] = np.clip(chunk_film, 0.0, 1.0)
 

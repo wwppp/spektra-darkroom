@@ -55,6 +55,7 @@ from core.format_constants import (
 from core.version import get_app_title, get_full_version_info
 from core.app_core import SpektraEngine
 from core import sdc_manager
+from core import push_model
 from core import config_manager
 from core import session_cache_manager
 from ui.export_queue_manager import ExportQueueManager, ExportQueueDialog, ExportTask
@@ -7878,8 +7879,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
         linked = bool(self.current_params.get("push_underexpose"))
 
         if not linked:
+            toe = push_model.toe_amount_for(current) * 255.0
+            scale, _ = push_model.grain_shape_for(current)
             body = (f"当前：显影 +{current} 档，曝光不联动（只换特性曲线）\n"
-                    f"显影实测补回约 {gain:.1f} EV；要模拟“欠曝 {current} 档再迫冲”请勾选「模拟欠曝」")
+                    f"自动：黑位 +{toe:.0f}/255、暗部压缩、颗粒 ×{scale:.1f}"
+                    f"（显影实测补回约 {gain:.1f} EV）\n"
+                    f"要模拟“欠曝 {current} 档再迫冲”请勾选「模拟欠曝」")
             return f"{label}\n{body}" if label else body
 
         exposure = float(self.current_params.get("exposure_ev", 0.0) or 0.0)

@@ -429,6 +429,9 @@ def _preset_signature(preset):
         str(_preset_value(preset, "granularity_read_density", "net")),
         float(_preset_value(preset, "fog_density", DEFAULT_FOG_DENSITY)),
         _freeze(_preset_value(preset, "reversal_profile", DEFAULT_REVERSAL_PROFILE)),
+        # Push amplitude: without these two, +1 and +2 would share one baked table.
+        round(float(preset.get("grain_scale") or 1.0), 6),
+        round(float(preset.get("grain_shadow_gain") or 0.0), 6),
     )
 
 
@@ -485,7 +488,7 @@ def bake_density_lut(preset):
     if cached is not None:
         return cached
 
-    law, profile, d_min, d_max, read, fog, reversal = key
+    law, profile, d_min, d_max, read, fog, reversal, _scale, _shadow = key
     if profile is None:
         profile = DEFAULT_DENSITY_RECORDS
     grid = np.linspace(0.0, DENSITY_LUT_MAX, DENSITY_LUT_SIZE, dtype=np.float64)
@@ -517,8 +520,32 @@ def bake_density_lut(preset):
         roll = 1.0 - (3.0 * sat * sat - 2.0 * sat * sat * sat)
         lut[:, layer] = (DENS_GAIN * modulation * roll).astype(np.float32)
 
+    _apply_push_shape(lut, preset, read, (d_min, d_max))
     _LUT_CACHE[key] = lut
     return lut
+
+
+def _apply_push_shape(lut, preset, read, limits):
+    """Amplify grain for a push, most of all in the shadows.  Identity at standard development.
+
+    A pushed negative is grainier because it was developed longer, and the shadow end is where
+    that shows first: those crystals got the least light, so the same development leaves them
+    far apart.  The print's tone curve then compresses exactly that end, which is why the push
+    measured flat (sigma 0.48 -> 0.54 in the darkest patch).  The weight is 1.0 at the granularity
+    anchor, so the P5 calibration of the mid-density amplitude is untouched.
+    """
+    scale = float(preset.get("grain_scale") or 1.0)
+    shadow = float(preset.get("grain_shadow_gain") or 0.0)
+    if abs(scale - 1.0) < 1e-6 and shadow <= 0.0:
+        return
+    d_min, d_max = limits
+    grid = np.linspace(0.0, DENSITY_LUT_MAX, DENSITY_LUT_SIZE, dtype=np.float64)
+    for record in range(lut.shape[1]):
+        lo = _layer_value(d_min, record, DEFAULT_DENSITY_MIN)
+        hi = _layer_value(d_max, record, DEFAULT_DENSITY_MAX)
+        anchor = max(granularity_anchor_density(read, lo, hi), 1e-4)
+        weight = 1.0 + shadow * np.clip((anchor - grid) / anchor, 0.0, 1.0)
+        lut[:, record] = (lut[:, record] * (scale * weight)).astype(np.float32)
 
 
 def _lattice_index(density):

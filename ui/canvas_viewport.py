@@ -12,6 +12,7 @@ from PySide6.QtOpenGL import (
 from core.path_utils import get_resource_dir
 from core import config_manager
 from core.darkroom_math import grain_scale_px, grain_colour_rho, scene_gain
+from core import push_model
 from core import grain_model as grain_model_ref
 from core.grain_model import octave_weights as grain_octave_weights
 from OpenGL import GL
@@ -171,6 +172,7 @@ uniform vec3 u_cmy;
 uniform float u_print_exposure;
 uniform float u_preflash;
 uniform float u_black_lift;
+uniform float u_push_toe;
 
 // Halation physics (Official Spektrafilm Model)
 uniform float u_halation;           // halation_amount (1.0 = physical default)
@@ -1317,6 +1319,12 @@ void main() {
         float c_blk = min(0.95, -u_black_lift);
         film_rgb = max(vec3(0.0), (film_rgb - vec3(c_blk)) / (1.0 - c_blk));
     }
+    // 9. Push development toe: lifted black point and compressed shadows, white preserved.
+    //    Same formula as darkroom_math.apply_push_toe(), which the CPU export runs.
+    if (u_push_toe > 0.0001) {
+        vec3 inv = vec3(1.0) - clamp(film_rgb, 0.0, 1.0);
+        film_rgb = clamp(film_rgb + u_push_toe * inv * inv * inv, 0.0, 1.0);
+    }
 
     fragColor = vec4(clamp(film_rgb, 0.0, 1.0), 1.0);
 }
@@ -1917,11 +1925,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_print_exposure", 1.0)
             u_1f("u_preflash", 0.0)
             u_1f("u_black_lift", float(self.params.get("black_lift", 0.0)))
+            u_1f("u_push_toe", push_model.toe_amount_for(self.params.get("push_ev", 0)))
         else:
             u_3f("u_cmy", float(self.params.get("enlarger_cyan", 0.0)), float(self.params.get("enlarger_magenta", 0.0)), float(self.params.get("enlarger_yellow", 0.0)))
             u_1f("u_print_exposure", float(self.params.get("print_exposure", 1.0)))
             u_1f("u_preflash", float(self.params.get("pre_flash", 0.0)))
             u_1f("u_black_lift", float(self.params.get("black_lift", 0.0)))
+            u_1f("u_push_toe", push_model.toe_amount_for(self.params.get("push_ev", 0)))
 
         # Lens correction uniforms
         lens_cfg = self.params.get("lens", {})

@@ -208,6 +208,22 @@ def grain_scale_px(fmt_mm, master_long_px, grain_size=1.0, stock_size_mm=0.005):
     return max(0.20, (5.976 / um_per_px) * max(0.2, float(grain_size)) * (float(stock_size_mm) / 0.005))
 
 
+def apply_push_toe(img, amount=0.0):
+    """Push development's display-domain toe: lift the black point, soften the shadows.
+
+    ``v + a(1-v)^3`` keeps white at 1.0 (the term vanishes there), lifts the deepest tone to
+    ``a`` and drops the shadow slope to ``1-3a``.  Both effects have to live here rather than in
+    the film's density: fog in ``base_density`` is exactly cancelled by the print's per-channel
+    exposure correction, and a flattened toe in the characteristic curve measured as a no-op once
+    the print rebalanced it.  Mirrored by ``u_push_toe`` in the preview shader.
+    """
+    a = float(amount)
+    if a <= 1e-4:
+        return img
+    inv = 1.0 - np.clip(img, 0.0, 1.0)
+    return np.clip(img + a * inv * inv * inv, 0.0, 1.0).astype(np.float32)
+
+
 def apply_black_point(img, black_lift=0.0):
     """Bidirectional black-point calibration preserving the white point (1.0).
     - black_lift > 0: lifts Dmax black point toward grey (vintage fade / airy shadows) without clipping highlights.

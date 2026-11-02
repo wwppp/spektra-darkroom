@@ -34,6 +34,37 @@ import numpy as np
 _TABLE_CACHE: dict[str, tuple[float, dict | None]] = {}
 _LOCK = threading.Lock()
 
+# How a push changes the *look* beyond the measured curve.  Both are per stop, both saturate, and
+# both are 0 at standard development -- a stock at 0 stops must render exactly as it did before
+# this existed.
+PUSH_TOE_PER_STOP = 0.068      # display-domain toe: black lift and shadow compression
+GRAIN_SCALE_PER_STOP = 0.30    # overall grain amplitude
+GRAIN_SHADOW_PER_STOP = 1.00   # extra amplitude at zero density, fading to 0 at the anchor
+
+
+def toe_amount_for(stops):
+    """Display-domain toe for a push: lift the black point and flatten the shadows.
+
+    Two things a pushed frame shows that the print stage will not carry.  The fog cannot ride in
+    ``base_density`` -- it is a spatially uniform, spectrally fixed attenuation there, and the
+    print's per-channel exposure correction is its exact inverse (measured: bit-identical output
+    with and without, Tri-X +2, grey patches 31.0/59.0/107.0/154.0/189.0 both ways).  Nor can the
+    toe ride in the characteristic curve: flattening it there measured as a no-op on the print
+    (p50 61 -> 62, shadow detail 1.89 -> 1.87) because the print rebalances the whole curve.
+
+    So both are applied where they survive, after the LUT: ``v + a(1-v)^3`` leaves white at 1.0,
+    lifts the black point to ``a``, and drops the deepest shadow slope to ``1 - 3a`` -- the
+    muddy-shoulder look, with the highlights untouched.
+    """
+    return float(min(0.20, PUSH_TOE_PER_STOP * max(0, int(stops))))
+
+
+def grain_shape_for(stops):
+    """(overall amplitude, extra shadow amplitude) for a push, both 1.0/0.0 at standard."""
+    stops = max(0, int(stops))
+    return (1.0 + GRAIN_SCALE_PER_STOP * stops,
+            min(2.0, GRAIN_SHADOW_PER_STOP * stops))
+
 
 def push_dir(resources_dir):
     return os.path.join(resources_dir, "profiles", "push")
@@ -115,7 +146,13 @@ def curve_ratio(base_curves, pushed_curves):
 
 
 def apply_to_profile(profile, table, stops):
-    """Clone ``profile`` with the pushed curve, sub-layer split and fog.  ``profile`` is untouched."""
+    """Clone ``profile`` with the pushed curve and its sub-layer split.  ``profile`` is untouched.
+
+    The table's ``dMin`` no longer goes into ``base_density``: measured, the print stage's
+    exposure correction cancels a uniform neutral fog exactly (bit-identical output), so the fog
+    is applied after the LUT by :func:`black_lift_for` instead.  ``dMin`` still moves the grain
+    preset's ``density_min``, which is where it does have an effect.
+    """
     entry, applied = condition(table, stops)
     if entry is None or profile is None:
         return profile, 0
@@ -130,17 +167,9 @@ def apply_to_profile(profile, table, stops):
     if layers.ndim == 3 and layers.shape[0] == ratio.shape[0]:
         layers = layers * ratio[:, :, None]
 
-    d_min = float(entry.get("dMin") or 0.0)
-    base_density = np.asarray(data.base_density, dtype=np.float64)
-    fog = np.zeros_like(base_density)
-    if d_min and base_density.size:
-        channel_density = np.asarray(data.channel_density, dtype=np.float64)
-        fog = d_min * channel_density.sum(axis=1)      # (wavelengths,) -- one neutral density unit
-
     pushed_profile = profile.clone()
     pushed_profile.update_data(
         density_curves=pushed,
         density_curves_layers=layers,
-        base_density=base_density + fog,
     )
     return pushed_profile, applied
