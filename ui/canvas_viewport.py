@@ -173,6 +173,7 @@ uniform float u_print_exposure;
 uniform float u_preflash;
 uniform float u_black_lift;
 uniform float u_push_toe;
+uniform float u_push_fog;
 
 // Halation physics (Official Spektrafilm Model)
 uniform float u_halation;           // halation_amount (1.0 = physical default)
@@ -1133,6 +1134,10 @@ void main() {
     }
 
     // 3.5. Silver Halide Organic Film Grain & Multi-Octave Dye Cloud Mottle (Pre-LUT Transmittance Space)
+    // Fog field for the push toe below: the lifted black point is developed silver, so it has to
+    // be granular.  Without it a frame that renders under the paper's black point comes out as a
+    // single flat value at any zoom -- measured sigma 0.00 with the grain slider at 1.0.
+    float push_fog_n = 0.0;
     if (u_grain > 0.01) {
         // Golden-ratio irrational rotation matrix (breaks all raster / coordinate grid alignment)
         const mat2 rot = mat2(0.9114, -0.4115, 0.4115, 0.9114);
@@ -1215,6 +1220,11 @@ void main() {
         // Stock strength & user slider modulation
         float base_stock_strength = (u_stock_grain_strength > 0.0001) ? u_stock_grain_strength : 0.010;
         float eff_strength = (u_grain / 0.40) * (base_stock_strength / 0.010);
+        // The toe's own grain, at the fine octave's scale and attenuated by the screen footprint
+        // like everything else, so a fit-view preview stays smooth instead of turning to static.
+        // 2.31 normalises the fine octave's realised std (0.432 after smoothstep interpolation)
+        // to 1.0, so this term matches darkroom_math.fog_noise() at the same amplitude.
+        push_fog_n = shared_fine * grain_att * clamp(u_grain / 0.4, 0.0, 2.0) * 2.31;
 
         // Granularity vs negative optical density.  Two possible sources for D:
         //   u_film_density_enable == 1: the negative's own net density, read from the cube the
@@ -1323,7 +1333,12 @@ void main() {
     //    Same formula as darkroom_math.apply_push_toe(), which the CPU export runs.
     if (u_push_toe > 0.0001) {
         vec3 inv = vec3(1.0) - clamp(film_rgb, 0.0, 1.0);
-        film_rgb = clamp(film_rgb + u_push_toe * inv * inv * inv, 0.0, 1.0);
+        // The fog gets the same weight squared: it is strongest where the print actually
+        // crushed the frame and fades out of the midtones, instead of laying a constant
+        // fluctuation over the whole image.
+        vec3 inv3 = inv * inv * inv;
+        vec3 pedestal = inv3 + vec3(u_push_fog * push_fog_n) * inv3 * inv3;
+        film_rgb = clamp(film_rgb + u_push_toe * pedestal, 0.0, 1.0);
     }
 
     fragColor = vec4(clamp(film_rgb, 0.0, 1.0), 1.0);
@@ -1926,12 +1941,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_preflash", 0.0)
             u_1f("u_black_lift", float(self.params.get("black_lift", 0.0)))
             u_1f("u_push_toe", push_model.toe_amount_for(self.params.get("push_ev", 0)))
+            u_1f("u_push_fog", push_model.fog_grain_for(self.params.get("push_ev", 0)))
         else:
             u_3f("u_cmy", float(self.params.get("enlarger_cyan", 0.0)), float(self.params.get("enlarger_magenta", 0.0)), float(self.params.get("enlarger_yellow", 0.0)))
             u_1f("u_print_exposure", float(self.params.get("print_exposure", 1.0)))
             u_1f("u_preflash", float(self.params.get("pre_flash", 0.0)))
             u_1f("u_black_lift", float(self.params.get("black_lift", 0.0)))
             u_1f("u_push_toe", push_model.toe_amount_for(self.params.get("push_ev", 0)))
+            u_1f("u_push_fog", push_model.fog_grain_for(self.params.get("push_ev", 0)))
 
         # Lens correction uniforms
         lens_cfg = self.params.get("lens", {})

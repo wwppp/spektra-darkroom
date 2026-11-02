@@ -4155,6 +4155,8 @@ class SpektraEngine:
             # Push's fog and toe ride after the LUT: inside the film or the curve both are
             # cancelled by the print's renormalisation (see push_model.toe_amount_for).
             push_toe = push_model.toe_amount_for(params_dict.get("push_ev", 0))
+            push_fog = (push_model.fog_grain_for(params_dict.get("push_ev", 0))
+                        * min(2.0, max(0.0, float(params_dict.get("grain", 0.4))) / 0.4))
             halation = float(params_dict.get("halation_amount", params_dict.get("halation", 1.0)))
             hal_spatial_scale = float(params_dict.get("halation_spatial_scale", 1.0))
             scatter_amount = float(params_dict.get("scatter_amount", 1.0))
@@ -4202,7 +4204,7 @@ class SpektraEngine:
                 if abs(black_lift) > 1e-4:
                     rendered_float = apply_black_point(rendered_float, black_lift)
                 if push_toe > 1e-4:
-                    rendered_float = apply_push_toe(rendered_float, push_toe)
+                    rendered_float = apply_push_toe(rendered_float, push_toe, push_fog)
 
                 # Crop, flips and straighten exactly as the film pipeline does below
                 rendered_float = self._apply_export_crop(rendered_float, params_dict)
@@ -4433,7 +4435,7 @@ class SpektraEngine:
 
                 # Bidirectional Black Point calibration (white-point preserving: >0 lifts shadows/fades, <0 subtracts base fog/deepens blacks)
                 chunk_film = apply_black_point(chunk_film, black_lift)
-                chunk_film = apply_push_toe(chunk_film, push_toe)
+                chunk_film = apply_push_toe(chunk_film, push_toe, push_fog, origin=(y0, 0))
 
                 rendered_float[y0:y1] = np.clip(chunk_film, 0.0, 1.0)
 

@@ -41,6 +41,8 @@ PUSH_TOE_PER_STOP = 0.068      # display-domain toe: black lift and shadow compr
 GRAIN_SCALE_PER_STOP = 0.60    # overall grain amplitude
 GRAIN_SHADOW_PER_STOP = 1.60   # extra amplitude at zero density, fading to 0 at the anchor
 GRAIN_FOG_PER_STOP = 1.20      # additive shadow grain (the fog's own grain), in DENS_GAIN units
+FOG_GRAIN_RELATIVE = 0.15      # fluctuation of the lifted black, as a fraction of the lift itself
+FOG_GRAIN_AT_FULL_SLIDER = 2.0 # the 颗粒 slider multiplies it, up to this, over its 0.40 default
 
 
 def toe_amount_for(stops):
@@ -72,6 +74,23 @@ def grain_shape_for(stops):
     return (1.0 + GRAIN_SCALE_PER_STOP * stops,
             min(3.0, GRAIN_SHADOW_PER_STOP * stops),
             min(2.2, GRAIN_FOG_PER_STOP * stops))
+
+
+def fog_grain_for(stops):
+    """Fluctuation of the lifted black point, relative to the lift itself.  0 at standard.
+
+    The toe lifts the crushed end of the frame to a constant ``a``.  Measured on a frame that
+    renders below the paper's black point, that end is *exactly* one value: every pixel the same,
+    sigma 0.00, 100% zoom included -- because the grain stage multiplies the film's transmittance
+    before the LUT, and a transmittance of ~0 stays ~0 through the print whatever you multiply it
+    by, while the lift is painted on afterwards as a constant.
+
+    Developed fog is not a constant, though: it is silver, and it is granular.  This factor is
+    that granularity, expressed against the lift so it scales with the push and vanishes with it.
+    """
+    if not stops:
+        return 0.0
+    return FOG_GRAIN_RELATIVE
 
 
 def push_dir(resources_dir):

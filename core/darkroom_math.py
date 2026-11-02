@@ -208,7 +208,56 @@ def grain_scale_px(fmt_mm, master_long_px, grain_size=1.0, stock_size_mm=0.005):
     return max(0.20, (5.976 / um_per_px) * max(0.2, float(grain_size)) * (float(stock_size_mm) / 0.005))
 
 
-def apply_push_toe(img, amount=0.0):
+_NOISE_CELL = 1.7          # px per noise cell at 100% -- same order as one grain cluster
+
+
+def _hash01(ix, iy):
+    """Deterministic [0,1) lattice value from integer cell coordinates."""
+    n = (np.asarray(ix, dtype=np.int64) * np.int64(374761393)
+         + np.asarray(iy, dtype=np.int64) * np.int64(668265263)
+         + np.int64(1442695040888963407)) & np.int64(0x7FFFFFFFFFFFFFFF)
+    n = ((n ^ (n >> np.int64(13))) * np.int64(1274126177)) & np.int64(0x7FFFFFFFFFFFFFFF)
+    n = n ^ (n >> np.int64(16))
+    return ((n & np.int64(0xFFFFFF)).astype(np.float32) / np.float32(16777215.0))
+
+
+def _value_noise(h, w, cell, origin_y=0, origin_x=0):
+    """Zero-mean, unit-std smooth value noise on absolute pixel coordinates.
+
+    Absolute coordinates (not chunk-relative) keep a tiled export seam-free: two chunks of the
+    same frame get the same field wherever they meet.
+    """
+    ys = (np.arange(h, dtype=np.float32) + float(origin_y)) / cell
+    xs = (np.arange(w, dtype=np.float32) + float(origin_x)) / cell
+    y0 = np.floor(ys)[:, None]
+    x0 = np.floor(xs)[None, :]
+    ty = (ys - y0.ravel())[:, None]
+    tx = (xs - x0.ravel())[None, :]
+    sy = ty * ty * (3.0 - 2.0 * ty)
+    sx = tx * tx * (3.0 - 2.0 * tx)
+    v00 = _hash01(x0, y0)
+    v10 = _hash01(x0 + 1.0, y0)
+    v01 = _hash01(x0, y0 + 1.0)
+    v11 = _hash01(x0 + 1.0, y0 + 1.0)
+    top = v00 + (v10 - v00) * sx
+    bot = v01 + (v11 - v01) * sx
+    return ((top + (bot - top) * sy) - 0.5) * 2.0
+
+
+def fog_noise(h, w, origin_y=0, origin_x=0):
+    """The grain field the lifted black point carries: two octaves, std ~1.
+
+    Cancels out of the pedestal at zero, so the mean of the lift is unchanged; only its texture.
+    """
+    n1 = _value_noise(h, w, _NOISE_CELL, origin_y, origin_x)
+    n2 = _value_noise(h, w, _NOISE_CELL * 2.15, origin_y, origin_x)
+    n = (n1 * 0.72 + n2 * 0.52) * 2.62
+    # Soft limit: the raw sum reaches +-3, and a hard clip there would punch pure-black
+    # pinholes out of the lifted pedestal instead of reading as grain.
+    return 2.0 * np.tanh(n * 0.5)
+
+
+def apply_push_toe(img, amount=0.0, fog_grain=0.0, origin=(0, 0)):
     """Push development's display-domain toe: lift the black point, soften the shadows.
 
     ``v + a(1-v)^3`` keeps white at 1.0 (the term vanishes there), lifts the deepest tone to
@@ -216,12 +265,27 @@ def apply_push_toe(img, amount=0.0):
     the film's density: fog in ``base_density`` is exactly cancelled by the print's per-channel
     exposure correction, and a flattened toe in the characteristic curve measured as a no-op once
     the print rebalanced it.  Mirrored by ``u_push_toe`` in the preview shader.
+
+    ``fog_grain`` adds the fluctuation the lift itself must carry.  Without it the toe paints a
+    *constant* over everything the print crushed, and a frame that renders below the paper's
+    black point comes out as a perfectly flat card: measured, one unique RGB value, sigma 0.00,
+    at 100% zoom with the grain slider at 1.0.  Real fog is silver and is granular, so the lift
+    gets a zero-mean field scaled against itself.
     """
     a = float(amount)
     if a <= 1e-4:
         return img
     inv = 1.0 - np.clip(img, 0.0, 1.0)
-    return np.clip(img + a * inv * inv * inv, 0.0, 1.0).astype(np.float32)
+    inv3 = inv * inv * inv
+    pedestal = inv3
+    g = float(fog_grain)
+    if g > 1e-4:
+        h, w = pedestal.shape[:2]
+        n = fog_noise(h, w, origin[0], origin[1])
+        # Weighted by the pedestal's own cube: strongest where the print crushed the frame,
+        # gone from the midtones.  A flat fluctuation everywhere just reads as noise.
+        pedestal = pedestal + (n * g)[:, :, None] * inv3 * inv3
+    return np.clip(img + a * pedestal, 0.0, 1.0).astype(np.float32)
 
 
 def apply_black_point(img, black_lift=0.0):
