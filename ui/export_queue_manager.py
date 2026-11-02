@@ -100,7 +100,12 @@ class _LoadImageWorker(QThread):
                 paper_stock = self.params.get("paper_stock", "kodak_2383")
                 print_mode = self.params.get("print_mode", "optical")
                 try:
-                    lut_arr = self.engine.get_3d_lut(film_stock, paper_stock, lut_size=33, print_mode=print_mode)
+                    # params must reach the bake: without them the table is standard
+                    # development, so a pushed frame exported standard while the LUT-driven
+                    # preview showed the pushed curve (0 档 coincided, which is why this only
+                    # ever showed up on pushed frames).
+                    lut_arr = self.engine.get_3d_lut(film_stock, paper_stock, lut_size=33,
+                                                     params_dict=self.params, print_mode=print_mode)
                 except Exception as ex_lut:
                     logger.warning(f"Failed to fetch 3D LUT in background loader: {ex_lut}")
 
@@ -467,7 +472,8 @@ class ExportQueueManager(QObject):
                         paper_stock = task.params.get("paper_stock", "kodak_2383")
                         print_mode = task.params.get("print_mode", "optical")
                         try:
-                            eff_lut = self.engine.get_3d_lut(film_stock, paper_stock, lut_size=33, print_mode=print_mode)
+                            eff_lut = self.engine.get_3d_lut(film_stock, paper_stock, lut_size=33,
+                                                             params_dict=task.params, print_mode=print_mode)
                         except Exception as ex_lut:
                             logger.warning(f"Failed to fetch 3D LUT for GPU export: {ex_lut}")
                         if eff_density is None and hasattr(self.engine, "get_film_density"):

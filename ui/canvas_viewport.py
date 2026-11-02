@@ -1298,12 +1298,44 @@ void main() {
     }
 
     // 4. Physical 3D LUT sampling with Log Shaper (Film emulsion + Paper D-max)
+    //
+    // Zoomed out, one screen pixel covers many master pixels and the mip chain has already
+    // averaged them *in scene-linear light*. Handing that average to the tone curve is not the
+    // same as averaging the developed pixels (E[f(x)] != f(E[x])), and the gap is largest where
+    // the curve bends hardest - measured at fit on a pushed Portra frame: 0 at the bottom of the
+    // scale, -15..-17 in the upper midtones, -5 near white, red worst (its knee comes first), so
+    // a sky read 15 levels too cyan against the export. Four taps a quarter footprint apart, each
+    // one mip level finer, tile the pixel footprint and restore most of the curvature for four
+    // extra texture reads and four LUT reads - not the 4x full-frame cost of real supersampling.
     vec3 film_rgb;
     if (u_has_lut == 1) {
-        vec3 shaper_in = linear_to_shaper(linear_rgb);
         float lut_dim = float(textureSize(u_lut, 0).x);
-        vec3 lut_coord = shaper_in * ((lut_dim - 1.0) / lut_dim) + (0.5 / lut_dim);
-        film_rgb = texture(u_lut, lut_coord).rgb;
+        float lut_scale = (lut_dim - 1.0) / lut_dim;
+        // Decide from the actual sample footprint, not from a uniform: an offscreen render
+        // reuses whatever the last paintGL left in the program, and a leaked flag would
+        // supersample the export.
+        vec2 tex_sz = max(vec2(100.0), vec2(textureSize(u_image, 0)));
+        vec2 fp_px = vec2(length(d_sample_dx * tex_sz), length(d_sample_dy * tex_sz));
+        if (max(fp_px.x, fp_px.y) >= 1.5) {
+            float tap_lod = clamp(log2(max(1.0, max(fp_px.x, fp_px.y))) - 1.0, 0.0, 9.0);
+            // Ratio against the centre tap: keeps the halation / diffusion / grain level already
+            // in linear_rgb while carrying only the local detail variation of each tap.
+            vec3 base_lin = compute_scene_radiance(textureLod(u_image, sample_uv, tap_lod).rgb);
+            vec3 acc = vec3(0.0);
+            for (int i = 0; i < 4; i++) {
+                vec2 q = vec2(float(i & 1) - 0.5, float((i >> 1) & 1) - 0.5) * 0.5;
+                vec2 tap_uv = clamp(sample_uv + q.x * d_sample_dx + q.y * d_sample_dy,
+                                    0.0, 1.0);
+                vec3 tap_lin = compute_scene_radiance(textureLod(u_image, tap_uv, tap_lod).rgb);
+                vec3 lin_t = max(vec3(0.0), linear_rgb * (tap_lin / max(base_lin, vec3(1e-4))));
+                acc += texture(u_lut, linear_to_shaper(lin_t) * lut_scale + (0.5 / lut_dim)).rgb;
+            }
+            film_rgb = acc * 0.25;
+        } else {
+            vec3 shaper_in = linear_to_shaper(linear_rgb);
+            vec3 lut_coord = shaper_in * lut_scale + (0.5 / lut_dim);
+            film_rgb = texture(u_lut, lut_coord).rgb;
+        }
     } else {
         film_rgb = prophoto_to_srgb(linear_rgb);
     }
@@ -3237,16 +3269,25 @@ class DarkroomGLCanvas(QOpenGLWidget):
             paper_id_off = eff_params.get("paper_profile", getattr(self, "current_paper_stock", "none"))
             pmode_off = eff_params.get("print_mode", getattr(self, "current_print_mode", "optical"))
             is_scan_off = (paper_id_off == "none" or pmode_off == "scan")
+            # The push toe / fog are uniforms too: without these the offscreen render (export,
+            # thumbnails, histogram) silently reused whatever the last paintGL happened to leave
+            # behind, which is only right by luck - and wrong after a push change with no repaint.
+            push_toe_off = push_model.toe_amount_for(eff_params.get("push_ev", 0))
+            push_fog_off = push_model.fog_grain_for(eff_params.get("push_ev", 0))
             if is_pos_off or is_scan_off:
                 u_3f("u_cmy", 0.0, 0.0, 0.0)
                 u_1f("u_print_exposure", 1.0)
                 u_1f("u_preflash", 0.0)
                 u_1f("u_black_lift", float(eff_params.get("black_lift", 0.0)))
+                u_1f("u_push_toe", push_toe_off)
+                u_1f("u_push_fog", push_fog_off)
             else:
                 u_3f("u_cmy", float(eff_params.get("enlarger_cyan", 0.0)), float(eff_params.get("enlarger_magenta", 0.0)), float(eff_params.get("enlarger_yellow", 0.0)))
                 u_1f("u_print_exposure", float(eff_params.get("print_exposure", 1.0)))
                 u_1f("u_preflash", float(eff_params.get("pre_flash", 0.0)))
                 u_1f("u_black_lift", float(eff_params.get("black_lift", 0.0)))
+                u_1f("u_push_toe", push_toe_off)
+                u_1f("u_push_fog", push_fog_off)
 
             def u_4f(name, x, y, z, w):
                 loc = self.shader_program.uniformLocation(name)
