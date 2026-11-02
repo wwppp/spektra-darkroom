@@ -210,6 +210,8 @@ uniform vec2 u_crop_flip;
 
 uniform float u_split_x;
 uniform int u_view_mode;
+// Fit zoom develops four taps; only meaningful when no stage is already blurring the frame.
+uniform int u_supersample_ok;
 uniform float u_screen_aspect;
 uniform float u_image_aspect;
 uniform float u_native_aspect;
@@ -450,6 +452,58 @@ vec3 diffusion_disc(vec2 sample_uv, vec2 radius_uv) {
         w_sum += w;
     }
     return acc / max(0.0001, w_sum);
+}
+
+// The enlarger and the paper, applied to one patch of the negative: steps 4 to 8 of the
+// pipeline, lifted out of main() so a pixel can run it more than once.  At fit zoom one screen
+// pixel covers several image pixels; averaging them *after* this is what a downsample does --
+// averaging before it is what a different-looking picture does.
+vec3 develop_negative(vec3 linear_rgb) {
+    vec3 film_rgb;
+    if (u_has_lut == 1) {
+        vec3 shaper_in = linear_to_shaper(linear_rgb);
+        float lut_dim = float(textureSize(u_lut, 0).x);
+        vec3 lut_coord = shaper_in * ((lut_dim - 1.0) / lut_dim) + (0.5 / lut_dim);
+        film_rgb = texture(u_lut, lut_coord).rgb;
+    } else {
+        film_rgb = prophoto_to_srgb(linear_rgb);
+    }
+
+    // 5. DIR Coupler inhibition is already fully baked into the LUT above (film development
+    //    stage). No post-LUT approximation is applied: dragging the DIR sliders rebakes the
+    //    LUT at full resolution through the same code path, so preview == commit.
+
+    // 6. Enlarger CMY filtration, print exposure & pre-flash in paper-exposure domain
+    //    print = 1 / (1 + E^2.5)  ->  E' = E * 10^(-0.004 * cmy) / print_exposure + preflash
+    //    (mirrors core/darkroom_math.paper_domain_adjust)
+    if (any(greaterThan(abs(u_cmy), vec3(0.01))) || abs(u_print_exposure - 1.0) > 0.005 || u_preflash > 0.0005) {
+        vec3 pv = clamp(film_rgb, 1e-4, 1.0 - 1e-4);
+        vec3 e_paper = pow(vec3(1.0) / pv - vec3(1.0), vec3(0.4));
+        e_paper = e_paper * pow(vec3(10.0), -0.004 * u_cmy) / max(0.05, u_print_exposure) + vec3(max(0.0, u_preflash));
+        film_rgb = vec3(1.0) / (vec3(1.0) + pow(e_paper, vec3(2.5)));
+    }
+
+    // 7. Paper Chemistry Morph & Developer Exhaustion - delta vs. LUT-baked values only
+    float morph_r = u_morph_gamma / max(0.05, u_lut_morph_gamma);
+    if (abs(morph_r - 1.0) > 0.01) {
+        vec3 c_m = clamp(film_rgb, 1e-4, 1.0 - 1e-4);
+        vec3 odds = pow((c_m / 0.42) / ((vec3(1.0) - c_m) / 0.58), vec3(morph_r));
+        film_rgb = (odds * 0.42) / (odds * 0.42 + vec3(0.58));
+    }
+    float exh_d = u_developer_exhaustion - u_lut_dev_exh;
+    if (abs(exh_d) > 0.005) {
+        vec3 c_exh = clamp(film_rgb, 0.0, 1.0);
+        film_rgb = clamp(film_rgb + exh_d * c_exh * (vec3(1.0) - c_exh) * (c_exh - vec3(0.42)) * 0.35, 0.0, 1.0);
+    }
+
+    // 8. Bidirectional Black Point calibration (white-point preserving: >0 lifts shadows/fades, <0 subtracts base fog/deepens blacks)
+    if (u_black_lift > 0.0001) {
+        film_rgb = vec3(u_black_lift) + film_rgb * (1.0 - u_black_lift);
+    } else if (u_black_lift < -0.0001) {
+        float c_blk = min(0.95, -u_black_lift);
+        film_rgb = max(vec3(0.0), (film_rgb - vec3(c_blk)) / (1.0 - c_blk));
+    }
+    return clamp(film_rgb, 0.0, 1.0);
 }
 
 // {{FILM_GRAIN}}
@@ -987,66 +1041,53 @@ void main() {
     // ui/gl_film_grain.py's port of fotufilm's tile sampler -- the same film, the same placement,
     // the same read the CPU export makes. It reads the pre-distortion coordinate: grain belongs
     // to the film, not to the lens the film was shot through.
+    vec3 grain_dD = vec3(0.0);
     if (u_grain_on == 1) {
-        vec3 grain_dD = grain_field(linear_rgb, pre_dist_uv, pre_dist_dx, pre_dist_dy);
+        grain_dD = grain_field(linear_rgb, pre_dist_uv, pre_dist_dx, pre_dist_dy);
         // A diagnostic read of the stage: the density field itself, so the GPU sampler can be
         // compared against the CPU one pixel for pixel. Unreachable from the UI.
         if (u_grain_probe == 1) {
             fragColor = vec4(grain_dD * 0.5 + 0.5, 1.0);
             return;
         }
-        linear_rgb *= exp(-grain_dD * 2.302585092994046);   // 10^-dD
     } else if (u_grain_probe == 1) {
         fragColor = vec4(vec3(0.5), 1.0);
         return;
     }
 
-    // 4. Physical 3D LUT sampling with Log Shaper (Film emulsion + Paper D-max)
+    // 4. Physical 3D LUT sampling, then the paper.  When the canvas shows the photo below one
+    //    image pixel per screen pixel, four taps are developed separately and averaged.  The
+    //    pipeline is not linear, so averaging the light first and developing once lifts the
+    //    mid-tones and shifts colour (measured in docs/grain-port-plan.md 2.6: +15 levels of
+    //    green on a bypass frame).  Grain goes into every tap from the one field: its own
+    //    aperture already covers the pixel, so that is what the film under it actually did.
+    vec2 step_px = vec2(length(d_sample_dx * tex_dim), length(d_sample_dy * tex_dim));
+    bool supersample = (u_supersample_ok == 1) && max(step_px.x, step_px.y) >= 1.5;
     vec3 film_rgb;
-    if (u_has_lut == 1) {
-        vec3 shaper_in = linear_to_shaper(linear_rgb);
-        float lut_dim = float(textureSize(u_lut, 0).x);
-        vec3 lut_coord = shaper_in * ((lut_dim - 1.0) / lut_dim) + (0.5 / lut_dim);
-        film_rgb = texture(u_lut, lut_coord).rgb;
+    if (supersample) {
+        vec2 ox = d_sample_dx * 0.25;
+        vec2 oy = d_sample_dy * 0.25;
+        vec3 acc = vec3(0.0);
+        for (int i = 0; i < 4; i++) {
+            vec2 off = ((i & 1) == 0 ? -ox : ox) + ((i & 2) == 0 ? -oy : oy);
+            // Half the footprint per tap: four taps of half a pixel cover the pixel once, so the
+            // mip chain and the taps must not both average the same area.
+            vec3 tap = compute_scene_radiance(
+                textureGrad(u_image, clamp(sample_uv + off, half_texel, vec2(1.0) - half_texel),
+                            d_sample_dx * 0.5, d_sample_dy * 0.5).rgb);
+            if (u_grain_on == 1) {
+                tap *= exp(-grain_dD * 2.302585092994046);
+            }
+            acc += develop_negative(tap);
+        }
+        film_rgb = acc * 0.25;
     } else {
-        film_rgb = prophoto_to_srgb(linear_rgb);
+        if (u_grain_on == 1) {
+            linear_rgb *= exp(-grain_dD * 2.302585092994046);   // 10^-dD
+        }
+        film_rgb = develop_negative(linear_rgb);
     }
-
-    // 5. DIR Coupler inhibition is already fully baked into the LUT above (film development
-    //    stage). No post-LUT approximation is applied: dragging the DIR sliders rebakes the
-    //    LUT at full resolution through the same code path, so preview == commit.
-
-    // 6. Enlarger CMY filtration, print exposure & pre-flash in paper-exposure domain
-    //    print = 1 / (1 + E^2.5)  ->  E' = E * 10^(-0.004 * cmy) / print_exposure + preflash
-    //    (mirrors core/darkroom_math.paper_domain_adjust)
-    if (any(greaterThan(abs(u_cmy), vec3(0.01))) || abs(u_print_exposure - 1.0) > 0.005 || u_preflash > 0.0005) {
-        vec3 pv = clamp(film_rgb, 1e-4, 1.0 - 1e-4);
-        vec3 e_paper = pow(vec3(1.0) / pv - vec3(1.0), vec3(0.4));
-        e_paper = e_paper * pow(vec3(10.0), -0.004 * u_cmy) / max(0.05, u_print_exposure) + vec3(max(0.0, u_preflash));
-        film_rgb = vec3(1.0) / (vec3(1.0) + pow(e_paper, vec3(2.5)));
-    }
-
-    // 7. Paper Chemistry Morph & Developer Exhaustion - delta vs. LUT-baked values only
-    float morph_r = u_morph_gamma / max(0.05, u_lut_morph_gamma);
-    if (abs(morph_r - 1.0) > 0.01) {
-        vec3 c_m = clamp(film_rgb, 1e-4, 1.0 - 1e-4);
-        vec3 odds = pow((c_m / 0.42) / ((vec3(1.0) - c_m) / 0.58), vec3(morph_r));
-        film_rgb = (odds * 0.42) / (odds * 0.42 + vec3(0.58));
-    }
-    float exh_d = u_developer_exhaustion - u_lut_dev_exh;
-    if (abs(exh_d) > 0.005) {
-        vec3 c_exh = clamp(film_rgb, 0.0, 1.0);
-        film_rgb = clamp(film_rgb + exh_d * c_exh * (vec3(1.0) - c_exh) * (c_exh - vec3(0.42)) * 0.35, 0.0, 1.0);
-    }
-
-    // 8. Bidirectional Black Point calibration (white-point preserving: >0 lifts shadows/fades, <0 subtracts base fog/deepens blacks)
-    if (u_black_lift > 0.0001) {
-        film_rgb = vec3(u_black_lift) + film_rgb * (1.0 - u_black_lift);
-    } else if (u_black_lift < -0.0001) {
-        float c_blk = min(0.95, -u_black_lift);
-        film_rgb = max(vec3(0.0), (film_rgb - vec3(c_blk)) / (1.0 - c_blk));
-    }
-    fragColor = vec4(clamp(film_rgb, 0.0, 1.0), 1.0);
+    fragColor = vec4(film_rgb, 1.0);
 }
 """
 
@@ -1732,6 +1773,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 u_1f("u_scatter_amount", 0.0)
             u_1f("u_scene_prepared", 1.0)
 
+        self._supersample_ok = 0 if prepared_tex else self._supersample_allowed()
+
         # Bind 2D Image Texture (Unit 0)
         if self._image_tex_id:
             funcs.glActiveTexture(0x84C0)  # GL_TEXTURE0
@@ -2005,6 +2048,22 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 print(f"[SpektraGrain] density upload skipped: {exc}")
             self._pending_density = None
 
+    def _supersample_allowed(self) -> int:
+        """Whether the four-tap develop is meaningful for this frame.
+
+        Halation, scatter and diffusion are spatial stages: they already average the frame, so
+        four taps would only multiply the cost.  With them off, the four taps are the downsampling
+        the missing mip chain would have done.
+        """
+        if self.params.get("no_supersample"):
+            return 0                    # diagnostic switch, used by scratch/_p3_fit_check.py
+        hal = float(self.params.get("halation_amount", self.params.get("halation", 1.0)) or 0.0)
+        scat = float(self.params.get("scatter_amount", 1.0) or 0.0)
+        family = str(self.params.get("diffusion_family", "none")).lower()
+        strength = float(self.params.get("diffusion_strength", 0.0) or 0.0)
+        quiet = hal <= 0.001 and scat <= 0.001 and (family == "none" or strength <= 0.001)
+        return 1 if quiet else 0
+
     # --- film grain ------------------------------------------------------------------------
     def _bind_grain(self, u_1f, u_1i, u_2f, u_3f, size) -> None:
         """Make the current stock's film resident and hand the stage everything it needs.
@@ -2022,6 +2081,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         grain = self._grain
         if isinstance(self._film_density, np.ndarray):
             grain.set_density(self._film_density)
+        # Set before the early returns: a frame with no grain still needs the four-tap develop.
+        u_1i("u_supersample_ok", int(getattr(self, "_supersample_ok", 0)))
         stock = self.params.get("film_stock")
         if grain is None or not stock or stock == "none" \
                 or getattr(self, "_is_placeholder", False):
@@ -3039,6 +3100,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 u_1f("u_scene_prepared", 1.0)
             else:
                 u_1f("u_scene_prepared", 0.0)
+
+            self._supersample_ok = 0 if prepared_tex else self._supersample_allowed()
 
             funcs.glActiveTexture(0x84C0)  # GL_TEXTURE0
             GL.glBindTexture(GL.GL_TEXTURE_2D, prepared_tex if prepared_tex else active_tex_id)

@@ -92,7 +92,13 @@ ivec3 grain_placement(int bx, int by, int laying, int record) {
 float grain_sat_lookup(int layer, vec2 p) {
     // Texel i of a 257-wide table sits at (i + 0.5) / 257, so a point p in [0, 256] lands
     // exactly between its two neighbours -- the same bilinear read the CPU does by hand.
-    return texture(u_grain_sat, vec3((p + 0.5) / 257.0, float(layer))).r;
+    //
+    // Two half-float channels, not one float: GL 3.0 requires linear filtering of half-float
+    // textures but not of 32-bit float ones, and the table's sums reach ~3e4 where a half's own
+    // step is 16 -- larger than the box difference being read.  Storing the value and its
+    // residual restores the precision at no extra memory (2 x 16 bit = 32).
+    vec2 texel = texture(u_grain_sat, vec3((p + 0.5) / 257.0, float(layer))).rg;
+    return texel.x + texel.y;
 }
 
 float grain_sat(int layer, vec2 p) {
@@ -338,10 +344,16 @@ class GLFilmGrain:
         self._mean_light = np.array([[tiles.mean_light(r, k) for k in range(levels)]
                                      for r in range(3)], dtype=np.float32)
 
-        bank = np.empty((3 * levels, _SAT_SIDE, _SAT_SIDE), dtype=np.float32)
+        # Two half-float channels per texel: the value and its residual against half precision.
+        # The sum of the two reads back at nearly float32 accuracy, through a texture format the
+        # spec actually requires the driver to filter linearly.
+        bank = np.empty((3 * levels, _SAT_SIDE, _SAT_SIDE, 2), dtype=np.float16)
         for record in range(3):
             for level in range(levels):
-                bank[record * levels + level] = tiles.summed_area(record, level)
+                table = tiles.summed_area(record, level).astype(np.float32)
+                high = table.astype(np.float16)
+                bank[record * levels + level, :, :, 0] = high
+                bank[record * levels + level, :, :, 1] = (table - high.astype(np.float32))
 
         if self._sat_tex is None or self._layers != 3 * levels:
             if self._sat_tex:
@@ -349,11 +361,8 @@ class GLFilmGrain:
             self._sat_tex = GL.glGenTextures(1)
             self._layers = 3 * levels
             GL.glBindTexture(GL.GL_TEXTURE_2D_ARRAY, self._sat_tex)
-            # R32F is what the table needs: it holds sums up to 65536 and the box difference of
-            # two nearly equal sums is the signal.  Half precision would round that difference
-            # away at the bright end.
-            GL.glTexImage3D(GL.GL_TEXTURE_2D_ARRAY, 0, GL.GL_R32F, _SAT_SIDE, _SAT_SIDE,
-                            self._layers, 0, GL.GL_RED, GL.GL_FLOAT, bank)
+            GL.glTexImage3D(GL.GL_TEXTURE_2D_ARRAY, 0, GL.GL_RG16F, _SAT_SIDE, _SAT_SIDE,
+                            self._layers, 0, GL.GL_RG, GL.GL_HALF_FLOAT, bank)
             GL.glTexParameteri(GL.GL_TEXTURE_2D_ARRAY, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
             GL.glTexParameteri(GL.GL_TEXTURE_2D_ARRAY, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
             GL.glTexParameteri(GL.GL_TEXTURE_2D_ARRAY, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
@@ -362,7 +371,7 @@ class GLFilmGrain:
         else:
             GL.glBindTexture(GL.GL_TEXTURE_2D_ARRAY, self._sat_tex)
             GL.glTexSubImage3D(GL.GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, _SAT_SIDE, _SAT_SIDE,
-                               self._layers, GL.GL_RED, GL.GL_FLOAT, bank)
+                               self._layers, GL.GL_RG, GL.GL_HALF_FLOAT, bank)
             GL.glBindTexture(GL.GL_TEXTURE_2D_ARRAY, 0)
 
     # -- the density cube --------------------------------------------------------------------
