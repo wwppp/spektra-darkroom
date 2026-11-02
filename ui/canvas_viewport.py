@@ -1311,12 +1311,11 @@ void main() {
     if (u_has_lut == 1) {
         float lut_dim = float(textureSize(u_lut, 0).x);
         float lut_scale = (lut_dim - 1.0) / lut_dim;
-        // Decide from the actual sample footprint, not from a uniform: an offscreen render
-        // reuses whatever the last paintGL left in the program, and a leaked flag would
-        // supersample the export.
+        // Only the on-screen view: the offscreen render pins u_zoom to 1.0 on every draw, and
+        // an export that small-sizes itself must stay byte-identical to a 100% one.
         vec2 tex_sz = max(vec2(100.0), vec2(textureSize(u_image, 0)));
         vec2 fp_px = vec2(length(d_sample_dx * tex_sz), length(d_sample_dy * tex_sz));
-        if (max(fp_px.x, fp_px.y) >= 1.5) {
+        if (u_zoom < 0.999 && max(fp_px.x, fp_px.y) >= 1.5) {
             float tap_lod = clamp(log2(max(1.0, max(fp_px.x, fp_px.y))) - 1.0, 0.0, 9.0);
             // Ratio against the centre tap: keeps the halation / diffusion / grain level already
             // in linear_rgb while carrying only the local detail variation of each tap.
