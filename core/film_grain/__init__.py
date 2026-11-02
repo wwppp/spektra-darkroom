@@ -1,8 +1,10 @@
 """Film grain, ported from fotufilm-engine's film-tile model.
 
-Status: **P0 skeleton**.  The old octave model (``core/grain_model.py`` + shader stage 3.5) is
-gone; everything below is the interface the port fills in, and ``apply_block`` is a pass-through
-until P2 lands.  See ``docs/grain-port-plan.md``.
+Status: **P1 done** (2026-11-02).  The old octave model (``core/grain_model.py`` + shader stage
+3.5) is gone; ``population.py`` now fits the crystal population off each stock's curve and
+``tile_build.py`` lays a record's film tile, both checked against the reference in
+``tests/test_film_tile_build.py``.  ``apply_block`` is still a pass-through: the CPU sampler that
+reads the tiles is P2.  See ``docs/grain-port-plan.md``.
 
 Why a port and not a patch
 --------------------------
