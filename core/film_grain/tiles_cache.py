@@ -31,7 +31,7 @@ import numpy as np
 from . import tile_build as tb
 from .population import CrystalPopulation, GrainStock
 
-__all__ = ["StockTiles", "build_tiles", "load_or_build", "TileStore"]
+__all__ = ["StockTiles", "build_tiles", "load_or_build", "is_cached", "TileStore"]
 
 CACHE_VERSION = 3
 
@@ -174,6 +174,16 @@ def build_tiles(stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1,
 
 def _path(stock: GrainStock, levels: int, seed: int) -> Path:
     return _cache_root() / f"{stock.stock_id}-{_signature(stock, levels, seed)}.npz"
+
+
+def is_cached(stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1) -> bool:
+    """Whether this stock's film is already on disk.
+
+    The preview asks before it reads: laying a stock costs twenty to forty seconds, and a paint
+    that blocks for that long is indistinguishable from a hang.  Callers that cannot wait check
+    this first and lay the film off the paint thread.
+    """
+    return _path(stock, levels, seed).exists()
 
 
 def load_or_build(stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1,

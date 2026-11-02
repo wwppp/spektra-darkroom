@@ -21,6 +21,7 @@ __all__ = ["table", "stock_for", "available", "clear_cache"]
 
 _LOCK = threading.Lock()
 _CACHE: dict | None = None
+_STOCKS: dict[str, GrainStock] = {}
 
 
 def _path() -> Path:
@@ -46,6 +47,7 @@ def clear_cache() -> None:
     global _CACHE
     with _LOCK:
         _CACHE = None
+        _STOCKS.clear()
 
 
 def available() -> list[str]:
@@ -53,14 +55,21 @@ def available() -> list[str]:
 
 
 def stock_for(stock_id: str | None) -> GrainStock | None:
-    """The grain a stock id carries, or ``None`` when its film has not been characterised."""
+    """The grain a stock id carries, or ``None`` when its film has not been characterised.
+
+    Memoised: the preview asks once a frame, and rebuilding three curves to answer the same
+    question every 16 ms is work with no purpose.
+    """
     if not stock_id:
         return None
+    known = _STOCKS.get(stock_id)
+    if known is not None:
+        return known
     entry = table().get("stocks", {}).get(stock_id)
     if entry is None:
         return None
     curves = tuple(Curve.from_json(curve) for curve in entry["curves"])
-    return GrainStock(
+    stock = GrainStock(
         stock_id=stock_id,
         curves=curves,
         grain_size_mm=float(entry["grainSizeMM"]),
@@ -75,6 +84,8 @@ def stock_for(stock_id: str | None) -> GrainStock | None:
         granularity_read_density=str(entry.get("granularityReadDensity", "net")),
         luma_correlation=float(entry.get("grainLumaCorrelation", 0.0)),
     )
+    _STOCKS[stock_id] = stock
+    return stock
 
 
 def source_for(stock_id: str | None) -> str | None:

@@ -57,10 +57,10 @@ from core.app_core import SpektraEngine
 from core import sdc_manager
 from core import config_manager
 
-# The grain stage is being replaced wholesale (docs/grain-port-plan.md).  Until the film-tile
-# sampler is wired into both renderers, the grain controls are shown but inert, so nothing here
-# can pretend to work.
-GRAIN_IMPLEMENTATION_READY = False
+# The film-tile sampler is in both renderers now (docs/grain-port-plan.md P3), so the controls
+# drive the frame again.  A stock whose grain has not been baked yet still says so rather than
+# moving a slider that changes nothing.
+GRAIN_IMPLEMENTATION_READY = True
 from core import session_cache_manager
 from ui.export_queue_manager import ExportQueueManager, ExportQueueDialog, ExportTask
 from ui.unsaved_session_dialog import UnsavedSessionDialog
@@ -9567,13 +9567,20 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # ships instead of leaving a slider that silently does nothing.
         sec_grain = getattr(self, "sec_grain", None)
         grain_available = GRAIN_IMPLEMENTATION_READY and not is_none
+        grain_hint = ""
         if is_none:
             grain_hint = "当前处于数码原片旁通模式，无胶片银盐结晶微粒"
-        elif not GRAIN_IMPLEMENTATION_READY:
-            grain_hint = ("颗粒已接入导出（按默认量铺 fotufilm 影像片），画布预览待 P3 接入；"
-                          "此期间先不要用滑块调颗粒")
-        else:
-            grain_hint = ""
+        elif grain_available:
+            # The port only carries the stocks whose parameters are baked.  The rest have no film
+            # to read, so the controls say so instead of moving without an effect.
+            try:
+                from core.film_grain import grain_source
+                if grain_source(getattr(self, "current_film_stock", None)) is None:
+                    grain_available = False
+                    grain_hint = ("这支胶卷的颗粒参数尚未固化（移植期先做了 Gold 200 / Portra 400 / "
+                                  "Tri-X 400 三支做验收），换这三支以外的胶卷暂时无颗粒")
+            except Exception:
+                pass
         if sec_grain is not None and hasattr(sec_grain, "set_available"):
             sec_grain.set_available(grain_available, grain_hint)
             if not grain_available:

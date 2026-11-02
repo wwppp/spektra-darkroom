@@ -1,8 +1,10 @@
 """Film grain, ported from fotufilm-engine's film-tile model.
 
-Status: **P2** (2026-11-02).  ``population.py`` fits the crystal population off each stock's
+Status: **P3** (2026-11-02).  ``population.py`` fits the crystal population off each stock's
 curve, ``tile_build.py`` lays the film, ``tiles_cache.py`` keeps it, ``sampler.py`` reads it for a
-frame.  ``apply_block`` is the export's entry point.  See ``docs/grain-port-plan.md``.
+frame (the export), and ``ui/gl_film_grain.py`` reads the same tables for the canvas.  The two
+agree pixel for pixel -- ``scratch/_p3_gpu_vs_cpu.py`` -- so a photographer judges the grain the
+export will write, not a look-alike.  See ``docs/grain-port-plan.md``.
 
 Why a port and not a patch
 --------------------------
@@ -28,6 +30,8 @@ Layout
 ``tiles_cache.py``   disk cache, keyed by (stock, record, seed, version)
 ``sampler.py``       CPU sampling: 128 um blocks, two layings, layer blending, aperture mean
 ``profiles.py``      which grain a stock id carries, from ``resources/profiles/grain_params.json``
+
+The GPU sampler lives in ``ui/gl_film_grain.py``: same tables, same placement, same constants.
 
 The tile data and the constants live in exactly one place so the GPU sampler (``ui/``) and the
 CPU sampler cannot drift apart.
