@@ -76,6 +76,7 @@ class StockTiles:
     _sat: dict = field(default_factory=dict, repr=False)
     _means: np.ndarray | None = field(default=None, repr=False)
     _rho: np.ndarray | None = field(default=None, repr=False)
+    _sigma: np.ndarray | None = field(default=None, repr=False)
 
     @property
     def levels(self) -> int:
@@ -117,6 +118,22 @@ class StockTiles:
                     means[record, level] = -np.log10(max(self.mean_light(record, level), 1e-9))
             self._means = means
         return self._means
+
+    def sigmas(self) -> np.ndarray:
+        """Spread of the density fluctuation at each level, ``(3, levels)``.
+
+        The records do not carry the same spread -- a record with a wider density range has more
+        grain -- so tying them to one common field has to be done in units of each record's own
+        sigma, or the mix silently rescales the coarser record.  That is what this table is for.
+        """
+        if self._sigma is None:
+            sigma = np.full((3, self.levels), np.nan, dtype=np.float64)
+            for record in range(3):
+                for level in range(self.levels):
+                    density = -np.log10(np.maximum(self.light(record, level), 1e-9))
+                    sigma[record, level] = float(density.std())
+            self._sigma = sigma
+        return self._sigma
 
     def correlations(self) -> np.ndarray:
         """Correlation of neighbouring levels' grain, ``(3, levels-1)``.

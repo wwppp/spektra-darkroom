@@ -2067,6 +2067,27 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 print(f"[SpektraGrain] density upload skipped: {exc}")
             self._pending_density = None
 
+    def begin_interaction(self) -> None:
+        """Tell the canvas a drag is in progress, so the expensive path can stand down.
+
+        Called from the slider handlers and from the canvas's own pan/zoom; the frame is redrawn
+        once more when the interaction stops, this time with the full-quality path.
+        """
+        self._interacting = True
+        timer = getattr(self, "_interaction_idle", None)
+        if timer is None:
+            from PySide6.QtCore import QTimer
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(160)
+            timer.timeout.connect(self._end_interaction)
+            self._interaction_idle = timer
+        timer.start()
+
+    def _end_interaction(self) -> None:
+        self._interacting = False
+        self.update()
+
     def _supersample_allowed(self) -> int:
         """Whether the four-tap develop is meaningful for this frame.
 
@@ -2076,6 +2097,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         """
         if self.params.get("no_supersample"):
             return 0                    # diagnostic switch, used by scratch/_p3_fit_check.py
+        if getattr(self, "_interacting", False):
+            # While a finger or a slider is moving, the frame has to come back in ~80 ms, not 160.
+            # Four taps are the first thing to go: the grain and the chemistry are unchanged, the
+            # downsample is simply done once instead of four times, and it comes back on idle.
+            return 0
         hal = float(self.params.get("halation_amount", self.params.get("halation", 1.0)) or 0.0)
         scat = float(self.params.get("scatter_amount", 1.0) or 0.0)
         family = str(self.params.get("diffusion_family", "none")).lower()
@@ -2571,6 +2597,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.pan_y = max(-limit, min(limit, self.pan_y))
 
     def wheelEvent(self, event):
+        self.begin_interaction()
         delta = event.angleDelta().y()
         if delta == 0:
             return
@@ -2636,6 +2663,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if event.buttons():
+            self.begin_interaction()
         if getattr(self, '_is_canvas_long_pressing', False):
             event.accept()
             return

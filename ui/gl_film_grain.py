@@ -38,7 +38,8 @@ GRAIN_UNIFORM_NAMES = (
     "u_grain_sat", "u_grain_density", "u_grain_on", "u_grain_has_density",
     "u_grain_levels", "u_grain_mono", "u_grain_seed", "u_grain_dmin", "u_grain_dmax",
     "u_grain_pitch", "u_grain_size", "u_grain_softness", "u_grain_amount", "u_grain_colour",
-    "u_grain_layer", "u_grain_means", "u_grain_rho", "u_grain_mean_light",
+    "u_grain_layer", "u_grain_luma", "u_grain_means", "u_grain_rho", "u_grain_mean_light",
+    "u_grain_sigma",
     "u_grain_image_size", "u_grain_probe",
 )
 
@@ -62,10 +63,12 @@ uniform float u_grain_size;
 uniform float u_grain_softness;
 uniform float u_grain_amount;
 uniform float u_grain_colour;
+uniform float u_grain_luma;             // how much of one field the three records share
 uniform vec3  u_grain_layer;
 uniform float u_grain_means[51];        // -log10(level mean light), per (record, level)
 uniform float u_grain_rho[51];          // neighbour correlation, per (record, level)
 uniform float u_grain_mean_light[51];
+uniform float u_grain_sigma[51];        // spread of each (record, level), in density
 uniform vec2  u_grain_image_size;
 uniform int   u_grain_probe;        // diagnostic: write the density field instead of the frame
 
@@ -218,6 +221,36 @@ vec3 grain_net_density(vec3 linear) {
     return -log(max(linear, vec3(1e-9))) / GRAIN_LOG10 - u_grain_dmin;
 }
 
+// The record's own spread at this density, interpolated over the level table.  The records do
+// not share a sigma (a record with a wider density range is grainier), so tying them to one
+// field has to be done in units of each record's own sigma.
+float grain_sigma_at(int record, float net) {
+    float span = max(u_grain_dmax[record] - u_grain_dmin[record], 1e-6);
+    float top = float(u_grain_levels - 1);
+    float x = clamp((net - u_grain_dmin[record]) / span * top, 0.0, top);
+    int lo = int(floor(x));
+    int hi = min(lo + 1, u_grain_levels - 1);
+    int base = record * u_grain_levels;
+    return max(mix(u_grain_sigma[base + lo], u_grain_sigma[base + hi], x - float(lo)), 1e-6);
+}
+
+// Luma correlation: a coating's three layers are only partly independent, and the reference packs
+// how much as grainLumaCorrelation.  Their test asserts the invariant we honour here -- rho moves
+// how much the channels share, never how much grain there is.
+//
+// In units of each record's own sigma (u), with s the standardised mean (each u sits at 1/sqrt(3)
+// from s), out = (u + c s) / sqrt(1 + a) with a = 2 c / sqrt(3) + c^2.  Choosing
+// a = rho / (1 - rho) makes the cross-correlation exactly rho and leaves every variance at one.
+vec3 grain_couple(vec3 g, vec3 net, float rho) {
+    float s0 = grain_sigma_at(0, net.r);
+    float s1 = grain_sigma_at(1, net.g);
+    float s2 = grain_sigma_at(2, net.b);
+    vec3 shared = vec3(g.r / s0 + g.g / s1 + g.b / s2) / 3.0 * sqrt(3.0);
+    float target = rho / max(1.0 - rho, 1e-3);
+    float c = -0.57735027 + sqrt(0.33333333 + target);
+    return (g + c * vec3(s0, s1, s2) * shared) / sqrt(1.0 + target);
+}
+
 // The stage's entry point: density fluctuation for this pixel, in density units.
 vec3 grain_field(vec3 linear, vec2 sample_uv, vec2 d_dx, vec2 d_dy) {
     float pitch = u_grain_pitch / max(u_grain_size, 0.01);
@@ -240,10 +273,21 @@ vec3 grain_field(vec3 linear, vec2 sample_uv, vec2 d_dx, vec2 d_dy) {
     vec3 g = vec3(grain_record(0, net.r, pixel, footprint),
                   grain_record(1, net.g, pixel, footprint),
                   grain_record(2, net.b, pixel, footprint));
+    float rho = clamp(u_grain_luma, 0.0, 1.0);
+    float own = clamp(u_grain_colour, 0.0, 1.0);
+    // At Colour Grain 0 the three channels are already one field: there is no independence left to
+    // couple, and mixing there only rescales it.
+    if (rho > 0.0 && own > 0.05) {
+        g = grain_couple(g, net, min(rho, 0.99));
+    }
     g *= u_grain_amount * u_grain_layer / u_grain_size;
     // Colour Grain: 1 keeps each record's own dye clouds, 0 shares one field across all three.
-    float own = clamp(u_grain_colour, 0.0, 1.0);
     float shared = sqrt(max(3.0 - 2.0 * own * own, 0.0)) - own;
+    if (rho > 0.0 && own > 0.05) {
+        // The coefficient above assumes independent records; coupled ones give a mean that is
+        // wider by sqrt(1 + 2 rho), so divide that back out.
+        shared /= sqrt(1.0 + 2.0 * min(rho, 0.99));
+    }
     return own * g + shared * vec3((g.r + g.g + g.b) / 3.0);
 }
 """
@@ -260,9 +304,11 @@ class GLFilmGrain:
         self._layers = 0
         self._stock_id: str | None = None
         self._monochrome = False
+        self._luma = 0.0
         self._levels = 0
         self._means = None
         self._rho = None
+        self._sigma = None
         self._mean_light = None
         self._d_min = np.zeros(3)
         self._d_max = np.zeros(3)
@@ -301,6 +347,7 @@ class GLFilmGrain:
             self._upload(self._tiles, stock)
             self._stock_id = stock.stock_id
             self._monochrome = bool(stock.is_monochrome)
+            self._luma = float(stock.luma_correlation) if not stock.is_monochrome else 0.0
             self._ready = True
             self.note = f"{stock.stock_id}: {self._levels} levels x 3 records"
             return True
@@ -341,6 +388,7 @@ class GLFilmGrain:
         self._d_max = np.asarray(tiles.d_max, dtype=np.float64)
         self._means = np.asarray(tiles.means(), dtype=np.float32)
         self._rho = np.asarray(tiles.correlations(), dtype=np.float32)
+        self._sigma = np.asarray(tiles.sigmas(), dtype=np.float32)
         self._mean_light = np.array([[tiles.mean_light(r, k) for k in range(levels)]
                                      for r in range(3)], dtype=np.float32)
 
@@ -454,6 +502,7 @@ class GLFilmGrain:
             "u_grain_softness": float(look.scan_softness),
             "u_grain_amount": amount,
             "u_grain_colour": float(look.colour),
+            "u_grain_luma": float(self._luma),
             "u_grain_layer": tuple(float(v) for v in look.layers),
             "u_grain_image_size": (float(image_size[0]), float(image_size[1])),
             "u_grain_probe": 1 if params.get("grain_probe") else 0,
@@ -468,15 +517,17 @@ class GLFilmGrain:
         means = np.zeros(3 * MAX_LEVELS, dtype=np.float32)
         rho = np.zeros(3 * MAX_LEVELS, dtype=np.float32)
         light = np.zeros(3 * MAX_LEVELS, dtype=np.float32)
+        sigma = np.ones(3 * MAX_LEVELS, dtype=np.float32)
         levels = self._levels
         for record in range(3):
             base = record * MAX_LEVELS
             means[base:base + levels] = self._means[record][:levels]
             light[base:base + levels] = self._mean_light[record][:levels]
+            sigma[base:base + levels] = self._sigma[record][:levels]
             count = max(levels - 1, 0)
             rho[base:base + count] = self._rho[record][:count]
         self._arrays = {"u_grain_means": means, "u_grain_rho": rho,
-                        "u_grain_mean_light": light}
+                        "u_grain_mean_light": light, "u_grain_sigma": sigma}
         return self._arrays
 
     def release(self) -> None:

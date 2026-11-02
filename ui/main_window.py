@@ -7209,6 +7209,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
         if self._bypass_blocks_param(param_key):
             return
+        began = getattr(self.canvas, "begin_interaction", None)
+        if began is not None:
+            began()
         self.current_params[param_key] = val
         if param_key == "halation_amount":
             self.current_params["halation"] = val
@@ -7375,6 +7378,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
         if self._bypass_blocks_param(param_key):
             return
+        began = getattr(self.canvas, "begin_interaction", None)
+        if began is not None:
+            began()
         # Read before the write: the push branch below needs to know which stop count we came from.
         prev_push = int(round(float(self.current_params.get("push_ev", 0) or 0)))
         self.current_params[param_key] = val

@@ -129,6 +129,10 @@ class TileSampler:
         self.pitch, self.footprint = look_geometry(px_per_mm, size, softness)
         self.means = tiles.means()
         self.rho = tiles.correlations()
+        self.sigmas = tiles.sigmas()
+        self.d_min = np.asarray(tiles.d_min, dtype=np.float64)
+        self.d_max = np.asarray(tiles.d_max, dtype=np.float64)
+        self.levels = int(tiles.levels)
         self.mean_lights = np.asarray(
             [[tiles.mean_light(r, k) for k in range(tiles.levels)] for r in range(3)],
             dtype=np.float64)
@@ -273,21 +277,81 @@ class TileSampler:
 
     # -- the frame --------------------------------------------------------------------------
     def apply(self, net_density: np.ndarray, row_offset: int, amount: float, colour: float = 1.0,
-              layer_weights=(1.0, 1.0, 1.0), monochrome: bool = False) -> np.ndarray:
+              layer_weights=(1.0, 1.0, 1.0), monochrome: bool = False,
+              luma_correlation: float = 0.0) -> np.ndarray:
         """Density fluctuation for a chunk of the frame, ``(height, width, 3)``.
 
         ``net_density`` is the negative's developed density above base per record, in the stock's
         own units -- the quantity the tile levels are indexed by.
+
+        ``luma_correlation`` ties the three records' dye clouds to one common field, the way a
+        real coating's layers are only partly independent.  The reference packs it as
+        ``grainLumaCorrelation`` and documents the invariant we honour here: the *spread* must not
+        move with the correlation, only how much of it the three channels share.  Mixing in the
+        scaled mean keeps both true -- variance stays ``sigma^2`` while the cross-correlation of
+        any two records becomes exactly ``rho``.
         """
         height, width = net_density.shape[:2]
         if monochrome:
             grain = self._record(1, net_density[..., 1], row_offset)
             return np.repeat((amount * grain)[..., None], 3, axis=2)
-        grain = np.empty((height, width, 3), dtype=np.float64)
+        raw = np.empty((height, width, 3), dtype=np.float64)
         for record in range(3):
-            grain[..., record] = self._record(record, net_density[..., record], row_offset) \
-                * (amount * max(float(layer_weights[record]), 0.0) / self.size)
+            raw[..., record] = self._record(record, net_density[..., record], row_offset)
+
         own = min(max(colour, 0.0), 1.0)
+        rho = min(max(float(luma_correlation), 0.0), 1.0)
+        # At Colour Grain 0 the three channels are already one field, so there is no independence
+        # left to couple -- mixing there only rescales it.
+        if rho > 0.0 and own > 0.05:
+            raw = self._couple_records(raw, net_density, min(rho, 0.99))
+
+        grain = raw * (amount * np.asarray([max(float(w), 0.0) for w in layer_weights],
+                                           dtype=np.float64) / self.size)
+
         shared = np.sqrt(max(3.0 - 2.0 * own * own, 0.0)) - own
+        if rho > 0.0 and own > 0.05:
+            # The coefficient above assumes independent records; once they are coupled the mean is
+            # wider by sqrt((1 + 2 rho) / 3), so divide that back out.
+            shared /= np.sqrt(1.0 + 2.0 * min(rho, 0.99))
         mean = grain.mean(axis=2, keepdims=True)
         return own * grain + shared * mean
+
+    # -- luma correlation --------------------------------------------------------------------
+    def _sigma_at(self, record: int, net: np.ndarray) -> np.ndarray:
+        """The record's own spread at each pixel's density, ``(h, w)``.
+
+        Interpolated over the level table rather than taken as one number: the grain is coarser
+        in the dense end, and the records do not sit at the same density for the same pixel.
+        """
+        span = max(float(self.d_max[record] - self.d_min[record]), 1e-6)
+        x = np.clip((net - self.d_min[record]) / span * (self.levels - 1), 0.0, self.levels - 1.0)
+        table = self.sigmas[record]
+        lo = np.floor(x).astype(np.int64)
+        hi = np.minimum(lo + 1, self.levels - 1)
+        w = x - lo
+        return np.maximum((1.0 - w) * table[lo] + w * table[hi], 1e-6)
+
+    def _couple_records(self, raw: np.ndarray, net_density: np.ndarray, rho: float) -> np.ndarray:
+        """Tie the three records' fluctuations to one field, without changing their spread.
+
+        The target is the reference's invariant: ``grainLumaCorrelation`` sets how much of the
+        grain the channels *share*, and the granularity must not move with it (their
+        LuminanceChannelTests asserts the ratio is constant from rho 0 to rho 1).
+
+        Work in units of each record's own sigma -- the records differ by up to 1.6x, so a plain
+        mix would rescale the coarser one -- then, with ``u`` the standardised records and ``s``
+        the standardised mean (which each ``u`` is correlated with at 1/sqrt(3)):
+
+            out = (u + c s) / sqrt(1 + a),   a = 2 c / sqrt(3) + c^2
+
+        Picking ``a = rho / (1 - rho)`` makes the cross-correlation exactly ``rho`` and leaves the
+        variance at one, for every rho and every record.
+        """
+        sigma = np.stack([self._sigma_at(r, net_density[..., r]) for r in range(3)], axis=2)
+        unit = raw / sigma
+        shared = np.sqrt(3.0) * unit.mean(axis=2, keepdims=True)
+        gamma = 1.0 / np.sqrt(3.0)
+        target = rho / (1.0 - rho)
+        c = -gamma + np.sqrt(gamma * gamma + target)
+        return (raw + c * sigma * shared) / np.sqrt(1.0 + target)

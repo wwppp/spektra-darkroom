@@ -183,7 +183,8 @@ def apply_block(linear: np.ndarray, params: GrainParams, *, stock: str | None = 
     if density is None:
         density = -np.log10(np.maximum(linear, 1e-6)) - np.asarray(tiles.d_min, dtype=np.float32)
     fluctuation = sampler.apply(density, row_offset, params.amount, params.colour,
-                                params.layers, monochrome=grain_stock.is_monochrome)
+                                params.layers, monochrome=grain_stock.is_monochrome,
+                                luma_correlation=grain_stock.luma_correlation)
     _LAST[str(stock)] = {
         "active": True,
         "pitch": float(sampler.pitch),
