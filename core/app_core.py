@@ -1602,6 +1602,11 @@ class SpektraEngine:
                         try:
                             with open(os.path.join(self.profiles_dir, f), "r", encoding="utf-8") as fp:
                                 meta = json.load(fp)
+                            if not isinstance(meta.get("data"), dict) or "density_curves" not in meta["data"]:
+                                # Not a film: this directory also holds the baked grain table
+                                # (grain_params.json), which has curves of its own but no profile.
+                                # It used to be listed as a stock called "Grain Params".
+                                continue
                             info_obj = meta.get("info", {})
                             if meta.get("type") != "paper" and "paper" not in sid.lower() and info_obj.get("support") != "paper":
                                 channel_model = info_obj.get("channel_model", "color")
