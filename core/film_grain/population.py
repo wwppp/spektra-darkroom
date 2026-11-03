@@ -57,6 +57,14 @@ MARK_DISPERSION = 0.5
 MARK_SECOND_MOMENT = 1.0 + MARK_DISPERSION * MARK_DISPERSION
 DEFAULT_GRAIN_FOG_DENSITY = 0.03
 
+# The developability grid a development condition is fitted over (reference:
+# ``Development.developabilities``, ``CrystalGrainModel.swift``).  Below 1.0 a record is pulled,
+# above it pushed; the fit picks the value whose re-formed curve matches the condition's.
+DEVELOPABILITIES = np.arange(0.3, 1.8001, 0.05)
+REFIT_ROUNDS = 40                              # coordinate-descent passes over the four sublayers
+REFIT_STEPS = 30                               # golden-section steps inside one sublayer
+REFIT_GAIN_BOUNDS = (0.0, 6.0)                 # the reference's search interval for a dye gain
+
 
 def granularity_aperture_response(clump_sigma_mm: float) -> float:
     """Fraction of a Gaussian clump field's granularity the 48 µm aperture keeps.
@@ -116,6 +124,17 @@ class GrainStock:
     grain_fog_density: float = DEFAULT_GRAIN_FOG_DENSITY
     granularity_read_density: str = "net"      # "net" (1 above base) or "gross"
     luma_correlation: float = 0.0
+    # Per record: how much coarser the model says this development is *at the read density*
+    # than the standard one.  1.0 means "same", and is what every stock gets until a pushed
+    # development is asked for.  The anchor multiplies the published granularity by it, because
+    # that figure was measured at the reference process and a longer development reaches the
+    # same net density from a thicker piece of film.
+    anchor_scales: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    # Which stock's coating this one was developed from: ``None`` for the standard development,
+    # the stock's own id when it is a pushed condition.  ``build_tiles`` hands it to
+    # ``CrystalPopulation`` as ``reference``, which is what lets ``refitDevelopment`` hold the
+    # coating and solve only the development.
+    reference_id: str | None = None
 
     # -- derived ----------------------------------------------------------------------------
     def layer_weight(self, layer: int) -> float:
@@ -385,9 +404,8 @@ class CrystalPopulation:
 
         if not self._same_curve(reference_curve, developed_curve):
             # A development condition away from the reference: the same coating, developed
-            # further or less far.  P2/P5 fills this in; until then it must not be silent.
-            raise NotImplementedError(
-                "pushed/pulled development is not ported yet (P2); curves differ from reference")
+            # further or less far.  The reference's ``refitDevelopment`` solves it here.
+            self._refit_development(developed_curve)
 
         scale = population.coating_density_scale
         if scale != 1.0:
@@ -409,6 +427,101 @@ class CrystalPopulation:
     def _same_curve(a: Curve, b: Curve) -> bool:
         return bool(np.all(np.abs(np.asarray([a.density(x) for x in FIT_LOG_EXPOSURES])
                                   - np.asarray([b.density(x) for x in FIT_LOG_EXPOSURES])) < 1e-4))
+
+    # -- development ------------------------------------------------------------------------
+    def _refit_development(self, developed_curve: Curve) -> None:
+        """Fit this coating to a development condition, in place.
+
+        Port of ``CrystalGrainModel.refitDevelopment``.  The coating -- crystal counts, cloud
+        radii, pools, class shares -- is what the *reference* process measured, so it is held
+        fixed.  What a longer or shorter development changes is how many latent centres reach
+        the threshold (``developability``) and how much dye each developed crystal ends up
+        carrying (the per-sublayer ``gain``).  Both are solved against the condition's own curve
+        above base:
+
+        * ``developability`` on a fixed grid, 0.3 … 1.8 in 0.05 steps;
+        * for each, four dye gains by coordinate descent, each coordinate by golden section
+          inside 0 … 6 (the pool makes the formed density concave in the gain, so a quadratic
+          step would not do).
+
+        The pair with the lowest SSE wins and is written back, ``fit_error`` with it.  Anything
+        wildly off the coating's reach will still be off afterwards -- that is the honest
+        outcome and the caller reports it rather than hiding it.
+        """
+        targets = np.asarray([developed_curve.density(x) - developed_curve.d_min
+                              for x in FIT_LOG_EXPOSURES], dtype=np.float64)
+        demand = np.asarray([b.demand_at_full for b in self.bins], dtype=np.float64)
+        pool = np.asarray([b.pool for b in self.bins], dtype=np.float64)
+        coated = np.nonzero(demand > 0)[0]
+        if coated.size == 0 or targets.size == 0:
+            return
+
+        def formed(fractions: np.ndarray, gains: np.ndarray) -> np.ndarray:
+            asked = demand[None, :] * gains[None, :] * fractions
+            out = np.empty_like(asked)
+            for index in range(asked.shape[1]):
+                out[:, index] = _dye(asked[:, index], pool[index]) if pool[index] > 0 \
+                    else asked[:, index]
+            return out.sum(axis=1)
+
+        def sse_of(fractions: np.ndarray, gains: np.ndarray) -> float:
+            diff = formed(fractions, gains) - targets
+            return float(diff @ diff)
+
+        previous = self.developability
+        best: tuple[float, np.ndarray, float, float] | None = None
+        phi = 0.6180339887
+        low_bound, high_bound = REFIT_GAIN_BOUNDS
+        for developability in DEVELOPABILITIES:
+            self.developability = float(developability)
+            fractions = np.asarray([self.bin_fractions(float(x)) for x in FIT_LOG_EXPOSURES])
+            gains = np.ones_like(demand)
+            for _ in range(REFIT_ROUNDS):
+                moved = 0.0
+                for index in coated:
+                    low, high = low_bound, high_bound
+                    c = high - phi * (high - low)
+                    d = low + phi * (high - low)
+                    probe = gains.copy()
+                    probe[index] = c
+                    f_c = sse_of(fractions, probe)
+                    probe[index] = d
+                    f_d = sse_of(fractions, probe)
+                    for _ in range(REFIT_STEPS):
+                        if f_c < f_d:
+                            high, d, f_d = d, c, f_c
+                            c = high - phi * (high - low)
+                            probe[index] = c
+                            f_c = sse_of(fractions, probe)
+                        else:
+                            low, c, f_c = c, d, f_d
+                            d = low + phi * (high - low)
+                            probe[index] = d
+                            f_d = sse_of(fractions, probe)
+                    updated = 0.5 * (low + high)
+                    moved = max(moved, abs(updated - float(gains[index])))
+                    gains[index] = updated
+                if moved < 1e-5:
+                    break
+            error = sse_of(fractions, gains)
+            worst = float(np.max(np.abs(formed(fractions, gains) - targets)))
+            if best is None or error < best[2]:
+                best = (float(developability), gains.copy(), error, worst)
+
+        if best is None:                             # nothing fitted: leave the reference alone
+            self.developability = previous
+            return
+        developability, gains, _error, worst = best
+        self.developability = developability
+        self.fit_error = worst
+        self.bins = tuple(
+            replace(b,
+                    gain=float(gains[index]),
+                    demand_at_full=float(b.demand_at_full * gains[index]),
+                    dye_per_cloud=float(b.dye_per_cloud * gains[index]))
+            if index in coated else b
+            for index, b in enumerate(self.bins)
+        )
 
     # -- what the record states -------------------------------------------------------------
     def forming_fractions(self, log_exposure: float) -> np.ndarray:

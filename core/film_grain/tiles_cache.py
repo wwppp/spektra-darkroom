@@ -31,7 +31,7 @@ import numpy as np
 from . import tile_build as tb
 from .population import CrystalPopulation, GrainStock
 
-__all__ = ["StockTiles", "build_tiles", "load_or_build", "is_cached", "TileStore"]
+__all__ = ["StockTiles", "build_tiles", "load_or_build", "is_cached", "TileStore", "signature_of"]
 
 CACHE_VERSION = 6          # 6: anchor keeps its closest pass (sigma is not monotone in dye)
 
@@ -44,7 +44,7 @@ def _cache_root() -> Path:
 
 
 def _signature(stock: GrainStock, levels: int, seed: int) -> str:
-    payload = json.dumps({
+    payload = {
         "version": CACHE_VERSION,
         "levels": levels,
         "seed": seed,
@@ -59,8 +59,12 @@ def _signature(stock: GrainStock, levels: int, seed: int) -> str:
         "fog": stock.grain_fog_density,
         "curves": [[round(float(c.density(x)), 6) for x in (-4.0, -2.0, 0.0, 2.0, 4.0)]
                    for c in stock.curves],
-    }, sort_keys=True)
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+    }
+    # Only a pushed development carries a non-unit scale.  Keying unconditionally would
+    # invalidate every standard film on disk for a value that is always 1.0 there.
+    if any(abs(float(s) - 1.0) > 1e-9 for s in stock.anchor_scales):
+        payload["anchor"] = [round(float(s), 6) for s in stock.anchor_scales]
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass
@@ -72,6 +76,11 @@ class StockTiles:
     d_max: np.ndarray                  # (3,)
     lights: np.ndarray                 # (3, levels, side, side) float32
     active: tuple[int, ...]            # records that carry grain
+
+    # Content hash of everything that shaped this film (see ``_signature``).  Set by the store
+    # that handed the object out; two developments of one stock share ``stock_id`` but not this,
+    # so anything caching per-stock objects must key on it as well.
+    signature: str = ""
 
     _sat: dict = field(default_factory=dict, repr=False)
     _means: np.ndarray | None = field(default=None, repr=False)
@@ -157,16 +166,19 @@ class StockTiles:
         return self._rho
 
 
-def _anchor(record: tb.FilmRecord, model: CrystalPopulation) -> tb.FilmRecord:
+def _anchor(record: tb.FilmRecord, model: CrystalPopulation, scale: float = 1.0) -> tb.FilmRecord:
     """Re-solve the dye until the tile reads the sheet's granularity at the read density.
 
     The read density is a *net* density -- one above base -- so the gross density to lay is
     simply ``d_min + read_net``.  Going through ``log_exposure_for`` and back would put a
     reversal on the far end of its ladder (net 1.0 → gross 2.42 on Provia 100F), and the anchor
     would then be taken somewhere the sheet never measured.
+
+    ``scale`` carries a pushed development's gain: the sheet's figure belongs to the reference
+    process, and ``GrainStock.anchor_scales`` says how much coarser this development is there.
     """
     gross = float(record.d_min + model.read_net_density)
-    return tb.anchor_to_sheet(record, gross, model.read_sigma)
+    return tb.anchor_to_sheet(record, gross, model.read_sigma * float(scale))
 
 
 def build_tiles(stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1,
@@ -176,11 +188,18 @@ def build_tiles(stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1,
     d_max = np.zeros(3)
     lights = np.zeros((3, levels, tb.TILE_SIDE, tb.TILE_SIDE), dtype=np.float32)
     active = [1] if stock.is_monochrome else [0, 1, 2]
+    reference = None
+    if stock.reference_id:
+        # A pushed development: the coating comes from the standard one, the curve from the
+        # condition, and ``refitDevelopment`` bridges them.
+        from . import profiles
+        reference = profiles.stock_for(stock.reference_id, 0)
     for record in active:
         started = time.time()
-        model = CrystalPopulation(stock, record)
+        model = CrystalPopulation(stock, record, reference=reference)
         laid = tb.sublayers_for(model)
-        anchored = _anchor(laid, model)
+        scale = float(stock.anchor_scales[record]) if record < len(stock.anchor_scales) else 1.0
+        anchored = _anchor(laid, model, scale)
         d_min[record], d_max[record] = anchored.d_min, anchored.d_max
         for level, gross in enumerate(anchored.grosses(levels)):
             lights[record, level] = tb.build_level(anchored, gross, seed=seed).astype(np.float32)
@@ -197,6 +216,15 @@ def build_tiles(stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1,
 
 def _path(stock: GrainStock, levels: int, seed: int) -> Path:
     return _cache_root() / f"{stock.stock_id}-{_signature(stock, levels, seed)}.npz"
+
+
+def signature_of(stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1) -> str:
+    """The content hash that names this film on disk and in memory.
+
+    Exposed because a caller holding tiles has to tell two developments of one stock apart
+    without re-deriving the curves it cannot see.
+    """
+    return _signature(stock, levels, seed)
 
 
 def is_cached(stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1) -> bool:
@@ -241,11 +269,13 @@ class TileStore:
         self._capacity = capacity
 
     def get(self, stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1) -> StockTiles:
-        key = f"{stock.stock_id}-{_signature(stock, levels, seed)}"
+        signature = _signature(stock, levels, seed)
+        key = f"{stock.stock_id}-{signature}"
         cached = self._entries.get(key)
         if cached is not None:
             return cached
         tiles = load_or_build(stock, levels=levels, seed=seed)
+        tiles.signature = signature
         if len(self._entries) >= self._capacity:
             self._entries.pop(next(iter(self._entries)))
         self._entries[key] = tiles
