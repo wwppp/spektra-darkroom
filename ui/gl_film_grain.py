@@ -606,6 +606,7 @@ class GLFilmGrain:
     def scalars(self, params: dict, px_per_mm: float, image_size: tuple[int, int]) -> dict:
         """The float/int uniforms of one paint, as ``{name: value}``."""
         from core.film_grain import params_for
+        from core.film_grain.sampler import effective_size
         look = params_for(params)
         pitch = (1.0 / max(px_per_mm, 1e-6)) / 0.001
         amount = float(look.amount)
@@ -618,9 +619,11 @@ class GLFilmGrain:
             "u_grain_dmin": tuple(float(v) for v in self._d_min),
             "u_grain_dmax": tuple(float(v) for v in self._d_max),
             "u_grain_pitch": float(pitch),
-            # Clamped here, on the CPU side, so the shader's `/ u_grain_size` can never divide by
-            # a slider zero.  Same floor the CPU sampler uses.
-            "u_grain_size": float(min(max(look.size, 0.1), 4.0)),
+            # The slider's geometric curve lives in one place (``effective_size``); the CPU
+            # sampler bends its pitch through the same function, so preview and export agree at
+            # every setting.  Clamped inside, so the shader's `/ u_grain_size` can never divide
+            # by a slider zero.
+            "u_grain_size": float(effective_size(look.size)),
             "u_grain_softness": float(look.scan_softness),
             "u_grain_amount": amount,
             "u_grain_colour": float(look.colour),

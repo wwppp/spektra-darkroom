@@ -27,7 +27,7 @@ import numpy as np
 
 from . import tile_build as tb
 
-__all__ = ["TileSampler", "block_placement", "look_geometry"]
+__all__ = ["TileSampler", "block_placement", "look_geometry", "effective_size"]
 
 TILE_LAYERS = 2                     # independent layings of the same tile
 BLOCK_TEXELS = 128
@@ -40,6 +40,25 @@ MARGIN_TEXELS = 64
 # without adding detail, since the tile itself is sampled at 4 µm.
 SIZE_MIN = 0.1
 SIZE_MAX = 4.0
+# The slider's geometric curve.  Applied linearly, the pitch made size 2 coarser than the
+# reference's size 3 (measured correlation length: ours 1.52/2.01/2.50 px for s1/s2/s3,
+# reference 1.40/1.56/1.81 -- s3/s1 1.64x vs 1.29x).  A first cut used ``size**0.23`` on the
+# assumption that correlation length tracks the pitch one-to-one; it does not -- the reading
+# box averages detail as it widens, so measured response is ~``size**0.45``.  0.5 puts the
+# measured s3/s1 at 1.29 (1.52 -> 1.96 px).  If the slider ceiling ever moves, re-fit from the
+# three rendered sizes rather than trusting the exponent.
+SIZE_CURVE = 0.5
+
+
+def effective_size(size: float) -> float:
+    """The slider value as the geometric multiplier the sampler actually applies.
+
+    Both the CPU sampler (``look_geometry``) and the GPU uniforms (``GLFilmGrain.scalars``)
+    must go through this one function: the shader divides the pitch by ``u_grain_size`` and
+    scales the fluctuation by it, so a curve applied on only one side would disagree with the
+    other at every setting except 1.
+    """
+    return float(min(max(float(size), SIZE_MIN), SIZE_MAX) ** SIZE_CURVE)
 # A pixel may not read more film than one block holds.  ``BLOCK_TEXELS`` is 128 and a tile is 256,
 # so a read box wider than a block stops being "a patch of film under this pixel" and starts
 # wrapping across placements.  Past this the pitch simply stops growing: at that point the grain
@@ -53,9 +72,10 @@ def look_geometry(px_per_mm: float, size: float = 1.0, softness: float = 1.0) ->
     ``size`` magnifies the film under the frame; the grain grows with it and its fluctuation falls
     by as much, so the 48 µm aperture still reads the sheet.  ``softness`` is the side of the
     square of film each pixel reads, in pixels: wider averages the grain down as a softer scan
-    does.
+    does.  The slider value is bent through ``effective_size`` first -- linear travel made every
+    step of the slider a full geometric step, twice the reference's rhythm.
     """
-    size = min(max(size, SIZE_MIN), SIZE_MAX)
+    size = effective_size(size)
     softness = min(max(softness, 0.5), 4.0)
     pitch = (1.0 / max(px_per_mm, 1e-6)) / tb.TILE_TEXEL_MM / size
     pitch = min(pitch, MAX_PITCH)
@@ -138,7 +158,10 @@ class TileSampler:
                  softness: float = 1.0) -> None:
         self.tiles = tiles
         self.seed = int(seed)
-        self.size = min(max(size, SIZE_MIN), SIZE_MAX)
+        # Bent through the same curve as the pitch: the amplitude term below divides by size to
+        # undo "one pixel now reads more film", and that reading is the *effective* geometry --
+        # a linear size here would disagree with the shader, which multiplies the bent value.
+        self.size = effective_size(size)
         self.pitch, self.footprint = look_geometry(px_per_mm, size, softness)
         self.means = tiles.means()
         self.rho = tiles.correlations()
