@@ -52,6 +52,7 @@ from .population import (
 # of megabytes, large enough that the per-slice overhead disappears; the value has no effect on
 # the result, only on the peak allocation (see ``_developed``).
 _MARK_BLOCK = 8 * 1024 * 1024
+_SPLAT_BLOCK = 8 * 1024 * 1024         # crystals per scatter-add chunk (peak-memory guard)
 
 __all__ = [
     "TILE_SIDE",
@@ -449,18 +450,26 @@ def _lay(layer: Sublayer, gross: float, record: FilmRecord, seed: int, period_mm
     amounts = layer.peak_demand * mark / max(layer.capacity, 1e-6)   # demand over capacity
 
     if resolved > 0:
-        value = amounts * resolved
         ix = np.floor(px)
         iy = np.floor(py)
         ax = px - ix
         ay = py - iy
-        ix0 = np.mod(ix.astype(np.int64), width)
-        iy0 = np.mod(iy.astype(np.int64), height)
+        # int32: the tile is 256², so every index fits — and a 38M-crystal population's
+        # per-corner index arrays stay half the size, which is the difference between
+        # fitting in what an 8 GB box has free and a MemoryError (superia_200).
+        ix0 = np.mod(ix.astype(np.int32), width)
+        iy0 = np.mod(iy.astype(np.int32), height)
         ix1 = np.mod(ix0 + 1, width)
         iy1 = np.mod(iy0 + 1, height)
-        for xs, wx in ((ix0, 1.0 - ax), (ix1, ax)):
-            for ys, wy in ((iy0, 1.0 - ay), (iy1, ay)):
-                demand += _splat(ys * width + xs, value * wx * wy, size)
+        vals = amounts * resolved
+        # Chunked: a 38M-crystal level's corner arrays are ~4 GB together in float64; in
+        # 8M-crystal blocks the peak stays under ~700 MB and the result is bit-identical
+        # (the splat is a pure per-crystal scatter-add).
+        for lo in range(0, vals.size, _SPLAT_BLOCK):
+            hi = min(lo + _SPLAT_BLOCK, vals.size)
+            for xs, wx in ((ix0[lo:hi], 1.0 - ax[lo:hi]), (ix1[lo:hi], ax[lo:hi])):
+                for ys, wy in ((iy0[lo:hi], 1.0 - ay[lo:hi]), (iy1[lo:hi], ay[lo:hi])):
+                    demand += _splat(ys * width + xs, vals[lo:hi] * wx * wy, size)
 
     covering = 1.0 - resolved
     if covering > 0:
