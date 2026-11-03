@@ -198,10 +198,25 @@ float grain_record(int record, float net, vec2 pixel, float footprint) {
                 }
                 vec2 offset = vec2(GRAIN_MARGIN) + vec2(place.xy);
 
-                float la = max(grain_box_light(record, k, p0, p1, offset, area), 1e-9);
-                float lb = max(grain_box_light(record, k + 1, p0, p1, offset, area), 1e-9);
+                // A floor relative to the level's own mean light.  The SAT is stored in half
+                // floats and a box is four subtractions of them, so at size 3 the error reaches
+                // 40 % of the mean and `light` can cross zero -- and -log10(1e-9) is density 9.0,
+                // which turned single channels pure black.  1.5 D below the level mean is far
+                // outside any real fluctuation, so it clamps only the broken reads.
+                float floor_a = pow(10.0, -u_grain_means[layer_a] - 1.5);
+                float floor_b = pow(10.0, -u_grain_means[layer_a + 1] - 1.5);
+                float la = max(grain_box_light(record, k, p0, p1, offset, area), floor_a);
+                float lb = max(grain_box_light(record, k + 1, p0, p1, offset, area), floor_b);
                 float da = -log(la) / GRAIN_LOG10 - u_grain_means[layer_a];
                 float db = -log(lb) / GRAIN_LOG10 - u_grain_means[layer_a + 1];
+                // The floor above only stops log(0); it still allows 1.5 D of excursion, which is
+                // 30-150x this layer's own sigma and renders as a black speck.  A real
+                // fluctuation never leaves 3 sigma, so anything beyond that is a broken SAT read
+                // and is clamped to the edge of the range the grain actually occupies.
+                float sa = 3.0 * max(u_grain_sigma[layer_a], 1e-4);
+                float sb = 3.0 * max(u_grain_sigma[layer_a + 1], 1e-4);
+                da = clamp(da, -sa, sa);
+                db = clamp(db, -sb, sb);
                 acc += w * grain_blend(da, db, u, u_grain_rho[layer_a]);
                 norm += w * w;
             }
@@ -280,7 +295,7 @@ vec3 grain_field(vec3 linear, vec2 sample_uv, vec2 d_dx, vec2 d_dy) {
     if (rho > 0.0 && own > 0.05) {
         g = grain_couple(g, net, min(rho, 0.99));
     }
-    g *= u_grain_amount * u_grain_layer / u_grain_size;
+    g *= u_grain_amount * u_grain_layer / max(u_grain_size, 0.01);
     // Colour Grain: 1 keeps each record's own dye clouds, 0 shares one field across all three.
     float shared = sqrt(max(3.0 - 2.0 * own * own, 0.0)) - own;
     if (rho > 0.0 && own > 0.05) {
@@ -293,6 +308,24 @@ vec3 grain_field(vec3 linear, vec2 sample_uv, vec2 d_dx, vec2 d_dy) {
 """
 
 
+def _diag(message: str) -> None:
+    """Append one timestamped line to the user cache dir.
+
+    The paint never tells you why it was blank: it only returns early.  When the canvas goes black
+    for tens of seconds this file is the only place that says which stage was still running.
+    Cheap enough to leave in -- one line per state change, not per frame.
+    """
+    try:
+        import time
+        from pathlib import Path
+        from core.path_utils import get_user_cache_dir
+        path = Path(get_user_cache_dir()) / "grain_diag.log"
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%H:%M:%S')} {time.time() % 1000:07.3f} {message}\n")
+    except Exception:                                  # noqa: BLE001 - diagnostics never break a paint
+        pass
+
+
 class GLFilmGrain:
     """Owns one stock's tile textures and the uniforms that describe them."""
 
@@ -303,6 +336,7 @@ class GLFilmGrain:
         self._density_ref = None
         self._layers = 0
         self._stock_id: str | None = None
+        self._push_stops = 0
         self._monochrome = False
         self._luma = 0.0
         self._levels = 0
@@ -318,38 +352,72 @@ class GLFilmGrain:
         self._float_linear = True
         self.note = ""
         self._building: str | None = None
+        self._developing: str | None = None
+        self._missing: str | None = None      # "stock@stops" the table does not cover
         self._on_ready = None       # called from the build thread; the canvas marshals it
 
     # -- tiles -------------------------------------------------------------------------------
-    def ensure_stock(self, stock_id: str | None) -> bool:
-        """Make the named stock's film resident.  Cheap and idempotent once it is."""
+    def ensure_stock(self, stock_id: str | None, push_stops: int = 0) -> bool:
+        """Make the named stock's film resident, at the development asked for.
+
+        ``push_stops`` is part of the identity: the same stock developed two stops longer is a
+        different film, so it needs its own tiles and its own upload.
+        """
+        stops = int(push_stops or 0)
         if not stock_id or stock_id in (None, "none"):
             self._ready = False
             return False
-        if self._ready and self._stock_id == stock_id:
+        if self._ready and self._stock_id == stock_id and self._push_stops == stops:
             return True
+        if self._missing == f"{stock_id}@{stops}":
+            self._ready = False
+            self.note = "no baked grain for this stock"
+            return False
         try:
             from core.film_grain import profiles, tiles_cache
-            stock = profiles.stock_for(stock_id)
+            if profiles.cached(stock_id, stops) is None:
+                # A pushed stock costs 9.5 s to develop (refitDevelopment).  Paying that inside a
+                # paint is exactly what made opening push look like a hang, so it takes the same
+                # background slot the tile laying uses and the next ready frame picks it up.
+                _diag(f"ensure {stock_id}+{stops}: no developed stock, starting background build")
+                self._start_develop(stock_id, stops)
+                self._ready = False
+                self.note = f"developing {stock_id}{f' +{stops}' if stops else ''}..."
+                return False
+            stock = profiles.stock_for(stock_id, stops)
             if stock is None:
                 self._ready = False
                 self.note = "no baked grain for this stock"
                 return False
-            if self._stock_id != stock.stock_id or self._tiles is None:
+            signature = tiles_cache.signature_of(stock)
+            # What the canvas wants right now.  A job that starts after the user has already
+            # moved on can drop out immediately instead of spending 20-40 s on a film nobody is
+            # looking at.
+            self._wanted_sig = signature
+            if self._tiles is None or getattr(self._tiles, "signature", "") != signature:
                 if not tiles_cache.is_cached(stock):
                     # Laying a film takes 20-40 s.  Doing it inside a paint looks like a hang,
                     # so it is started here and picked up by the next frame that finds it ready.
-                    self._start_build(stock)
+                    _diag(f"ensure {stock_id}+{stops}: tiles missing, laying in background")
+                    self._start_build(stock, signature)
                     self._ready = False
                     self.note = f"laying {stock.stock_id}'s film..."
                     return False
+                import time as _t
+                _t0 = _t.perf_counter()
                 self._tiles = tiles_cache.load_or_build(stock)
+                self._tiles.signature = signature
+                _diag(f"ensure {stock_id}+{stops}: tiles loaded in {(_t.perf_counter()-_t0)*1000:.0f} ms")
+            import time as _t
+            _t0 = _t.perf_counter()
             self._upload(self._tiles, stock)
+            _diag(f"ensure {stock_id}+{stops}: uploaded in {(_t.perf_counter()-_t0)*1000:.0f} ms")
             self._stock_id = stock.stock_id
+            self._push_stops = stops
             self._monochrome = bool(stock.is_monochrome)
             self._luma = float(stock.luma_correlation) if not stock.is_monochrome else 0.0
             self._ready = True
-            self.note = f"{stock.stock_id}: {self._levels} levels x 3 records"
+            self.note = f"{stock.stock_id}{f' +{stops}' if stops else ''}: {self._levels} levels x 3 records"
             return True
         except Exception as exc:                     # noqa: BLE001 - a paint must never break
             print(f"[SpektraGrain] tile upload skipped: {exc}")
@@ -357,19 +425,71 @@ class GLFilmGrain:
             self.note = str(exc)
             return False
 
-    def _start_build(self, stock) -> None:
-        if self._building == stock.stock_id:
+    def _start_develop(self, stock_id: str, stops: int) -> None:
+        """Build a stock's grain off the paint thread.
+
+        ``stock_for`` is where ``refitDevelopment`` runs for a pushed stock; the 31-step grid over
+        four sublayers measured 9.5 s on kodak_gold_200.  Same shape as ``_start_build``: mark the
+        slot, work in a thread, tell the canvas when it lands.
+        """
+        key = f"{stock_id}@{stops}"
+        # One background job at a time, whatever film it is for.  Guarding only against the same
+        # key meant that clicking through ten films started ten threads, each running a 5-10 s
+        # refit, and they queue behind profiles' build lock -- so the CPU stayed pinned long
+        # after the user stopped clicking, and nine of those results were thrown away anyway.
+        # Serialising loses nothing: the job always ends by re-triggering a paint, and that paint
+        # asks for whatever is on screen now, not for whatever was current when it started.
+        if self._developing is not None:
             return
-        self._building = stock.stock_id
+        self._developing = key
         import threading
+        import time as _t
+        _t0 = _t.perf_counter()
+
+        def work():
+            built = None
+            try:
+                from core.film_grain import profiles
+                built = profiles.stock_for(stock_id, stops)
+            except Exception as exc:                 # noqa: BLE001 - reported, never raised
+                print(f"[SpektraGrain] developing {stock_id} +{stops} failed: {exc}")
+            finally:
+                _diag(f"develop {stock_id}+{stops} finished in {(_t.perf_counter()-_t0):.2f} s")
+                # Remember a stock the table does not cover: without this the paint would start a
+                # fresh doomed thread every frame and the note would never settle.
+                if built is None:
+                    self._missing = key
+                self._developing = None
+                if self._on_ready is not None:
+                    self._on_ready()
+
+        threading.Thread(target=work, daemon=True, name=f"grain-dev-{stock_id}").start()
+
+    def _start_build(self, stock, signature: str = "") -> None:
+        key = f"{stock.stock_id}@{signature}"
+        # Same rule as _start_develop: laying a film takes 20-40 s of solid CPU, so a burst of
+        # film switches must not leave a queue of them behind.  The next paint re-requests
+        # whatever is wanted by then.
+        if self._building is not None:
+            return
+        self._building = key
+        import threading
+        import time as _t
+        _t0 = _t.perf_counter()
 
         def work():
             try:
                 from core.film_grain import tiles_cache
+                # The user may have switched films while this one waited for the slot.  Laying
+                # the film is 20-40 s of solid CPU, so check before paying it.
+                if getattr(self, "_wanted_sig", signature) != signature:
+                    _diag(f"layout {stock.stock_id}: skipped, no longer on screen")
+                    return
                 tiles_cache.load_or_build(stock)
             except Exception as exc:                 # noqa: BLE001 - reported, never raised
                 print(f"[SpektraGrain] laying {stock.stock_id} failed: {exc}")
             finally:
+                _diag(f"layout {stock.stock_id} finished in {(_t.perf_counter()-_t0):.2f} s")
                 self._building = None
                 if self._on_ready is not None:
                     self._on_ready()
@@ -498,7 +618,9 @@ class GLFilmGrain:
             "u_grain_dmin": tuple(float(v) for v in self._d_min),
             "u_grain_dmax": tuple(float(v) for v in self._d_max),
             "u_grain_pitch": float(pitch),
-            "u_grain_size": float(look.size),
+            # Clamped here, on the CPU side, so the shader's `/ u_grain_size` can never divide by
+            # a slider zero.  Same floor the CPU sampler uses.
+            "u_grain_size": float(min(max(look.size, 0.1), 4.0)),
             "u_grain_softness": float(look.scan_softness),
             "u_grain_amount": amount,
             "u_grain_colour": float(look.colour),

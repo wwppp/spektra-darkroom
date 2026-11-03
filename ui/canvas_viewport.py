@@ -1495,6 +1495,27 @@ class DarkroomGLCanvas(QOpenGLWidget):
         pass
 
     def paintGL(self):
+        # A paint that dies halfway leaves the clear colour on screen and leaves Qt believing the
+        # frame was drawn, so nothing asks for another one: on screen that is a black canvas that
+        # a pan suddenly repairs.  Catch it, say so in the diagnostic log, and queue a retry.
+        try:
+            self._paint_scene()
+            self._paint_fail_streak = 0
+        except Exception as exc:                 # noqa: BLE001 - a paint must never kill the view
+            import traceback
+            traceback.print_exc()
+            streak = getattr(self, "_paint_fail_streak", 0) + 1
+            self._paint_fail_streak = streak
+            try:
+                from .gl_film_grain import _diag as _diag_line
+                _diag_line(f"paint EXCEPTION #{streak} {type(exc).__name__}: {exc}")
+            except Exception:                    # noqa: BLE001 - diagnostics are optional
+                pass
+            # One retry is a repair; an unbounded loop would spin on a permanently broken state.
+            if streak <= 5:
+                QTimer.singleShot(150, self.update)
+
+    def _paint_scene(self):
         if not self.shader_program or not self.vbo:
             return
 
@@ -1506,6 +1527,19 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self._pending_lut = None
 
         funcs = QOpenGLContext.currentContext().functions()
+        # One line per state change, never per frame: when a paint comes out black this is what
+        # says whether the image, the LUT or the grain was the one missing.
+        try:
+            from .gl_film_grain import _diag as _diag_line
+            _state = (bool(self._has_image), bool(self._has_lut),
+                      bool(getattr(self._grain, "ready", False)) if self._grain else False,
+                      getattr(self, "_is_placeholder", False))
+            if _state != getattr(self, "_diag_state", None):
+                self._diag_state = _state
+                _diag_line(f"paint image={int(_state[0])} lut={int(_state[1])} "
+                           f"grain={int(_state[2])} placeholder={int(_state[3])}")
+        except Exception:                            # noqa: BLE001 - diagnostics are optional
+            pass
         GL.glClearColor(self._bg_color[0], self._bg_color[1], self._bg_color[2], 1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
 
@@ -1580,12 +1614,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_base_ev", float(self.params.get("base_ev", 0.0)))
         u_1f("u_highlights", float(self.params.get("highlights", 0.0)))
         u_1f("u_shadows", float(self.params.get("shadows", 0.0)))
-        u_3f("u_scene_gain", *scene_gain(
+        _gain = scene_gain(
             eff_exposure,
             self.params.get("color_temp", 5500.0),
             self.params.get("base_temp", 5500.0),
             self.params.get("tint", 1.0),
-            self.params.get("base_tint", 1.0)))
+            self.params.get("base_tint", 1.0))
+        u_3f("u_scene_gain", *_gain)
         film_id = self.params.get("film_stock", getattr(self, "current_film_stock", "none"))
         is_pos = self.engine.is_positive_film(film_id) if hasattr(self.engine, 'is_positive_film') else False
         # 数码原片旁通 (no film media): exposure / WB / highlights-shadows / optics stay live,
@@ -1800,14 +1835,20 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1i("u_raw_image", 2)
             u_1i("u_has_raw", 1 if prepared_tex else 0)
 
-        # Bind 3D LUT Texture (Unit 1)
-        if self._lut_tex_id:
-            funcs.glActiveTexture(0x84C1)  # GL_TEXTURE1
-            GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
-            u_1i("u_lut", 1)
-
         # Film grain (units 3 and 4): the stock's laid film and the density cube it is indexed by.
         self._bind_grain(u_1f, u_1i, u_2f, u_3f, (self._image_w, self._image_h))
+
+        # Bind 3D LUT Texture (unit 1), intentionally last.
+        # The frame that arrives together with a fresh 3D texture used to come out black while
+        # the texture itself verified fine on the GPU (read back and compared with the CPU
+        # array).  Everything between the upload and here -- the halation chain's own program and
+        # unit juggling, the grain binding -- can leave the sampler or unit 1 in another state,
+        # and a 3D sampler pointed at an empty unit returns 0, which the paper chain turns into
+        # pure black.  Binding immediately before the draw costs nothing and rules that out.
+        if self._lut_tex_id:
+            funcs.glActiveTexture(0x84C1)
+            GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
+            u_1i("u_lut", 1)
 
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 
@@ -2031,32 +2072,41 @@ class DarkroomGLCanvas(QOpenGLWidget):
         data = np.ascontiguousarray(lut_array_3d, dtype=np.float32)
 
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        # Upload on the LUT's own unit.  glTexSubImage3D writes to whatever is bound to the 3D
+        # target of the *active* unit, and that unit is left wherever the previous frame's grain
+        # binding put it -- without this the upload silently goes nowhere and the table never
+        # changes, which looks exactly like "the push selector does nothing".
+        GL.glActiveTexture(0x84C1)                       # GL_TEXTURE1
         if self._lut_tex_id and getattr(self, "_lut_tex_size", 0) == size:
             GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
-            GL.glTexSubImage3D(GL.GL_TEXTURE_3D, 0, 0, 0, 0, size, size, size, GL.GL_RGB, GL.GL_FLOAT, data)
+            GL.glTexSubImage3D(GL.GL_TEXTURE_3D, 0, 0, 0, 0, size, size, size,
+                               GL.GL_RGB, GL.GL_FLOAT, data)
             GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
             self._has_lut = True
-            return
+        else:
+            if self._lut_tex_id:
+                GL.glDeleteTextures([self._lut_tex_id])
+                self._lut_tex_id = None
 
-        if self._lut_tex_id:
-            GL.glDeleteTextures([self._lut_tex_id])
-            self._lut_tex_id = None
+            self._lut_tex_id = GL.glGenTextures(1)
+            self._lut_tex_size = size
+            GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
 
-        self._lut_tex_id = GL.glGenTextures(1)
-        self._lut_tex_size = size
-        GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
-        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
-        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
-        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
-        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
-        GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
-
-        GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGB16F, size, size, size, 0, GL.GL_RGB, GL.GL_FLOAT, data)
-        GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
-        self._has_lut = True
+            GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGB16F, size, size, size, 0,
+                            GL.GL_RGB, GL.GL_FLOAT, data)
+            GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
+            self._has_lut = True
 
         # The grain stage's density cube is uploaded here too: it is only meaningful against the
         # LUT that was baked with it, and this is the one place both are guaranteed in hand.
+        # This has to run for a reused texture as well: a push change reuses the 33^3 texture but
+        # brings a different density cube with it, and skipping the update left the grain sampling
+        # the previous development condition's axis.
         if self._pending_density is not None:
             try:
                 if self._grain is None:
@@ -2133,7 +2183,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 or getattr(self, "_is_placeholder", False):
             u_1i("u_grain_on", 0)
             return
-        if not grain.ensure_stock(stock):
+        push_stops = int(round(float(self.params.get("push_ev", 0) or 0)))
+        if not grain.ensure_stock(stock, push_stops):
             u_1i("u_grain_on", 0)
             return
 
