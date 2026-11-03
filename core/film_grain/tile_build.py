@@ -52,7 +52,6 @@ from .population import (
 # of megabytes, large enough that the per-slice overhead disappears; the value has no effect on
 # the result, only on the peak allocation (see ``_developed``).
 _MARK_BLOCK = 8 * 1024 * 1024
-_SPLAT_BLOCK = 8 * 1024 * 1024         # crystals per scatter-add chunk (peak-memory guard)
 
 __all__ = [
     "TILE_SIDE",
@@ -366,66 +365,20 @@ def sublayers_for(model: CrystalPopulation, levels: int = TABLE_SAMPLES,
 # ---------------------------------------------------------------------------------------------
 # Laying one level
 # ---------------------------------------------------------------------------------------------
-def _developed(layer: Sublayer, gross: float, record: FilmRecord, seed: int, period_mm: float,
-               pixel_mm: float, sublayer_index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The crystals of one sublayer that develop at ``gross``: position and mark.
-
-    Every crystal draws the same numbers whether or not it develops, so the coating is one film
-    under any exposure.  Positions are in samples (sample ``i`` is centred at ``i + 0.5``).
-    """
-    cells = max(int(round(period_mm / layer.cell_mm)), 1)
-    cell = period_mm / cells
-    rng = np.random.default_rng([seed, sublayer_index])
-    counts = rng.poisson(layer.coated_per_mm2 * cell * cell, size=(cells, cells))
-    total = int(counts.sum())
-    empty = (np.empty(0), np.empty(0), np.empty(0))
-    if total == 0:
-        return empty
-
-    # A coarse-grained stock can coat tens of millions of crystals in one period, and the cheap
-    # thing to write -- five full-length float64 arrays plus a (shape, total) mark block -- peaks
-    # above 2 GB.  On a 16 GB machine with the app running that is an allocation failure, not a
-    # slow path (measured: `Unable to allocate 868 MiB for (4, 28437706)`).  So: int32 for the
-    # cell indices, and the positions are only computed for the crystals that actually develop.
-    flat = np.repeat(np.arange(counts.size, dtype=np.int32), counts.ravel())
-    offset_x = rng.random(total, dtype=np.float64)
-    offset_y = rng.random(total, dtype=np.float64)
-    develop = rng.random(total, dtype=np.float64)
-    keep = develop < layer.fraction_at(gross, record.d_min, record.d_max)
-    if not np.any(keep):
-        return empty
-    del develop
-
-    cy, cx = np.divmod(flat[keep], cells)
-    del flat
-    px = ((cx + offset_x[keep]) * cell) / pixel_mm - 0.5
-    py = ((cy + offset_y[keep]) * cell) / pixel_mm - 0.5
-
-    # ``mark`` is the mean of `shape` gamma draws per crystal.  Drawn as one (shape, total) block
-    # it is the largest single allocation here; drawn row by row in the same order it is the same
-    # stream -- numpy fills C-order -- so the numbers are bit-identical and the peak is one row.
-    shape = int(round(1.0 / (MARK_DISPERSION * MARK_DISPERSION)))
-    keep_at = np.flatnonzero(keep)
-    kept = keep_at.size
-    mark = np.zeros(kept, dtype=np.float64)
-    step = max(1, _MARK_BLOCK // 8)              # crystals drawn per slice of a row
-    for _row in range(shape):
-        for start in range(0, total, step):
-            stop = min(start + step, total)
-            block = rng.random(stop - start)
-            np.maximum(block, 1e-7, out=block)
-            np.log(block, out=block)
-            # Only the kept slice of this row is needed; the rest is still drawn to stay in stream.
-            lo = np.searchsorted(keep_at, start, side="left")
-            hi = np.searchsorted(keep_at, stop, side="left")
-            if hi > lo:
-                mark[lo:hi] += block[keep_at[lo:hi] - start]
-    mark /= -shape                             # -mean(log u): the gamma mark, mean 1
-    return px, py, mark
-
-
 def _splat(index: np.ndarray, weights: np.ndarray, size: int) -> np.ndarray:
     return np.bincount(index, weights=weights, minlength=size).astype(np.float64)
+
+
+def _mark_grid(shape: int) -> np.ndarray:
+    """The mark axis for the covering path: gamma quantiles over any population we lay.
+
+    The full-length predecessor built this axis from the level's own mark min/max; the block
+    pipeline holds no level's every mark at once, and the empirical extremes of up to a few
+    hundred million draws sit inside the 0.5e-9..1-0.5e-9 quantile band anyway, so a fixed axis
+    clamps exactly where the old one did for every crystal that matters.
+    """
+    p = np.linspace(0.5e-9, 1.0 - 0.5e-9, 48)
+    return _gamma_quantile(p, shape) / shape
 
 
 def _lay(layer: Sublayer, gross: float, record: FilmRecord, seed: int, period_mm: float,
@@ -438,61 +391,104 @@ def _lay(layer: Sublayer, gross: float, record: FilmRecord, seed: int, period_mm
     instead, and the samples it covers are at capacity: that is what stops a grain smaller than a
     pixel from reading as an impossibly dense point.  Between the two it lays both, weighted, so a
     cloud growing through the sample size changes the film smoothly.
+
+    Everything runs in blocks of crystals.  A coarse-grained stock coats up to ~200 million
+    crystals in one period, and the full-length predecessor wanted ~11 GB of simultaneously-live
+    arrays for such a level (measured: `Unable to allocate 495 MiB for (129867877,) int32` on an
+    8 GB box with the app running).  Per block the peak is a few hundred MB.  The random stream is
+    consumed per crystal in a fixed order -- x, y, develop, then the mark rows -- so a block
+    boundary moves nothing.
     """
     size = width * height
     demand = np.zeros(size)
-    log_uncovered = np.zeros(size)
-    px, py, mark = _developed(layer, gross, record, seed, period_mm, pixel_mm, sublayer_index)
-    if px.size == 0:
-        return demand.reshape(height, width), log_uncovered.reshape(height, width)
+
+    cells = max(int(round(period_mm / layer.cell_mm)), 1)
+    cell = period_mm / cells
+    rng = np.random.default_rng([seed, sublayer_index])
+    counts = rng.poisson(layer.coated_per_mm2 * cell * cell, size=(cells, cells))
+    total = int(counts.sum())
+    if total == 0:
+        return demand.reshape(height, width), demand.reshape(height, width)
+
+    bounds = np.cumsum(counts.ravel())            # crystal index -> cell, one lookup per kept
+    bounds[-1] = total
+    fraction = layer.fraction_at(gross, record.d_min, record.d_max)
 
     resolved = float(min(max((layer.sigma_mm / pixel_mm - 0.5) / 1.5, 0.0), 1.0))
-    amounts = layer.peak_demand * mark / max(layer.capacity, 1e-6)   # demand over capacity
-
-    if resolved > 0:
-        ix = np.floor(px)
-        iy = np.floor(py)
-        ax = px - ix
-        ay = py - iy
-        # int32: the tile is 256², so every index fits — and a 38M-crystal population's
-        # per-corner index arrays stay half the size, which is the difference between
-        # fitting in what an 8 GB box has free and a MemoryError (superia_200).
-        ix0 = np.mod(ix.astype(np.int32), width)
-        iy0 = np.mod(iy.astype(np.int32), height)
-        ix1 = np.mod(ix0 + 1, width)
-        iy1 = np.mod(iy0 + 1, height)
-        vals = amounts * resolved
-        # Chunked: a 38M-crystal level's corner arrays are ~4 GB together in float64; in
-        # 8M-crystal blocks the peak stays under ~700 MB and the result is bit-identical
-        # (the splat is a pure per-crystal scatter-add).
-        for lo in range(0, vals.size, _SPLAT_BLOCK):
-            hi = min(lo + _SPLAT_BLOCK, vals.size)
-            for xs, wx in ((ix0[lo:hi], 1.0 - ax[lo:hi]), (ix1[lo:hi], ax[lo:hi])):
-                for ys, wy in ((iy0[lo:hi], 1.0 - ay[lo:hi]), (iy1[lo:hi], ay[lo:hi])):
-                    demand += _splat(ys * width + xs, vals[lo:hi] * wx * wy, size)
-
     covering = 1.0 - resolved
-    if covering > 0:
-        # The square of film one crystal fills, in samples, centred on the crystal.  Rather than
-        # rasterising every square's exact overlap with every sample it touches -- 25M crystals at
-        # the top of a Tri-X curve -- lay the covered *area* and blur it by a Gaussian with the
-        # square's own second moment.  At the 3x supersample and through a 48 µm aperture the two
-        # are indistinguishable, and the tile stays a fraction of a second per level.
-        grid = np.linspace(float(mark.min()), float(mark.max()), 48)
-        occupied = np.array([_occupied_area(layer.edge * float(g), layer.silver) for g in grid])
-        side = layer.sigma_mm * np.sqrt(np.interp(mark, grid, occupied)) / pixel_mm
-        area = covering * side * side
-        index = (np.mod(np.floor(py).astype(np.int64), height) * width
-                 + np.mod(np.floor(px).astype(np.int64), width))
-        covered = _splat(index, area, size)
-        if covered.any():
-            weight = float(np.sum(area))
-            sigma = float(np.sqrt(np.sum(area * side * side) / max(weight, 1e-30)) / np.sqrt(12.0))
-            covered = _blur(covered.reshape(height, width), sigma)
-            # What each sample keeps clear.  One crystal covering a sample whole leaves nothing, so
-            # the share is `1 - covered` rather than `exp(-covered)`; overlapping squares are the
-            # second-order case the reference's product-of-shares treats exactly and this does not.
-            log_uncovered = np.log(np.maximum(1.0 - covered, 1e-6))
+    shape = int(round(1.0 / (MARK_DISPERSION * MARK_DISPERSION)))
+    grid = _mark_grid(shape)
+    occupied = np.array([_occupied_area(layer.edge * float(g), layer.silver) for g in grid])
+
+    covered = np.zeros(size)
+    area_sum = 0.0                                # Sigma area, and Sigma area*side^2 for the blur
+    moment_sum = 0.0
+    block = max(1, _MARK_BLOCK // 2)              # per block: ~a dozen n-length float64 rows
+    for start in range(0, total, block):
+        stop = min(start + block, total)
+        n = stop - start
+        offset_x = rng.random(n, dtype=np.float64)
+        offset_y = rng.random(n, dtype=np.float64)
+        develop = rng.random(n, dtype=np.float64)
+        hit = np.flatnonzero(develop < fraction)
+        del develop
+        if hit.size == 0:
+            continue
+        idx = np.searchsorted(bounds, hit + start, side="right")
+        np.minimum(idx, counts.size - 1, out=idx)
+        cy, cx = np.divmod(idx, cells)
+        px = ((cx + offset_x[hit]) * cell) / pixel_mm - 0.5
+        py = ((cy + offset_y[hit]) * cell) / pixel_mm - 0.5
+        del offset_x, offset_y, idx, cy, cx
+
+        mark = np.zeros(hit.size, dtype=np.float64)
+        for _row in range(shape):
+            blk = rng.random(n)
+            np.maximum(blk, 1e-7, out=blk)
+            np.log(blk, out=blk)
+            mark += blk[hit]
+        mark /= -shape                            # -mean(log u): the gamma mark, mean 1
+        amounts = layer.peak_demand * mark / max(layer.capacity, 1e-6)
+
+        if resolved > 0:
+            ix = np.floor(px)
+            iy = np.floor(py)
+            ax = px - ix
+            ay = py - iy
+            # int32: the tile is 256x256, so every index fits.
+            ix0 = np.mod(ix.astype(np.int32), width)
+            iy0 = np.mod(iy.astype(np.int32), height)
+            ix1 = np.mod(ix0 + 1, width)
+            iy1 = np.mod(iy0 + 1, height)
+            vals = amounts * resolved
+            for xs, wx in ((ix0, 1.0 - ax), (ix1, ax)):
+                for ys, wy in ((iy0, 1.0 - ay), (iy1, ay)):
+                    demand += _splat(ys * width + xs, vals * wx * wy, size)
+            del ix, iy, ax, ay, ix0, iy0, ix1, iy1, vals
+
+        if covering > 0:
+            # The square of film one crystal fills, in samples, centred on the crystal.  Lay the
+            # covered *area* and blur it by a Gaussian with the square's own second moment; at the
+            # 3x supersample and through a 48 um aperture that is indistinguishable from
+            # rasterising every square's exact overlap with every sample it touches.
+            side = layer.sigma_mm * np.sqrt(np.interp(mark, grid, occupied)) / pixel_mm
+            area = covering * side * side
+            index = (np.mod(np.floor(py).astype(np.int32), height) * width
+                     + np.mod(np.floor(px).astype(np.int32), width))
+            covered += _splat(index, area, size)
+            area_sum += float(np.sum(area))
+            moment_sum += float(np.sum(area * side * side))
+            del side, area, index
+        del px, py, mark, amounts
+
+    log_uncovered = np.zeros(size)
+    if covering > 0 and covered.any():
+        sigma = float(np.sqrt(moment_sum / max(area_sum, 1e-30)) / np.sqrt(12.0))
+        covered = _blur(covered.reshape(height, width), sigma)
+        # What each sample keeps clear.  One crystal covering a sample whole leaves nothing, so
+        # the share is `1 - covered` rather than `exp(-covered)`; overlapping squares are the
+        # second-order case the reference's product-of-shares treats exactly and this does not.
+        log_uncovered = np.log(np.maximum(1.0 - covered, 1e-6)).ravel()
 
     return demand.reshape(height, width), log_uncovered.reshape(height, width)
 
