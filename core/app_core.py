@@ -1269,6 +1269,45 @@ def save_encoded_image(rendered_data, output_path, params_dict):
     return True
 
 
+# The print exposure every LUT is baked at, and the display levels applied to its output.
+#
+# Measured against the reference engine on the 20-step grey card (kodak_gold_200 on
+# kodak_ektacolor_edge).  Our tone curve has the right *shape* but sits 8.7% low in contrast and
+# about eight levels low at black.  Print exposure alone cannot close that: sweeping 0.40..1.20
+# the best slope the print reaches is 0.934 of the reference's, and it overshoots the midtones
+# first.  At 1.10 the shape matches to 1.65 levels, and what is left over is a straight line, so
+# both are applied -- bake at 1.10, then pass the cube through the levels below (residual 1.81
+# on the same twenty patches).
+#
+# The constants are global on purpose.  Fitting each bake to its own endpoints would stretch
+# every stock to full range and flatten the differences between them; a uniform transform leaves
+# a contrasty film contrasty.
+PRINT_EXPOSURE_CALIBRATION = 1.10
+DISPLAY_LEVELS_GAIN = 1.0949
+DISPLAY_LEVELS_LIFT = 7.85 / 255.0
+SDR_SHOULDER_KNEE = 0.90
+
+
+def apply_display_levels(lut: np.ndarray) -> np.ndarray:
+    """Two-point levels on a baked cube, then the SDR shoulder the reference uses.
+
+    Applied after the CCTF on purpose.  This is a calibration of the *picture* against the
+    reference render, not a physical exposure, and in the encoded domain it compresses while it
+    lifts.
+
+    The shoulder is the reference's own delivery curve (``highlightShoulder(ceiling: 1,
+    knee: 0.9)``).  Without it the gain pushes ~3% of the cube onto exactly 1.0, which is a hard
+    clip: bright specular detail and saturated highlights would flat-top.  With it the cube's
+    maximum is strictly below white and the top stays ordered.
+    """
+    y = lut * DISPLAY_LEVELS_GAIN + DISPLAY_LEVELS_LIFT
+    knee = SDR_SHOULDER_KNEE
+    over = np.maximum(y - knee, 0.0)
+    room = 1.0 - knee
+    y = np.where(y > knee, knee + room * over / (over + room), y)
+    return np.clip(y, 0.0, 1.0).astype(np.float32)
+
+
 class SpektraEngine:
     def __init__(self, resources_dir=None):
         if resources_dir is None:
@@ -2555,8 +2594,8 @@ class SpektraEngine:
         # ``neutral_digest`` is what makes a re-solved filtration miss: the profile fingerprint
         # above only covers the curves, and the filters live in their own file.
         if is_default_params and not push_stops:
-            cache_file = os.path.join(cache_dir, f"v6_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
-            bundled_file = os.path.join(bundled_cache_dir, f"v6_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
+            cache_file = os.path.join(cache_dir, f"v7_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
+            bundled_file = os.path.join(bundled_cache_dir, f"v7_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
             load_target = cache_file if os.path.exists(cache_file) else (bundled_file if os.path.exists(bundled_file) else None)
             # The grain law reads the negative density, not the LUT. Serving a cached LUT without
             # its density cube would silently drop the grain back to the -log10(lin) domain, so a
@@ -2695,6 +2734,9 @@ class SpektraEngine:
         sim = self._lut_sim_cache.get(sim_key)
         if sim is None:
             digested = digest_params(params)
+            # lut_mode pins the print exposure to 1.0, and that is where the tone curve came out
+            # 8.7% short of the reference; the calibration has to be applied after the digest.
+            digested.enlarger.print_exposure = PRINT_EXPOSURE_CALIBRATION
             sim = Simulator(digested)
             if len(self._lut_sim_cache) >= 8:
                 self._lut_sim_cache.pop(next(iter(self._lut_sim_cache)))
@@ -2763,6 +2805,10 @@ class SpektraEngine:
         ):
             lut_3d = self._gate_dir_neutral_axis(
                 lut_3d, lattice, film_stock, paper_stock, lut_size, params_dict, print_mode)
+
+        # Display levels last, so every branch above (mono luma, reversal postprocess, DIR gate)
+        # is calibrated identically and nothing downstream sees two different tonal bases.
+        lut_3d = apply_display_levels(lut_3d)
 
         dir_baked = has_dir
         morph_baked = params.print is not None
@@ -4694,6 +4740,10 @@ class SpektraEngine:
         params.film_render.grain.active = False
 
         digested = digest_params(params)
+        # Keep whatever print exposure the caller asked for and put the calibration on top, so an
+        # exported .cube matches what the canvas shows at the same slider value.
+        digested.enlarger.print_exposure = (
+            float(params_dict.get("print_exposure", 1.0) or 1.0) * PRINT_EXPOSURE_CALIBRATION)
         simulator = Simulator(digested)
         lut_output = np.clip(simulator.process(lattice).reshape(lut_size, lut_size, lut_size, 3), 0.0, 1.0)
         if is_bw:
@@ -4703,6 +4753,7 @@ class SpektraEngine:
             lut_output[..., 2] = luma
         elif is_pos:
             lut_output = self._postprocess_positive_lut(lut_output, film_stock)
+        lut_output = apply_display_levels(lut_output)
 
         with open(output_cube_path, "w", encoding="utf-8") as f:
             f.write(f"# Created by SpektraDarkroom\n")
