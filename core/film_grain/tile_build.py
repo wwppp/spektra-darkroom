@@ -48,6 +48,11 @@ from .population import (
     CrystalPopulation,
 )
 
+# Crystals drawn at once when averaging the gamma mark.  Small enough that one slice is a couple
+# of megabytes, large enough that the per-slice overhead disappears; the value has no effect on
+# the result, only on the peak allocation (see ``_developed``).
+_MARK_BLOCK = 8 * 1024 * 1024
+
 __all__ = [
     "TILE_SIDE",
     "TILE_TEXEL_MM",
@@ -342,20 +347,46 @@ def _developed(layer: Sublayer, gross: float, record: FilmRecord, seed: int, per
     if total == 0:
         return empty
 
-    flat = np.repeat(np.arange(counts.size), counts.ravel())
-    cy, cx = np.divmod(flat, cells)
+    # A coarse-grained stock can coat tens of millions of crystals in one period, and the cheap
+    # thing to write -- five full-length float64 arrays plus a (shape, total) mark block -- peaks
+    # above 2 GB.  On a 16 GB machine with the app running that is an allocation failure, not a
+    # slow path (measured: `Unable to allocate 868 MiB for (4, 28437706)`).  So: int32 for the
+    # cell indices, and the positions are only computed for the crystals that actually develop.
+    flat = np.repeat(np.arange(counts.size, dtype=np.int32), counts.ravel())
     offset_x = rng.random(total, dtype=np.float64)
     offset_y = rng.random(total, dtype=np.float64)
     develop = rng.random(total, dtype=np.float64)
-    shape = int(round(1.0 / (MARK_DISPERSION * MARK_DISPERSION)))
-    mark = -np.log(np.maximum(rng.random((shape, total)), 1e-7)).mean(axis=0)
-
     keep = develop < layer.fraction_at(gross, record.d_min, record.d_max)
     if not np.any(keep):
         return empty
-    px = ((cx[keep] + offset_x[keep]) * cell) / pixel_mm - 0.5
-    py = ((cy[keep] + offset_y[keep]) * cell) / pixel_mm - 0.5
-    return px, py, mark[keep]
+    del develop
+
+    cy, cx = np.divmod(flat[keep], cells)
+    del flat
+    px = ((cx + offset_x[keep]) * cell) / pixel_mm - 0.5
+    py = ((cy + offset_y[keep]) * cell) / pixel_mm - 0.5
+
+    # ``mark`` is the mean of `shape` gamma draws per crystal.  Drawn as one (shape, total) block
+    # it is the largest single allocation here; drawn row by row in the same order it is the same
+    # stream -- numpy fills C-order -- so the numbers are bit-identical and the peak is one row.
+    shape = int(round(1.0 / (MARK_DISPERSION * MARK_DISPERSION)))
+    keep_at = np.flatnonzero(keep)
+    kept = keep_at.size
+    mark = np.zeros(kept, dtype=np.float64)
+    step = max(1, _MARK_BLOCK // 8)              # crystals drawn per slice of a row
+    for _row in range(shape):
+        for start in range(0, total, step):
+            stop = min(start + step, total)
+            block = rng.random(stop - start)
+            np.maximum(block, 1e-7, out=block)
+            np.log(block, out=block)
+            # Only the kept slice of this row is needed; the rest is still drawn to stay in stream.
+            lo = np.searchsorted(keep_at, start, side="left")
+            hi = np.searchsorted(keep_at, stop, side="left")
+            if hi > lo:
+                mark[lo:hi] += block[keep_at[lo:hi] - start]
+    mark /= -shape                             # -mean(log u): the gamma mark, mean 1
+    return px, py, mark
 
 
 def _splat(index: np.ndarray, weights: np.ndarray, size: int) -> np.ndarray:

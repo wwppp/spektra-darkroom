@@ -2438,6 +2438,46 @@ class SpektraEngine:
         with self._lut_bake_lock:
             return self._build_3d_lut(film_stock, paper_stock, lut_size, params_dict, print_mode)
 
+    def _resolve_base_paper(self, film_stock, paper_stock, print_mode):
+        """The paper a bake actually prints onto, before the bake starts.
+
+        The same three branches the build body takes, lifted out so the cache key can be settled
+        first: the filtration below depends on this, and the filtration has to be in the key.
+        """
+        prof = self._load_profile(film_stock)
+        info = getattr(prof, "info", None)
+        is_pos = bool(getattr(prof, "is_positive", False)) or \
+            (info is not None and getattr(info, "type", None) == "positive")
+        if is_pos:
+            return "none"
+        if info is not None and getattr(info, "channel_model", None) == "bw":
+            return "kodak_2383" if paper_stock == "none" else paper_stock
+        if print_mode == "scan":
+            # A scanned negative has no sheet: the inversion is timed off Ektacolor Edge.
+            return "kodak_ektacolor_edge"
+        return "kodak_2383" if paper_stock == "none" else paper_stock
+
+    def _filter_fingerprint(self, base_paper, film_stock, push_stops=0):
+        """Neutral filtration the bake reads, as a hashable value plus a short digest.
+
+        The filters neutralise this film on this paper, so they are part of what the table *is*.
+        They live in `resources/neutral_print_filters.json` and can be re-solved without the stock
+        id changing -- which is how editing Y by ±10 used to render four bit-identical frames.
+        """
+        try:
+            prof = self._load_profile(film_stock)
+            info = getattr(prof, "info", None)
+            if info is not None and getattr(info, "channel_model", None) == "bw":
+                # Monochrome prints through a neutral enlarger: the bake zeroes the filtration.
+                values = (0.0, 0.0, 0.0)
+            else:
+                values = tuple(round(float(v), 2) for v in
+                               self.get_neutral_filter(base_paper, film_stock, push_stops))
+        except Exception:                              # noqa: BLE001 - a key must never fail a bake
+            return ("unresolved",), "00000000"
+        digest = hashlib.sha1(repr(values).encode()).hexdigest()[:8]
+        return values, digest
+
     def _build_3d_lut(self, film_stock="kodak_portra_400", paper_stock="kodak_2383", lut_size=33, params_dict=None, print_mode=None):
         """Unlocked LUT build body - call get_3d_lut() instead."""
         params_dict = params_dict or {}
@@ -2465,8 +2505,13 @@ class SpektraEngine:
         # Push development is baked into the curve, so it must be part of the identity of this
         # table: the same stock at +0 and +2 is two different films, not one cached twice.
         push_stops = self.pushed_film_stops(film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))
+        # The neutral filtration is baked in too, and it is *not* part of the stock id: re-solving
+        # `neutral_print_filters.json` used to keep serving the old table (measured: Y ±10 came
+        # back bit-identical).  Keyed by the values themselves, so a re-solve misses cleanly.
+        base_paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
+        neutral, neutral_digest = self._filter_fingerprint(base_paper_key, film_stock, push_stops)
         cache_key = (film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same,
-                     morph_gamma, dev_exh, push_stops)
+                     morph_gamma, dev_exh, push_stops, base_paper_key, neutral)
         with self._render_lock:
             if cache_key in self._lut_cache:
                 self._lut_cache.move_to_end(cache_key)
@@ -2507,16 +2552,18 @@ class SpektraEngine:
         # fingerprint below is what the table was actually baked from.
         fingerprint = self._profile_fingerprint(film_stock)
         # The bundled tables are all standard development; a pushed bake must never be served one.
+        # ``neutral_digest`` is what makes a re-solved filtration miss: the profile fingerprint
+        # above only covers the curves, and the filters live in their own file.
         if is_default_params and not push_stops:
-            cache_file = os.path.join(cache_dir, f"v5_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}.npy")
-            bundled_file = os.path.join(bundled_cache_dir, f"v5_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}.npy")
+            cache_file = os.path.join(cache_dir, f"v6_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
+            bundled_file = os.path.join(bundled_cache_dir, f"v6_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
             load_target = cache_file if os.path.exists(cache_file) else (bundled_file if os.path.exists(bundled_file) else None)
             # The grain law reads the negative density, not the LUT. Serving a cached LUT without
             # its density cube would silently drop the grain back to the -log10(lin) domain, so a
             # cache hit only counts when both files are there; otherwise fall through and rebake
             # (one extra develop-only pass, once per stock).
-            dens_name = (f"density_v3__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}"
-                         f"__{eff_paper}__{lut_size}__1.0_1.0_1.0.npy")
+            dens_name = (f"density_v4__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}"
+                         f"__{eff_paper}__{lut_size}__{neutral_digest}__1.0_1.0_1.0.npy")
             dens_file = os.path.join(cache_dir, dens_name)
             dens_bundled = os.path.join(bundled_cache_dir, dens_name)
             dens_target = dens_file if os.path.exists(dens_file) else (
@@ -2637,7 +2684,9 @@ class SpektraEngine:
         # The simulator carries the film profile, and a pushed bake uses a different profile, so
         # push belongs in the key -- without it the second push setting silently reuses the first
         # one's pipeline and renders the same curve (measured: +1 and +2 came out bit-identical).
-        sim_key = (film_stock, base_paper, illuminant, is_pos, is_bw, push_stops)
+        # The neutral filtration belongs there for the same reason: it is baked into the pipeline
+        # as `enlarger.*_filter_neutral`, and a re-solved table used to keep the old Simulator.
+        sim_key = (film_stock, base_paper, illuminant, is_pos, is_bw, push_stops, neutral)
         if not hasattr(self, "_lut_sim_cache"):
             self._lut_sim_cache = {}
         if not hasattr(self, "_lut_loge_cache"):
@@ -2654,6 +2703,9 @@ class SpektraEngine:
             p_pipe = sim._pipeline
             p_pipe.settings.use_enlarger_lut = use_sub_lut
             p_pipe.settings.use_scanner_lut = use_sub_lut
+            p_pipe.enlarger.c_filter_neutral = float(base_filter[0])
+            p_pipe.enlarger.m_filter_neutral = float(base_filter[1])
+            p_pipe.enlarger.y_filter_neutral = float(base_filter[2])
             p_pipe.film_render.dir_couplers.active = (dir_amt > 0.01 and has_dir)
             p_pipe.film_render.dir_couplers.amount = dir_amt
             p_pipe.film_render.dir_couplers.inhibition_interlayer = dir_intl
@@ -4158,6 +4210,10 @@ class SpektraEngine:
 
             film_stock = params_dict.get("film_stock", "kodak_portra_400")
             paper_stock = params_dict.get("paper_stock", "kodak_2383")
+            # The development the grain has to be built for: a requested +3 on a +1/+2 table
+            # resolves to +2, so keep the *applied* stops rather than the request.
+            grain_push = int(self.pushed_film_stops(
+                film_stock, int(round(float(params_dict.get("push_ev", 0) or 0)))) or 0)
             
             lut_3d = self.get_3d_lut(film_stock, paper_stock, lut_size=33, params_dict=params_dict)
             # Negative density for the grain law, from the very same bake as the LUT above.
@@ -4398,6 +4454,7 @@ class SpektraEngine:
                         net_density=_net,
                         px_per_mm=max(H, W) / max(fmt_mm, 1.0),
                         row_offset=y0,
+                        push_stops=grain_push,
                     )
                     del _pre, _net
 
