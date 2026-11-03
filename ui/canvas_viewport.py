@@ -11,6 +11,7 @@ from PySide6.QtOpenGL import (
 )
 from core.path_utils import get_resource_dir
 from core import config_manager
+from core import film_formats
 from core.darkroom_math import scene_gain
 from OpenGL import GL
 
@@ -2188,8 +2189,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1i("u_grain_on", 0)
             return
 
-        px_per_mm = float(max(size[0], size[1], 1)) / max(
-            5.0, float(self.params.get("film_format_mm", 35.0)))
+        px_per_mm = film_formats.pixels_per_mm(size[0], size[1],
+                                               float(self.params.get("film_format_mm", 35.0)))
         for name, value in grain.scalars(self.params, px_per_mm, size).items():
             if isinstance(value, tuple):
                 (u_2f if len(value) == 2 else u_3f)(name, *value)

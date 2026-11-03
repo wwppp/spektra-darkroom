@@ -54,6 +54,7 @@ from .format_constants import (
     IMPORTABLE_IMAGE_EXTENSIONS
 )
 from . import colorspace as color_space
+from . import film_formats
 from . import film_grain
 from . import push_model
 
@@ -4396,7 +4397,9 @@ class SpektraEngine:
             if cancel_cb and cancel_cb():
                 return {"success": False, "cancelled": True, "error": "用户已取消导出"}
 
-            pixel_size_um = float((fmt_mm * 1000.0) / max(H, W))
+            # Same short-edge anchoring as the grain: diffusion radii are millimetres on the film,
+            # so a panoramic crop and a 3:2 frame of the same gauge must diffuse identically.
+            pixel_size_um = 1000.0 / film_formats.pixels_per_mm(W, H, fmt_mm)
 
             # 2. Optical Diffusion Filter (Aligned with Viewport Vogel Spiral/Gaussian bloom)
             if diff_family != "none" and diff_strength > 0.001:
@@ -4505,7 +4508,7 @@ class SpektraEngine:
                         chunk_linear, grain_params,
                         stock=film_stock,
                         net_density=_net,
-                        px_per_mm=max(H, W) / max(fmt_mm, 1.0),
+                        px_per_mm=film_formats.pixels_per_mm(W, H, fmt_mm),
                         row_offset=y0,
                         push_stops=grain_push,
                     )
