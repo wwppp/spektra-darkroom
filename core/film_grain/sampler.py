@@ -35,6 +35,18 @@ SEAM_TEXELS = 16
 MARGIN_TEXELS = 64
 
 
+# ``size`` is a UI slider from 0 to 3 in the app; 0 means "as fine as the tiles can be read" and
+# must not divide the pitch by zero.  0.1 is the floor -- going below it only adds tile texels
+# without adding detail, since the tile itself is sampled at 4 µm.
+SIZE_MIN = 0.1
+SIZE_MAX = 4.0
+# A pixel may not read more film than one block holds.  ``BLOCK_TEXELS`` is 128 and a tile is 256,
+# so a read box wider than a block stops being "a patch of film under this pixel" and starts
+# wrapping across placements.  Past this the pitch simply stops growing: at that point the grain
+# is already well under one pixel, which is what the bottom of the slider means physically.
+MAX_PITCH = 64.0
+
+
 def look_geometry(px_per_mm: float, size: float = 1.0, softness: float = 1.0) -> tuple[float, float]:
     """Pixel pitch and reading footprint, in tile texels.
 
@@ -43,9 +55,10 @@ def look_geometry(px_per_mm: float, size: float = 1.0, softness: float = 1.0) ->
     square of film each pixel reads, in pixels: wider averages the grain down as a softer scan
     does.
     """
-    size = min(max(size, 0.5), 4.0)
+    size = min(max(size, SIZE_MIN), SIZE_MAX)
     softness = min(max(softness, 0.5), 4.0)
     pitch = (1.0 / max(px_per_mm, 1e-6)) / tb.TILE_TEXEL_MM / size
+    pitch = min(pitch, MAX_PITCH)
     return pitch, pitch * softness
 
 
@@ -125,7 +138,7 @@ class TileSampler:
                  softness: float = 1.0) -> None:
         self.tiles = tiles
         self.seed = int(seed)
-        self.size = min(max(size, 0.5), 4.0)
+        self.size = min(max(size, SIZE_MIN), SIZE_MAX)
         self.pitch, self.footprint = look_geometry(px_per_mm, size, softness)
         self.means = tiles.means()
         self.rho = tiles.correlations()

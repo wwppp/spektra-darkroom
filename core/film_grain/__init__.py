@@ -94,7 +94,9 @@ def params_for(params: Mapping[str, Any] | None) -> GrainParams:
 
     return GrainParams(
         amount=number("grain", 0.4),
-        size=number("grain_size", 1.0) or 1.0,
+        # No ``or 1.0`` here: the size slider starts at 0, and falling back to 1.0 would make the
+        # bottom of its travel mean "standard" instead of "smallest".  ``look_geometry`` clamps.
+        size=number("grain_size", 1.0),
         colour=number("grain_colour", 1.0),
         scan_softness=number("scan_softness", 1.0) or 1.0,
         layers=(number("grain_layer_r", 1.0), number("grain_layer_g", 1.0),
@@ -138,8 +140,10 @@ def _store():
 
 
 def _sampler(stock, tiles, px_per_mm: float, params: GrainParams, seed: int):
-    key = (stock.stock_id, round(px_per_mm, 3), round(params.size, 3),
-           round(params.scan_softness, 3), seed)
+    # ``tiles.signature`` separates developments of the same stock: the id alone would hand a
+    # pushed frame the standard development's sampler, which holds the wrong film's statistics.
+    key = (stock.stock_id, getattr(tiles, "signature", ""), round(px_per_mm, 3),
+           round(params.size, 3), round(params.scan_softness, 3), seed)
     cached = _SAMPLERS.get(key)
     if cached is None:
         from .sampler import TileSampler
@@ -153,7 +157,7 @@ def _sampler(stock, tiles, px_per_mm: float, params: GrainParams, seed: int):
 
 def apply_block(linear: np.ndarray, params: GrainParams, *, stock: str | None = None,
                 net_density: np.ndarray | None = None, px_per_mm: float = 0.0,
-                row_offset: int = 0, seed: int = 1) -> np.ndarray:
+                row_offset: int = 0, seed: int = 1, push_stops: int = 0) -> np.ndarray:
     """Multiply scene-linear transmittance by the stock's grain.
 
     ``linear``      ``(height, width, 3)`` negative transmittance for one chunk of the frame.
@@ -170,7 +174,7 @@ def apply_block(linear: np.ndarray, params: GrainParams, *, stock: str | None = 
     if not FILM_GRAIN_ACTIVE or params.amount <= 0 or linear.size == 0:
         return linear
     from . import profiles
-    grain_stock = profiles.stock_for(stock)
+    grain_stock = profiles.stock_for(stock, push_stops)
     if grain_stock is None:
         _LAST[str(stock)] = {"active": False, "reason": "no baked grain parameters"}
         return linear

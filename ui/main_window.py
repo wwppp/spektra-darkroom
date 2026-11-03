@@ -4473,29 +4473,35 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_texture = self.sec_halation  # Backward compatibility alias
         self.sec_optical = self.sec_halation  # Backward compatibility alias
 
+    # 强度滑块的刻度。1 = 内核 amount 0.4，也就是标定锚（`docs/grain-calibration.md:244`：
+    # slider 0.40 / D=0.90 的 σ = 0.05914 = 真实 35 mm 负片的 RMS 颗粒度）。于是滑块读数
+    # 直接是「真实颗粒度的百分比/100」：1 = 100%、3 = 300%，而 amount = ui / 2.5。
+    GRAIN_UI_PER_AMOUNT = 2.5
+
     def _init_grain_section(self):
         self.sec_grain = AccordionSection("银盐颗粒 (Grain)")
         self.sec_grain.resetClicked.connect(lambda: self.reset_track("grain"))
 
         self.slider_grain = AdobeScrubSlider(
-            "银盐颗粒感", 0.0, 1.0, 0.4, step=0.02, unit="", decimals=2,
-            tooltip="卤化银晶体显影后的微观有机颗粒结构强度"
+            "强度", 0.0, 3.0, 1.0, step=0.1, unit="", decimals=1,
+            tooltip="真实颗粒度的百分比：1.0 = 100%（标定锚），3.0 = 300%。"
+                    "低于 1 是减淡，高于 1 是夸张。"
         )
         self.slider_grain.valueChanged.connect(lambda v: self._on_slider_live("grain", v))
         self.slider_grain.sliderReleased.connect(self._on_slider_committed)
         self.sec_grain.addWidget(self.slider_grain)
 
         self.slider_grain_size = AdobeScrubSlider(
-            "颗粒物理尺寸", 0.5, 2.5, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="卤化银微晶与发色染料微云物理尺度倍率"
+            "大小", 0.0, 3.0, 1.0, step=0.1, unit="", decimals=1,
+            tooltip="卤化银微晶与发色染料云的等效尺度倍数。1.0 为标定尺寸。"
         )
         self.slider_grain_size.valueChanged.connect(lambda v: self._on_slider_live("grain_size", v))
         self.slider_grain_size.sliderReleased.connect(self._on_slider_committed)
         self.sec_grain.addWidget(self.slider_grain_size)
 
         self.slider_grain_colour = AdobeScrubSlider(
-            "色彩微粒 (彩噪)", 0.0, 1.0, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="0.0为纯单色明度颗粒，1.0为真实彩色胶片独立多层染料云(彩噪)"
+            "色彩微粒", 0.0, 1.0, 1.0, step=0.1, unit="", decimals=1,
+            tooltip="0.0 为纯单色明度颗粒，1.0 为真实彩色胶片的三层独立染料云(彩噪)"
         )
         self.slider_grain_colour.valueChanged.connect(lambda v: self._on_slider_live("grain_colour", v))
         self.slider_grain_colour.sliderReleased.connect(self._on_slider_committed)
@@ -4578,6 +4584,17 @@ class DarkroomMainWindow(QMainWindow):
         self.act_export_lut.triggered.connect(self.action_export_darkroom_lut)
         self.act_export_lut.setEnabled(False)
         file_menu.addAction(self.act_export_lut)
+
+        file_menu.addSeparator()
+
+        # 维护入口。A1 之前改中性滤色或修档案都靠手工删 %LOCALAPPDATA%，很容易把「缓存没清」
+        # 当成「代码没生效」。这里给一个正经按钮，只删这两个目录，不做通配删除。
+        self.act_rebuild_caches = QAction("重建渲染缓存...", self)
+        self.act_rebuild_caches.setToolTip(
+            "删除 LUT 与颗粒瓦片缓存，下次渲染时重建。档案或印片滤色改过之后用。"
+        )
+        self.act_rebuild_caches.triggered.connect(self.rebuild_render_caches)
+        file_menu.addAction(self.act_rebuild_caches)
 
         file_menu.addSeparator()
 
@@ -7207,6 +7224,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
     def _on_slider_live(self, param_key, val):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
             return
+        if param_key == "grain":
+            # 滑块读数是「真实颗粒度的百分比」，内核吃的是 amount（0.4 = 100%）。
+            # 换算是这一处和 `_apply_params_to_ui` 的回填，两处必须互为逆运算。
+            val = float(val) / self.GRAIN_UI_PER_AMOUNT
         if self._bypass_blocks_param(param_key):
             return
         began = getattr(self.canvas, "begin_interaction", None)
@@ -7657,6 +7678,73 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 is_default = True
             sec.set_reset_enabled(not is_default)
 
+    def rebuild_render_caches(self):
+        """Delete the LUT and grain-tile caches, then drop the in-memory ones.
+
+        Two directories, nothing else: LUT tables (``.npy``) and laid film tiles.  No wildcards on
+        user data -- if a path does not look like the cache it is skipped and reported.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        try:
+            from core.path_utils import get_user_lut_cache_dir, get_user_cache_dir
+            lut_dir = str(get_user_lut_cache_dir())
+            grain_dir = str(os.path.join(str(get_user_cache_dir()), "film_grain"))
+        except Exception as exc:                       # noqa: BLE001
+            QMessageBox.warning(self, "重建渲染缓存", f"找不到缓存目录：{exc}")
+            return
+
+        sizes = {}
+        for path in (lut_dir, grain_dir):
+            total = 0
+            for name in (os.listdir(path) if os.path.isdir(path) else []):
+                full = os.path.join(path, name)
+                if os.path.isfile(full):
+                    total += os.path.getsize(full)
+            sizes[path] = total
+        total_mb = sum(sizes.values()) / (1024 * 1024)
+        detail = "\n".join(f"  {os.path.basename(p)}: {s / 1024 / 1024:.1f} MB"
+                           for p, s in sizes.items())
+        if QMessageBox.question(
+                self, "重建渲染缓存",
+                f"将删除以下缓存（{total_mb:.0f} MB）：\n{detail}\n\n"
+                "下次渲染会重新烘焙，第一次会慢一些。继续？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        removed, failed = 0, []
+        for path in (lut_dir, grain_dir):
+            if not os.path.isdir(path):
+                continue
+            for name in os.listdir(path):
+                full = os.path.join(path, name)
+                if not os.path.isfile(full):
+                    continue
+                try:
+                    os.remove(full)
+                    removed += 1
+                except Exception as exc:               # noqa: BLE001
+                    failed.append(f"{name}: {exc}")
+
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            for attr in ("_lut_cache", "_lut_sim_cache", "_lut_loge_cache",
+                         "_film_density_cache", "_neutral_push_cache"):
+                cache = getattr(engine, attr, None)
+                if isinstance(cache, dict):
+                    cache.clear()
+        try:
+            from core.film_grain import profiles
+            profiles.clear_cache()
+        except Exception:                              # noqa: BLE001 - cache clearing is best effort
+            pass
+
+        if hasattr(self, "canvas"):
+            self.canvas.update()
+        message = f"已删除 {removed} 个缓存文件。"
+        if failed:
+            message += "\n以下文件删不掉（可能被占用）：\n" + "\n".join(failed[:8])
+        QMessageBox.information(self, "重建渲染缓存", message)
+
     def reset_track(self, track_name):
         is_none = (getattr(self, "current_film_stock", "none") == "none")
         if is_none and track_name in ("chemistry", "enlarger", "halation", "grain", "texture"):
@@ -8054,7 +8142,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'slider_boost_ev'): self.slider_boost_ev.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
             if hasattr(self, 'slider_halation'): self.slider_halation.set_value(p.get("halation_amount", p.get("halation", 1.0)))
             if hasattr(self, 'slider_halation_boost'): self.slider_halation_boost.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
-            if hasattr(self, 'slider_grain'): self.slider_grain.set_value(p.get("grain", 0.4))
+            # 强度滑块显示的是百分比刻度，params 里存的是 amount（0.4 = 100%）。方向与
+            # `_on_slider_live` 相反，改一处必须改另一处。
+            if hasattr(self, 'slider_grain'):
+                self.slider_grain.set_value(p.get("grain", 0.4) * self.GRAIN_UI_PER_AMOUNT)
             if hasattr(self, 'slider_grain_size'): self.slider_grain_size.set_value(p.get("grain_size", 1.0))
             if hasattr(self, 'slider_grain_colour'): self.slider_grain_colour.set_value(p.get("grain_colour", 1.0))
 
