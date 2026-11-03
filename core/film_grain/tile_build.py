@@ -90,6 +90,40 @@ ANCHOR_PASSES = 8
 ANCHOR_TOLERANCE = 0.02               # stop within 2 % in log ratio
 _SQRT2PI = np.sqrt(2.0 * np.pi)
 
+#: Granularity-against-density shape per record, fitted to Kodak's published diffuse RMS
+#: granularity against density for Vision3 (5203/5207/5213/5219, 48 µm aperture) — the pack
+#: default ``FilmStockDefaults.grainDensityRecords``, used wherever a stock states none:
+#:     s²(D) = (1 - e^(-D/toe)) · (1 + amp·e^(-D/decay)
+#:                                   + hump·e^(-((D - hump_d)/hump_w)²/2))
+#: The first factor is how much of the emulsion developed at all; the bracket is the variance
+#: one unit of density carries — loud while the fast coarse sub-layer develops, decaying onto
+#: the fine slow one, then rising again near net 1.1–1.5, most in the blue record, where that
+#: slow sub-layer's own coarse population comes in.  Normalised at the record's read density,
+#: so the anchor contract (σ48@read == read_sigma) is untouched.
+DENSITY_PROFILE_DEFAULT: tuple[tuple[float, float, float, float, float, float], ...] = (
+    (20.0, 0.3373, 0.2629, 0.8187, 1.1811, 0.3212),
+    (20.0, 0.3583, 0.3183, 1.6514, 1.4856, 0.3631),
+    (20.0, 0.1069, 0.5457, 4.2644, 1.38, 0.3446),
+)
+
+
+def dye_cloud_variance(density: float, row: tuple[float, ...]) -> float:
+    """``s²(D)`` of the fitted chromogenic shape, in arbitrary units."""
+    amp, toe, decay, hump, hump_d, hump_w = row
+    offset = (density - hump_d) / max(hump_w, 1e-4)
+    return float((1.0 - np.exp(-density / max(toe, 1e-4)))
+                 * (1.0 + amp * np.exp(-density / max(decay, 1e-4))
+                    + hump * np.exp(-0.5 * offset * offset)))
+
+
+def density_modulation(net: float, fog: float, anchor_net: float,
+                       row: tuple[float, ...]) -> float:
+    """σ(D)/σ(anchor) of the fitted shape, fog counted at both densities."""
+    here = max(net, 0.0) + fog
+    anchor = max(anchor_net + fog, 1e-4)
+    ratio = dye_cloud_variance(here, row) / max(dye_cloud_variance(anchor, row), 1e-6)
+    return float(np.sqrt(max(ratio, 0.0)))
+
 
 def supersample_for(pitch_mm: float) -> int:
     return int(min(max(np.ceil(pitch_mm / FINEST_SAMPLE_MM), 1), MAX_SUPERSAMPLE))

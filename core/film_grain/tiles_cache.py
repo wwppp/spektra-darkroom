@@ -33,7 +33,7 @@ from .population import CrystalPopulation, GrainStock
 
 __all__ = ["StockTiles", "build_tiles", "load_or_build", "is_cached", "TileStore", "signature_of"]
 
-CACHE_VERSION = 6          # 6: anchor keeps its closest pass (sigma is not monotone in dye)
+CACHE_VERSION = 7          # 7: per-level sigma retargeted to the reference density law
 
 
 def _cache_root() -> Path:
@@ -201,8 +201,32 @@ def build_tiles(stock: GrainStock, levels: int = tb.TILE_LEVELS, seed: int = 1,
         scale = float(stock.anchor_scales[record]) if record < len(stock.anchor_scales) else 1.0
         anchored = _anchor(laid, model, scale)
         d_min[record], d_max[record] = anchored.d_min, anchored.d_max
+        # The reference modulates each record's granularity against density with its fitted
+        # chromogenic shape (Grain.h `dye_cloud_granularity_variance`, normalised at the read
+        # density).  Our laid tile's own sigma-against-density emerges from the crystal render
+        # and runs up to 35 % off that shape, record-dependently — the blue record's second rise
+        # near net 1.1–1.5 never appears.  Retarget every level: rescale the level's fluctuation
+        # (mean kept) so its 48 µm sigma equals read_sigma · modulation(net).  At the anchor the
+        # modulation is 1 and the anchor already holds, so the contract survives.
+        retarget = not (stock.is_silver or stock.is_reversal)
+        row = None
+        fog = stock.grain_fog_density
+        if retarget:
+            profile = getattr(stock, "density_profile", None)
+            row = (profile[record] if profile and record < len(profile)
+                   else tb.DENSITY_PROFILE_DEFAULT[record])
+        target_base = model.read_sigma * scale
         for level, gross in enumerate(anchored.grosses(levels)):
-            lights[record, level] = tb.build_level(anchored, gross, seed=seed).astype(np.float32)
+            light = tb.build_level(anchored, gross, seed=seed).astype(np.float32)
+            if retarget:
+                net = gross - anchored.d_min
+                target = target_base * tb.density_modulation(net, fog, model.read_net_density,
+                                                             row)
+                ours = tb.sigma48(light)
+                gain = float(np.clip(target / max(ours, 1e-9), 0.25, 4.0))
+                mean = float(light.mean())
+                light = (mean + gain * (light - mean)).astype(np.float32)
+            lights[record, level] = light
         if verbose:
             print(f"  {stock.stock_id} record {record}: {time.time() - started:.1f} s")
     if stock.is_monochrome:
