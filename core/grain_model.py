@@ -23,11 +23,14 @@ from scipy.ndimage import gaussian_filter
 
 __all__ = ["sample_layer_density", "apply_grain"]
 
+# Jarvis 4-Gaussian mixture of the dye-cloud point spread exp(-r/k), with the same weights
+# the reference uses (Jarvis 1992, Eqs. 2 and 4).  ``sigma`` is a multiple of the decay length.
+_JARVIS = ((0.240, 0.518), (0.384, 0.983), (0.274, 1.848), (0.102, 3.731))
+
 # Below these the reference's micro-structure stage is a no-op (`add_micro_structure` skips a
 # blur under 0.4 px and a sigma under 0.05 px).  At any render size we support -- 35 mm across
 # 753 px is already 46 um/px -- both conditions hold, so the stage is inert and skipped rather
 # than silently dropped.  Guarded so a future high-resolution render cannot skip it by accident.
-_MICRO_BLUR_PX = 0.2 / 1.0      # micro_structure[0] um / pixel_size_um, checked in apply_grain
 _MICRO_SIGMA_NM = 30.0
 
 
@@ -69,9 +72,14 @@ def apply_grain(density, layer_table, scalars, pixel_size_um, strength=1.0, rng=
 
     d_min = np.asarray(scalars["density_min"], dtype=np.float64)
     d_max = np.asarray(scalars["density_max_layers"], dtype=np.float64)     # (3 sl, 3 ch)
-    n_pp = np.asarray(scalars["particles"], dtype=np.float64) * float(strength)
+    # `particles_per_um2` is the rate the bundle carries (it is baked with pixel_size_um=1 so
+    # the shader can multiply in its own pitch).  Using the sibling `particles` key here once
+    # cost a 752x over-estimate of the grain: the CPU reference drew 0.5 particles per pixel
+    # where the film has 750, and "the shader is 10x too weak" turned out to be this line.
+    n_pp = (np.asarray(scalars["particles_per_um2"], dtype=np.float64)
+            * float(pixel_size_um) ** 2 * float(strength))
     unif = np.asarray(scalars["uniformity"], dtype=np.float64)              # (3 ch)
-    blur = np.asarray(scalars["blur_sigma"], dtype=np.float64)              # (3 sl, 3 ch)
+    blur_um = float(scalars.get("blur_um", 0.0))
 
     # The reference adds each layer's share of the fog *before* sampling, so the tail of the
     # distribution keeps its shape instead of being clipped to zero.
@@ -91,7 +99,11 @@ def apply_grain(density, layer_table, scalars, pixel_size_um, strength=1.0, rng=
             rate = (n / sat) * p
             draw = rng.poisson(rate).astype(np.float64)
             g = draw * (dmax / n) * sat
-            sigma = float(blur[sl, ch])
+            # The reference's dye-cloud blur is ``blur_um * sqrt(od_particle)`` *pixels* (it
+            # mixes the units, but that is the behaviour we are matching), and od_particle is
+            # dmax/n -- so the blur shrinks as the pitch grows.  Baking the sigma once at a
+            # nominal pixel size made it look like a 1 px blur at every resolution.
+            sigma = float(blur_um) * float(np.sqrt(max(dmax, 0.0) / max(n, 1e-9)))
             if sigma > 0.4:
                 g = gaussian_filter(g, sigma)
             out[..., ch] += g
@@ -101,6 +113,24 @@ def apply_grain(density, layer_table, scalars, pixel_size_um, strength=1.0, rng=
         raise NotImplementedError("micro-structure stage not ported")
 
     out -= d_min
+
+    # Jarvis dye cloud: a four-gaussian decomposition of exp(-r/k), evaluated on the summed
+    # density before the chroma mix.  Skipped entirely when the decay length is under 0.2 px.
+    decay_px = float(scalars.get("dye_cloud_decay_um", 1.45)) / max(float(pixel_size_um), 0.1)
+    if decay_px > 0.2:
+        acc = np.zeros_like(out)
+        for weight, factor in _JARVIS:
+            acc += weight * gaussian_filter(out, (max(decay_px * factor, 0.1),) * 2 + (0,))
+        out = acc
+
+    # Variance-preserving mix towards shared luminance grain (see the shader's copy).
+    colour = float(scalars.get("colour_grain", 0.5))
+    if colour < 1.0 - 1e-4:
+        own = min(max(colour, 0.0), 1.0)
+        shared = np.sqrt(max(0.0, 3.0 - 2.0 * own * own)) - own
+        fluct = out - density
+        out = density + own * fluct + shared * fluct.mean(axis=-1, keepdims=True)
+
     final = float(scalars["final_blur_px"])
     if final > 0:
         for ch in range(3):

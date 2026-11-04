@@ -465,12 +465,15 @@ vec3 diffusion_disc(vec2 sample_uv, vec2 radius_uv) {
 // pipeline, lifted out of main() so a pixel can run it more than once.  At fit zoom one screen
 // pixel covers several image pixels; averaging them *after* this is what a downsample does --
 // averaging before it is what a different-looking picture does.
-vec3 develop_negative(vec3 linear_rgb) {
+vec3 develop_negative(vec3 linear_rgb, vec2 image_px) {
     vec3 film_rgb;
     if (u_grain_cubes == 1) {
         // Density first, so the grain has somewhere to go: the stage between these two calls
         // is the film's development, and it cannot be baked into a pointwise table.
-        film_rgb = develop_from_density(density_from_linear(linear_rgb));
+        // The grain stage *replaces* the density (the reference returns an absolute density,
+        // not a delta), which is also why the inactive path has to hand the input straight back.
+        vec3 density = grain_field(density_from_linear(linear_rgb), image_px);
+        film_rgb = develop_from_density(density);
     } else if (u_has_lut == 1) {
         vec3 shaper_in = linear_to_shaper(linear_rgb);
         float lut_dim = float(textureSize(u_lut, 0).x);
@@ -1059,6 +1062,81 @@ void main() {
     //    mid-tones and shifts colour (measured in docs/grain-port-plan.md 2.6: +15 levels of
     //    green on a bypass frame).  Grain goes into every tap from the one field: its own
     //    aperture already covers the pixel, so that is what the film under it actually did.
+    if (u_grain_probe == 1 && u_grain_cubes == 1) {
+        vec3 base = density_from_linear(linear_rgb);
+        vec3 dg = grain_field(base, pre_dist_uv * tex_dim);
+        fragColor = vec4((dg - base) * 4.0 + 0.5, 1.0);   // density delta, +-0.125
+        return;
+    }
+    if (u_grain_probe == 9 && u_grain_cubes == 1) {
+        ivec2 p9 = ivec2(floor(pre_dist_uv * tex_dim + 0.5));
+        uvec3 st = uvec3(uint(p9.x), uint(p9.y), uint(u_grain_seed));
+        float a1 = rng_unit(st), a2 = rng_unit(st), a3 = rng_unit(st);
+        fragColor = vec4(a1, a2, a3, 1.0);
+        return;
+    }
+    if (u_grain_probe == 6 && u_grain_cubes == 1) {
+        vec3 dens = density_from_linear(linear_rgb);
+        vec3 dg = grain_apply(dens, ivec2(floor(pre_dist_uv * tex_dim + 0.5)));
+        fragColor = vec4(dg * 0.5, 1.0);
+        if (any(isnan(dg)) || any(isinf(dg))) fragColor = vec4(1.0, 0.0, 1.0, 1.0);
+        return;
+    }
+    if (u_grain_probe == 10 && u_grain_cubes == 1) {
+        // p / sat / layer density of (ch0, sl0): the three numbers that decide whether the
+        // layer saturates (sat -> 0 swallows the grain, the failure the CPU model does not have).
+        vec3 dens = density_from_linear(linear_rgb);
+        float u = clamp((dens.r - u_grain_axis_min.r) / max(u_grain_axis_max.r - u_grain_axis_min.r, 1e-6), 0.0, 1.0);
+        vec4 lay = texture(u_grain_table, vec2(u, 0.5 / 3.0));
+        float d = lay.r + u_grain_min_layer[0].r;
+        float p = clamp(d / max(u_grain_dmax_layer[0].r, 1e-6), 1e-6, 1.0 - 1e-6);
+        float sat = 1.0 - p * u_grain_uniformity.r * (1.0 - 1e-6);
+        fragColor = vec4(p, sat, lay.r, 1.0);
+        return;
+    }
+    if (u_grain_probe == 11 && u_grain_cubes == 1) {
+        // The sampler on its own, centred so the tails are not clipped by the 0..1 write.
+        ivec2 p11 = ivec2(floor(pre_dist_uv * tex_dim + 0.5));
+        uvec3 s1 = uvec3(uint(p11.x), uint(p11.y), uint(u_grain_seed));
+        float x1 = poisson(s1, 500.0);
+        uvec3 s2 = uvec3(uint(p11.x), uint(p11.y), uint(u_grain_seed + 101));
+        float x2 = poisson(s2, 20.0);
+        fragColor = vec4((x1 - 500.0) / 200.0 + 0.5, (x2 - 20.0) / 80.0 + 0.5, 0.0, 1.0);
+        return;
+    }
+    if (u_grain_probe == 12 && u_grain_cubes == 1) {
+        fragColor = vec4(u_grain_strength / 4.0, u_grain_size / 4.0, u_grain_px_um / 100.0, 1.0);
+        return;
+    }
+    if (u_grain_probe == 13 && u_grain_cubes == 1) {
+        // npp / mu of (ch0, sl0), the two numbers that set the grain contrast.
+        vec3 dens = density_from_linear(linear_rgb);
+        float u = clamp((dens.r - u_grain_axis_min.r) / max(u_grain_axis_max.r - u_grain_axis_min.r, 1e-6), 0.0, 1.0);
+        vec4 lay = texture(u_grain_table, vec2(u, 0.5 / 3.0));
+        float d = lay.r + u_grain_min_layer[0].r;
+        float p = clamp(d / max(u_grain_dmax_layer[0].r, 1e-6), 1e-6, 1.0 - 1e-6);
+        float sat = 1.0 - p * u_grain_uniformity.r * (1.0 - 1e-6);
+        float npp = u_grain_ppu[0].r * u_grain_px_um * u_grain_px_um * u_grain_strength / u_grain_size;
+        fragColor = vec4(npp / 4000.0, ((npp / sat) * p) / 40000.0, dens.r / 2.0, 1.0);
+        return;
+    }
+    if (u_grain_probe == 14 && u_grain_cubes == 1) {
+        // Flat-density A/B: the same constant field the CPU model is fed, so the two can be
+        // compared without the picture's own structure in the way.
+        vec3 d0 = vec3(0.6);
+        vec3 dg = grain_apply(d0, ivec2(floor(pre_dist_uv * tex_dim + 0.5)));
+        fragColor = vec4((dg - d0) * 4.0 + 0.5, 1.0);
+        return;
+    }
+    if (u_grain_probe >= 2 && u_grain_cubes == 1) {
+        vec3 dens = density_from_linear(linear_rgb);
+        vec4 tbl = texture(u_grain_table, vec2(clamp(dens.r / max(u_grain_axis_max.r, 1e-6), 0.0, 1.0), 0.5 / 3.0));
+        if (u_grain_probe == 2) { fragColor = vec4(u_grain_dmax_layer[0][0] * 0.5, dens.r * 0.5, u_grain_dmin.r * 5.0, 1.0); return; }
+        if (u_grain_probe == 3) { fragColor = vec4(tbl.rgb * 0.5, 1.0); return; }
+        if (u_grain_probe == 4) { fragColor = vec4(u_grain_ppu[0].r * 0.5, u_grain_uniformity.r, u_grain_px_um * 0.02, 1.0); return; }
+        if (u_grain_probe == 5) { fragColor = vec4(u_grain_min_layer[0].r * 20.0, u_grain_axis_max.r * 0.3, 0.0, 1.0); return; }
+    }
+
     vec2 step_px = vec2(length(d_sample_dx * tex_dim), length(d_sample_dy * tex_dim));
     bool supersample = (u_supersample_ok == 1) && max(step_px.x, step_px.y) >= 1.5;
     vec3 film_rgb;
@@ -1073,11 +1151,11 @@ void main() {
             vec3 tap = compute_scene_radiance(
                 textureGrad(u_image, clamp(sample_uv + off, half_texel, vec2(1.0) - half_texel),
                             d_sample_dx * 0.5, d_sample_dy * 0.5).rgb);
-            acc += develop_negative(tap);
+            acc += develop_negative(tap, pre_dist_uv * tex_dim);
         }
         film_rgb = acc * 0.25;
     } else {
-        film_rgb = develop_negative(linear_rgb);
+        film_rgb = develop_negative(linear_rgb, pre_dist_uv * tex_dim);
     }
     fragColor = vec4(film_rgb, 1.0);
 }
@@ -1526,6 +1604,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if loc >= 0:
                 funcs.glUniform3f(loc, float(x), float(y), float(z))
 
+        def u_3fv(name, values):
+            loc = self.shader_program.uniformLocation(name)
+            if loc >= 0:
+                arr = np.ascontiguousarray(values, dtype=np.float32).reshape(-1, 3)
+                funcs.glUniform3fv(loc, int(arr.shape[0]), arr.ravel())
+
         def u_4f(name, x, y, z, w):
             loc = self.shader_program.uniformLocation(name)
             if loc >= 0:
@@ -1801,9 +1885,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # downsample, no spatial stage already averaging the frame).
         u_1i("u_supersample_ok", int(getattr(self, "_supersample_ok", 0)))
 
-        if self._grain_cubes.bind(u_1i):
-            u_3f("u_density_min", *[float(v) for v in self._grain_cubes.density_min])
-            u_3f("u_density_max", *[float(v) for v in self._grain_cubes.density_max])
+        # Film pitch of *this* render: the grain is a physical population, so a 1200 px preview
+        # and a 6000 px export see different pixel sizes and must compute their own rates.
+        _fmt_mm = float(self.params.get("film_format_mm", 35.0))
+        _px_um = _fmt_mm * 1000.0 / float(max(1, self._image_w, self._image_h))
+        self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params)
 
         if self._lut_tex_id:
             funcs.glActiveTexture(0x84C1)
@@ -2850,6 +2936,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 loc = self.shader_program.uniformLocation(name)
                 if loc >= 0: funcs.glUniform3f(loc, float(x), float(y), float(z))
 
+            def u_3fv(name, values):
+                loc = self.shader_program.uniformLocation(name)
+                if loc >= 0:
+                    arr = np.ascontiguousarray(values, dtype=np.float32).reshape(-1, 3)
+                    funcs.glUniform3fv(loc, int(arr.shape[0]), arr.ravel())
+
             # Full-bleed 1:1 mapping: offscreen target is the image, zero letterboxing / zero black bars!
             u_1f("u_screen_aspect", 1.0)
             u_1f("u_image_aspect", 1.0)
@@ -3105,9 +3197,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
             # The offscreen read is the same frame the canvas shows, so it must carry the same
             # two density tables -- and at the offscreen resolution's own pitch.
-            if self._grain_cubes.bind(u_1i):
-                u_3f("u_density_min", *[float(v) for v in self._grain_cubes.density_min])
-                u_3f("u_density_max", *[float(v) for v in self._grain_cubes.density_max])
+            # The pitch belongs to the frame being *written*, not to the source: a half-size
+            # export samples the same film with pixels twice as wide, so it must draw its own
+            # particle counts or the grain would scale with the downscale.
+            _px_um = (float(self.params.get("film_format_mm", 35.0)) * 1000.0
+                      / float(max(1, int(target_w), int(target_h))))
+            self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params)
 
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 

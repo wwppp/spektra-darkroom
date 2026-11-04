@@ -8,8 +8,17 @@ RGB->RGB table never exposes it.  Splitting the chain at the density lets the sh
 which is the order the reference runs too.  Both cubes are baked by the engine from the same
 pipeline, keyed together, so they cannot describe two different prints.
 
-The GLSL below is spliced into the canvas fragment shader at ``// {{GRAIN}}``; it relies on
-``linear_to_shaper`` being defined above it and declares its own uniforms.
+The grain itself is the reference's particle model, evaluated per pixel:
+
+    p     = D / Dmax                      probability a grain develops
+    sat   = 1 - p * uniformity            the layer saturates, so the rate rises
+    X     ~ Poisson((n / sat) * p)        the binomial(Poisson) of the reference, thinned
+    grain = X * (Dmax / n) * sat
+
+Randomness is a counter-based hash keyed on the *absolute image pixel*, so a render is
+reproducible and a chunked export has no seams: the same pixel always draws the same particle
+count.  (The frame-wide blur the reference applies afterwards is spatial and is handled
+separately -- see ``u_grain_taps``.)
 """
 
 from __future__ import annotations
@@ -27,6 +36,27 @@ uniform sampler3D u_print_lut;        // normalised (C, M, Y) -> output RGB
 uniform vec3      u_density_min;      // the density range the print cube covers
 uniform vec3      u_density_max;
 
+// The sub-layer split, resampled onto a uniform density axis: texel (density, record) holds the
+// three coated layers' densities, so the shader does one multiply and one fetch.
+uniform sampler2D u_grain_table;
+uniform vec3      u_grain_axis_min;
+uniform vec3      u_grain_axis_max;
+
+// Per (sub-layer, record): the layer ceiling with its fog share, and the particle rate per um^2.
+uniform vec3      u_grain_dmax_layer[3];
+uniform vec3      u_grain_min_layer[3];
+uniform vec3      u_grain_ppu[3];
+uniform vec3      u_grain_uniformity;
+uniform vec3      u_grain_dmin;
+
+uniform float     u_grain_px_um;      // film pitch of *this* render, in micrometres
+uniform float     u_grain_strength;   // editorial multiplier on the particle rate (1 = reference)
+uniform float     u_grain_size;       // editorial multiplier on the particle area (1 = reference)
+uniform float     u_grain_colour;     // 1 = independent dye clouds, 0 = shared luminance grain
+uniform int       u_grain_seed;
+uniform int       u_grain_taps;       // 1 = off for the spatial blur, 9 = 3x3 gaussian
+uniform int       u_grain_probe;      // diagnostic: paint the density delta instead of the print
+
 vec3 density_from_linear(vec3 linear_rgb) {
     float dim = float(textureSize(u_density_lut, 0).x);
     vec3 coord = linear_to_shaper(linear_rgb) * ((dim - 1.0) / dim) + (0.5 / dim);
@@ -39,27 +69,164 @@ vec3 develop_from_density(vec3 density) {
     vec3 coord = clamp(u, 0.0, 1.0) * ((dim - 1.0) / dim) + (0.5 / dim);
     return texture(u_print_lut, coord).rgb;
 }
+
+// --- randomness ------------------------------------------------------------------------------
+// Counter-based: the state is seeded from the pixel, so the draw is a pure function of position
+// and never depends on how the frame was split into tiles or fragments.
+uvec3 pcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
+
+uint rng_next(inout uvec3 state) {
+    state = pcg3d(state);
+    return state.x;
+}
+
+float rng_unit(inout uvec3 state) {
+    return float(rng_next(state)) * (1.0 / 4294967296.0);
+}
+
+float log_gamma(float x) {
+    const float c[6] = float[6](76.18009172947146, -86.50532032941677, 24.01409824083091,
+                                -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5);
+    float y = x;
+    float tmp = x + 5.5;
+    tmp -= (x + 0.5) * log(tmp);
+    float ser = 1.000000000190015;
+    for (int j = 0; j < 6; j++) {
+        y += 1.0;
+        ser += c[j] / y;
+    }
+    return -tmp + log(2.5066282746310005 * ser / x);
+}
+
+// PTRS: the sampler numpy uses, so the distribution is the reference's, not an approximation.
+float poisson(inout uvec3 state, float mu) {
+    if (mu < 10.0) {
+        float enlam = exp(-mu);
+        float X = 0.0;
+        float prod = 1.0;
+        for (int i = 0; i < 64; i++) {
+            prod *= rng_unit(state);
+            if (prod > enlam) X += 1.0; else return X;
+        }
+        return X;
+    }
+    float slam = sqrt(mu);
+    float loglam = log(mu);
+    float b = 0.931 + 2.53 * slam;
+    float a = -0.059 + 0.02483 * b;
+    float invalpha = 1.1239 + 1.1328 / (b - 3.4);
+    float vr = 0.9277 - 3.6224 / (b - 2.0);
+    for (int i = 0; i < 64; i++) {
+        float U = rng_unit(state) - 0.5;
+        float V = rng_unit(state);
+        float us = 0.5 - abs(U);
+        float k = floor((2.0 * a / us + b) * U + mu + 0.43);
+        if (us >= 0.07 && V <= vr) return k;
+        if (k < 0.0 || (us < 0.013 && V > us)) continue;
+        if (log(V) + log(invalpha) - log(a / (us * us) + b)
+                <= -mu + k * loglam - log_gamma(k + 1.0)) return k;
+    }
+    return floor(mu);
+}
+
+// --- the particle model ----------------------------------------------------------------------
+// Returns the density the film actually developed -- an *absolute* density, not a delta: the
+// reference's `apply_grain_to_density_layers` hands back the summed particle density, and the
+// caller replaces.  Getting this backwards brightens the whole frame.
+vec3 grain_apply(vec3 density, ivec2 px) {
+    if (u_grain_strength <= 0.0) return density;
+    float area = u_grain_px_um * u_grain_px_um;
+    vec3 total = vec3(0.0);
+    for (int ch = 0; ch < 3; ch++) {
+        float lo = u_grain_axis_min[ch];
+        float hi = u_grain_axis_max[ch];
+        float u = clamp((density[ch] - lo) / max(hi - lo, 1e-6), 0.0, 1.0);
+        vec4 layer = texture(u_grain_table, vec2(u, (float(ch) + 0.5) / 3.0));
+        for (int sl = 0; sl < 3; sl++) {
+            float dmax = u_grain_dmax_layer[sl][ch];
+            float npp = u_grain_ppu[sl][ch] * area * u_grain_strength / u_grain_size;
+            if (npp <= 0.0 || dmax <= 0.0) continue;
+            float d = layer[sl] + u_grain_min_layer[sl][ch];
+            float p = clamp(d / dmax, 1e-6, 1.0 - 1e-6);
+            float sat = 1.0 - p * u_grain_uniformity[ch] * (1.0 - 1e-6);
+            uvec3 state = uvec3(uint(px.x), uint(px.y), uint(u_grain_seed + ch * 3 + sl));
+            float X = poisson(state, (npp / sat) * p);
+            total[ch] += X * (dmax / npp) * sat;
+        }
+    }
+    if (u_grain_probe == 6) return total;
+    // The reference does not ship three independent dye-cloud fields: it mixes them back
+    // towards their common mean (fotufilm's ``Look.mix``, ``mix_chroma_grain`` upstream).
+    // ``own`` keeps each record's own draw, ``shared`` adds the mean of the three, and the
+    // weights are chosen so the per-record variance is unchanged while the *luminance*
+    // variance rises by 1/sqrt(0.557) = 1.34x -- the grain stops reading as coloured noise
+    // and starts reading as silver.  Skipping this was a large part of "the grain is weak":
+    // two thirds of the energy was landing in chroma, where the eye barely sees it.
+    vec3 net = total - u_grain_dmin;
+    vec3 fluct = net - density;
+    float own = clamp(u_grain_colour, 0.0, 1.0);
+    float shared = sqrt(max(0.0, 3.0 - 2.0 * own * own)) - own;
+    float mean_fluct = (fluct.r + fluct.g + fluct.b) / 3.0;
+    return density + own * fluct + shared * mean_fluct;
+}
+
+// The reference blurs the assembled grain once more at frame scale (0.65 px).  A pointwise
+// renderer cannot express a spatial filter for free, so the taps are evaluated here: the
+// kernel is a 3x3 gaussian, and every tap is the *same* pure function of its own pixel, which
+// keeps the result identical to what a two-pass blur would produce.
+vec3 grain_field(vec3 density, vec2 image_px) {
+    ivec2 px = ivec2(floor(image_px + 0.5));
+    vec3 d = grain_apply(density, px);
+    if (u_grain_taps < 2) return d;
+    // gaussian sigma 0.65 px -> weights exp(-(dx^2+dy^2)/(2*0.65^2))
+    const float w1 = 0.3022;     // exp(-1/(2*0.4225)) normalised below
+    const float w2 = 0.0913;     // exp(-2/(2*0.4225))
+    float norm = 1.0 + 4.0 * w1 + 4.0 * w2;
+    d *= 1.0 / norm;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 q = px + ivec2(dx, dy);
+            float w = (dx == 0 || dy == 0) ? w1 : w2;
+            d += grain_apply(density, q) * (w / norm);
+        }
+    }
+    return d;
+}
 """
 
 
 class GLCubeGrain:
-    """Owns the two 3-D tables the stage reads. One instance per canvas context."""
+    """Owns the tables the stage reads. One instance per canvas context."""
 
     def __init__(self):
         self._density_tex = 0
         self._density_size = 0
         self._print_tex = 0
         self._print_size = 0
+        self._table_tex = 0
+        self._table_signature = None
         self.density_min = np.zeros(3, dtype=np.float32)
         self.density_max = np.ones(3, dtype=np.float32)
+        self.grain = {}
+        self.layer_axis_min = np.zeros(3, dtype=np.float32)
+        self.layer_axis_max = np.ones(3, dtype=np.float32)
         self.ready = False
         self._signature = None
+        self._pending = None
 
     # -- upload ------------------------------------------------------------------------------
     def set_bundle(self, bundle):
         """Stage a bundle for the next paint; ``None`` turns the path off."""
         if bundle is None:
             self._pending = None
+            self._signature = None
             self.ready = False
             return
         signature = (id(bundle.get("density")), id(bundle.get("cube")))
@@ -68,17 +235,24 @@ class GLCubeGrain:
         self._signature = signature
         self._pending = bundle
 
-    def upload_pending(self, unit_a=5, unit_b=6):
+    def upload_pending(self, unit_a=5, unit_b=6, unit_c=7):
         """Push a staged bundle to the GPU. Call with the canvas context current."""
-        pending = getattr(self, "_pending", None)
+        pending = self._pending
         if pending is None:
             return
         self._density_tex, self._density_size = self._upload_cube(
             self._density_tex, self._density_size, pending["density"], unit_a)
         self._print_tex, self._print_size = self._upload_cube(
             self._print_tex, self._print_size, pending["cube"], unit_b)
+
+        layer_table = pending["layer_table"]
+        self._upload_table(layer_table, unit_c)
+
         self.density_min = np.asarray(pending["density_min"], dtype=np.float32)
         self.density_max = np.asarray(pending["density_max"], dtype=np.float32)
+        self.layer_axis_min = np.asarray(layer_table["axis_min"], dtype=np.float32)
+        self.layer_axis_max = np.asarray(layer_table["axis_max"], dtype=np.float32)
+        self.grain = pending["grain"]
         self.ready = True
         self._pending = None
 
@@ -107,21 +281,74 @@ class GLCubeGrain:
         GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
         return tex, n
 
+    def _upload_table(self, layer_table, unit):
+        """256 samples x 3 records, RGBA = the three sub-layer densities of that record."""
+        table = np.asarray(layer_table["table"], dtype=np.float32)   # (samples, 3, 4)
+        data = np.ascontiguousarray(np.transpose(table, (1, 0, 2)))  # (3, samples, 4)
+        samples = data.shape[1]
+        signature = (samples, id(layer_table["table"]))
+        GL.glActiveTexture(0x84C0 + unit)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        if self._table_tex and self._table_signature == signature:
+            return
+        if self._table_tex:
+            GL.glDeleteTextures([self._table_tex])
+        self._table_tex = GL.glGenTextures(1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._table_tex)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA32F, samples, 3, 0,
+                        GL.GL_RGBA, GL.GL_FLOAT, data)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        self._table_signature = signature
+
     # -- bind --------------------------------------------------------------------------------
-    def bind(self, u_1i, unit_a=5, unit_b=6):
+    def bind(self, u_1i, u_1f, u_3f, u_3fv, pixel_size_um, params,
+             unit_a=5, unit_b=6, unit_c=7):
         if not self.ready:
             u_1i("u_grain_cubes", 0)
             return False
         for unit, tex, name in ((unit_a, self._density_tex, "u_density_lut"),
-                                (unit_b, self._print_tex, "u_print_lut")):
+                                (unit_b, self._print_tex, "u_print_lut"),
+                                (unit_c, self._table_tex, "u_grain_table")):
             GL.glActiveTexture(0x84C0 + unit)
-            GL.glBindTexture(GL.GL_TEXTURE_3D, tex)
+            GL.glBindTexture(GL.GL_TEXTURE_3D if name != "u_grain_table" else GL.GL_TEXTURE_2D, tex)
             u_1i(name, unit)
+
         u_1i("u_grain_cubes", 1)
+        u_3f("u_density_min", *[float(v) for v in self.density_min])
+        u_3f("u_density_max", *[float(v) for v in self.density_max])
+        u_3f("u_grain_axis_min", *[float(v) for v in self.layer_axis_min])
+        u_3f("u_grain_axis_max", *[float(v) for v in self.layer_axis_max])
+
+        g = self.grain or {}
+        if not g:
+            return True
+        # (sl, ch) arrays reach the shader as one vec3 per sub-layer, indexed by record.
+        for name, key in (("u_grain_dmax_layer", "density_max_layers"),
+                          ("u_grain_min_layer", "density_min_layers"),
+                          ("u_grain_ppu", "particles_per_um2")):
+            arr = np.asarray(g.get(key, np.zeros((3, 3))), dtype=np.float32)
+            u_3fv(name, arr)
+        u_3f("u_grain_uniformity", *[float(v) for v in np.asarray(g.get("uniformity", np.ones(3)))])
+        u_3f("u_grain_dmin", *[float(v) for v in np.asarray(g.get("density_min", np.zeros(3)))])
+
+        u_1f("u_grain_px_um", float(pixel_size_um))
+        # `grain` is the old fotufilm-era slider and stays inert until M5 re-maps it; the
+        # reference strength is what ships today, so a fresh document renders the film as the
+        # upstream does rather than at 40 % of it.
+        u_1f("u_grain_strength", float(params.get("grain_amount", 1.0)))
+        u_1f("u_grain_size", max(0.05, float(params.get("grain_size", 1.0))))
+        u_1f("u_grain_colour", float(g.get("colour_grain", 0.5)))
+        u_1i("u_grain_seed", int(params.get("grain_seed", 0)))
+        u_1i("u_grain_taps", int(params.get("grain_taps", 9)))
+        u_1i("u_grain_probe", int(params.get("grain_probe", 0)))
         return True
 
     def release(self):
-        for attr in ("_density_tex", "_print_tex"):
+        for attr in ("_density_tex", "_print_tex", "_table_tex"):
             tex = getattr(self, attr, 0)
             if tex:
                 try:
@@ -131,3 +358,4 @@ class GLCubeGrain:
                 setattr(self, attr, 0)
         self.ready = False
         self._signature = None
+        self._table_signature = None

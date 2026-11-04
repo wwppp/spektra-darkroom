@@ -182,6 +182,9 @@ def layer_scalars(film_data, grain, pixel_size_um):
         # at 1 MP are different samplings of the same film.
         "particles_per_um2": (fractions / particle_area).astype(np.float32),
         "uniformity": np.asarray(grain.uniformity, dtype=np.float32),
+        # How far the three records keep their own dye clouds (`mix_chroma_grain` upstream).
+        # 0.5 is the reference: half independent, half shared luminance.
+        "colour_grain": float(getattr(grain, "colour_grain", 0.5)),
         "blur_sigma": blur_sigma.astype(np.float32),
         "blur_um": float(grain.blur_dye_clouds_um),
         "final_blur_px": float(grain.blur),
