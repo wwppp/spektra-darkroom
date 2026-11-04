@@ -2602,14 +2602,14 @@ class SpektraEngine:
         # ``neutral_digest`` is what makes a re-solved filtration miss: the profile fingerprint
         # above only covers the curves, and the filters live in their own file.
         if is_default_params and not push_stops:
-            cache_file = os.path.join(cache_dir, f"v8_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
-            bundled_file = os.path.join(bundled_cache_dir, f"v8_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
+            cache_file = os.path.join(cache_dir, f"v9_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
+            bundled_file = os.path.join(bundled_cache_dir, f"v9_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
             load_target = cache_file if os.path.exists(cache_file) else (bundled_file if os.path.exists(bundled_file) else None)
             # The grain law reads the negative density, not the LUT. Serving a cached LUT without
             # its density cube would silently drop the grain back to the -log10(lin) domain, so a
             # cache hit only counts when both files are there; otherwise fall through and rebake
             # (one extra develop-only pass, once per stock).
-            dens_name = (f"density_v4__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}"
+            dens_name = (f"density_v5__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}"
                          f"__{eff_paper}__{lut_size}__{neutral_digest}__1.0_1.0_1.0.npy")
             dens_file = os.path.join(cache_dir, dens_name)
             dens_bundled = os.path.join(bundled_cache_dir, dens_name)
