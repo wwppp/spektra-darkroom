@@ -442,7 +442,11 @@ class BatchImportWorker(QThread):
                         "raw_preview": None,
                         "exif": cached.get("exif", {}),
                         "auto_ev": cached.get("auto_ev", 0.0),
-                        "base_ev": cached.get("base_ev", 0.0),
+                        # Session caches written by older builds carry the auto-metered value in
+                        # base_ev; the meter no longer ships one (it stays in auto_ev, applied
+                        # only through the auto-exposure button), and the photo-load chain
+                        # consults the sdc sidecar for explicitly saved values.
+                        "base_ev": 0.0,
                         "is_raw": cached.get("is_raw", False)
                     }
                     time.sleep(0.001)
@@ -767,11 +771,11 @@ class SessionRestoreWorker(QThread):
 
         is_uncached = False
         crop_data = params.get("crop") if (params and isinstance(params, dict)) else None
+        # base_ev is deliberately not restored from sessions or caches: it used to carry the
+        # auto-metered value, pinning every restore to a stale exposure.  The sdc sidecar
+        # stays authoritative (re-consulted at photo-load time); the metered suggestion lives
+        # in auto_ev behind the auto-exposure button.
         b_ev = 0.0
-        if params and "base_ev" in params and abs(float(params["base_ev"])) > 0.0001:
-            b_ev = float(params["base_ev"])
-        elif cache_item is not None:
-            b_ev = float(cache_item.get("base_ev", 0.0))
 
         ext_p = os.path.splitext(p)[1].lower()
         is_raw_p = ext_p in RAW_EXTENSIONS
@@ -3929,6 +3933,38 @@ class DarkroomMainWindow(QMainWindow):
             self.lbl_paper_title.setText(f"放大相纸 ({len(self.paper_cards)} 张)")
         self.reflow_grids()
 
+    def _on_auto_exposure(self):
+        """One-tap metered exposure: apply the active photo's metered EV suggestion.
+
+        The meter runs on every decode and lands in ``auto_ev``; nothing applies it
+        automatically (the default chain stays at 0 EV, matching the reference engine).
+        """
+        ev = 0.0
+        photo = None
+        pid = getattr(self, "active_photo_id", None)
+        photos = getattr(self, "photos", [])
+        if pid is not None:
+            photo = next((p for p in photos if p and p.get("id") == pid), None)
+        if photo is None:
+            path = getattr(self, "_current_photo_path", None)
+            photo = next((p for p in photos if p and p.get("path") == path), None)
+        if photo is not None:
+            ev = float(photo.get("auto_ev", 0.0) or 0.0)
+        if abs(ev) < 1e-4 and getattr(self, "_current_photo_path", None):
+            try:
+                c_chk = session_cache_manager.get_photo_cache(self._current_photo_path)
+                if c_chk:
+                    ev = float(c_chk.get("auto_ev", 0.0) or 0.0)
+            except Exception:
+                pass
+        if abs(ev) < 1e-4:
+            self.set_app_status("测光建议为 0 EV，无需调整", timeout_ms=2500)
+            return
+        ev = max(-3.0, min(3.0, ev))
+        self.slider_ev.setValue(ev)
+        self._on_slider_committed()
+        self.set_app_status(f"已按测光建议设置曝光 {ev:+.2f} EV", timeout_ms=2500)
+
     def _init_exposure_section(self):
         self.sec_exposure = AccordionSection("场景曝光 (Exposure)")
         self.sec_exposure.resetClicked.connect(lambda: self.reset_track("exposure"))
@@ -3942,6 +3978,33 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_ev.valueChanged.connect(lambda v: self._on_slider_live("exposure_ev", v))
         self.slider_ev.sliderReleased.connect(self._on_slider_committed)
         self.sec_exposure.addWidget(self.slider_ev)
+
+        # One-tap metered exposure, mirroring the reference's Auto Adjust: the meter runs on
+        # every decode but nothing ships until this button applies its suggestion to the
+        # exposure slider (the default chain stays at 0 EV -- see decode_photo_data).
+        self.btn_auto_ev = QPushButton("自动曝光")
+        self.btn_auto_ev.setToolTip("按 18% 中灰与高光测光建议设置曝光（不改变其他参数）")
+        self.btn_auto_ev.setFixedHeight(24)
+        self.btn_auto_ev.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_auto_ev.setStyleSheet("""
+            QPushButton {
+                background: #2a2f3a;
+                color: #cbd5e1;
+                font-size: 12px;
+                border: 1px solid #3b4252;
+                border-radius: 5px;
+                padding: 2px 10px;
+            }
+            QPushButton:hover {
+                background: #374151;
+                color: #f1f5f9;
+            }
+            QPushButton:pressed {
+                background: #1f2937;
+            }
+        """)
+        self.btn_auto_ev.clicked.connect(self._on_auto_exposure)
+        self.sec_exposure.addWidget(self.btn_auto_ev)
 
         self.slider_highlights = AdobeScrubSlider(
             "高光", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
@@ -10462,11 +10525,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     if sdc_chk and sdc_chk.get("params", {}).get("base_ev"):
                         base_ev = float(sdc_chk["params"]["base_ev"])
                         photo["base_ev"] = base_ev
-                if abs(base_ev) < 0.0001:
-                    c_chk = session_cache_manager.get_photo_cache(photo["path"])
-                    if c_chk and c_chk.get("base_ev"):
-                        base_ev = float(c_chk["base_ev"])
-                        photo["base_ev"] = base_ev
+                # The session cache is deliberately NOT consulted for base_ev: legacy entries
+                # carry the old auto-metered value and the meter itself no longer ships one
+                # (decode keeps it in auto_ev; the explicit auto-exposure button applies it).
+                # An sdc sidecar stays authoritative because the user saved it deliberately.
             self._active_base_temp = base_temp
             self._active_base_tint = base_tint
             self._active_base_ev = base_ev

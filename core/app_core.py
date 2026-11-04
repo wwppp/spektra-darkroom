@@ -3945,7 +3945,12 @@ class SpektraEngine:
             # file that already carries its base exposure does not double-apply it.
             is_raw_file = (ext in raw_exts)
             auto_ev = cls.calculate_auto_exposure_ev(preview_small)
-            base_ev = auto_ev
+            # The metered value is a SUGGESTION (auto_ev), applied only through the explicit
+            # auto-exposure button.  It used to land in base_ev and ship on every load, which
+            # darkened a bright-sky frame by -0.38 EV against the reference engine's own render
+            # of the same raw (measured 2026-11-04: the reference applies no automatic
+            # adjustment on load -- its AutoAdjustment is a one-tap feature, default neutral).
+            base_ev = 0.0
             # Retain pristine scene-linear ProPhoto radiance values without pre-multiplying base_ev
             raw_preview = preview_small.astype(np.float32)
             del preview_small
