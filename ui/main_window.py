@@ -57,10 +57,6 @@ from core.app_core import SpektraEngine
 from core import sdc_manager
 from core import config_manager
 
-# The film-tile sampler is in both renderers now (docs/grain-port-plan.md P3), so the controls
-# drive the frame again.  A stock whose grain has not been baked yet still says so rather than
-# moving a slider that changes nothing.
-GRAIN_IMPLEMENTATION_READY = True
 from core import session_cache_manager
 from ui.export_queue_manager import ExportQueueManager, ExportQueueDialog, ExportTask
 from ui.unsaved_session_dialog import UnsavedSessionDialog
@@ -3709,7 +3705,6 @@ class DarkroomMainWindow(QMainWindow):
         self._init_chemistry_section()
         self._init_enlarger_section()
         self._init_halation_section()
-        self._init_grain_section()
         self.sidebar_layout.addStretch(1)
 
         sidebar_scroll.setWidget(self.sidebar_content)
@@ -4549,42 +4544,6 @@ class DarkroomMainWindow(QMainWindow):
         self.sidebar_layout.addWidget(self.sec_halation)
         self.sec_texture = self.sec_halation  # Backward compatibility alias
         self.sec_optical = self.sec_halation  # Backward compatibility alias
-
-    # 强度滑块的刻度。1 = 内核 amount 0.4，也就是标定锚（`docs/grain-calibration.md:244`：
-    # slider 0.40 / D=0.90 的 σ = 0.05914 = 真实 35 mm 负片的 RMS 颗粒度）。于是滑块读数
-    # 直接是「真实颗粒度的百分比/100」：1 = 100%、3 = 300%，而 amount = ui / 2.5。
-    GRAIN_UI_PER_AMOUNT = 2.5
-
-    def _init_grain_section(self):
-        self.sec_grain = AccordionSection("银盐颗粒 (Grain)")
-        self.sec_grain.resetClicked.connect(lambda: self.reset_track("grain"))
-
-        self.slider_grain = AdobeScrubSlider(
-            "强度", 0.0, 3.0, 1.0, step=0.1, unit="", decimals=1,
-            tooltip="真实颗粒度的百分比：1.0 = 100%（标定锚），3.0 = 300%。"
-                    "低于 1 是减淡，高于 1 是夸张。"
-        )
-        self.slider_grain.valueChanged.connect(lambda v: self._on_slider_live("grain", v))
-        self.slider_grain.sliderReleased.connect(self._on_slider_committed)
-        self.sec_grain.addWidget(self.slider_grain)
-
-        self.slider_grain_size = AdobeScrubSlider(
-            "大小", 0.0, 3.0, 1.0, step=0.1, unit="", decimals=1,
-            tooltip="卤化银微晶与发色染料云的等效尺度倍数。1.0 为标定尺寸。"
-        )
-        self.slider_grain_size.valueChanged.connect(lambda v: self._on_slider_live("grain_size", v))
-        self.slider_grain_size.sliderReleased.connect(self._on_slider_committed)
-        self.sec_grain.addWidget(self.slider_grain_size)
-
-        self.slider_grain_colour = AdobeScrubSlider(
-            "色彩微粒", 0.0, 1.0, 1.0, step=0.1, unit="", decimals=1,
-            tooltip="0.0 为纯单色明度颗粒，1.0 为真实彩色胶片的三层独立染料云(彩噪)"
-        )
-        self.slider_grain_colour.valueChanged.connect(lambda v: self._on_slider_live("grain_colour", v))
-        self.slider_grain_colour.sliderReleased.connect(self._on_slider_committed)
-        self.sec_grain.addWidget(self.slider_grain_colour)
-
-        self.sidebar_layout.addWidget(self.sec_grain)
 
     _init_texture_section = _init_halation_section
     _init_optical_section = _init_halation_section
@@ -7205,10 +7164,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         try:
             # 1. 100% WYSIWYG Real-time GPU offscreen FBO sampling across all 20+ parameters
             if hasattr(self, 'canvas') and self.canvas and getattr(self.canvas, '_has_image', False):
-                # Grain off: a 256px sample only feeds the histogram, and grain there adds
                 # noise to the readout without telling anyone anything.
                 sampled = self.canvas.render_offscreen(
-                    target_w=256, target_h=170, params_override={"grain": 0.0}, bit_depth=8)
+                    target_w=256, target_h=170, bit_depth=8)
                 if sampled is not None and sampled.size > 0:
                     self.histogram_widget.update_from_rgb(sampled)
                     return
@@ -7301,10 +7259,6 @@ aspect_ratio=self._lens_frame_aspect(photo),
     def _on_slider_live(self, param_key, val):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
             return
-        if param_key == "grain":
-            # 滑块读数是「真实颗粒度的百分比」，内核吃的是 amount（0.4 = 100%）。
-            # 换算是这一处和 `_apply_params_to_ui` 的回填，两处必须互为逆运算。
-            val = float(val) / self.GRAIN_UI_PER_AMOUNT
         if self._bypass_blocks_param(param_key):
             return
         began = getattr(self.canvas, "begin_interaction", None)
@@ -7341,36 +7295,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
     def _apply_lut(self, lut_3d):
         """Upload a committed LUT and record which parameter key it represents, so the live
         preview can tell "already showing this" from "still stale"."""
-        self.canvas.set_lut(lut_3d, self._film_density_for_current())
+        self.canvas.set_lut(lut_3d)
         self._lut_applied_key = self._current_lut_key()
         queued = getattr(self, "_lut_job", None)
         if queued is not None and queued[0] != self._lut_applied_key:
             self._lut_job = None       # superseded: never spend a bake on outdated parameters
-
-    def _film_density_for_current(self):
-        """Density cube belonging to the LUT currently being shown.
-
-        The grain law is a function of negative density, and that cube is baked alongside the
-        LUT; the canvas carries it so the shader cannot index one bake's law with another
-        bake's densities. A miss means the LUT on screen did not come from this engine's cache
-        (or the parameters moved between bake and apply) -- say so once instead of silently
-        dropping the grain back to the -log10(lin) domain, which is what P1 exists to remove.
-        """
-        eng = getattr(self, "engine", None)
-        film = getattr(self, "current_film_stock", "none")
-        if eng is None or film in (None, "", "none"):
-            return None
-        params = dict(self.current_params)
-        params["print_mode"] = getattr(self, "current_print_mode", "optical")
-        try:
-            grid = eng.get_film_density(film, getattr(self, "current_paper_stock", "kodak_2383"), 33, params)
-        except Exception as exc:                    # noqa: BLE001 - never break a paint
-            print(f"[SpektraGrain] 密度表获取失败: {exc}")
-            grid = None
-        if grid is None and not getattr(self, "_density_miss_warned", False):
-            self._density_miss_warned = True
-            print("[SpektraGrain] 警告：当前 LUT 没有配套的显影密度表，颗粒回退到 -log10(lin) 域")
-        return grid
 
     def _ensure_lut_bake_bridge(self):
         if hasattr(self, "_lut_bake_bridge"):
@@ -7698,14 +7627,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 "scatter_amount": 1.0, "boost_ev": 0.0,
                 "halation": 1.0, "halation_boost": 0.0
             },
-            "grain": {
-                "grain": 0.4, "grain_size": 1.0, "grain_colour": 1.0
-            },
             "texture": {
                 "halation_amount": 1.0, "halation_spatial_scale": 1.0,
                 "scatter_amount": 1.0, "boost_ev": 0.0,
-                "halation": 1.0, "halation_boost": 0.0,
-                "grain": 0.4, "grain_size": 1.0, "grain_colour": 1.0
+                "halation": 1.0, "halation_boost": 0.0
             }
         }
 
@@ -7809,12 +7734,6 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 cache = getattr(engine, attr, None)
                 if isinstance(cache, dict):
                     cache.clear()
-        try:
-            from core.film_grain import profiles
-            profiles.clear_cache()
-        except Exception:                              # noqa: BLE001 - cache clearing is best effort
-            pass
-
         if hasattr(self, "canvas"):
             self.canvas.update()
         message = f"已删除 {removed} 个缓存文件。"
@@ -8219,12 +8138,6 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'slider_boost_ev'): self.slider_boost_ev.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
             if hasattr(self, 'slider_halation'): self.slider_halation.set_value(p.get("halation_amount", p.get("halation", 1.0)))
             if hasattr(self, 'slider_halation_boost'): self.slider_halation_boost.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
-            # 强度滑块显示的是百分比刻度，params 里存的是 amount（0.4 = 100%）。方向与
-            # `_on_slider_live` 相反，改一处必须改另一处。
-            if hasattr(self, 'slider_grain'):
-                self.slider_grain.set_value(p.get("grain", 0.4) * self.GRAIN_UI_PER_AMOUNT)
-            if hasattr(self, 'slider_grain_size'): self.slider_grain_size.set_value(p.get("grain_size", 1.0))
-            if hasattr(self, 'slider_grain_colour'): self.slider_grain_colour.set_value(p.get("grain_colour", 1.0))
 
             # Lens correction controls
             lens_cfg = p.get("lens")
@@ -9555,7 +9468,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 tgt_h = 120
                 tgt_w = max(10, int(round(120.0 * asp)))
 
-            rendered_rgb = self.canvas.render_offscreen(target_w=tgt_w, target_h=tgt_h, params_override={"grain": 0.0}, bit_depth=8)
+            rendered_rgb = self.canvas.render_offscreen(target_w=tgt_w, target_h=tgt_h, bit_depth=8)
             if rendered_rgb is not None and rendered_rgb.size > 0:
                 is_valid = bool(rendered_rgb.mean() > 1.0 or rendered_rgb.max() > 10)
                 if not is_valid and not getattr(self.canvas, '_has_image', False):
@@ -9745,43 +9658,6 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 s.setToolTip(getattr(s, "default_tooltip", "") if hal_available else hal_hint)
                 for child in [s] + s.findChildren(QWidget):
                     child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not hal_available)
-
-        # 6. 银盐颗粒 (Grain)
-        # The controls stay on screen but inert while the port lands: the old octave model was
-        # removed in one piece (docs/grain-port-plan.md P0) and the film-tile sampler is not in
-        # yet, so there is nothing for them to drive.  Flip GRAIN_IMPLEMENTATION_READY when P3
-        # ships instead of leaving a slider that silently does nothing.
-        sec_grain = getattr(self, "sec_grain", None)
-        grain_available = GRAIN_IMPLEMENTATION_READY and not is_none
-        grain_hint = ""
-        if is_none:
-            grain_hint = "当前处于数码原片旁通模式，无胶片银盐结晶微粒"
-        elif grain_available:
-            # The port only carries the stocks whose parameters are baked.  The rest have no film
-            # to read, so the controls say so instead of moving without an effect.
-            try:
-                from core.film_grain import grain_source
-                if grain_source(getattr(self, "current_film_stock", None)) is None:
-                    grain_available = False
-                    grain_hint = ("这支胶卷还没有颗粒参数：推冲的 Portra 800（Push 1 / Push 2）要等"
-                                  "推冲显影模型移植后才铺，其余胶卷均已固化")
-            except Exception:
-                pass
-        if sec_grain is not None and hasattr(sec_grain, "set_available"):
-            sec_grain.set_available(grain_available, grain_hint)
-            if not grain_available:
-                sec_grain.set_reset_enabled(False)
-        grain_sliders = [
-            getattr(self, "slider_grain", None),
-            getattr(self, "slider_grain_size", None),
-            getattr(self, "slider_grain_colour", None),
-        ]
-        for s in grain_sliders:
-            if s is not None:
-                s.setEnabled(grain_available)
-                s.setToolTip(getattr(s, "default_tooltip", "") if grain_available else grain_hint)
-                for child in [s] + s.findChildren(QWidget):
-                    child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not grain_available)
 
         # Left panel paper cards: lock and dim when in bypass or positive reversal film
         if hasattr(self, 'paper_cards') and self.paper_cards:

@@ -11,7 +11,6 @@ from PySide6.QtOpenGL import (
 )
 from core.path_utils import get_resource_dir
 from core import config_manager
-from core import film_formats
 from core.darkroom_math import scene_gain
 from OpenGL import GL
 
@@ -511,8 +510,6 @@ vec3 develop_negative(vec3 linear_rgb) {
     }
     return clamp(film_rgb, 0.0, 1.0);
 }
-
-// {{FILM_GRAIN}}
 
 void main() {
     if (u_has_image == 0) {
@@ -1050,25 +1047,6 @@ void main() {
         }
     }
 
-    // 3.6. Film grain: the pixel is the mean transmittance of one small patch of the stock's
-    // pre-rendered film tile, so it has to run on the negative's side of the LUT. The stage is
-    // ui/gl_film_grain.py's port of fotufilm's tile sampler -- the same film, the same placement,
-    // the same read the CPU export makes. It reads the pre-distortion coordinate: grain belongs
-    // to the film, not to the lens the film was shot through.
-    vec3 grain_dD = vec3(0.0);
-    if (u_grain_on == 1) {
-        grain_dD = grain_field(linear_rgb, pre_dist_uv, pre_dist_dx, pre_dist_dy);
-        // A diagnostic read of the stage: the density field itself, so the GPU sampler can be
-        // compared against the CPU one pixel for pixel. Unreachable from the UI.
-        if (u_grain_probe == 1) {
-            fragColor = vec4(grain_dD * 0.5 + 0.5, 1.0);
-            return;
-        }
-    } else if (u_grain_probe == 1) {
-        fragColor = vec4(vec3(0.5), 1.0);
-        return;
-    }
-
     // 4. Physical 3D LUT sampling, then the paper.  When the canvas shows the photo below one
     //    image pixel per screen pixel, four taps are developed separately and averaged.  The
     //    pipeline is not linear, so averaging the light first and developing once lifts the
@@ -1089,28 +1067,15 @@ void main() {
             vec3 tap = compute_scene_radiance(
                 textureGrad(u_image, clamp(sample_uv + off, half_texel, vec2(1.0) - half_texel),
                             d_sample_dx * 0.5, d_sample_dy * 0.5).rgb);
-            if (u_grain_on == 1) {
-                tap *= exp(-grain_dD * 2.302585092994046);
-            }
             acc += develop_negative(tap);
         }
         film_rgb = acc * 0.25;
     } else {
-        if (u_grain_on == 1) {
-            linear_rgb *= exp(-grain_dD * 2.302585092994046);   // 10^-dD
-        }
         film_rgb = develop_negative(linear_rgb);
     }
     fragColor = vec4(film_rgb, 1.0);
 }
 """
-
-# The grain stage is one self-contained block of GLSL: it lives next to the sampler it mirrors,
-# and it is spliced in here so the two can never drift without the file moving.
-from .gl_film_grain import GRAIN_GLSL as _GRAIN_GLSL          # noqa: E402
-
-FRAGMENT_SHADER_SRC = FRAGMENT_SHADER_SRC.replace("// {{FILM_GRAIN}}", _GRAIN_GLSL)
-
 
 CANVAS_BG_COLORS = {
     "white": (1.0, 1.0, 1.0),
@@ -1177,8 +1142,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
     requestReset = Signal()
     requestResetToOpen = Signal()
     requestClearCrop = Signal()
-    # A stock's film finished laying on the build thread; the next paint can read it.
-    grainReady = Signal()
     # Emitted when a render had to leave the GPU (currently only the >16384 px texture limit).
     # The console line alone was invisible: the user saw "export finished" with no hint that it
     # went through the CPU, i.e. that it took minutes instead of seconds.
@@ -1218,13 +1181,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._has_library_photos = False
         self._pending_image = None
         self._pending_lut = None
-        # Negative-density cube travelling with _pending_lut: the grain sampler indexes
-        # its density layers by it, so it keeps riding along with the LUT bake.
-        self._film_density = None
-        self._pending_density = None
-        # The GPU sampler (ui/gl_film_grain.py): one stock's film resident at a time.
-        self._grain = None
-        self.grainReady.connect(self.update)
         self._gl_initialized = False
 
         # Long-press on canvas to preview original (Before)
@@ -1429,11 +1385,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 pass
             self.vbo = None
 
-        grain = getattr(self, "_grain", None)
-        if grain is not None:
-            grain.release()
-            self._grain = None
-
     def initializeGL(self):
         self._release_gl_resources()
         self.shader_program = QOpenGLShaderProgram(self)
@@ -1507,11 +1458,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
             traceback.print_exc()
             streak = getattr(self, "_paint_fail_streak", 0) + 1
             self._paint_fail_streak = streak
-            try:
-                from .gl_film_grain import _diag as _diag_line
-                _diag_line(f"paint EXCEPTION #{streak} {type(exc).__name__}: {exc}")
-            except Exception:                    # noqa: BLE001 - diagnostics are optional
-                pass
             # One retry is a repair; an unbounded loop would spin on a permanently broken state.
             if streak <= 5:
                 QTimer.singleShot(150, self.update)
@@ -1530,17 +1476,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
         funcs = QOpenGLContext.currentContext().functions()
         # One line per state change, never per frame: when a paint comes out black this is what
         # says whether the image, the LUT or the grain was the one missing.
-        try:
-            from .gl_film_grain import _diag as _diag_line
-            _state = (bool(self._has_image), bool(self._has_lut),
-                      bool(getattr(self._grain, "ready", False)) if self._grain else False,
-                      getattr(self, "_is_placeholder", False))
-            if _state != getattr(self, "_diag_state", None):
-                self._diag_state = _state
-                _diag_line(f"paint image={int(_state[0])} lut={int(_state[1])} "
-                           f"grain={int(_state[2])} placeholder={int(_state[3])}")
-        except Exception:                            # noqa: BLE001 - diagnostics are optional
-            pass
         GL.glClearColor(self._bg_color[0], self._bg_color[1], self._bg_color[2], 1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
 
@@ -1836,9 +1771,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1i("u_raw_image", 2)
             u_1i("u_has_raw", 1 if prepared_tex else 0)
 
-        # Film grain (units 3 and 4): the stock's laid film and the density cube it is indexed by.
-        self._bind_grain(u_1f, u_1i, u_2f, u_3f, (self._image_w, self._image_h))
-
         # Bind 3D LUT Texture (unit 1), intentionally last.
         # The frame that arrives together with a fresh 3D texture used to come out black while
         # the texture itself verified fine on the GPU (read back and compared with the CPU
@@ -1846,6 +1778,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # unit juggling, the grain binding -- can leave the sampler or unit 1 in another state,
         # and a 3D sampler pointed at an empty unit returns 0, which the paper chain turns into
         # pure black.  Binding immediately before the draw costs nothing and rules that out.
+        # Four-tap develop is meaningful only where the renderer can afford it (a real
+        # downsample, no spatial stage already averaging the frame).
+        u_1i("u_supersample_ok", int(getattr(self, "_supersample_ok", 0)))
+
         if self._lut_tex_id:
             funcs.glActiveTexture(0x84C1)
             GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
@@ -2053,17 +1989,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 pass
         return {"dir_amount": 1.0, "dir_interlayer": 1.0, "dir_samelayer": 1.0, "morph_gamma": 1.0, "developer_exhaustion": 0.0}
 
-    def set_3d_lut(self, lut_array_3d, film_density=None):
-        """Upload 3D LUT array (float32 [N, N, N, 3]) to 3D texture.
-
-        ``film_density`` is the negative-density cube baked alongside that LUT.  It has to
-        travel with the LUT, not be looked up later: the grain law is indexed by density, and a
-        cube from a different (film, paper, DIR) bake would silently misplace the whole curve.
-        """
+    def set_3d_lut(self, lut_array_3d):
+        """Upload 3D LUT array (float32 [N, N, N, 3]) to 3D texture."""
         self._lut_baked = self._lookup_lut_baked(lut_array_3d)
         self._pending_lut = lut_array_3d
-        self._film_density = film_density
-        self._pending_density = film_density
         self.update()
 
     set_lut = set_3d_lut
@@ -2102,21 +2031,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
                             GL.GL_RGB, GL.GL_FLOAT, data)
             GL.glBindTexture(GL.GL_TEXTURE_3D, 0)
             self._has_lut = True
-
-        # The grain stage's density cube is uploaded here too: it is only meaningful against the
-        # LUT that was baked with it, and this is the one place both are guaranteed in hand.
-        # This has to run for a reused texture as well: a push change reuses the 33^3 texture but
-        # brings a different density cube with it, and skipping the update left the grain sampling
-        # the previous development condition's axis.
-        if self._pending_density is not None:
-            try:
-                if self._grain is None:
-                    from .gl_film_grain import GLFilmGrain
-                    self._grain = GLFilmGrain()
-                self._grain.set_density(self._pending_density)
-            except Exception as exc:                 # noqa: BLE001 - never break a paint
-                print(f"[SpektraGrain] density upload skipped: {exc}")
-            self._pending_density = None
 
     def begin_interaction(self) -> None:
         """Tell the canvas a drag is in progress, so the expensive path can stand down.
@@ -2159,55 +2073,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
         strength = float(self.params.get("diffusion_strength", 0.0) or 0.0)
         quiet = hal <= 0.001 and scat <= 0.001 and (family == "none" or strength <= 0.001)
         return 1 if quiet else 0
-
-    # --- film grain ------------------------------------------------------------------------
-    def _bind_grain(self, u_1f, u_1i, u_2f, u_3f, size) -> None:
-        """Make the current stock's film resident and hand the stage everything it needs.
-
-        A stock with no baked grain parameters (or no LUT, or a placeholder) switches the stage
-        off instead of drawing something plausible: "no grain" is a truthful answer, a look-alike
-        is not.
-        """
-        if self._grain is None:
-            from .gl_film_grain import GLFilmGrain
-            self._grain = GLFilmGrain()
-            # The film is laid off the paint thread; the signal is queued, so the repaint lands
-            # on the GUI thread no matter which one finished the work.
-            self._grain.set_ready_callback(self.grainReady.emit)
-        grain = self._grain
-        if isinstance(self._film_density, np.ndarray):
-            grain.set_density(self._film_density)
-        # Set before the early returns: a frame with no grain still needs the four-tap develop.
-        u_1i("u_supersample_ok", int(getattr(self, "_supersample_ok", 0)))
-        stock = self.params.get("film_stock")
-        if grain is None or not stock or stock == "none" \
-                or getattr(self, "_is_placeholder", False):
-            u_1i("u_grain_on", 0)
-            return
-        push_stops = int(round(float(self.params.get("push_ev", 0) or 0)))
-        if not grain.ensure_stock(stock, push_stops):
-            u_1i("u_grain_on", 0)
-            return
-
-        px_per_mm = film_formats.pixels_per_mm(size[0], size[1],
-                                               float(self.params.get("film_format_mm", 35.0)))
-        for name, value in grain.scalars(self.params, px_per_mm, size).items():
-            if isinstance(value, tuple):
-                (u_2f if len(value) == 2 else u_3f)(name, *value)
-            elif isinstance(value, int):
-                u_1i(name, value)
-            else:
-                u_1f(name, value)
-
-        for name, data in grain.arrays().items():
-            loc = self.shader_program.uniformLocation(name)
-            if loc >= 0:
-                GL.glUniform1fv(loc, int(data.size), data)
-
-        if grain.bind(3) is not None:
-            u_1i("u_grain_sat", 3)
-        if grain.density_unit(4) is not None:
-            u_1i("u_grain_density", 4)
 
     @property
     def _image_w(self):
@@ -2816,7 +2681,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         else:
             super().mouseDoubleClickEvent(event)
 
-    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None, density_override=None):
+    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None):
         """Render image at target resolution on GPU using an offscreen FBO.
         Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
         """
@@ -2859,7 +2724,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
         temp_tex_id = None
         temp_lut_tex_id = None
         fbo = None
-        _saved_film_density = self._film_density
         try:
             funcs = QOpenGLContext.currentContext().functions()
 
@@ -2905,11 +2769,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 active_lut_tex_id = temp_lut_tex_id
             else:
                 active_lut_tex_id = self._lut_tex_id
-
-            # The density cube has to follow the LUT it was baked with. Swapping the LUT without
-            # swapping the cube would index one bake's grain law with another bake's densities.
-            if lut_override is not None:
-                self._film_density = density_override
 
             # Merge params
             eff_params = dict(self.params)
@@ -3263,7 +3122,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
             print(f"[DarkroomGLCanvas] render_offscreen error: {e}")
             return None
         finally:
-            self._film_density = _saved_film_density
             if temp_tex_id:
                 try:
                     GL.glDeleteTextures([temp_tex_id])

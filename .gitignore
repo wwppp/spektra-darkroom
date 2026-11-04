@@ -99,3 +99,8 @@ CHANGELOG.md
 
 # Local cache of the fotufilm web demo (tools/fotufilm_mirror.py)
 .fotufilm-mirror/
+
+# 本地测试素材与临时产物
+测试/
+debug.log
+scratch/_bak_*.py

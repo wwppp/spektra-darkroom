@@ -55,7 +55,6 @@ from .format_constants import (
 )
 from . import colorspace as color_space
 from . import film_formats
-from . import film_grain
 from . import push_model
 
 
@@ -2086,235 +2085,6 @@ class SpektraEngine:
         self._halation_params_cache[key] = cached
         return cached
 
-    def get_film_grain_preset(self, film_stock, push_stops=0):
-        """Grain preset for ``film_stock`` at the given push development.
-
-        Push raises the negative's density, and the grain law is a function of density (P1), so a
-        pushed frame gets dirtier shadows for free -- but the law's Dmax fade also has to move, or
-        the pushed curve would be cut where the standard curve ended.  Only those two numbers are
-        overridden; the stock's granularity-vs-density *shape* is measured data and is not pushed
-        by guesswork.
-        """
-        preset = self._grain_preset_base(film_stock)
-        if not push_stops or not preset:
-            return preset
-        key = (film_stock, int(push_stops))
-        cache = getattr(self, "_grain_push_cache", None)
-        if cache is None:
-            cache = self._grain_push_cache = {}
-        if key in cache:
-            return cache[key]
-        table = push_model.load_table(self.resources_dir, film_stock)
-        entry, applied = push_model.condition(table, int(push_stops))
-        if entry is None:
-            cache[key] = preset
-            return preset
-        curves = np.asarray(entry["curves"], dtype=np.float64)
-        pushed = dict(preset)
-        pushed["density_max"] = [float(v) for v in np.nanmax(curves, axis=0)]
-        pushed["density_min"] = [float(v) + float(entry.get("dMin") or 0.0)
-                                 for v in np.nanmin(curves, axis=0)]
-        # No amplitude patch: the ported model derives grain from the negative's density, and a
-        # pushed negative *is* denser, so the grain coarsens on its own.  Anything added here
-        # would be counted twice.
-        pushed["push_stops"] = applied
-        cache[key] = pushed
-        return pushed
-
-    def _grain_preset_base(self, film_stock):
-        """Extract physical crystal grain parameters (size_mm, strength, layer_weights, density_profile)
-        from film profile JSON, or provide physically-calibrated fallbacks.
-        """
-        if not hasattr(self, "_grain_preset_cache"):
-            self._grain_preset_cache = {}
-
-        if not film_stock or film_stock == "none":
-            return {
-                "size_mm": 0.005,
-                "strength": 0.010,
-                "layer_weights": [0.70, 1.0, 1.35],
-                "density_profile": None,
-                # No stock, so no declared density range: the reversal flip and the grain
-                # sampler fall back to the model default rather than to an invented curve.
-                "density_law": None,
-            }
-
-        if film_stock in self._grain_preset_cache:
-            return self._grain_preset_cache[film_stock]
-
-        preset = None
-        custom_path = os.path.join(self.profiles_dir, f"{film_stock}.json")
-        if os.path.exists(custom_path):
-            try:
-                with open(custom_path, "r", encoding="utf-8") as fp:
-                    d = json.load(fp)
-                    cg = None
-                    if "data" in d and isinstance(d["data"], dict) and "physical_extensions" in d["data"]:
-                        cg = d["data"]["physical_extensions"].get("crystal_grain")
-                    elif "physical_extensions" in d and isinstance(d["physical_extensions"], dict):
-                        cg = d["physical_extensions"].get("crystal_grain")
-
-                    if cg and isinstance(cg, dict):
-                        # Density range of the stock's characteristic curves, which the density
-                        # law needs for its reading-density anchor and for the Dmax fade.  The
-                        # stored curves are baseline-zeroed net density, so the minimum is ~0 and
-                        # the span is what matters; the grain sampler indexes layers by it.
-                        d_min, d_max = self._profile_density_range(d)
-                        preset = {
-                            "size_mm": float(cg.get("size_mm", 0.005)),
-                            "strength": float(cg.get("strength", 0.010)),
-                            "layer_weights": [float(x) for x in cg.get("layer_weights", [0.70, 1.0, 1.35])],
-                            "density_profile": cg.get("density_profile"),
-                            "density_law": int(cg.get("density_law", 2)),
-                            # Per-stock grain law inputs.  These come straight from the profile
-                            # (fotufilm-engine data, see tools/validate_fotufilm_port.py); a
-                            # missing value means "use the model's global default", which is
-                            # different from a zero.
-                            "luma_correlation": cg.get("luma_correlation"),
-                            "granularity_read_density": cg.get("granularity_read_density"),
-                            "fog_density": cg.get("fog_density"),
-                            "reversal_profile": cg.get("reversal_profile"),
-                            "population": cg.get("population"),
-                            # Where the three coated sub-layers sit on the density axis (P2): the
-                            # grain octaves are those sub-layers, so each needs its own response.
-                            "layer_structure": self._profile_layer_structure(d),
-                            "density_min": d_min,
-                            "density_max": d_max,
-                        }
-            except Exception as e:
-                print(f"[SpektraGrain] 提取胶片颗粒配置异常: {e}")
-
-        # Intelligent physical fallback if not in profile
-        if preset is None:
-            stock_lower = film_stock.lower()
-            is_bw = any(k in stock_lower for k in ("mono", "b&w", "bw", "tmax", "tri_x", "hp5", "delta", "pan_f", "acros", "double_x", "infrared"))
-            is_tungsten = any(k in stock_lower for k in ("800t", "500t", "200t", "tungsten"))
-            is_fast = any(k in stock_lower for k in ("400", "800", "1600", "3200"))
-            is_slow = any(k in stock_lower for k in ("25", "50", "64", "100", "125", "160"))
-
-            if is_bw:
-                layer_weights = [1.0, 1.0, 1.0]
-            elif is_tungsten:
-                layer_weights = [0.90, 1.0, 2.71]
-            else:
-                layer_weights = [0.70, 1.0, 1.35]
-
-            if "3200" in stock_lower:
-                size_mm = 0.008
-                strength = 0.019
-            elif "tri_x" in stock_lower or "hp5" in stock_lower:
-                size_mm = 0.008
-                strength = 0.017
-            elif is_fast:
-                size_mm = 0.005
-                strength = 0.011
-            elif is_slow:
-                size_mm = 0.004
-                strength = 0.006
-            else:
-                size_mm = 0.005
-                strength = 0.010
-
-            preset = {
-                "size_mm": size_mm,
-                "strength": strength,
-                "layer_weights": layer_weights,
-                "density_profile": None,
-                # An uncatalogued stock declares no law, so the calibrated P0 bell is used.
-                "density_law": None,
-                "density_min": None,
-                "density_max": None,
-            }
-
-        self._grain_preset_cache[film_stock] = preset
-        return preset
-
-    @staticmethod
-    def _profile_density_range(doc):
-        """Per-record ``(density_min, density_max)`` of a profile's baked density curves.
-
-        The density law normalises itself at the stock's reading density and fades out below its
-        Dmax, so it needs the stock's own density span.  The stored curves are baseline-zeroed
-        net density, so the minimum reads ~0 (the true base density is not recoverable from the
-        profile); only the span carries information, and the reading density is 1.0 above the
-        minimum either way, clamped into the span.  Returns ``(None, None)`` when a profile
-        carries no curves, which falls back to the model's defaults.
-        """
-        try:
-            data = doc.get("data") if isinstance(doc.get("data"), dict) else doc
-            curves = data.get("density_curves")
-            if not curves:
-                return None, None
-            arr = np.asarray(curves, dtype=np.float64)
-            if arr.ndim != 2 or arr.shape[1] < 3:
-                return None, None
-            return ([float(x) for x in arr.min(axis=0)[:3]],
-                    [float(x) for x in arr.max(axis=0)[:3]])
-        except Exception:
-            return None, None
-
-    @staticmethod
-    def _profile_layer_structure(doc):
-        """Per record, per sub-layer ``[dmax, half_development, span]``, in units of the record's Dmax.
-
-        The three spatial grain octaves are the three coated sub-layers of a chromogenic emulsion
-        (fast/coarse -> slow/fine), so P2 needs to know where each sub-layer lives on the density
-        axis.  The profiles already carry that: ``density_curves_layers`` is (N, 3 layers, 3
-        records) of net density.  For each sub-layer this reports
-
-          * ``dmax``   -- how much density the sub-layer carries (its ceiling, /total);
-          * ``half``   -- the *total* density at which it is half developed (/total), i.e. where
-                          that sub-layer is most "active", which is where its granularity peaks;
-          * ``span``   -- the total-density width of its 20..80 % development (/total), which sets
-                          how sharp that peak is.
-
-        Returns ``None`` when the profile carries no layer curves.  A sub-layer with no density at
-        all yields ``[0, 0, 0]``; the grain sampler treats that (and any three
-        sub-layers that half-develop at the same density) as "not separable" and uses its
-        structural fallback.
-        """
-        try:
-            data = doc.get("data") if isinstance(doc.get("data"), dict) else doc
-            layers = data.get("density_curves_layers")
-            curves = data.get("density_curves")
-            if not layers or not curves:
-                return None
-            layer_arr = np.asarray(layers, dtype=np.float64)
-            curve_arr = np.asarray(curves, dtype=np.float64)
-            if layer_arr.ndim != 3 or layer_arr.shape[1] != 3 or layer_arr.shape[2] < 3:
-                return None
-            if curve_arr.ndim != 2 or curve_arr.shape[1] < 3:
-                return None
-            structure = []
-            for record in range(3):
-                total_curve = curve_arr[:, record]
-                ceiling = float(np.nanmax(total_curve))
-                if not np.isfinite(ceiling) or ceiling <= 1e-6:
-                    structure.append([[0.0, 0.0, 0.0] for _ in range(3)])
-                    continue
-                net_total = total_curve - float(np.nanmin(total_curve))
-                rows = []
-                for layer in range(3):
-                    column = layer_arr[:, layer, record]
-                    base = float(np.nanmin(column))
-                    net = column - base
-                    peak = float(np.nanmax(net))
-                    if not np.isfinite(peak) or peak <= 1e-6:
-                        rows.append([0.0, 0.0, 0.0])
-                        continue
-                    fraction = net / peak
-                    developed = np.nan_to_num(net_total, nan=0.0)
-                    half = developed[int(np.argmax(fraction >= 0.5))]
-                    lo = developed[int(np.argmax(fraction >= 0.2))]
-                    hi = developed[int(np.argmax(fraction >= 0.8))]
-                    rows.append([peak / ceiling,
-                                 float(half) / ceiling,
-                                 max(float(hi - lo), 0.0) / ceiling])
-                structure.append(rows)
-            return structure
-        except Exception:
-            return None
-
     @staticmethod
     def _postprocess_positive_lut(lut_3d: np.ndarray, film_stock: str) -> np.ndarray:
         """
@@ -4233,14 +4003,7 @@ class SpektraEngine:
 
             film_stock = params_dict.get("film_stock", "kodak_portra_400")
             paper_stock = params_dict.get("paper_stock", "kodak_2383")
-            # The development the grain has to be built for: a requested +3 on a +1/+2 table
-            # resolves to +2, so keep the *applied* stops rather than the request.
-            grain_push = int(self.pushed_film_stops(
-                film_stock, int(round(float(params_dict.get("push_ev", 0) or 0)))) or 0)
-            
             lut_3d = self.get_3d_lut(film_stock, paper_stock, lut_size=33, params_dict=params_dict)
-            # Negative density for the grain law, from the very same bake as the LUT above.
-            film_density = self.get_film_density(film_stock, paper_stock, 33, params_dict)
 
             exp_val = float(params_dict.get("exposure_ev", 0.0))
             temp_val = float(params_dict.get("color_temp", 5500.0))
@@ -4266,8 +4029,6 @@ class SpektraEngine:
             hal_spatial_scale = float(params_dict.get("halation_spatial_scale", 1.0))
             scatter_amount = float(params_dict.get("scatter_amount", 1.0))
             hal_boost = float(params_dict.get("boost_ev", params_dict.get("halation_boost", 0.0)))
-            grain = float(params_dict.get("grain", 0.4))
-            grain_size = float(params_dict.get("grain_size", 1.0))
             fmt_mm = float(params_dict.get("film_format_mm", 35.0))
             diff_family = str(params_dict.get("diffusion_family", "none")).lower()
             diff_strength = float(params_dict.get("diffusion_strength", 0.0))
@@ -4452,10 +4213,6 @@ class SpektraEngine:
                 chem_params["morph_gamma"] = 1.0
                 chem_params["developer_exhaustion"] = 0.0
 
-            # Grain parameters, in fotufilm's own terms.  The tile sampler (P2) reads the same
-            # object; the stock's crystal population and tile data come from the engine.
-            grain_params = film_grain.params_for(params_dict)
-
             # The enlarger's own optics and the paper's light scattering, as one Gaussian on the
             # film's scale -- the reference's printMTFSigma (FilmEngine.swift:1110-1117,
             # PrintStock.swift:44: non-projected papers blur 0.004 mm, floored at 0.151 px).
@@ -4480,25 +4237,6 @@ class SpektraEngine:
                 # (measured: sigma unchanged to 3 decimals, 2026-11-04).
                 ys, ye = max(0, y0 - enl_halo), min(H, y1 + enl_halo)
                 work = linear_full[ys:ye].copy()
-
-                # Pre-LUT transmittance grain: the pixel is light that went through one small
-                # patch of the stock's film tile, so the stage has to run on the negative side of
-                # the LUT, exactly where the reference implementation puts it.  The tile level a
-                # pixel reads is its own developed density, so it comes from the same density cube
-                # the LUT was baked with -- not from -log10(linear), which carries the base.
-                if film_grain.FILM_GRAIN_ACTIVE and grain > 0:
-                    _pre = np.clip(shaper_forward(work) * (lut_size - 1),
-                                   0.0, lut_size - 1.0).astype(np.int32)
-                    _net = film_density[_pre[..., 2], _pre[..., 1], _pre[..., 0]]
-                    work = film_grain.apply_block(
-                        work, grain_params,
-                        stock=film_stock,
-                        net_density=_net,
-                        px_per_mm=enl_px_per_mm,
-                        row_offset=ys,
-                        push_stops=grain_push,
-                    )
-                    del _pre, _net
 
                 if enl_sigma_px > 0.2:
                     for c in range(3):
