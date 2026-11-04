@@ -73,97 +73,22 @@ class PrintingStage:
     # private methods
 
     def _film_cmy_to_print_log_raw(self, cmy_film_density: np.ndarray) -> np.ndarray:
-        """Print exposure, structured like the reference engine's.
-
-        The spectral integration runs under the RAW enlarger lamp — the reference prints a
-        reflection paper through unfiltered 3200 K tungsten (PrintIllumination.swift) and
-        neutralizes per paper record at its own calibrated midpoint.  We had been integrating
-        through the solved dichroic filtration, which shapes the lamp and starves whichever
-        paper record the filtration cuts (Y58 starves blue): that record's paper curve falls
-        into its toe and its grain dies on the tones it drives (measured on a sky tone:
-        per-record grain transfer B/R 0.55 filtered vs 4.48 raw vs the reference's 1.18 — the
-        lamp is the dominant control).
-
-        So: energies integrate under the raw lamp; the per-record operating point comes from an
-        anchor solved at mid-grey — ``anchor[c]`` is where the *filtered* calibration put
-        mid-grey on the paper's exposure axis, i.e. the filtration's neutrality work survives as
-        a per-record log-exposure offset (the equivalent of the reference's paperMidpoint) while
-        the tone-to-tone grain crosstalk flows through the raw spectral response.  Mid-grey
-        lands exactly where the previous chain put it, so neutrality and the display
-        calibration built on it are preserved.
-        """
         sensitivity = 10 ** self._print.data.log_sensitivity
         sensitivity = np.nan_to_num(sensitivity)
         enlarger_light_source = standard_illuminant(self._enlarger.illuminant)
 
-        anchor, log_mid_raw = self._print_anchor(sensitivity, enlarger_light_source)
-
+        raw = np.zeros_like(cmy_film_density)
         density_spectral = compute_density_spectral(
             self._film.data.channel_density,
             cmy_film_density,
             base_density=self._film.data.base_density,
         )
-        light = density_to_light(density_spectral, enlarger_light_source)
+        print_illuminant = self._enlarger_service.enlarger_filtered_illuminant(enlarger_light_source)
+        light = density_to_light(density_spectral, print_illuminant)
         raw = contract("ijk, kl->ijl", light, sensitivity)
-        # Relative to mid-grey under the same raw lamp, then onto the anchored operating point.
-        relative = (np.log10(np.fmax(raw, 1e-12))
-                    - log_mid_raw)
-        log_raw = anchor + relative
-        if self._enlarger.preflash_exposure > 0:
-            # Uniform flash in the relative-energy domain, as the reference applies it.
-            flash = self._raw_preflash_energy(sensitivity, enlarger_light_source)
-            log_raw = np.log10(10.0 ** relative + flash / np.fmax(
-                10.0 ** log_mid_raw, 1e-12)) + anchor
-        return log_raw
-
-    def _print_anchor(self, sensitivity, enlarger_light_source):
-        """(anchor, log mid-grey raw energy), both per record; computed once per pipeline run.
-
-        The anchor is the paper's own calibrated midpoint — the reference's
-        ``printExposureMidpoints`` (PrintPaperTables.swift): the log exposure at which each
-        paper record reaches ``dMin + anchorDensity`` (0.744 above base for reflection
-        paper).  It is a property of the paper alone, which no viewing lamp and no film
-        chemistry can move.  It used to be the filtered-integration chain's mid-grey
-        landing, recomputed at run time from whatever dye spectra were loaded: the moment
-        the reference's real dyes and orange mask landed in the film profile, that landing
-        stopped being neutral and dragged every record's operating point with it (mid-gray
-        R read -96 display levels against the reference, 2026-11-04).
-        """
-        cached = getattr(self, "_print_anchor_cache", None)
-        if cached is not None:
-            return cached
-        curves = np.asarray(self._print.data.density_curves, dtype=np.float64)
-        log_exposure = np.asarray(self._print.data.log_exposure, dtype=np.float64).ravel()
-        trims = np.asarray(getattr(self._print.data, "midpoint_trim", [0.0, 0.0, 0.0]),
-                           dtype=np.float64)
-        anchor = np.zeros((3,))
-        for c in range(3):
-            d = curves[:, c]
-            finite = np.isfinite(d)
-            d_min = float(np.nanmin(d[finite]))
-            target = d_min + 0.744 + float(trims[c])
-            # Density rises monotonically with exposure on a negative-working paper.
-            anchor[c] = float(np.interp(target, d[finite], log_exposure[finite]))
-
-        # Raw-lamp mid-grey energies, per record, for the relative axis.
-        mid_spectral = self._enlarger_service.density_spectral_midgray
-        light_r = density_to_light(mid_spectral, enlarger_light_source)
-        e_r_mid = contract("ijk, kl->ijl", light_r, sensitivity)
-        log_mid_raw = np.log10(np.fmax(e_r_mid, 1e-12))
-
-        self._print_anchor_cache = (anchor, log_mid_raw)
-        return self._print_anchor_cache
-
-    def _raw_preflash_energy(self, sensitivity, enlarger_light_source):
-        """Preflash energy integrated under the raw lamp (absolute units)."""
-        if self._enlarger.preflash_exposure <= 0:
-            return np.zeros((3,))
-        preflash_illuminant = self._enlarger_service.preflash_filtered_illuminant(
-            enlarger_light_source)
-        density_base = np.asarray(self._film.data.base_density)[None, None, :]
-        light_preflash = density_to_light(density_base, preflash_illuminant)
-        raw_preflash = contract("ijk, kl->ijl", light_preflash, sensitivity)
-        return raw_preflash * self._enlarger.preflash_exposure
+        raw *= self._compute_exposure_factor_midgray(sensitivity, print_illuminant)
+        raw += self._compute_raw_preflash(enlarger_light_source, sensitivity)
+        return np.log10(np.fmax(raw, 0.0) + 1e-10)
 
     def _compute_raw_preflash(self, light_source, sensitivity):
         if self._enlarger.preflash_exposure > 0:

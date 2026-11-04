@@ -54,10 +54,6 @@ def compute_dir_couplers_matrix(couplers_params: DirCouplersParams = DirCouplers
     
     # Dynamic CouplerGeometry derivation from physical layer stack (Phase 5)
     cg_data = getattr(couplers_params, "coupler_geometry", None)
-    direct = getattr(couplers_params, "direct_matrix", None)
-    if direct is not None:
-        # Per-stock reference matrix, already in [donor][receiver] per-density-unit form.
-        return np.array(direct, dtype=np.float64)
     if cg_data and isinstance(cg_data, dict):
         cinh = cg_data.get("coupler_inhibition")
         if cinh is not None:
@@ -172,21 +168,6 @@ def apply_density_correction_dir_couplers(
         return density_cmy
 
     couplers_matrix *= dir_couplers.amount
-
-    # Prevent over-inhibition curve folding: if the maximum local slope of
-    # d(density_silver @ couplers_matrix) / d(log_exposure) exceeds 0.85,
-    # log_exposure_0 = log_exposure - density_silver @ couplers_matrix becomes
-    # non-monotonic and inverts highlights. Scale each receiver column so its
-    # maximum slope along the characteristic curve never exceeds 0.85.
-    dle = np.diff(log_exposure)
-    if dle.size > 0 and np.all(dle > 0):
-        ds_curve = (np.nanmax(density_curves, axis=0) - density_curves) if positive else density_curves
-        couplers_curve = contract('jk, km->jm', ds_curve, couplers_matrix)
-        slopes = np.diff(couplers_curve, axis=0) / dle[:, None]
-        max_slopes = np.max(slopes, axis=0)
-        for m in range(couplers_matrix.shape[1]):
-            if max_slopes[m] > 0.85:
-                couplers_matrix[:, m] *= (0.85 / max_slopes[m])
     
     density_curves_0 = compute_density_curves_before_dir_couplers(
         density_curves,

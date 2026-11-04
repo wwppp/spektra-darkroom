@@ -25,14 +25,8 @@ def standard_illuminant(type='D65', return_class=False):
     elif type=='K75P':
         spectral_intensity = colour.SDS_LIGHT_SOURCES['Kinoton 75P'].copy().align(SPECTRAL_SHAPE)
     elif type=='TH-KG3':
-        # The reference engine's enlarger lamp is a bare 3200 K blackbody
-        # (SpectralModel.swift enlarger3200K: blackbody(kelvinK: 3200), no heat filter).
-        # This branch used to be a 3400 K lamp behind a Schott KG3 heat filter, which
-        # suppressed exactly the deep-red band the paper's red-sensitive layer reads;
-        # with the reference's real negative dyes and orange mask in the profile the
-        # difference distorted the R record's print exposure (sky R -36 vs the
-        # reference, measured 2026-11-04).  The filtered variant stays on 'TH-KG3-L'.
-        spectral_intensity = black_body_spectrum(3200)
+        spectral_intensity = black_body_spectrum(3400)
+        spectral_intensity.values = schott_kg3_heat_filter.apply(spectral_intensity.values)
     elif type=='TH-KG3-L': # enlarger source with heat filter and lens transmittance
         spectral_intensity = black_body_spectrum(3400)
         spectral_intensity.values = schott_kg3_heat_filter.apply(spectral_intensity.values)
