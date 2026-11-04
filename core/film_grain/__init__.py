@@ -41,6 +41,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+import json
+
 import numpy as np
 
 __all__ = [
@@ -155,6 +157,34 @@ def _sampler(stock, tiles, px_per_mm: float, params: GrainParams, seed: int):
     return cached
 
 
+_CALIBRATION: dict | None = None
+
+
+def _layer_calibration(stock_id: str) -> tuple[float, float, float]:
+    """Per-record multipliers measured against the reference's own card renders.
+
+    The tile sigma is anchored to the published granularity at the 48 um aperture, but the
+    reference's *rendered* per-record amplitude above that anchor is a property of its crystal
+    renderer, and ours emerges differently (the anchor cannot pin the rendered spectrum's
+    absolute scale).  ``resources/profiles/grain_calibration.json`` carries the measured
+    correction, one entry per stock that has a reference card to measure against.
+    """
+    global _CALIBRATION
+    if _CALIBRATION is None:
+        from pathlib import Path
+        from core.path_utils import get_resource_dir
+        path = Path(get_resource_dir()) / "profiles" / "grain_calibration.json"
+        table = {}
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as handle:
+                table = json.load(handle).get("stocks", {})
+        _CALIBRATION = table
+    values = _CALIBRATION.get(stock_id)
+    if not values or len(values) < 3:
+        return (1.0, 1.0, 1.0)
+    return (float(values[0]), float(values[1]), float(values[2]))
+
+
 def apply_block(linear: np.ndarray, params: GrainParams, *, stock: str | None = None,
                 net_density: np.ndarray | None = None, px_per_mm: float = 0.0,
                 row_offset: int = 0, seed: int = 1, push_stops: int = 0) -> np.ndarray:
@@ -193,8 +223,10 @@ def apply_block(linear: np.ndarray, params: GrainParams, *, stock: str | None = 
     # records' shared variance and, through the print's crosstalk, distorted the display-domain
     # per-channel sigma (R up to 1.5x).  Measured against the reference's own card render,
     # 2026-11-04.  ``_couple_records`` stays for an explicit future control.
+    cal = _layer_calibration(grain_stock.stock_id)
+    layers = tuple(l * c for l, c in zip(params.layers, cal))
     fluctuation = sampler.apply(density, row_offset, params.amount, params.colour,
-                                params.layers, monochrome=grain_stock.is_monochrome,
+                                layers, monochrome=grain_stock.is_monochrome,
                                 luma_correlation=0.0)
     _LAST[str(stock)] = {
         "active": True,

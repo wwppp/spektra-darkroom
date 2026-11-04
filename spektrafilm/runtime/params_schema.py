@@ -144,6 +144,9 @@ class DirCouplersParams:
     diffusion_tail_um: float = 200.0 # exponential tail for Lévy-like processes or environmental heterogeneity
     diffusion_tail_weight: float = 0.06
     coupler_geometry: dict | None = None
+    # Explicit [donor][receiver] matrix in log-exposure shift per absolute density unit.
+    # When set it replaces the gamma_* derivation entirely (per-stock reference data).
+    direct_matrix: tuple | None = None
 
 @dataclass
 class GlareParams:

@@ -95,7 +95,55 @@ from .shaper import (  # noqa: E402  (kept next to the constants it describes)
 )
 
 
+_DIR_COUPLER_TABLE_CACHE = None
+
+
+def apply_reference_dir_couplers(params):
+    """Point a negative-film pipeline's DIR couplers at the reference pack's per-stock table.
+
+    Our global negative couplers were eyeballed ("just eyeballed, optimize!") and their
+    cross-record terms measured 3x the reference's on the gray card (G donor -> R receiver):
+    the grain leaked into the wrong display channel exactly that hard.  The packs carry a
+    per-stock ``couplerInhibition`` in [receiver][donor] order, released per *normalized*
+    activation a = (formed - dMin)/range, so the per-density-unit matrix is
+    ``M[donor][receiver] = inhibition[receiver][donor] / range[donor]``.  The diagonal and
+    the neutral-ramp response stay neutralized by the curve pre-compensation, same as the
+    reference's coupler warp does.
+    """
+    global _DIR_COUPLER_TABLE_CACHE
+    try:
+        info = params.film.info
+        if getattr(info, "type", None) != "negative":
+            return params
+        if getattr(info, "channel_model", None) == "bw":
+            return params
+        stock_id = info.stock
+        if _DIR_COUPLER_TABLE_CACHE is None:
+            from .path_utils import get_resource_dir
+            path = os.path.join(get_resource_dir(), "profiles", "grain_params.json")
+            table = {}
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as handle:
+                    table = json.load(handle).get("stocks", {})
+            _DIR_COUPLER_TABLE_CACHE = table
+        entry = (_DIR_COUPLER_TABLE_CACHE.get(stock_id) or {}).get("dirCouplers")
+        if not entry:
+            return params
+        inh = np.asarray(entry["inhibition"], dtype=float)   # [receiver][donor]
+        ranges = np.asarray(entry["ranges"], dtype=float)    # per donor record
+        if inh.shape != (3, 3) or ranges.shape != (3,) or not np.all(np.isfinite(ranges)) \
+                or np.any(ranges <= 1e-6):
+            return params
+        matrix = (inh / ranges[None, :]).T                   # -> [donor][receiver]
+        params.film_render.dir_couplers.direct_matrix = tuple(
+            tuple(float(v) for v in row) for row in matrix)
+    except Exception as exc:  # never block a render on reference data problems
+        logger.warning("reference dir-couplers unavailable: %s", exc)
+    return params
+
+
 def srgb_to_linear(srgb):
+
     """Decode standard sRGB non-linear CCTF into linear values."""
     srgb_c = np.clip(srgb, 0.0, 1.0)
     return np.where(srgb_c <= 0.04045, srgb_c / 12.92, np.power(np.maximum(0.0, (srgb_c + 0.055) / 1.055), 2.4)).astype(np.float32)
@@ -2741,7 +2789,7 @@ class SpektraEngine:
 
         sim = self._lut_sim_cache.get(sim_key)
         if sim is None:
-            digested = digest_params(params)
+            digested = digest_params(apply_reference_dir_couplers(params))
             # lut_mode pins the print exposure to 1.0, and that is where the tone curve came out
             # 8.7% short of the reference; the calibration has to be applied after the digest.
             digested.enlarger.print_exposure = PRINT_EXPOSURE_CALIBRATION
@@ -4749,7 +4797,7 @@ class SpektraEngine:
         params.film_render.halation.active = False
         params.film_render.grain.active = False
 
-        digested = digest_params(params)
+        digested = digest_params(apply_reference_dir_couplers(params))
         # Keep whatever print exposure the caller asked for and put the calibration on top, so an
         # exported .cube matches what the canvas shows at the same slider value.
         digested.enlarger.print_exposure = (

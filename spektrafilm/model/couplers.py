@@ -54,6 +54,10 @@ def compute_dir_couplers_matrix(couplers_params: DirCouplersParams = DirCouplers
     
     # Dynamic CouplerGeometry derivation from physical layer stack (Phase 5)
     cg_data = getattr(couplers_params, "coupler_geometry", None)
+    direct = getattr(couplers_params, "direct_matrix", None)
+    if direct is not None:
+        # Per-stock reference matrix, already in [donor][receiver] per-density-unit form.
+        return np.array(direct, dtype=np.float64)
     if cg_data and isinstance(cg_data, dict):
         cinh = cg_data.get("coupler_inhibition")
         if cinh is not None:
