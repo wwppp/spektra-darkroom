@@ -8551,6 +8551,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._schedule_histogram_update()
         if push_undo and self._current_photo_path:
             self._update_active_thumbnails()
+            # 相纸换了，左侧胶卷卡片的预览必须重渲染；否则要等切分类标签才刷新
+            self._refresh_card_previews(film_only=True)
         self._update_stock_mode_ui()
         if push_undo:
             self.push_undo_state()
