@@ -4535,13 +4535,30 @@ class SpektraEngine:
             # object; the stock's crystal population and tile data come from the engine.
             grain_params = film_grain.params_for(params_dict)
 
+            # The enlarger's own optics and the paper's light scattering, as one Gaussian on the
+            # film's scale -- the reference's printMTFSigma (FilmEngine.swift:1110-1117,
+            # PrintStock.swift:44: non-projected papers blur 0.004 mm, floored at 0.151 px).
+            # The negative is PROJECTED: both its image and its grain read soft, and the effect
+            # scales with the frame's sampling -- invisible on the coarse gray card, decisive at
+            # scan pitch (measured 2026-11-04: without it our grain reads 2x hot and pixel-locked
+            # against the reference at 5.96 um pitch while matching on the card).
+            enl_px_per_mm = film_formats.pixels_per_mm(W, H, fmt_mm)
+            enl_sigma_px = max(0.004 * enl_px_per_mm, 0.151)
+            enl_halo = int(np.ceil(3.0 * enl_sigma_px)) + 1
+
             def _process_chunk(y_range):
                 y0, y1 = y_range
                 # Checked inside the worker, not only between completed futures: a single
                 # 64 MP chunk takes long enough that "cancel" used to look dead for a second.
                 if cancel_cb and cancel_cb():
                     return
-                chunk_linear = linear_full[y0:y1].copy()
+                # Grain then enlarger blur, on a halo-extended slice so neither the tile
+                # sampling nor the per-chunk Gaussian seams at chunk edges.  The reference
+                # assembles the negative (image + grain) first and the projection softens the
+                # assembled whole -- blurring before the grain would leave the grain unblurred
+                # (measured: sigma unchanged to 3 decimals, 2026-11-04).
+                ys, ye = max(0, y0 - enl_halo), min(H, y1 + enl_halo)
+                work = linear_full[ys:ye].copy()
 
                 # Pre-LUT transmittance grain: the pixel is light that went through one small
                 # patch of the stock's film tile, so the stage has to run on the negative side of
@@ -4549,18 +4566,24 @@ class SpektraEngine:
                 # pixel reads is its own developed density, so it comes from the same density cube
                 # the LUT was baked with -- not from -log10(linear), which carries the base.
                 if film_grain.FILM_GRAIN_ACTIVE and grain > 0:
-                    _pre = np.clip(shaper_forward(chunk_linear) * (lut_size - 1),
+                    _pre = np.clip(shaper_forward(work) * (lut_size - 1),
                                    0.0, lut_size - 1.0).astype(np.int32)
                     _net = film_density[_pre[..., 2], _pre[..., 1], _pre[..., 0]]
-                    chunk_linear = film_grain.apply_block(
-                        chunk_linear, grain_params,
+                    work = film_grain.apply_block(
+                        work, grain_params,
                         stock=film_stock,
                         net_density=_net,
-                        px_per_mm=film_formats.pixels_per_mm(W, H, fmt_mm),
-                        row_offset=y0,
+                        px_per_mm=enl_px_per_mm,
+                        row_offset=ys,
                         push_stops=grain_push,
                     )
                     del _pre, _net
+
+                if enl_sigma_px > 0.2:
+                    for c in range(3):
+                        work[..., c] = cv2.GaussianBlur(work[..., c], (0, 0), enl_sigma_px)
+                chunk_linear = work[y0 - ys:y1 - ys]
+                del work
 
                 coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
                 idx0 = coords.astype(np.int32)
