@@ -376,12 +376,20 @@ class GLCubeGrain:
         # The dye-cloud + frame-blur kernel belongs to the pitch, so it is sized here rather
         # than baked into the bundle.  Five nodes: the reference's cascade has fallen below
         # 1 % of its centre by |dx| = 2 at every pitch this app renders.
+        # 0 = the reference cascade as-is, 1 = frame blur only (no dye cloud),
+        # 2 = no convolution at all.  The last two exist so the cost of each stage can be
+        # measured instead of guessed at.
+        mode = int(params.get("grain_kernel_mode", 0))
         final_blur = float(g.get("final_blur_px", 0.65) or 0.0)
-        key = (round(float(pixel_size_um), 5), round(final_blur, 4), bool(u_1fv))
+        decay_um = 0.0 if mode == 1 else 1.45
+        if mode == 2:
+            final_blur = 0.0
+            decay_um = 0.0
+        key = (round(float(pixel_size_um), 5), round(final_blur, 4), decay_um, bool(u_1fv))
         if self._kernel_key != key:
             import core.grain_bake as grain_bake
             self._kernel = grain_bake.grain_kernel_1d(
-                float(pixel_size_um), final_blur_px=final_blur)
+                float(pixel_size_um), final_blur_px=final_blur, decay_um=decay_um)
             self._kernel_key = key
         if u_1fv is not None:
             u_1fv("u_grain_kernel", self._kernel)
