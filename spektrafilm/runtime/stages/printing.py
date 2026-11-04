@@ -119,24 +119,34 @@ class PrintingStage:
     def _print_anchor(self, sensitivity, enlarger_light_source):
         """(anchor, log mid-grey raw energy), both per record; computed once per pipeline run.
 
-        The anchor is the previous (filtered-integration) chain's own mid-grey landing — the
-        dichroic filtration keeps its neutrality role exactly there and nowhere else.
+        The anchor is the paper's own calibrated midpoint — the reference's
+        ``printExposureMidpoints`` (PrintPaperTables.swift): the log exposure at which each
+        paper record reaches ``dMin + anchorDensity`` (0.744 above base for reflection
+        paper).  It is a property of the paper alone, which no viewing lamp and no film
+        chemistry can move.  It used to be the filtered-integration chain's mid-grey
+        landing, recomputed at run time from whatever dye spectra were loaded: the moment
+        the reference's real dyes and orange mask landed in the film profile, that landing
+        stopped being neutral and dragged every record's operating point with it (mid-gray
+        R read -96 display levels against the reference, 2026-11-04).
         """
         cached = getattr(self, "_print_anchor_cache", None)
         if cached is not None:
             return cached
-        filtered_lamp = self._enlarger_service.enlarger_filtered_illuminant(
-            enlarger_light_source)
-        mid_spectral = self._enlarger_service.density_spectral_midgray
-
-        # Where the filtered calibration put mid-grey, per record (the old chain's own value).
-        light_f = density_to_light(mid_spectral, filtered_lamp)
-        e_f_mid = contract("ijk, kl->ijl", light_f, sensitivity)
-        factor_f = self._compute_exposure_factor_midgray(sensitivity, filtered_lamp)
-        preflash_f = self._compute_raw_preflash(enlarger_light_source, sensitivity)
-        anchor = np.log10(np.fmax(e_f_mid * factor_f + preflash_f, 1e-10))
+        curves = np.asarray(self._print.data.density_curves, dtype=np.float64)
+        log_exposure = np.asarray(self._print.data.log_exposure, dtype=np.float64).ravel()
+        trims = np.asarray(getattr(self._print.data, "midpoint_trim", [0.0, 0.0, 0.0]),
+                           dtype=np.float64)
+        anchor = np.zeros((3,))
+        for c in range(3):
+            d = curves[:, c]
+            finite = np.isfinite(d)
+            d_min = float(np.nanmin(d[finite]))
+            target = d_min + 0.744 + float(trims[c])
+            # Density rises monotonically with exposure on a negative-working paper.
+            anchor[c] = float(np.interp(target, d[finite], log_exposure[finite]))
 
         # Raw-lamp mid-grey energies, per record, for the relative axis.
+        mid_spectral = self._enlarger_service.density_spectral_midgray
         light_r = density_to_light(mid_spectral, enlarger_light_source)
         e_r_mid = contract("ijk, kl->ijl", light_r, sensitivity)
         log_mid_raw = np.log10(np.fmax(e_r_mid, 1e-12))
