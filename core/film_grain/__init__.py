@@ -51,6 +51,7 @@ __all__ = [
     "params_for",
     "apply_block",
     "layer_value",
+    "layer_calibration",
     "grain_source",
     "DEFAULT_DENSITY_MAX",
 ]
@@ -160,7 +161,7 @@ def _sampler(stock, tiles, px_per_mm: float, params: GrainParams, seed: int):
 _CALIBRATION: dict | None = None
 
 
-def _layer_calibration(stock_id: str) -> tuple[float, float, float]:
+def layer_calibration(stock_id: str) -> tuple[float, float, float]:
     """Per-record multipliers measured against the reference's own card renders.
 
     The tile sigma is anchored to the published granularity at the 48 um aperture, but the
@@ -223,7 +224,7 @@ def apply_block(linear: np.ndarray, params: GrainParams, *, stock: str | None = 
     # records' shared variance and, through the print's crosstalk, distorted the display-domain
     # per-channel sigma (R up to 1.5x).  Measured against the reference's own card render,
     # 2026-11-04.  ``_couple_records`` stays for an explicit future control.
-    cal = _layer_calibration(grain_stock.stock_id)
+    cal = layer_calibration(grain_stock.stock_id)
     layers = tuple(l * c for l, c in zip(params.layers, cal))
     fluctuation = sampler.apply(density, row_offset, params.amount, params.colour,
                                 layers, monochrome=grain_stock.is_monochrome,

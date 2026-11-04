@@ -33,6 +33,7 @@ __all__ = ["GLFilmGrain", "GRAIN_GLSL", "GRAIN_UNIFORM_NAMES", "MAX_LEVELS"]
 MAX_LEVELS = 17                     # core/film_grain/tile_build.TILE_LEVELS
 _TILE_SIDE = 256
 _SAT_SIDE = _TILE_SIDE + 1
+_ENLARGER_BLUR_TEXELS = 4.0         # 0.004 mm on the film; one texel = one micrometre
 
 GRAIN_UNIFORM_NAMES = (
     "u_grain_sat", "u_grain_density", "u_grain_on", "u_grain_has_density",
@@ -510,10 +511,38 @@ class GLFilmGrain:
         self._arrays = {}
         self._d_min = np.asarray(tiles.d_min, dtype=np.float64)
         self._d_max = np.asarray(tiles.d_max, dtype=np.float64)
-        self._means = np.asarray(tiles.means(), dtype=np.float32)
-        self._rho = np.asarray(tiles.correlations(), dtype=np.float32)
-        self._sigma = np.asarray(tiles.sigmas(), dtype=np.float32)
-        self._mean_light = np.array([[tiles.mean_light(r, k) for k in range(levels)]
+
+        # The enlarger softens the film itself -- the reference's printMTFSigma, a 0.004 mm
+        # Gaussian on the film's scale (FilmEngine.swift:1110-1117).  One texel is one micrometre,
+        # so the blur is a constant 4 texels in tile space: baking it into the tile once makes
+        # every zoom read the projected field, and the shader needs no changes.  Wrap mode
+        # matches the tile's own periodicity.  Measured 2026-11-04: without it the preview's
+        # grain reads ~2x hot and pixel-locked against the reference at scan pitch.
+        lights = np.asarray(tiles.lights, dtype=np.float32)
+        from scipy.ndimage import gaussian_filter
+        lights = gaussian_filter(lights, sigma=(0.0, 0.0, _ENLARGER_BLUR_TEXELS,
+                                                _ENLARGER_BLUR_TEXELS), mode='wrap')
+
+        def _sat_of(light: np.ndarray) -> np.ndarray:
+            shifted = light - float(light.mean())
+            table = np.zeros((light.shape[0] + 1, light.shape[1] + 1), dtype=np.float32)
+            table[1:, 1:] = shifted.cumsum(axis=0, dtype=np.float64).cumsum(
+                axis=1, dtype=np.float64).astype(np.float32)
+            return table
+
+        densities = [-np.log10(np.maximum(lights[r], 1e-9)) for r in range(3)]
+        self._means = np.array([[-np.log10(max(float(lights[r, k].mean()), 1e-9))
+                                 for k in range(levels)] for r in range(3)], dtype=np.float64)
+        self._rho = np.zeros((3, max(levels - 1, 1)), dtype=np.float64)
+        for r in range(3):
+            for k in range(levels - 1):
+                a = densities[r][k].ravel() - densities[r][k].mean()
+                b = densities[r][k + 1].ravel() - densities[r][k + 1].mean()
+                denominator = float(np.sqrt(np.sum(a * a) * np.sum(b * b)))
+                self._rho[r, k] = float(np.sum(a * b) / denominator) if denominator else 0.0
+        self._sigma = np.array([[float(densities[r][k].std()) for k in range(levels)]
+                                for r in range(3)], dtype=np.float64)
+        self._mean_light = np.array([[float(lights[r, k].mean()) for k in range(levels)]
                                      for r in range(3)], dtype=np.float32)
 
         # Two half-float channels per texel: the value and its residual against half precision.
@@ -522,7 +551,7 @@ class GLFilmGrain:
         bank = np.empty((3 * levels, _SAT_SIDE, _SAT_SIDE, 2), dtype=np.float16)
         for record in range(3):
             for level in range(levels):
-                table = tiles.summed_area(record, level).astype(np.float32)
+                table = _sat_of(lights[record, level])
                 high = table.astype(np.float16)
                 bank[record * levels + level, :, :, 0] = high
                 bank[record * levels + level, :, :, 1] = (table - high.astype(np.float32))
@@ -610,8 +639,13 @@ class GLFilmGrain:
     def scalars(self, params: dict, px_per_mm: float, image_size: tuple[int, int]) -> dict:
         """The float/int uniforms of one paint, as ``{name: value}``."""
         from core.film_grain import params_for
+        from core.film_grain import layer_calibration
         from core.film_grain.sampler import effective_size
         look = params_for(params)
+        # The per-record calibration measured against the reference applies on the GPU path
+        # exactly as apply_block applies it on the CPU path -- otherwise the canvas (and a GPU
+        # export) renders G/B grain half the strength the export writes.
+        cal = layer_calibration(self._stock_id)
         pitch = (1.0 / max(px_per_mm, 1e-6)) / 0.001
         amount = float(look.amount)
         return {
@@ -632,7 +666,7 @@ class GLFilmGrain:
             "u_grain_amount": amount,
             "u_grain_colour": float(look.colour),
             "u_grain_luma": float(self._luma),
-            "u_grain_layer": tuple(float(v) for v in look.layers),
+            "u_grain_layer": tuple(l * c for l, c in zip(look.layers, cal)),
             "u_grain_image_size": (float(image_size[0]), float(image_size[1])),
             "u_grain_probe": 1 if params.get("grain_probe") else 0,
         }
