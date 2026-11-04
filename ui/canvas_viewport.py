@@ -1065,7 +1065,11 @@ void main() {
     if (u_grain_probe == 1 && u_grain_cubes == 1) {
         vec3 base = density_from_linear(linear_rgb);
         vec3 dg = grain_field(base, pre_dist_uv * tex_dim);
-        fragColor = vec4((dg - base) * 4.0 + 0.5, 1.0);   // density delta, +-0.125
+        // +-0.5 range.  The old x4 (±0.125) is smaller than the grain's own sigma at real
+        // densities -- film grain reaches 0.15 density in the highlights -- so every bright
+        // pixel clipped and the measured sigma read far too low.  Probe 15 keeps the fine
+        // scale for the flat-field A/B.
+        fragColor = vec4((dg - base) + 0.5, 1.0);
         return;
     }
     if (u_grain_probe == 9 && u_grain_cubes == 1) {
