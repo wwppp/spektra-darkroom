@@ -8488,7 +8488,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if push_undo:
             self.push_undo_state()
             self._save_current_photo_sdc()
-            mode_name = "相纸印相" if mode == "optical" else "数码扫描"
+            mode_name = "相纸印相" if mode == "optical" else "负片直出"
             self.set_app_status(f"模式: {mode_name}", timeout_ms=2500)
 
     def on_switch_paper(self, stock_id, push_undo=True):
@@ -8539,7 +8539,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if push_undo:
             self.push_undo_state()
             self._save_current_photo_sdc()
-            mode_desc = "数码扫描" if stock_id == "none" else f"{stock_id}"
+            mode_desc = "负片直出" if stock_id == "none" else f"{stock_id}"
             self.set_app_status(f"相纸: {mode_desc}", timeout_ms=2500)
 
     def set_view_mode(self, mode):
@@ -9570,7 +9570,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         paper = getattr(self, "current_paper_stock", "none")
         pmode = getattr(self, "current_print_mode", "optical")
         if paper == "none" or pmode == "scan":
-            return False, "当前为底片数码扫描模式，无暗房放大机与相纸显影环节"
+            return False, "当前为负片直出模式（未反相），无暗房放大机与相纸显影环节"
         return True, ""
 
     def _enlarger_available(self) -> bool:

@@ -1271,50 +1271,16 @@ def save_encoded_image(rendered_data, output_path, params_dict):
     return True
 
 
-# The print exposure every LUT is baked at, and the display levels applied to its output.
+# The print exposure every LUT is baked at.
 #
-# Measured against the reference engine on the 20-step grey card (kodak_gold_200 on
-# kodak_ektacolor_edge).  Our tone curve has the right *shape* but sits 8.7% low in contrast and
-# about eight levels low at black.  Print exposure alone cannot close that: sweeping 0.40..1.20
-# the best slope the print reaches is 0.934 of the reference's, and it overshoots the midtones
-# first.  At 1.10 the shape matches to 1.65 levels, and what is left over is a straight line, so
-# both are applied -- bake at 1.10, then pass the cube through the levels below (residual 1.81
-# on the same twenty patches).
-#
-# The constants are global on purpose.  Fitting each bake to its own endpoints would stretch
-# every stock to full range and flatten the differences between them; a uniform transform leaves
-# a contrasty film contrasty.
-PRINT_EXPOSURE_CALIBRATION = 1.10
-DISPLAY_LEVELS_GAIN = 1.0949
-DISPLAY_LEVELS_LIFT = 7.85 / 255.0
-SDR_SHOULDER_KNEE = 0.90
-
-
-def apply_display_levels(lut: np.ndarray) -> np.ndarray:
-    """Two-point levels on a baked cube, then the SDR shoulder the reference uses.
-
-    Applied after the CCTF on purpose.  This is a calibration of the *picture* against the
-    reference render, not a physical exposure, and in the encoded domain it compresses while it
-    lifts.
-
-    The shoulder is the reference's own delivery curve (``highlightShoulder(ceiling: 1,
-    knee: 0.9)``).  Without it the gain pushes ~3% of the cube onto exactly 1.0, which is a hard
-    clip: bright specular detail and saturated highlights would flat-top.  With it the cube's
-    maximum is strictly below white and the top stays ordered.
-
-    The saturating branch is ``tanh``, not ``x/(x+room)``.  Both reach the same ceiling at the
-    same knee, but their local slope differs where it matters: at ``over = 0.03`` (code ~234) the
-    rational form is down to 0.59 while tanh is still 0.91.  That slope multiplies the grain --
-    the rational shoulder was eating 40% of the highlight texture to move the level by one code
-    value.  Measured on the twenty-step chart, tanh leaves steps 15-18 within 5% of the
-    reference's high-light sigma where the rational form trailed by up to 38%.
-    """
-    y = lut * DISPLAY_LEVELS_GAIN + DISPLAY_LEVELS_LIFT
-    knee = SDR_SHOULDER_KNEE
-    over = np.maximum(y - knee, 0.0)
-    room = 1.0 - knee
-    y = np.where(y > knee, knee + room * np.tanh(over / room), y)
-    return np.clip(y, 0.0, 1.0).astype(np.float32)
+# Kept at 1.0 = the upstream baseline.  It used to be 1.10, pairing with a display-levels pass
+# (gain 1.0949 + 7.85/255 lift + tanh shoulder) to compensate a contrast/black-point gap measured
+# against the reference engine.  That gap came from local kernel edits, not from the reference:
+# with the kernel restored to the upstream baseline, a 1.10 bake darkened the midtones by ~15
+# codes while the levels pass pushed black +8 and white +27, so the two errors partly cancelled
+# inside the picture and both were wrong.  With 1.0 and no levels pass, the baked grey axis
+# matches the reference pipeline point-for-point (measured max delta 0.0 over 33 steps).
+PRINT_EXPOSURE_CALIBRATION = 1.0
 
 
 class SpektraEngine:
@@ -1769,9 +1735,9 @@ class SpektraEngine:
         papers = [
             {
                 "id": "none",
-                "name": "数码扫描",
-                "badge": "数码直扫",
-                "desc": "跳过相纸印相，呈现底片直接数码扫描的通透细节与宽容度。"
+                "name": "负片直出",
+                "badge": "未反相",
+                "desc": "不经过相纸印相，直接输出底片本身的负像（橙色片基）。与上游 scan_film 一致，供自行反相/校色使用。"
             },
             {
                 "id": "kodak_2383",
@@ -2666,10 +2632,11 @@ class SpektraEngine:
             print_prof = self._load_profile(opt_paper)
             base_paper = opt_paper
         elif print_mode == "scan":
-            # Negative film in digital scan mode: digital lab scanner inversion paper (Kodak Ektacolor Edge)
-            scan_paper = "kodak_ektacolor_edge"
-            print_prof = self._load_profile(scan_paper)
-            base_paper = scan_paper
+            # 数字负片直出：等价于上游 io.scan_film=True —— 跳过印相，直接输出底片本身的
+            # 橙色负像（无色罩反转、无相纸曲线）。这里没有相纸，print=None 让管线走
+            # CMY_FILM -> RGB_OUT 的直扫拓扑。
+            print_prof = None
+            base_paper = "none"
         else:
             # Negative film in optical print mode: optical enlarger onto positive photographic paper
             opt_paper = "kodak_2383" if paper_stock == "none" else paper_stock
@@ -2679,7 +2646,7 @@ class SpektraEngine:
         dummy_print = print_prof if print_prof is not None else self._load_profile("kodak_2383")
         params = RuntimePhotoParams(film=film_prof, print=dummy_print)
         params.print = print_prof
-        params.io.scan_film = bool(is_pos)
+        params.io.scan_film = bool(is_pos or print_mode == "scan")
         params.settings.neutral_print_filters_from_database = False
 
         # CRITICAL: Enable lut_mode for deterministic, un-biased 3D LUT generation
@@ -2717,7 +2684,7 @@ class SpektraEngine:
             developer_exhaustion=dev_exh
         )
 
-        if is_bw:
+        if is_bw or print_mode == "scan":
             base_filter = [0.0, 0.0, 0.0]
         else:
             base_filter = self.get_neutral_filter(base_paper, film_stock, push_stops)
@@ -2814,10 +2781,6 @@ class SpektraEngine:
         ):
             lut_3d = self._gate_dir_neutral_axis(
                 lut_3d, lattice, film_stock, paper_stock, lut_size, params_dict, print_mode)
-
-        # Display levels last, so every branch above (mono luma, reversal postprocess, DIR gate)
-        # is calibrated identically and nothing downstream sees two different tonal bases.
-        lut_3d = apply_display_levels(lut_3d)
 
         dir_baked = has_dir
         morph_baked = params.print is not None
@@ -4792,7 +4755,6 @@ class SpektraEngine:
             lut_output[..., 2] = luma
         elif is_pos:
             lut_output = self._postprocess_positive_lut(lut_output, film_stock)
-        lut_output = apply_display_levels(lut_output)
 
         with open(output_cube_path, "w", encoding="utf-8") as f:
             f.write(f"# Created by SpektraDarkroom\n")
