@@ -415,7 +415,11 @@ class GLFilmGrain:
             self._stock_id = stock.stock_id
             self._push_stops = stops
             self._monochrome = bool(stock.is_monochrome)
-            self._luma = float(stock.luma_correlation) if not stock.is_monochrome else 0.0
+            # The reference's film-grain mode mixes records with the Look's colour alone
+            # (Frame.h film branch); ``grainLumaCorrelation`` is only read by the mode-0 clump
+            # field (Grain.h grain_mix).  Keep the GPU path identical to the CPU sampler, which
+            # passes 0 -- see core/film_grain/__init__.py apply_block.
+            self._luma = 0.0
             self._ready = True
             self.note = f"{stock.stock_id}{f' +{stops}' if stops else ''}: {self._levels} levels x 3 records"
             return True

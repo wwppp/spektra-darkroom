@@ -186,9 +186,16 @@ def apply_block(linear: np.ndarray, params: GrainParams, *, stock: str | None = 
     density = net_density
     if density is None:
         density = -np.log10(np.maximum(linear, 1e-6)) - np.asarray(tiles.d_min, dtype=np.float32)
+    # The reference's film-grain mode (GrainModel.film) mixes the three records with the Look's
+    # colour alone (FotufilmHalide/Stages/Graph/Frame.h, the `in.film_tiles` branch): the stock's
+    # ``grainLumaCorrelation`` lands in FOTUFILM_CONFIG_GRAIN_CORRELATION, which only the clump
+    # field (Stages/Grain.h ``grain_mix``, mode 0) ever reads.  Feeding it here deflated the
+    # records' shared variance and, through the print's crosstalk, distorted the display-domain
+    # per-channel sigma (R up to 1.5x).  Measured against the reference's own card render,
+    # 2026-11-04.  ``_couple_records`` stays for an explicit future control.
     fluctuation = sampler.apply(density, row_offset, params.amount, params.colour,
                                 params.layers, monochrome=grain_stock.is_monochrome,
-                                luma_correlation=grain_stock.luma_correlation)
+                                luma_correlation=0.0)
     _LAST[str(stock)] = {
         "active": True,
         "pitch": float(sampler.pitch),
