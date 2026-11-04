@@ -3454,7 +3454,11 @@ class DarkroomMainWindow(QMainWindow):
         paper_layout.addWidget(self.paper_scroll, 1)
 
         self._populate_paper_grid()
-        self.left_splitter.addWidget(paper_subwin)
+        # 相纸卡片墙已迁到右侧“放大机与相纸显影”面板的下拉框，这里不再入布局。
+        # 仍然保留实例引用：paper_cards / paper_grid 被缩略图与状态同步逻辑复用，
+        # 且 lbl_paper_title 会在换主题时被访问，无父无引用的 QWidget 会先被回收。
+        self.paper_subwin = paper_subwin
+        paper_subwin.setVisible(False)
 
         # Sub-window 3: 元数据属性 (EXIF)
         exif_subwin = QWidget()
@@ -3469,8 +3473,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.left_splitter.setStretchFactor(0, 4)
         self.left_splitter.setStretchFactor(1, 3)
-        self.left_splitter.setStretchFactor(2, 3)
-        self.left_splitter.setSizes([300, 180, 200])
+        self.left_splitter.setSizes([300, 200])
 
         lp_layout.addWidget(self.left_splitter)
         self.main_splitter.addWidget(left_panel)
@@ -4397,6 +4400,17 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_enlarger = AccordionSection("放大机与相纸显影")
         self.sec_enlarger.resetClicked.connect(lambda: self.reset_track("enlarger"))
 
+        # 相纸：从左侧卡片墙挪到这里，下拉框选择（与光源下拉同一套行组件）
+        paper_items = [(item.get("name") or item["id"], item["id"]) for item in self.engine.get_paper_stocks()]
+        self.combo_paper = ComboBoxRow(
+            "相纸",
+            paper_items,
+            default_val=getattr(self, "current_paper_stock", "none"),
+            tooltip="印相相纸型号，决定染色层光谱响应与密度曲线。选“胶片直扫”则跳过印相，直接输出底片负像"
+        )
+        self.combo_paper.valueChanged.connect(self._on_paper_combo_changed)
+        self.sec_enlarger.addWidget(self.combo_paper)
+
         self.combo_illuminant = ComboBoxRow(
             "光源光谱",
             [
@@ -4964,7 +4978,7 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, "main_splitter"):
             self.main_splitter.setSizes([320, 800, 320])
         if hasattr(self, "left_splitter"):
-            self.left_splitter.setSizes([300, 180, 200])
+            self.left_splitter.setSizes([300, 200])
         if hasattr(self, "center_splitter"):
             self.center_splitter.setSizes([600, 100])
         config_manager.save_window_config({
@@ -8488,7 +8502,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if push_undo:
             self.push_undo_state()
             self._save_current_photo_sdc()
-            mode_name = "相纸印相" if mode == "optical" else "负片直出"
+            mode_name = "相纸印相" if mode == "optical" else "胶片直扫"
             self.set_app_status(f"模式: {mode_name}", timeout_ms=2500)
 
     def on_switch_paper(self, stock_id, push_undo=True):
@@ -8508,7 +8522,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._mark_current_photo_dirty()
         self.current_paper_stock = stock_id
 
-        # Item 9: Selecting "none" (数码扫描 Film Scan) engages scan mode; selecting physical paper engages Optical Print mode
+        # Item 9: Selecting "none" (胶片直扫 Film Scan) engages scan mode; selecting physical paper engages Optical Print mode
         if push_undo:
             if stock_id == "none":
                 self.current_print_mode = "scan"
@@ -8519,6 +8533,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         for sid, card in self.paper_cards.items():
             card.set_active(sid == stock_id)
+        if hasattr(self, "combo_paper"):
+            self.combo_paper.set_value(stock_id)
 
         # Save to current photo
         if push_undo and self._current_photo_path:
@@ -8539,8 +8555,16 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if push_undo:
             self.push_undo_state()
             self._save_current_photo_sdc()
-            mode_desc = "负片直出" if stock_id == "none" else f"{stock_id}"
+            mode_desc = "胶片直扫" if stock_id == "none" else f"{stock_id}"
             self.set_app_status(f"相纸: {mode_desc}", timeout_ms=2500)
+
+    def _on_paper_combo_changed(self, paper_id):
+        """右侧“相纸”下拉框：与旧卡片墙走同一条切换路径。"""
+        if not paper_id:
+            return
+        if paper_id == getattr(self, "current_paper_stock", None):
+            return
+        self.on_switch_paper(paper_id)
 
     def set_view_mode(self, mode):
         self.canvas.set_view_mode(mode)
@@ -9570,7 +9594,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         paper = getattr(self, "current_paper_stock", "none")
         pmode = getattr(self, "current_print_mode", "optical")
         if paper == "none" or pmode == "scan":
-            return False, "当前为负片直出模式（未反相），无暗房放大机与相纸显影环节"
+            return False, "当前为胶片直扫模式（未反相），无暗房放大机与相纸显影环节"
         return True, ""
 
     def _enlarger_available(self) -> bool:
@@ -9777,6 +9801,17 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     card.setToolTip(getattr(card, "original_tooltip", ""))
 
         self._update_reset_buttons_state()
+
+        # 右侧相纸下拉框跟随当前状态（切换底片/撤销/相纸变更都走这里）
+        combo_paper = getattr(self, "combo_paper", None)
+        if combo_paper is not None:
+            combo_paper.set_value(getattr(self, "current_paper_stock", "none"))
+            paper_ok = not (is_pos or is_none)
+            combo_paper.setEnabled(paper_ok)
+            combo_paper.setToolTip(
+                getattr(combo_paper, "default_tooltip", "") if paper_ok
+                else ("反转正片无需相纸放大" if is_pos else "数码原片旁通模式无相纸印相环节")
+            )
 
     def _update_diffusion_ui_state(self):
         """Enable or gray out diffusion strength and warmth controls based on diffusion_family."""

@@ -1735,7 +1735,7 @@ class SpektraEngine:
         papers = [
             {
                 "id": "none",
-                "name": "负片直出",
+                "name": "胶片直扫",
                 "badge": "未反相",
                 "desc": "不经过相纸印相，直接输出底片本身的负像（橙色片基）。与上游 scan_film 一致，供自行反相/校色使用。"
             },
