@@ -159,6 +159,10 @@ def layer_scalars(film_data, grain, pixel_size_um):
     density_min_layers = fractions * density_min[None, :]
     density_max_abs = density_max_layers + density_min_layers
 
+    if float(grain.particle_area_um2) <= 0.0:
+        # The bake path zeroes this when grain is off (`digest_params`), so a caller that
+        # reached here with a digested parameter set would silently divide to infinity.
+        raise ValueError("grain.particle_area_um2 is 0 -- this is a grain-disabled parameter set")
     pixel_area = float(pixel_size_um) ** 2
     particle_area = (float(grain.particle_area_um2)
                      * np.asarray(grain.particle_scale, dtype=np.float64)[None, :]
@@ -170,6 +174,7 @@ def layer_scalars(film_data, grain, pixel_size_um):
 
     return {
         "density_min": density_min.astype(np.float32),
+        "density_min_layers": density_min_layers.astype(np.float32),
         "density_max_layers": density_max_abs.astype(np.float32),
         "particles": particles.astype(np.float32),
         "uniformity": np.asarray(grain.uniformity, dtype=np.float32),
