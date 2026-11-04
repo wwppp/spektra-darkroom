@@ -135,7 +135,28 @@ float poisson(inout uvec3 state, float mu) {
     return floor(mu);
 }
 
-// --- the particle model ----------------------------------------------------------------------
+// Standard normal from two uniforms (Box-Muller).  The tail is the reason the model uses a
+// gaussian rather than a fixed multiple of the sd: grain has to be able to spike.
+float gauss_unit(inout uvec3 state) {
+    float u1 = max(rng_unit(state), 1e-7);
+    float u2 = rng_unit(state);
+    return sqrt(-2.0 * log(u1)) * cos(6.28318530718 * u2);
+}
+// One draw per record, not one per sub-layer.
+//
+// The reference draws each of the three coated sub-layers from its own Poisson(rate), then
+// sums them with per-layer weights.  At any pitch this app renders, every rate is in the
+// hundreds (750 particles per pixel across the three layers at 5.8 um, thousands at preview
+// pitches), and a sum of Poissons with those means is normal to far better than the 8 bits the
+// frame is written in.  So the three layers are folded into the two moments that survive:
+//
+//     mean = sum_l amp_l * mu_l          var = sum_l amp_l^2 * mu_l
+//
+// with amp_l = dmax_l/npp_l * sat_l and mu_l = (npp_l/sat_l) * p_l.  `mean` is exactly the
+// layer sum the reference would average to, and `var` is its variance -- so sigma, which is
+// what the grain *is*, is unchanged.  What it buys is 9 Poisson draws per pixel becoming 3
+// gaussians, which is what makes the 5x5 dye-cloud convolution below affordable.
+//
 // Returns the density the film actually developed -- an *absolute* density, not a delta: the
 // reference's `apply_grain_to_density_layers` hands back the summed particle density, and the
 // caller replaces.  Getting this backwards brightens the whole frame.
@@ -148,6 +169,8 @@ vec3 grain_apply(vec3 density, ivec2 px) {
         float hi = u_grain_axis_max[ch];
         float u = clamp((density[ch] - lo) / max(hi - lo, 1e-6), 0.0, 1.0);
         vec4 layer = texture(u_grain_table, vec2(u, (float(ch) + 0.5) / 3.0));
+        float mean = 0.0;
+        float var = 0.0;
         for (int sl = 0; sl < 3; sl++) {
             float dmax = u_grain_dmax_layer[sl][ch];
             float npp = u_grain_ppu[sl][ch] * area * u_grain_strength / u_grain_size;
@@ -155,10 +178,13 @@ vec3 grain_apply(vec3 density, ivec2 px) {
             float d = layer[sl] + u_grain_min_layer[sl][ch];
             float p = clamp(d / dmax, 1e-6, 1.0 - 1e-6);
             float sat = 1.0 - p * u_grain_uniformity[ch] * (1.0 - 1e-6);
-            uvec3 state = uvec3(uint(px.x), uint(px.y), uint(u_grain_seed + ch * 3 + sl));
-            float X = poisson(state, (npp / sat) * p);
-            total[ch] += X * (dmax / npp) * sat;
+            float mu = (npp / sat) * p;
+            float amp = (dmax / npp) * sat;
+            mean += amp * mu;
+            var += amp * amp * mu;
         }
+        uvec3 state = uvec3(uint(px.x), uint(px.y), uint(u_grain_seed + ch));
+        total[ch] = mean + sqrt(max(var, 0.0)) * gauss_unit(state);
     }
     if (u_grain_probe == 6) return total;
     // The reference does not ship three independent dye-cloud fields: it mixes them back
@@ -176,28 +202,27 @@ vec3 grain_apply(vec3 density, ivec2 px) {
     return density + own * fluct + shared * mean_fluct;
 }
 
-// The reference blurs the assembled grain once more at frame scale (0.65 px).  A pointwise
-// renderer cannot express a spatial filter for free, so the taps are evaluated here: the
-// kernel is a 3x3 gaussian, and every tap is the *same* pure function of its own pixel, which
-// keeps the result identical to what a two-pass blur would produce.
+// The reference ends with two convolutions on the assembled density: the four Jarvis dye-cloud
+// gaussians, then the 0.65 px frame blur.  Both are isotropic, so they are one separable kernel,
+// and `core.grain_bake.grain_kernel_1d` reads that kernel's centre row back off the reference's
+// own cascade at this pitch -- the weights here are the reference's numbers, not a re-derivation
+// (a re-derived gaussian came out 13 % too wide and lost 13 % of the sigma).
+//
+// A pointwise renderer cannot express a spatial filter for free, so the taps are evaluated:
+// every tap is the same pure function of its own pixel, which is what a two-pass blur does.
+uniform float u_grain_kernel[5];
+
 vec3 grain_field(vec3 density, vec2 image_px) {
     ivec2 px = ivec2(floor(image_px + 0.5));
-    vec3 d = grain_apply(density, px);
-    if (u_grain_taps < 2) return d;
-    // gaussian sigma 0.65 px -> weights exp(-(dx^2+dy^2)/(2*0.65^2))
-    const float w1 = 0.3022;     // exp(-1/(2*0.4225)) normalised below
-    const float w2 = 0.0913;     // exp(-2/(2*0.4225))
-    float norm = 1.0 + 4.0 * w1 + 4.0 * w2;
-    d *= 1.0 / norm;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            ivec2 q = px + ivec2(dx, dy);
-            float w = (dx == 0 || dy == 0) ? w1 : w2;
-            d += grain_apply(density, q) * (w / norm);
+    if (u_grain_taps < 2) return grain_apply(density, px);
+    vec3 acc = vec3(0.0);
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            float w = u_grain_kernel[dx + 2] * u_grain_kernel[dy + 2];
+            acc += grain_apply(density, px + ivec2(dx, dy)) * w;
         }
     }
-    return d;
+    return acc;
 }
 """
 
@@ -217,6 +242,8 @@ class GLCubeGrain:
         self.grain = {}
         self.layer_axis_min = np.zeros(3, dtype=np.float32)
         self.layer_axis_max = np.ones(3, dtype=np.float32)
+        self._kernel = np.full(5, 0.2, dtype=np.float32)
+        self._kernel_key = None
         self.ready = False
         self._signature = None
         self._pending = None
@@ -306,7 +333,7 @@ class GLCubeGrain:
 
     # -- bind --------------------------------------------------------------------------------
     def bind(self, u_1i, u_1f, u_3f, u_3fv, pixel_size_um, params,
-             unit_a=5, unit_b=6, unit_c=7):
+             unit_a=5, unit_b=6, unit_c=7, u_1fv=None):
         if not self.ready:
             u_1i("u_grain_cubes", 0)
             return False
@@ -343,8 +370,21 @@ class GLCubeGrain:
         u_1f("u_grain_size", max(0.05, float(params.get("grain_size", 1.0))))
         u_1f("u_grain_colour", float(g.get("colour_grain", 0.5)))
         u_1i("u_grain_seed", int(params.get("grain_seed", 0)))
-        u_1i("u_grain_taps", int(params.get("grain_taps", 9)))
+        u_1i("u_grain_taps", int(params.get("grain_taps", 25)))
         u_1i("u_grain_probe", int(params.get("grain_probe", 0)))
+
+        # The dye-cloud + frame-blur kernel belongs to the pitch, so it is sized here rather
+        # than baked into the bundle.  Five nodes: the reference's cascade has fallen below
+        # 1 % of its centre by |dx| = 2 at every pitch this app renders.
+        final_blur = float(g.get("final_blur_px", 0.65) or 0.0)
+        key = (round(float(pixel_size_um), 5), round(final_blur, 4), bool(u_1fv))
+        if self._kernel_key != key:
+            import core.grain_bake as grain_bake
+            self._kernel = grain_bake.grain_kernel_1d(
+                float(pixel_size_um), final_blur_px=final_blur)
+            self._kernel_key = key
+        if u_1fv is not None:
+            u_1fv("u_grain_kernel", self._kernel)
         return True
 
     def release(self):

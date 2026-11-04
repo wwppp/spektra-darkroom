@@ -1124,7 +1124,9 @@ void main() {
         // Flat-density A/B: the same constant field the CPU model is fed, so the two can be
         // compared without the picture's own structure in the way.
         vec3 d0 = vec3(0.6);
-        vec3 dg = grain_apply(d0, ivec2(floor(pre_dist_uv * tex_dim + 0.5)));
+        // Screen coords, not image coords: the A/B has to be a 1:1 field or the tap spacing
+        // stops matching the pitch the kernel was sized for.
+        vec3 dg = grain_field(d0, gl_FragCoord.xy);
         fragColor = vec4((dg - d0) * 4.0 + 0.5, 1.0);
         return;
     }
@@ -1610,6 +1612,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 arr = np.ascontiguousarray(values, dtype=np.float32).reshape(-1, 3)
                 funcs.glUniform3fv(loc, int(arr.shape[0]), arr.ravel())
 
+        def u_1fv(name, values):
+            loc = self.shader_program.uniformLocation(name)
+            if loc >= 0:
+                arr = np.ascontiguousarray(values, dtype=np.float32).ravel()
+                funcs.glUniform1fv(loc, int(arr.shape[0]), arr)
+
         def u_4f(name, x, y, z, w):
             loc = self.shader_program.uniformLocation(name)
             if loc >= 0:
@@ -1889,7 +1897,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # and a 6000 px export see different pixel sizes and must compute their own rates.
         _fmt_mm = float(self.params.get("film_format_mm", 35.0))
         _px_um = _fmt_mm * 1000.0 / float(max(1, self._image_w, self._image_h))
-        self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params)
+        self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params, u_1fv=u_1fv)
 
         if self._lut_tex_id:
             funcs.glActiveTexture(0x84C1)
@@ -2942,6 +2950,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
                     arr = np.ascontiguousarray(values, dtype=np.float32).reshape(-1, 3)
                     funcs.glUniform3fv(loc, int(arr.shape[0]), arr.ravel())
 
+            def u_1fv(name, values):
+                loc = self.shader_program.uniformLocation(name)
+                if loc >= 0:
+                    arr = np.ascontiguousarray(values, dtype=np.float32).ravel()
+                    funcs.glUniform1fv(loc, int(arr.shape[0]), arr)
+
             # Full-bleed 1:1 mapping: offscreen target is the image, zero letterboxing / zero black bars!
             u_1f("u_screen_aspect", 1.0)
             u_1f("u_image_aspect", 1.0)
@@ -3202,7 +3216,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # particle counts or the grain would scale with the downscale.
             _px_um = (float(self.params.get("film_format_mm", 35.0)) * 1000.0
                       / float(max(1, int(target_w), int(target_h))))
-            self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params)
+            self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params, u_1fv=u_1fv)
 
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 

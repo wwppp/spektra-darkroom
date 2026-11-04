@@ -32,6 +32,7 @@ __all__ = [
     "bake_density_to_rgb",
     "bake_layer_table",
     "layer_scalars",
+    "grain_kernel_1d",
 ]
 
 # The shader clamps its density lookup to the axis this grid covers, so the grid has to be a
@@ -135,6 +136,45 @@ def bake_layer_table(film_data, samples=256):
         "axis_max": hi.astype(np.float32),
         "table": table,
     }
+
+
+def grain_kernel_1d(pixel_size_um, final_blur_px=0.65, radius=2, decay_um=1.45):
+    """The discrete kernel the reference's dye-cloud cascade reduces to at this pitch.
+
+    ``apply_grain_to_density_layers`` ends with two convolutions: the four Jarvis dye-cloud
+    gaussians (weights ``JARVIS_DYE_CLOUD_GAUSSIANS``, sigmas scaled by ``decay_um/pitch``),
+    then the frame blur ``grain.blur``.  Both are isotropic, so together they are one
+    separable kernel -- but the *discrete* weights are not the sampled gaussian: scipy's
+    ``gaussian_filter`` truncates and renormalises each of the four terms at its own radius.
+
+    Rather than re-derive that (the first attempt at doing so came out 13 % too wide and
+    cost 0.87x the reference's sigma), the cascade is simply run on a delta here and the
+    centre row read back.  The numbers handed to the shader are therefore the reference's
+    own, at the resolution being rendered.
+
+    Returns ``radius*2+1`` weights that sum to 1; the 2-D kernel is their outer product.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    pad = 8
+    n = 2 * (radius + pad) + 1
+    delta = np.zeros((n, n), dtype=np.float64)
+    delta[radius + pad, radius + pad] = 1.0
+
+    decay_px = float(decay_um) / max(float(pixel_size_um), 0.1)
+    out = np.zeros_like(delta)
+    for weight, factor in ((0.240, 0.518), (0.384, 0.983), (0.274, 1.848), (0.102, 3.731)):
+        out += weight * gaussian_filter(delta, max(decay_px * factor, 0.1))
+    if final_blur_px and final_blur_px > 0:
+        out = gaussian_filter(out, float(final_blur_px))
+
+    centre = radius + pad
+    row = out[centre, centre - radius:centre + radius + 1].astype(np.float64)
+    total = row.sum()
+    if total <= 0:
+        row = np.zeros(2 * radius + 1); row[radius] = 1.0
+        return row.astype(np.float32)
+    return (row / total).astype(np.float32)
 
 
 def layer_scalars(film_data, grain, pixel_size_um):
