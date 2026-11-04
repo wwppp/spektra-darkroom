@@ -10,6 +10,14 @@ from spektrafilm.utils.autoexposure import measure_autoexposure_ev
 from spektrafilm.utils.spectral_upsampling import rgb_to_raw_hanatos2025, rgb_to_raw_mallett2019
 
 
+# Profile 里的 physical_extensions（crystal_grain / halation / couplers）是
+# fotufilm 侧的移植产物，原版 spektrafilm 没有这些键，也不会自动注入。
+# 默认关闭：LUT 域必须与 D:/spektrafilm 原版逐像素等价。
+# 需要做物理扩展实验时显式改成 True（或从 params 显式赋值，注入逻辑只在
+# 用户没指定时才兜底，所以显式赋值永远优先）。
+USE_PROFILE_PHYSICAL_EXTENSIONS = False
+
+
 class FilmingStage:
     def __init__(self, film, film_render_params, camera_params, io_params, settings_params,
                  lut_service, resize_service, enlarger_service, color_reference_service):
@@ -71,7 +79,7 @@ class FilmingStage:
             pixel_size_um=self._resize_service.pixel_size_um,
         )
         raw = apply_gaussian_blur_um(raw, self._camera.lens_blur_um, self._resize_service.pixel_size_um)
-        if getattr(self._film_render.halation, "film_base", None) is None:
+        if USE_PROFILE_PHYSICAL_EXTENSIONS and getattr(self._film_render.halation, "film_base", None) is None:
             phys_ext = getattr(self._film.data, "physical_extensions", None) or {}
             if isinstance(phys_ext, dict):
                 self._film_render.halation.film_base = phys_ext.get("halation") or phys_ext.get("film_base")
@@ -82,7 +90,7 @@ class FilmingStage:
         return log_raw
 
     def develop(self, log_raw: np.ndarray) -> np.ndarray:
-        phys_ext = getattr(self._film.data, "physical_extensions", None) or {}
+        phys_ext = (getattr(self._film.data, "physical_extensions", None) or {}) if USE_PROFILE_PHYSICAL_EXTENSIONS else {}
         if isinstance(phys_ext, dict):
             if getattr(self._film_render.grain, "crystal_grain", None) is None and "crystal_grain" in phys_ext:
                 self._film_render.grain.crystal_grain = phys_ext["crystal_grain"]
