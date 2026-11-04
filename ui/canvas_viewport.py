@@ -1124,6 +1124,24 @@ void main() {
         fragColor = vec4(npp / 4000.0, ((npp / sat) * p) / 40000.0, dens.r / 2.0, 1.0);
         return;
     }
+    if (u_grain_probe == 18 && u_grain_cubes == 1) {
+        // Round trip only: density in, display out, no grain.  Compared against the plain frame
+        // it shows whether the print cube reproduces what the LUT path already produced.
+        fragColor = vec4(develop_from_density(density_from_linear(linear_rgb)), 1.0);
+        return;
+    }
+    if (u_grain_probe == 19 && u_grain_cubes == 1) {
+        // Local display slope of the print cube along the density axis, per pixel:
+        // slope = (R - B) / (2 * delta) in display units per density unit.  This is the number
+        // that turns a density-domain grain sigma into what the eye sees.
+        vec3 dens = density_from_linear(linear_rgb);
+        const float dl = 0.05;
+        vec3 up = develop_from_density(dens + vec3(dl));
+        vec3 dn = develop_from_density(dens - vec3(dl));
+        float slope = (up.r - dn.r) / (2.0 * dl);        // display units per density unit
+        fragColor = vec4(slope / 24.0 + 0.5, develop_from_density(dens).r, dens.r / 2.0, 1.0);
+        return;
+    }
     if (u_grain_probe == 14 && u_grain_cubes == 1) {
         // Flat-density A/B: the same constant field the CPU model is fed, so the two can be
         // compared without the picture's own structure in the way.

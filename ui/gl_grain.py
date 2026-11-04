@@ -164,6 +164,7 @@ vec3 grain_apply(vec3 density, ivec2 px) {
     if (u_grain_strength <= 0.0) return density;
     float area = u_grain_px_um * u_grain_px_um;
     vec3 total = vec3(0.0);
+    vec3 mean_total = vec3(0.0);          // noiseless layer sum, i.e. the reference's base
     for (int ch = 0; ch < 3; ch++) {
         float lo = u_grain_axis_min[ch];
         float hi = u_grain_axis_max[ch];
@@ -185,7 +186,16 @@ vec3 grain_apply(vec3 density, ivec2 px) {
         }
         uvec3 state = uvec3(uint(px.x), uint(px.y), uint(u_grain_seed + ch));
         total[ch] = mean + sqrt(max(var, 0.0)) * gauss_unit(state);
+        mean_total[ch] = mean;
     }
+    // The reference's baseline is the *layer sum*, not the density it was handed:
+    // ``apply_grain_to_density_layers`` sets ``density_cmy_base = sum(layers)``, perturbs the
+    // particles, and then puts the mixed fluctuation back on that base.  Whenever the layer
+    // split does not reproduce the density exactly -- which for a reversal stock it does not,
+    // by a lot at high density -- the difference is a real tonal modulation of the frame and
+    // it belongs in the output.  Using ``density`` here instead discards it, and on a positive
+    // that is most of what the eye reads as grain.
+    vec3 base = mean_total - u_grain_dmin;
     if (u_grain_probe == 6) return total;
     // The reference does not ship three independent dye-cloud fields: it mixes them back
     // towards their common mean (fotufilm's ``Look.mix``, ``mix_chroma_grain`` upstream).
@@ -195,11 +205,11 @@ vec3 grain_apply(vec3 density, ivec2 px) {
     // and starts reading as silver.  Skipping this was a large part of "the grain is weak":
     // two thirds of the energy was landing in chroma, where the eye barely sees it.
     vec3 net = total - u_grain_dmin;
-    vec3 fluct = net - density;
+    vec3 fluct = net - base;
     float own = clamp(u_grain_colour, 0.0, 1.0);
     float shared = sqrt(max(0.0, 3.0 - 2.0 * own * own)) - own;
     float mean_fluct = (fluct.r + fluct.g + fluct.b) / 3.0;
-    return density + own * fluct + shared * mean_fluct;
+    return base + own * fluct + shared * mean_fluct;
 }
 
 // The reference ends with two convolutions on the assembled density: the four Jarvis dye-cloud
