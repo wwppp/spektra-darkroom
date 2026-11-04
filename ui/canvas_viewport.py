@@ -1897,6 +1897,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # and a 6000 px export see different pixel sizes and must compute their own rates.
         _fmt_mm = float(self.params.get("film_format_mm", 35.0))
         _px_um = _fmt_mm * 1000.0 / float(max(1, self._image_w, self._image_h))
+        _override = self.params.get("grain_px_um_override")   # diagnostic: pin the pitch
+        if _override:
+            _px_um = float(_override)
         self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params, u_1fv=u_1fv)
 
         if self._lut_tex_id:
@@ -3216,6 +3219,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # particle counts or the grain would scale with the downscale.
             _px_um = (float(self.params.get("film_format_mm", 35.0)) * 1000.0
                       / float(max(1, int(target_w), int(target_h))))
+            _override = self.params.get("grain_px_um_override")   # diagnostic: pin the pitch
+            if _override:
+                _px_um = float(_override)
             self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params, u_1fv=u_1fv)
 
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
