@@ -459,13 +459,19 @@ vec3 diffusion_disc(vec2 sample_uv, vec2 radius_uv) {
     return acc / max(0.0001, w_sum);
 }
 
+// {{GRAIN}}
+
 // The enlarger and the paper, applied to one patch of the negative: steps 4 to 8 of the
 // pipeline, lifted out of main() so a pixel can run it more than once.  At fit zoom one screen
 // pixel covers several image pixels; averaging them *after* this is what a downsample does --
 // averaging before it is what a different-looking picture does.
 vec3 develop_negative(vec3 linear_rgb) {
     vec3 film_rgb;
-    if (u_has_lut == 1) {
+    if (u_grain_cubes == 1) {
+        // Density first, so the grain has somewhere to go: the stage between these two calls
+        // is the film's development, and it cannot be baked into a pointwise table.
+        film_rgb = develop_from_density(density_from_linear(linear_rgb));
+    } else if (u_has_lut == 1) {
         vec3 shaper_in = linear_to_shaper(linear_rgb);
         float lut_dim = float(textureSize(u_lut, 0).x);
         vec3 lut_coord = shaper_in * ((lut_dim - 1.0) / lut_dim) + (0.5 / lut_dim);
@@ -1077,6 +1083,12 @@ void main() {
 }
 """
 
+# The two-cube grain stage: its GLSL lives beside the tables it reads.
+from .gl_grain import GRAIN_GLSL as _GRAIN_GLSL, GLCubeGrain   # noqa: E402
+
+FRAGMENT_SHADER_SRC = FRAGMENT_SHADER_SRC.replace("// {{GRAIN}}", _GRAIN_GLSL)
+
+
 CANVAS_BG_COLORS = {
     "white": (1.0, 1.0, 1.0),
     "light_gray": (0.67, 0.67, 0.67),
@@ -1181,6 +1193,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._has_library_photos = False
         self._pending_image = None
         self._pending_lut = None
+        # The two-cube grain stage. Inert until a bundle is handed over; when it is, the shader
+        # takes the density route instead of the single RGB table.
+        self._grain_cubes = GLCubeGrain()
         self._gl_initialized = False
 
         # Long-press on canvas to preview original (Before)
@@ -1387,6 +1402,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def initializeGL(self):
         self._release_gl_resources()
+        grain_cubes = getattr(self, "_grain_cubes", None)
+        if grain_cubes is not None:
+            grain_cubes.release()
         self.shader_program = QOpenGLShaderProgram(self)
         vert_ok = self.shader_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, VERTEX_SHADER_SRC)
         frag_ok = self.shader_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Fragment, FRAGMENT_SHADER_SRC)
@@ -1472,6 +1490,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if self._pending_lut is not None:
             self._do_upload_lut(self._pending_lut)
             self._pending_lut = None
+        self._grain_cubes.upload_pending()
 
         funcs = QOpenGLContext.currentContext().functions()
         # One line per state change, never per frame: when a paint comes out black this is what
@@ -1782,6 +1801,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # downsample, no spatial stage already averaging the frame).
         u_1i("u_supersample_ok", int(getattr(self, "_supersample_ok", 0)))
 
+        if self._grain_cubes.bind(u_1i):
+            u_3f("u_density_min", *[float(v) for v in self._grain_cubes.density_min])
+            u_3f("u_density_max", *[float(v) for v in self._grain_cubes.density_max])
+
         if self._lut_tex_id:
             funcs.glActiveTexture(0x84C1)
             GL.glBindTexture(GL.GL_TEXTURE_3D, self._lut_tex_id)
@@ -1996,6 +2019,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.update()
 
     set_lut = set_3d_lut
+
+    def set_grain_bundle(self, bundle):
+        """Hand over the two density tables. ``None`` falls back to the single RGB table."""
+        self._grain_cubes.set_bundle(bundle)
+        self.update()
 
     def _do_upload_lut(self, lut_array_3d):
         size = lut_array_3d.shape[0]
@@ -3075,9 +3103,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 GL.glBindTexture(GL.GL_TEXTURE_3D, active_lut_tex_id)
                 u_1i("u_lut", 1)
 
-            # Film grain (units 3 and 4): the offscreen read is the same frame the canvas shows,
-            # so it must carry the same film -- and at the offscreen resolution's own pitch.
-            self._bind_grain(u_1f, u_1i, u_2f, u_3f, (int(src_w), int(src_h)))
+            # The offscreen read is the same frame the canvas shows, so it must carry the same
+            # two density tables -- and at the offscreen resolution's own pitch.
+            if self._grain_cubes.bind(u_1i):
+                u_3f("u_density_min", *[float(v) for v in self._grain_cubes.density_min])
+                u_3f("u_density_max", *[float(v) for v in self._grain_cubes.density_max])
 
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 

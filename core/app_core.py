@@ -2500,6 +2500,14 @@ class SpektraEngine:
             p_pipe.film_render.dir_couplers.inhibition_samelayer = dir_same
             p_pipe.print_render.density_curves_morph = params.print_render.density_curves_morph
 
+        # Keep the Simulator reachable by the table's key: the grain bundle needs a second bake
+        # on this very pipeline (density -> RGB), and it must be the same parameters the LUT was
+        # built from or the two cubes would describe different prints.  A table served from disk
+        # has no Simulator behind it; that entry is simply absent and the bundle reports a miss.
+        if not hasattr(self, "_lut_sims"):
+            self._lut_sims = {}
+        self._lut_sims[cache_key] = sim
+
         # Same reasoning: log-E film is the exposure at the emulsion, which the pushed curve moves.
         loge_key = (film_stock, lut_size, push_stops)
         log_e_film = self._lut_loge_cache.get(loge_key)
@@ -2666,6 +2674,106 @@ class SpektraEngine:
                                    int(round(float(params_dict.get("push_ev", 0) or 0)))),
         )
         return getattr(self, "_film_density_cache", {}).get(key)
+
+    def _lut_cache_key(self, film_stock, paper_stock, lut_size, params_dict, print_mode):
+        """The identity of a bake, derived exactly as ``_build_3d_lut`` derives it.
+
+        Kept in one place now that more than one table hangs off the same key: the LUT, the
+        density cube and the print cube all describe *one* parameter set, and a key that drifted
+        between them would pair a table with a cube from another print.
+        """
+        params_dict = params_dict or {}
+        if print_mode is None:
+            print_mode = str(params_dict.get("print_mode", "optical")).lower()
+        else:
+            print_mode = str(print_mode).lower()
+        if print_mode not in ("optical", "scan"):
+            print_mode = "optical"
+
+        illuminant = str(params_dict.get("enlarger_illuminant", "TH-KG3"))
+        dir_amt = round(float(params_dict.get("dir_amount", 1.0)), 2)
+        dir_intl = round(float(params_dict.get("dir_interlayer", 1.0)), 2)
+        dir_same = round(float(params_dict.get("dir_samelayer", 1.0)), 2)
+        morph_gamma = round(float(params_dict.get("morph_gamma", 1.0)), 2)
+        dev_exh = round(float(params_dict.get("developer_exhaustion", 0.0)), 2)
+
+        eff_paper = "none" if self.is_positive_film(film_stock) else (
+            "scan" if print_mode == "scan" else paper_stock)
+        push_stops = self.pushed_film_stops(
+            film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))
+        base_paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
+        neutral, _ = self._filter_fingerprint(base_paper_key, film_stock, push_stops)
+
+        return ((film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same,
+                 morph_gamma, dev_exh, push_stops, base_paper_key, neutral),
+                (film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same,
+                 push_stops))
+
+    def get_grain_bundle(self, film_stock, paper_stock="kodak_2383", lut_size=33,
+                         params_dict=None, print_mode=None):
+        """Everything the GPU grain stage needs, for the bake currently in the LUT cache.
+
+        Returns ``None`` when that bake is not available: a table read from disk has no
+        Simulator behind it, and the print cube cannot be produced without one.  Callers treat
+        that as "no grain this frame" rather than inventing a substitute -- the same rule the
+        density cube follows.
+        """
+        lut_key, density_key = self._lut_cache_key(
+            film_stock, paper_stock, lut_size, params_dict, print_mode)
+
+        if not hasattr(self, "_grain_bundle_cache"):
+            self._grain_bundle_cache = {}
+        if lut_key in self._grain_bundle_cache:
+            return self._grain_bundle_cache[lut_key]
+
+        sim = getattr(self, "_lut_sims", {}).get(lut_key)
+        density = getattr(self, "_film_density_cache", {}).get(density_key)
+        if sim is None and not getattr(self, "_grain_bundle_rebaked", None):
+            # A table served from disk is still correct -- what is missing is the pipeline state
+            # that would bake the print cube.  Re-running the bake once gives the bundle its
+            # Simulator; the table it produces is the same one already on screen.  Guarded so a
+            # parameter set that cannot produce a bundle does not retry on every paint.
+            self._grain_bundle_rebaked = set()
+        if sim is None:
+            tried = getattr(self, "_grain_bundle_rebaked", None)
+            if tried is not None and lut_key not in tried:
+                tried.add(lut_key)
+                with self._lut_bake_lock:
+                    self._lut_cache.pop(lut_key, None)
+                    self._build_3d_lut(film_stock, paper_stock, lut_size, params_dict, print_mode)
+                sim = getattr(self, "_lut_sims", {}).get(lut_key)
+                density = getattr(self, "_film_density_cache", {}).get(density_key)
+        if sim is None or density is None:
+            return None
+
+        import core.grain_bake as grain_bake
+        film_data = sim._pipeline.film.data
+
+        lo, hi = grain_bake.density_axis_range(density, film_data)
+        t0 = time.time()
+        print_cube = grain_bake.bake_density_to_rgb(sim, lut_size, lo, hi)
+        print(f"[SpektraGrain] 打印立方体烘焙完毕 ({lut_size}^3, "
+              f"{round((time.time() - t0) * 1000, 1)}ms)")
+
+        # The LUT's Simulator carries grain-disabled parameters (particle area zeroed by
+        # `digest_params`), so the grain law comes from a clean parameter set for this stock.
+        from spektrafilm import init_params
+        paper_for_grain = None if paper_stock in (None, "", "none", "scan") else paper_stock
+        grain_params = init_params(film_stock, paper_for_grain).film_render.grain
+
+        bundle = {
+            "density": np.ascontiguousarray(density, dtype=np.float32),
+            "density_min": lo,
+            "density_max": hi,
+            "cube": print_cube,
+            "layer_table": grain_bake.bake_layer_table(film_data),
+            "grain": grain_bake.layer_scalars(film_data, grain_params, 1.0),
+            "film": film_stock,
+        }
+        if len(self._grain_bundle_cache) >= 8:
+            self._grain_bundle_cache.pop(next(iter(self._grain_bundle_cache)))
+        self._grain_bundle_cache[lut_key] = bundle
+        return bundle
 
     def _gate_dir_neutral_axis(self, lut_3d, lattice, film_stock, paper_stock, lut_size,
                                params_dict, print_mode):

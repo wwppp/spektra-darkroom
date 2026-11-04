@@ -177,7 +177,12 @@ def layer_scalars(film_data, grain, pixel_size_um):
         "density_min_layers": density_min_layers.astype(np.float32),
         "density_max_layers": density_max_abs.astype(np.float32),
         "particles": particles.astype(np.float32),
+        # Particles scale with the *square* of the pixel pitch, so the shader needs the per-um^2
+        # rate rather than a number frozen at one render size: an export at 46 MP and a preview
+        # at 1 MP are different samplings of the same film.
+        "particles_per_um2": (fractions / particle_area).astype(np.float32),
         "uniformity": np.asarray(grain.uniformity, dtype=np.float32),
         "blur_sigma": blur_sigma.astype(np.float32),
+        "blur_um": float(grain.blur_dye_clouds_um),
         "final_blur_px": float(grain.blur),
     }

@@ -7296,10 +7296,31 @@ aspect_ratio=self._lens_frame_aspect(photo),
         """Upload a committed LUT and record which parameter key it represents, so the live
         preview can tell "already showing this" from "still stale"."""
         self.canvas.set_lut(lut_3d)
+        self.canvas.set_grain_bundle(self._grain_bundle_for_current())
         self._lut_applied_key = self._current_lut_key()
         queued = getattr(self, "_lut_job", None)
         if queued is not None and queued[0] != self._lut_applied_key:
             self._lut_job = None       # superseded: never spend a bake on outdated parameters
+
+    def _grain_bundle_for_current(self):
+        """The two density tables for the LUT on screen, or ``None`` when that bake has none.
+
+        A table read from disk has no Simulator behind it, so the print cube cannot be produced
+        and the shader falls back to the single RGB table.  Saying so is the honest answer --
+        the alternative is grain indexed by a density from a different print.
+        """
+        eng = getattr(self, "engine", None)
+        film = getattr(self, "current_film_stock", "none")
+        if eng is None or film in (None, "", "none"):
+            return None
+        params = dict(self.current_params)
+        params["print_mode"] = getattr(self, "current_print_mode", "optical")
+        try:
+            return eng.get_grain_bundle(film, getattr(self, "current_paper_stock", "kodak_2383"),
+                                        17, params)
+        except Exception as exc:                    # noqa: BLE001 - never break a paint
+            print(f"[SpektraGrain] 双立方体获取失败: {exc}")
+            return None
 
     def _ensure_lut_bake_bridge(self):
         if hasattr(self, "_lut_bake_bridge"):
@@ -7394,7 +7415,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 if isinstance(getattr(self.canvas, "params", None), dict):
                     for k, v in chem.items():
                         self.canvas.params[k] = v
-                self.canvas.set_lut(lut, self._film_density_for_current())
+                self.canvas.set_lut(lut)
+                self.canvas.set_grain_bundle(self._grain_bundle_for_current())
             except RuntimeError:
                 return  # canvas / window already torn down
             self._lut_applied_key = key
