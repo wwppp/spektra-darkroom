@@ -2281,7 +2281,7 @@ class SpektraEngine:
         # EXPERIMENTAL, on by default on this branch so it can be judged on real frames;
         # `film_look=0` in the parameter set restores the pure physical result exactly.
         return (round(float(p.get("film_look", 1.0) or 0.0), 2),
-                round(float(p.get("film_look_saturation", 0.65) or 0.65), 2),
+                round(float(p.get("film_look_saturation", 0.66) or 0.66), 2),
                 round(float(p.get("film_look_midtone", 0.0) or 0.0), 1),
                 # 1.5 puts the sky's hue exactly on the reference (257.7 -> 247.3 deg, measured),
                 # with the chroma effectively unchanged.  Blossoms still sit ~13 deg purple of
@@ -2305,19 +2305,42 @@ class SpektraEngine:
                          200.0 * (f[..., 1] - f[..., 2])], -1)
 
     @staticmethod
-    def _lab_to_srgb(lab):
-        L, A, B = lab[..., 0], lab[..., 1], lab[..., 2]
-        fy = (L + 16.0) / 116.0
-        fx = fy + A / 500.0
-        fz = fy - B / 200.0
+    def _lab_to_srgb(lab, max_iter=8):
+        """CIE Lab -> display sRGB, with chroma reduction instead of a hard RGB clip.
+
+        Clipping the linear RGB out of a rotated hue is what made the hue pass unusable in
+        the first place: on a saturated pink the rotation pushed a channel past 1.0, the clip
+        collapsed it, and the measured hue moved *away* from the target even though the
+        rotation was in the right direction.  So colours that leave the gamut are pulled back
+        by scaling a*/b* toward the neutral axis -- lightness and hue are kept, only chroma
+        gives way, which is what a film print does at the gamut edge anyway.
+        """
+        L = np.clip(lab[..., 0], 0.0, 100.0)
+        A = lab[..., 1].copy()
+        B = lab[..., 2].copy()
         d = 6.0 / 29.0
-        xyz = np.stack([np.where(fx > d, fx ** 3, 3.0 * d * d * (fx - 4.0 / 29.0)) * 0.95047,
-                        np.where(fy > d, fy ** 3, 3.0 * d * d * (fy - 4.0 / 29.0)),
-                        np.where(fz > d, fz ** 3, 3.0 * d * d * (fz - 4.0 / 29.0)) * 1.08883], -1)
         m = np.array([[3.2404542, -1.5371385, -0.4985314],
                       [-0.9692660, 1.8760108, 0.0415560],
                       [0.0556434, -0.2040259, 1.0572252]])
-        lin = np.clip(xyz @ m.T, 0.0, 1.0)
+
+        def to_linear(a_, b_):
+            fy = (L + 16.0) / 116.0
+            fx = fy + a_ / 500.0
+            fz = fy - b_ / 200.0
+            xyz = np.stack([np.where(fx > d, fx ** 3, 3.0 * d * d * (fx - 4.0 / 29.0)) * 0.95047,
+                            np.where(fy > d, fy ** 3, 3.0 * d * d * (fy - 4.0 / 29.0)),
+                            np.where(fz > d, fz ** 3, 3.0 * d * d * (fz - 4.0 / 29.0)) * 1.08883], -1)
+            return xyz @ m.T
+
+        lin = to_linear(A, B)
+        for _ in range(max_iter):
+            bad = ((lin < -1e-4) | (lin > 1.0 + 1e-4)).any(-1)
+            if not bad.any():
+                break
+            A = np.where(bad, A * 0.82, A)
+            B = np.where(bad, B * 0.82, B)
+            lin = to_linear(A, B)
+        lin = np.clip(lin, 0.0, 1.0)
         out = np.where(lin <= 0.0031308, lin * 12.92, 1.055 * np.power(lin, 1.0 / 2.4) - 0.055)
         return np.clip(out, 0.0, 1.0)
 
@@ -2341,7 +2364,11 @@ class SpektraEngine:
             d = (hd - center + 180.0) % 360.0 - 180.0
             return np.exp(-(d / sigma) ** 2)
 
-        hd = hd + hue * (-8.0 * band(247.0, 28.0) + 10.0 * band(330.0, 24.0))
+        # Only the sky band.  The blossoms looked 13 deg purple of the reference in a median-of-
+        # hue statistic, but that is an artefact: hue is circular, and the pixels straddling 360
+        # drag the median down.  Comparing median a*/b* instead puts them at 346.2 deg against
+        # 347.9 -- already right, and the earlier "+10 deg warm" term pushed them to 356.6.
+        hd = hd + hue * (-8.0 * band(247.0, 28.0))
         # Midtone lift: a bell that is zero by L*=10 and L*=94, so toe and shoulder stay put.
         L = L + mid * np.clip(1.0 - np.abs(L - 52.0) / 42.0, 0.0, 1.0)
 
