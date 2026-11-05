@@ -40,6 +40,20 @@ __all__ = [
 _DENSITY_MARGIN = 0.15
 _MIN_SPAN = 0.2
 
+# Frame-level blur applied after the dye-cloud cascade, in *pixels*.  The reference uses
+# ``GrainParams.blur = 0.65`` to hide the aliasing of per-pixel grain sampling, but that is
+# an anti-aliasing approximation, not physics, and it is the single biggest difference in how
+# the grain reads: on fotufilm's own step chart (same 12 um pitch, gold 200 + ektacolor edge)
+# the reference sits at a lag-1 autocorrelation of 0.047 while 0.65 puts us at 0.44 -- the
+# grain looks one step blurred rather than granular.  At 0.45 we land on 0.06 and keep 96%
+# of the amplitude, so no particle-area correction is needed.
+#
+# Because it is expressed in pixels rather than micrometres it does not scale with pitch:
+# measured lag-1 is 0.047 at 35 um/px (fit view), 0.059 at 12 um/px (3000 px), ~0.09 at
+# 8.9 um/px (4024 px export).  Only at diagnostic pitches around 2 um/px does the Jarvis
+# cloud term itself widen past a pixel and dominate again.
+FRAME_BLUR_PX = 0.45
+
 
 def normalized_density_curves(film_data):
     """The film's curves as ``develop()`` uses them: baseline-zeroed.
@@ -138,12 +152,13 @@ def bake_layer_table(film_data, samples=256):
     }
 
 
-def grain_kernel_1d(pixel_size_um, final_blur_px=0.65, radius=2, decay_um=1.45, unsharp=None):
+def grain_kernel_1d(pixel_size_um, final_blur_px=FRAME_BLUR_PX, radius=2, decay_um=1.45, unsharp=None):
     """The discrete kernel the reference's dye-cloud cascade reduces to at this pitch.
 
     ``apply_grain_to_density_layers`` ends with two convolutions: the four Jarvis dye-cloud
     gaussians (weights ``JARVIS_DYE_CLOUD_GAUSSIANS``, sigmas scaled by ``decay_um/pitch``),
-    then the frame blur ``grain.blur``.  Both are isotropic, so together they are one
+    then the frame blur (``FRAME_BLUR_PX``; upstream passes ``grain.blur`` = 0.65 there).
+    Both are isotropic, so together they are one
     separable kernel -- but the *discrete* weights are not the sampled gaussian: scipy's
     ``gaussian_filter`` truncates and renormalises each of the four terms at its own radius.
 
@@ -241,5 +256,7 @@ def layer_scalars(film_data, grain, pixel_size_um):
         "colour_grain": float(getattr(grain, "colour_grain", 0.5)),
         "blur_sigma": blur_sigma.astype(np.float32),
         "blur_um": float(grain.blur_dye_clouds_um),
-        "final_blur_px": float(grain.blur),
+        # Deliberately *not* ``grain.blur`` -- see ``FRAME_BLUR_PX``.  Keeping it here means
+        # the CPU reference (grain_model) and the GPU path (gl_grain) both read the same value.
+        "final_blur_px": FRAME_BLUR_PX,
     }

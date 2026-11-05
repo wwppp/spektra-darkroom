@@ -213,7 +213,8 @@ vec3 grain_apply(vec3 density, ivec2 px) {
 }
 
 // The reference ends with two convolutions on the assembled density: the four Jarvis dye-cloud
-// gaussians, then the 0.65 px frame blur.  Both are isotropic, so they are one separable kernel,
+// gaussians, then a frame blur (0.65 px upstream -- 0.45 here, see `grain_bake.FRAME_BLUR_PX`).
+// Both are isotropic, so they are one separable kernel,
 // and `core.grain_bake.grain_kernel_1d` reads that kernel's centre row back off the reference's
 // own cascade at this pitch -- the weights here are the reference's numbers, not a re-derivation
 // (a re-derived gaussian came out 13 % too wide and lost 13 % of the sigma).
@@ -405,7 +406,7 @@ class GLCubeGrain:
         # 2 = no convolution at all.  The last two exist so the cost of each stage can be
         # measured instead of guessed at.
         mode = int(params.get("grain_kernel_mode", 0))
-        final_blur = float(g.get("final_blur_px", 0.65) or 0.0)
+        final_blur = float(g.get("final_blur_px", 0.0) or 0.0)
         decay_um = 0.0 if mode == 1 else 1.45
         unsharp = self.unsharp if mode == 0 else (0.0, 0.0)
         if mode == 2:
