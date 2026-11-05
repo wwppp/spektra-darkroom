@@ -1915,10 +1915,21 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # downsample, no spatial stage already averaging the frame).
         u_1i("u_supersample_ok", int(getattr(self, "_supersample_ok", 0)))
 
-        # Film pitch of *this* render: the grain is a physical population, so a 1200 px preview
-        # and a 6000 px export see different pixel sizes and must compute their own rates.
+        # Film pitch of *this* render.  The grain is evaluated per fragment, not per source
+        # texel, so the pitch that matters is how much film one *screen* pixel covers.  This
+        # used to be computed from the master texture size, which is wrong whenever the frame
+        # is not drawn 1:1: at fit zoom a 4000 px master lands in ~600 screen pixels, so each
+        # fragment was told it held 8.7 um of film when it actually holds ~57 um -- 43x too few
+        # particles, hence ~6.5x the noise.  That is why the preview looked far grainier than
+        # the export, which renders into a target-sized FBO where the two pitches do coincide.
+        # Long edge, to match `render_offscreen` exactly.
         _fmt_mm = float(self.params.get("film_format_mm", 35.0))
-        _px_um = _fmt_mm * 1000.0 / float(max(1, self._image_w, self._image_h))
+        _bounds = self.get_image_bounds_norm()
+        _dpr = max(1.0, float(self.devicePixelRatioF()))
+        _disp = max(1.0,
+                    (_bounds[1] - _bounds[0]) * float(self.width()) * _dpr,
+                    (_bounds[3] - _bounds[2]) * float(self.height()) * _dpr)
+        _px_um = _fmt_mm * 1000.0 / _disp
         _override = self.params.get("grain_px_um_override")   # diagnostic: pin the pitch
         if _override:
             _px_um = float(_override)
