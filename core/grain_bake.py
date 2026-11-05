@@ -99,6 +99,16 @@ DYE_CLOUD_DECAY_UM = 6.7
 CHANNEL_RATE_SCALE = (1.19, 0.36, 0.47)
 COLOUR_GRAIN = 1.0
 
+# The stock whose measured chart calibration fixes the three constants above.  When a stock
+# carries fotufilm crystal-grain archive fields (`physical_extensions.crystal_grain`), the
+# resolver below scales the anchor by the field ratios -- linear first-order, refined later
+# by per-stock measurement.  The anchor stock itself divides by its own fields, i.e. is
+# bit-identical to the constants, which is the regression that guards the wiring.
+# fotufilm's layer_weights run (red-, green-, blue-sensitive) and its docs call the
+# blue-sensitive layer the grainiest -- index 2 of gold 200's [0.7, 1, 1.35] -- which maps
+# onto our density channels (C, M, Y) one to one: the red-sensitive record lays cyan.
+CRYSTAL_ANCHOR = {"size_mm": 0.005, "strength": 0.0105, "weights": (0.7, 1.0, 1.35)}
+
 
 def normalized_density_curves(film_data):
     """The film's curves as ``develop()`` uses them: baseline-zeroed.
@@ -252,8 +262,13 @@ def grain_kernel_1d(pixel_size_um, final_blur_px=FRAME_BLUR_PX, radius=2,
     return (row / total).astype(np.float32)
 
 
-def layer_scalars(film_data, grain, pixel_size_um):
+def layer_scalars(film_data, grain, pixel_size_um, crystal=None):
     """Per (record, sub-layer) numbers the shader needs besides the table.
+
+    ``crystal`` is the stock's fotufilm archive dict (``size_mm`` / ``strength`` /
+    ``layer_weights``) or ``None``.  Given it, the three gold-200 anchor constants resolve
+    per stock (see ``CRYSTAL_ANCHOR``); ``None`` keeps the anchor constants themselves, and
+    the anchor stock divides by its own fields, so both paths agree on it exactly.
 
     This is ``spektrafilm.model.grain.apply_grain_to_density_layers`` transcribed, minus the
     sampling itself:
@@ -282,11 +297,27 @@ def layer_scalars(film_data, grain, pixel_size_um):
     # Per-channel rate multipliers over the reference's own particle_scale -- see the
     # CHANNEL_RATE_SCALE calibration block above.  Dividing the area multiplies the rate;
     # the vector rides the channel axis of the (sublayer, channel) grid.
-    rate = np.asarray(CHANNEL_RATE_SCALE, dtype=np.float64)[None, :]
-    particle_area = (float(grain.particle_area_um2)
+    if crystal is not None:
+        try:
+            decay_um = DYE_CLOUD_DECAY_UM * float(crystal["size_mm"]) / CRYSTAL_ANCHOR["size_mm"]
+            weights = crystal.get("layer_weights")
+            if not weights or len(weights) != 3:
+                weights = CRYSTAL_ANCHOR["weights"]
+            rate = np.asarray([CHANNEL_RATE_SCALE[i] * float(weights[i]) / CRYSTAL_ANCHOR["weights"][i]
+                               for i in range(3)], dtype=np.float64)
+            area_mul = (float(crystal["strength"]) / CRYSTAL_ANCHOR["strength"]) ** 2
+        except (KeyError, TypeError, ValueError):
+            decay_um = float(DYE_CLOUD_DECAY_UM)
+            rate = np.asarray(CHANNEL_RATE_SCALE, dtype=np.float64)
+            area_mul = 1.0
+    else:
+        decay_um = float(DYE_CLOUD_DECAY_UM)
+        rate = np.asarray(CHANNEL_RATE_SCALE, dtype=np.float64)
+        area_mul = 1.0
+    particle_area = (float(grain.particle_area_um2) * area_mul
                      * np.asarray(grain.particle_scale, dtype=np.float64)[None, :]
                      * np.asarray(grain.particle_scale_layers, dtype=np.float64)[:, None]
-                     / rate)
+                     / rate[None, :])
     particles = pixel_area * fractions / particle_area                  # (3 sl, 3 ch)
 
     od_particle = density_max_abs / np.maximum(particles, 1e-9)
@@ -311,7 +342,7 @@ def layer_scalars(film_data, grain, pixel_size_um):
         # The Jarvis cascade's decay length.  Not in ``grain`` -- upstream hard-codes 1.45 in
         # `apply_grain_to_density_layers` -- so it travels with the bundle and both the CPU
         # reference and the shader's kernel read it from here.
-        "dye_cloud_decay_um": DYE_CLOUD_DECAY_UM,
+        "dye_cloud_decay_um": decay_um,
         # Deliberately *not* ``grain.blur`` -- see ``FRAME_BLUR_PX``.  Keeping it here means
         # the CPU reference (grain_model) and the GPU path (gl_grain) both read the same value.
         "final_blur_px": FRAME_BLUR_PX,

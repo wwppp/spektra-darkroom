@@ -1439,6 +1439,39 @@ class SpektraEngine:
         cache[key] = gain
         return gain
 
+    def _crystal_grain_fields(self, stock_id):
+        """The stock's fotufilm crystal-grain archive fields, or ``None``.
+
+        Read straight from the profile JSON (the resources overlay is the live copy) because
+        the processed Profile object drops ``physical_extensions``.  53 of the 61 stocks
+        carry the fields; the rest -- and any read failure -- resolve to ``None``, which
+        keeps the gold-200 anchor constants untouched.
+        """
+        if not stock_id or stock_id == "none":
+            return None
+        cache = getattr(self, "_crystal_grain_cache", None)
+        if cache is None:
+            cache = self._crystal_grain_cache = {}
+        if stock_id in cache:
+            return cache[stock_id]
+        fields = None
+        try:
+            path = os.path.join(self.profiles_dir, f"{stock_id}.json")
+            with open(path, "r", encoding="utf-8") as fp:
+                cg = (json.load(fp).get("data") or {}).get("physical_extensions", {}).get("crystal_grain")
+            if isinstance(cg, dict) and cg.get("size_mm") and cg.get("strength"):
+                weights = cg.get("layer_weights")
+                fields = {
+                    "size_mm": float(cg["size_mm"]),
+                    "strength": float(cg["strength"]),
+                    "layer_weights": (tuple(float(x) for x in weights)
+                                      if isinstance(weights, (list, tuple)) and len(weights) == 3 else None),
+                }
+        except Exception:                       # noqa: BLE001 - fields must never break a bake
+            fields = None
+        cache[stock_id] = fields
+        return fields
+
     def _load_profile(self, stock_id):
         if not stock_id or stock_id == "none":
             return None
@@ -3005,7 +3038,11 @@ class SpektraEngine:
             "density_max": hi,
             "cube": print_cube,
             "layer_table": grain_bake.bake_layer_table(film_data),
-            "grain": grain_bake.layer_scalars(film_data, grain_params, 1.0),
+            # The stock's fotufilm crystal-grain archive fields resolve the three gold-200
+            # anchor constants per stock (see CRYSTAL_ANCHOR); stocks without the fields --
+            # and any read failure -- fall back to the anchor constants unchanged.
+            "grain": grain_bake.layer_scalars(film_data, grain_params, 1.0,
+                                              crystal=self._crystal_grain_fields(film_stock)),
             # The scanner's sharpening, folded into the grain kernel: `scan()` runs it on the
             # display RGB, and a pointwise print cube cannot carry a spatial filter, so
             # without it the frame loses a third of its high-frequency energy.

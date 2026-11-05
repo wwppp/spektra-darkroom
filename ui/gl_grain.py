@@ -421,9 +421,9 @@ class GLCubeGrain:
         # measured instead of guessed at.
         mode = int(params.get("grain_kernel_mode", 0))
         final_blur = float(g.get("final_blur_px", 0.0) or 0.0)
-        # The decay length is calibration, not a per-stock value (upstream hard-codes 1.45),
-        # so it rides with the bundle rather than being repeated here.
-        decay_um = 0.0 if mode == 1 else float(g.get("dye_cloud_decay_um", 1.45))
+        # The decay length is resolved per stock from the archive fields now (see
+        # CRYSTAL_ANCHOR), so it rides with the bundle; the fallback is the anchor value.
+        decay_um = 0.0 if mode == 1 else float(g.get("dye_cloud_decay_um", grain_bake.DYE_CLOUD_DECAY_UM))
         unsharp = self.unsharp if mode == 0 else (0.0, 0.0)
         if mode == 2:
             final_blur = 0.0
