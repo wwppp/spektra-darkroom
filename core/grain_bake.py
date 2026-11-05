@@ -65,33 +65,38 @@ FRAME_BLUR_PX = 0.45
 # sits at 0.706 / 2 px: its grains are *clumps*, several pixels across, not per-pixel white
 # noise.
 #
-# ``DYE_CLOUD_DECAY_UM`` is what sets that, and it was measured rather than reasoned about.
-# On the CPU reference at 5.81 um/px (which carries the per-layer cloud blur as well):
+# ---------------------------------------------------------------------------------------
+# Grain scale, anchored on gold 200 against fotufilm on the neutral test chart
+# (`测试/中性测试图_6000x4000.png`, 6.0 um/px on the reference, 5.83 on our 35 mm long edge).
+# The chart supersedes the earlier live-frame readings: 24 blocks, both engines paired on
+# output L*, so curve slope and subject colour no longer leak into the numbers.  Measured
+# there on the midtone grey blocks (`scratch/_chart_compare.py`):
 #
-#     decay  1.45 um (0.25 px) -> lag-1 0.237, half 1 px
-#     decay  5.0  um (0.86 px) ->          0.622, half 2 px
-#     decay  6.0  um (1.03 px) ->          0.712, half 2 px
-#     decay  6.5  um (1.12 px) ->          0.748, half 2 px
+#     fotufilm   sigma R/G/B 0.0174/0.0238/0.0349   lag-1 0.671/0.664/0.658   half 2 px
+#     ours (old) sigma R/G/B 0.0225/0.0146/0.0228   lag-1 0.594/0.593/0.598   half 2 px
 #
-# 6.0 um it is: the shader's own kernel (no per-layer blur) lands on 0.685 at this pitch.
-# That is a clump, not a crystal -- 5 um is fotufilm's *clump radius* for gold 200, and a
-# decay of 6 um is the same object read through a point spread that carries 27 % of its
-# weight outside one sigma.
+# ``DYE_CLOUD_DECAY_UM`` sets the correlation width.  On the shader's own kernel at our
+# 5.83 um/px pitch (with the scanner unsharp folded in, `grain_kernel_1d`): 6.0 -> 0.599,
+# 6.6 -> 0.657, 6.7 -> 0.665, 6.8 -> 0.673.  6.7 um lands on the chart's 0.664.  (The
+# 0.706 quoted in earlier rounds was the live-frame residual on a blue sky -- same physics,
+# different window; the chart is the controlled read and the anchor from here on.)
 #
-# The amplitude needs **no** correction, and the earlier "we are 3.2x too loud at 4024 px"
-# reading was an artefact of the old width: widening the kernel drops per-pixel sigma by
-# nearly three (measured on a flat mid-grey at 5.81 um/px: 0.0402 -> 0.0144 in density).
-# Through the print's midtone slope that lands within ~30 % of fotufilm's measured sigma,
-# so the particle area stays at the reference's 0.2 um^2.  Scaling it down as well would
-# have moved the *preview* instead, where the clump is 0.10 px and only the particle rate
-# survives -- measured there, amplitude goes 0.0046 -> 0.0043, i.e. unchanged.
+# ``CHANNEL_RATE_SCALE`` fixes the per-channel balance.  fotufilm's B record is the loudest
+# on every block of the chart (0.50 : 0.68 : 1 normalised to B); ours came out 0.98 : 0.64 : 1
+# because the particles live in CMY density and the print cube's per-channel slope reshapes
+# them on the way out -- so the archive's ``layer_weights`` cannot be mapped linearly and the
+# balance is a measured multiplier on the particle *rate*.  Sigma goes as ONE OVER the square
+# root of the rate (more, smaller particles = less RMS, Selwyn), which the first iteration
+# confirmed exactly: rate x3.24 on M moved the output G sigma by 0.552 = 1/sqrt(3.24).  The
+# values below are the first-order solve at the chart's midtone (D1), including the ~0.95
+# sigma cost of widening the kernel 6.0 -> 6.7 um; the chart re-measurement is the judge.
 #
-# ``COLOUR_GRAIN``: 0.5 makes every record share half its draw, so R/G/B come out correlated
-# at 0.78 and the frame reads as luminance noise with a colour cast.  fotufilm's own frame
-# measures +0.15 / -0.08 / +0.18 on the grain residual -- three independent dye layers, which
-# is also what the physics says (the records are separate emulsions).  1.0 degenerates the
-# variance-preserving mix to the identity in both the shader and the CPU reference.
-DYE_CLOUD_DECAY_UM = 6.0
+# Both are gold-200 ANCHOR values carried as globals: the only stock calibrated so far.
+# The per-stock resolver (field wiring) replaces their *input* -- constants -> archive
+# fields x these coefficients -- with this chart result as the regression target; the
+# downstream bundle/shader path is parameterised already and does not change.
+DYE_CLOUD_DECAY_UM = 6.7
+CHANNEL_RATE_SCALE = (1.19, 0.36, 0.47)
 COLOUR_GRAIN = 1.0
 
 
@@ -274,9 +279,14 @@ def layer_scalars(film_data, grain, pixel_size_um):
         # reached here with a digested parameter set would silently divide to infinity.
         raise ValueError("grain.particle_area_um2 is 0 -- this is a grain-disabled parameter set")
     pixel_area = float(pixel_size_um) ** 2
+    # Per-channel rate multipliers over the reference's own particle_scale -- see the
+    # CHANNEL_RATE_SCALE calibration block above.  Dividing the area multiplies the rate;
+    # the vector rides the channel axis of the (sublayer, channel) grid.
+    rate = np.asarray(CHANNEL_RATE_SCALE, dtype=np.float64)[None, :]
     particle_area = (float(grain.particle_area_um2)
                      * np.asarray(grain.particle_scale, dtype=np.float64)[None, :]
-                     * np.asarray(grain.particle_scale_layers, dtype=np.float64)[:, None])
+                     * np.asarray(grain.particle_scale_layers, dtype=np.float64)[:, None]
+                     / rate)
     particles = pixel_area * fractions / particle_area                  # (3 sl, 3 ch)
 
     od_particle = density_max_abs / np.maximum(particles, 1e-9)
