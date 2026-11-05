@@ -1905,12 +1905,16 @@ class SpektraEngine:
             if measured is not None:
                 return measured
 
-        # If positive / reversal slide film or monochrome, return neutral baseline
+        # If positive / reversal slide film, the print is times off the paper's own response
+        # with a fixed standard filtration.
         if self.is_positive_film(film_stock):
             return [0.0, 50.0, 50.0]
+        # Monochrome negatives go through the solver like colour ones.  A silver image is
+        # spectrally neutral, which does NOT make the print neutral: the colour paper under
+        # the TH-KG3 enlarger is unbalanced on its own, and zero filtration hands that
+        # imbalance straight to the print (measured +49/+51 in a*/b* on ektacolor edge).
+        # Printing pan film on colour paper always took filtration in the darkroom.
         prof = profile_override if profile_override is not None else self._load_profile(film_stock)
-        if prof and hasattr(prof, 'info') and getattr(prof.info, 'channel_model', 'color') == 'bw':
-            return [0.0, 0.0, 0.0]
 
         # Automatic on-the-fly solver for arbitrary custom negative film stocks
         progress = getattr(self, "_neutral_solving", None)
@@ -2283,13 +2287,10 @@ class SpektraEngine:
         """
         try:
             prof = self._load_profile(film_stock)
-            info = getattr(prof, "info", None)
-            if info is not None and getattr(info, "channel_model", None) == "bw":
-                # Monochrome prints through a neutral enlarger: the bake zeroes the filtration.
-                values = (0.0, 0.0, 0.0)
-            else:
-                values = tuple(round(float(v), 2) for v in
-                               self.get_neutral_filter(base_paper, film_stock, push_stops))
+            # Monochrome negatives solve like colour ones -- zero filtration prints the
+            # paper's own imbalance (see _neutral_filter_base).
+            values = tuple(round(float(v), 2) for v in
+                           self.get_neutral_filter(base_paper, film_stock, push_stops))
         except Exception:                              # noqa: BLE001 - a key must never fail a bake
             return ("unresolved",), "00000000"
         digest = hashlib.sha1(repr(values).encode()).hexdigest()[:8]
@@ -2661,7 +2662,8 @@ class SpektraEngine:
             developer_exhaustion=dev_exh
         )
 
-        if is_bw or print_mode == "scan":
+        if print_mode == "scan":
+            # A scanned negative has no enlarger: no filtration stage at all.
             base_filter = [0.0, 0.0, 0.0]
         else:
             base_filter = self.get_neutral_filter(base_paper, film_stock, push_stops)
@@ -4858,11 +4860,10 @@ class SpektraEngine:
         params.debug.lut_mode = True
         params.camera.auto_exposure = False
         params.camera.exposure_compensation_ev = float(params_dict.get("exposure_ev", 0.0))
-        if is_bw:
-            base_filter = [0.0, 0.0, 0.0]
-        else:
-            base_filter = self.get_neutral_filter(
-                paper_stock, film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))
+        # Monochrome negatives solve like colour ones -- zero filtration prints the paper's
+        # own imbalance; the scan path zeroes it upstream where there is no enlarger.
+        base_filter = self.get_neutral_filter(
+            paper_stock, film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))
         params.settings.neutral_print_filters_from_database = False
         params.enlarger.c_filter_neutral = float(base_filter[0])
         params.enlarger.m_filter_neutral = float(base_filter[1])
