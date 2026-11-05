@@ -42,17 +42,48 @@ _MIN_SPAN = 0.2
 
 # Frame-level blur applied after the dye-cloud cascade, in *pixels*.  The reference uses
 # ``GrainParams.blur = 0.65`` to hide the aliasing of per-pixel grain sampling, but that is
-# an anti-aliasing approximation, not physics, and it is the single biggest difference in how
-# the grain reads: on fotufilm's own step chart (same 12 um pitch, gold 200 + ektacolor edge)
-# the reference sits at a lag-1 autocorrelation of 0.047 while 0.65 puts us at 0.44 -- the
-# grain looks one step blurred rather than granular.  At 0.45 we land on 0.06 and keep 96%
-# of the amplitude, so no particle-area correction is needed.
+# an anti-aliasing approximation, not physics: on fotufilm's own step chart (same 12 um pitch,
+# gold 200 + ektacolor edge) 0.65 puts the grain one full step wider than the reference.
 #
-# Because it is expressed in pixels rather than micrometres it does not scale with pitch:
-# measured lag-1 is 0.047 at 35 um/px (fit view), 0.059 at 12 um/px (3000 px), ~0.09 at
-# 8.9 um/px (4024 px export).  Only at diagnostic pitches around 2 um/px does the Jarvis
-# cloud term itself widen past a pixel and dominate again.
+# Its job used to be to carry the whole correlation, because the reference's 1.45 um dye cloud
+# is 0.16 px at export pitch and does nothing there.  Now that the clump is modelled properly
+# (see ``DYE_CLOUD_DECAY_UM``) this is only the residual: at 8.9 um/px the cascade alone sits
+# at lag-1 0.65 and 0.45 px of frame blur takes it to 0.72, the reference's 0.706.
+#
+# Because it is expressed in pixels rather than micrometres it does not scale with pitch, so
+# at a 60 um/px preview it is the *only* term left and the grain is again 1 px white noise --
+# which is what a 60 um sampling of a 10 um clump can resolve.
 FRAME_BLUR_PX = 0.45
+
+# ---------------------------------------------------------------------------------------
+# Grain scale, as fotufilm draws gold 200 at 1:1 (4024 px across the 36 mm frame = 8.9 um/px).
+#
+# The reference's dye-cloud decay is a single 1.45 um for all 61 stocks -- a format default,
+# not a per-film calibration -- and at 8.9 um/px that puts the noise at a lag-1 autocorrelation
+# of 0.20 with a 1 px half width.  fotufilm's own render of the same frame sits at 0.706 / 2 px:
+# its grains are *clumps*, several pixels across, not per-pixel white noise.
+#
+# ``DYE_CLOUD_DECAY_UM`` is what sets that, and it was measured rather than reasoned about:
+# on the cascade alone at 8.9 um/px, 1.45 um gives lag-1 0.19 / half width 1 px, 3.6 um gives
+# 0.32 / 1 px, 10 um gives 0.72 / 2 px.  With the 0.45 px frame blur on top, 10 um lands on
+# 0.719 -- the reference's 0.706.  That is a clump, not a crystal: 5 um is fotufilm's *clump
+# radius* for gold 200, and a decay of twice that is the same object read through a point
+# spread that carries 27 % of its weight outside one sigma.
+#
+# The amplitude needs **no** correction, and the earlier "we are 3.2x too loud at 4024 px"
+# reading was an artefact of the old width: widening the kernel drops per-pixel sigma by more
+# than three (measured on a flat mid-grey at 8.9 um/px: 0.0286 -> 0.0087 in density), and
+# through the print's midtone slope that is ~0.020 in RGB against fotufilm's 0.0207.  So the
+# particle area stays at the reference's 0.2 um^2 -- scaling it down as well would have halved
+# the *preview*, where the clump is 0.17 px and only the particle rate survives.
+#
+# ``COLOUR_GRAIN``: 0.5 makes every record share half its draw, so R/G/B come out correlated
+# at 0.75-0.90 and the frame reads as luminance noise with a colour cast.  fotufilm's own
+# frame measures +0.07 / -0.13 / +0.18 -- three independent dye layers, which is also what
+# the physics says (the records are separate emulsions).  1.0 degenerates the variance-
+# preserving mix to the identity in both the shader and the CPU reference.
+DYE_CLOUD_DECAY_UM = 10.0
+COLOUR_GRAIN = 1.0
 
 
 def normalized_density_curves(film_data):
@@ -152,7 +183,8 @@ def bake_layer_table(film_data, samples=256):
     }
 
 
-def grain_kernel_1d(pixel_size_um, final_blur_px=FRAME_BLUR_PX, radius=2, decay_um=1.45, unsharp=None):
+def grain_kernel_1d(pixel_size_um, final_blur_px=FRAME_BLUR_PX, radius=2,
+                    decay_um=DYE_CLOUD_DECAY_UM, unsharp=None):
     """The discrete kernel the reference's dye-cloud cascade reduces to at this pitch.
 
     ``apply_grain_to_density_layers`` ends with two convolutions: the four Jarvis dye-cloud
@@ -252,10 +284,15 @@ def layer_scalars(film_data, grain, pixel_size_um):
         "particles_per_um2": (fractions / particle_area).astype(np.float32),
         "uniformity": np.asarray(grain.uniformity, dtype=np.float32),
         # How far the three records keep their own dye clouds (`mix_chroma_grain` upstream).
-        # 0.5 is the reference: half independent, half shared luminance.
-        "colour_grain": float(getattr(grain, "colour_grain", 0.5)),
+        # 0.5 is the reference's value -- half independent, half shared luminance; see the
+        # calibration block above for why this is 1.0 here.
+        "colour_grain": COLOUR_GRAIN,
         "blur_sigma": blur_sigma.astype(np.float32),
         "blur_um": float(grain.blur_dye_clouds_um),
+        # The Jarvis cascade's decay length.  Not in ``grain`` -- upstream hard-codes 1.45 in
+        # `apply_grain_to_density_layers` -- so it travels with the bundle and both the CPU
+        # reference and the shader's kernel read it from here.
+        "dye_cloud_decay_um": DYE_CLOUD_DECAY_UM,
         # Deliberately *not* ``grain.blur`` -- see ``FRAME_BLUR_PX``.  Keeping it here means
         # the CPU reference (grain_model) and the GPU path (gl_grain) both read the same value.
         "final_blur_px": FRAME_BLUR_PX,

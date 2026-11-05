@@ -21,6 +21,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
+from core.grain_bake import DYE_CLOUD_DECAY_UM
+
 __all__ = ["sample_layer_density", "apply_grain"]
 
 # Jarvis 4-Gaussian mixture of the dye-cloud point spread exp(-r/k), with the same weights
@@ -116,7 +118,10 @@ def apply_grain(density, layer_table, scalars, pixel_size_um, strength=1.0, rng=
 
     # Jarvis dye cloud: a four-gaussian decomposition of exp(-r/k), evaluated on the summed
     # density before the chroma mix.  Skipped entirely when the decay length is under 0.2 px.
-    decay_px = float(scalars.get("dye_cloud_decay_um", 1.45)) / max(float(pixel_size_um), 0.1)
+    # The length comes from the bundle (`layer_scalars`), so it is the same one the shader's
+    # kernel is built with; the fallback is only for a hand-built scalars dict in diagnostics.
+    decay_um = float(scalars.get("dye_cloud_decay_um", DYE_CLOUD_DECAY_UM))
+    decay_px = decay_um / max(float(pixel_size_um), 0.1)
     if decay_px > 0.2:
         acc = np.zeros_like(out)
         for weight, factor in _JARVIS:
