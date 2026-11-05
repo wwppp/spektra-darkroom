@@ -408,9 +408,12 @@ class GLCubeGrain:
                     else float(params.get("grain", GRAIN_REFERENCE)) / GRAIN_REFERENCE)
         u_1f("u_grain_strength", max(0.0, strength))
         u_1f("u_grain_size", max(0.05, float(params.get("grain_size", 1.0))))
-        # The colour slider is M5's job: for now the calibrated per-bundle value stands, so a
-        # future per-stock colour mapping is not overridden by a stale fotufilm-era param.
-        u_1f("u_grain_colour", float(g.get("colour_grain", 1.0)))
+        # Colour grain is multiplicative: the calibrated per-bundle value from the profile
+        # (1 = independent dye clouds, 0 = the single silver image of a B&W stock) times the
+        # editorial `grain_colour` slider (M5, 1 = as calibrated).  A B&W bundle already
+        # carries colour_grain = 0, so the slider cannot re-colour a monochrome stock.
+        colour = float(g.get("colour_grain", 1.0)) * max(0.0, min(1.0, float(params.get("grain_colour", 1.0))))
+        u_1f("u_grain_colour", colour)
         u_1i("u_grain_seed", int(params.get("grain_seed", 0)))
         u_1i("u_grain_taps", int(params.get("grain_taps", 25)))
         u_1i("u_grain_probe", int(params.get("grain_probe", 0)))

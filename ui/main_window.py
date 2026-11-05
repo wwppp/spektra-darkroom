@@ -4544,6 +4544,50 @@ class DarkroomMainWindow(QMainWindow):
         self.sidebar_layout.addWidget(self.sec_halation)
         self.sec_texture = self.sec_halation  # Backward compatibility alias
         self.sec_optical = self.sec_halation  # Backward compatibility alias
+        self._init_grain_section()
+
+    def _init_grain_section(self):
+        """M5: 银盐颗粒面板（`347b5cb` 删除后重建）。
+
+        三个滑块的语义（2026-11-05 用户拍板）：
+        - 强度：倍率式 0–3，默认 1.0 = 标定参考；内部写 `grain` 键 = 倍率 × 0.4
+          （M4 映射 u_grain_strength = grain / 0.4，0.4 是 gold200 锚点的参考强度）。
+        - 大小：粒子面积倍率 0.5–2.0，直接写 `grain_size`。
+        - 彩色：乘性混合系数 0–1，直接写 `grain_colour`，与档案域 bundle.colour_grain
+          相乘（黑白卷档案已强制 0，滑块随黑白胶卷自动禁用）。
+        颗粒在 LUT 之外（shader 域），拖动只走 uniform，不触发 LUT 重烘焙。
+        """
+        self.sec_grain = AccordionSection("银盐颗粒 (Grain)")
+        self.sec_grain.resetClicked.connect(lambda: self.reset_track("grain"))
+
+        self.slider_grain_strength = AdobeScrubSlider(
+            "颗粒强度", 0.0, 3.0, 1.0, step=0.05, unit="x", decimals=2,
+            tooltip="颗粒强度倍率：1.0 = gold200 标定参考（内部 grain = 倍率 × 0.4）。\n"
+                    "0 = 无颗粒；>1 加粗颗粒速率，对黑白与彩色同时生效"
+        )
+        self.slider_grain_strength.valueChanged.connect(
+            lambda v: self._on_slider_live("grain", round(v * 0.4, 4)))
+        self.slider_grain_strength.sliderReleased.connect(self._on_slider_committed)
+        self.sec_grain.addWidget(self.slider_grain_strength)
+
+        self.slider_grain_size = AdobeScrubSlider(
+            "颗粒大小", 0.5, 2.0, 1.0, step=0.05, unit="x", decimals=2,
+            tooltip="颗粒粒子面积倍率：1.0 = 档案标定值；放大颗粒尺度，不改变速率"
+        )
+        self.slider_grain_size.valueChanged.connect(lambda v: self._on_slider_live("grain_size", v))
+        self.slider_grain_size.sliderReleased.connect(self._on_slider_committed)
+        self.sec_grain.addWidget(self.slider_grain_size)
+
+        self.slider_grain_colour = AdobeScrubSlider(
+            "彩色颗粒", 0.0, 1.0, 1.0, step=0.05, unit="", decimals=2,
+            tooltip="彩色颗粒混合系数：1.0 = 档案标定（三染料云独立）。\n"
+                    "0 = 共用单一亮度颗粒（类似黑白）。与档案域值相乘；黑白胶卷此滑块无效"
+        )
+        self.slider_grain_colour.valueChanged.connect(lambda v: self._on_slider_live("grain_colour", v))
+        self.slider_grain_colour.sliderReleased.connect(self._on_slider_committed)
+        self.sec_grain.addWidget(self.slider_grain_colour)
+
+        self.sidebar_layout.addWidget(self.sec_grain)
 
     _init_texture_section = _init_halation_section
     _init_optical_section = _init_halation_section
@@ -7722,6 +7766,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 "halation_amount": 1.0, "halation_spatial_scale": 1.0,
                 "scatter_amount": 1.0, "boost_ev": 0.0,
                 "halation": 1.0, "halation_boost": 0.0
+            },
+            "grain": {
+                # grain 存的是引擎键（0.4 = 标定参考），滑块显示倍率 = grain / 0.4
+                "grain": 0.4, "grain_size": 1.0, "grain_colour": 1.0
             }
         }
 
@@ -8229,6 +8277,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'slider_boost_ev'): self.slider_boost_ev.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
             if hasattr(self, 'slider_halation'): self.slider_halation.set_value(p.get("halation_amount", p.get("halation", 1.0)))
             if hasattr(self, 'slider_halation_boost'): self.slider_halation_boost.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
+
+            # 银盐颗粒：滑块显示倍率，内部 grain = 倍率 × 0.4（M4 参考）
+            if hasattr(self, 'slider_grain_strength'): self.slider_grain_strength.set_value(float(p.get("grain", 0.4)) / 0.4)
+            if hasattr(self, 'slider_grain_size'): self.slider_grain_size.set_value(p.get("grain_size", 1.0))
+            if hasattr(self, 'slider_grain_colour'): self.slider_grain_colour.set_value(p.get("grain_colour", 1.0))
 
             # Lens correction controls
             lens_cfg = p.get("lens")
@@ -9749,6 +9802,41 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 s.setToolTip(getattr(s, "default_tooltip", "") if hal_available else hal_hint)
                 for child in [s] + s.findChildren(QWidget):
                     child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not hal_available)
+
+        # 6. 银盐颗粒 (Grain) - 旁通态不可用；彩色滑块在黑白胶卷上无意义（档案强制共用银影）
+        sec_grain = getattr(self, "sec_grain", None)
+        grain_available = not is_none
+        grain_hint = "" if grain_available else "数码原片旁通模式无银盐乳剂，无颗粒"
+        try:
+            is_bw_film = (not is_none) and bool(self.engine.is_bw_stock(self.current_film_stock))
+        except Exception:
+            is_bw_film = False
+        if sec_grain is not None and hasattr(sec_grain, "set_available"):
+            sec_grain.set_available(grain_available, grain_hint)
+            if not grain_available:
+                sec_grain.set_reset_enabled(False)
+        grain_sliders = [
+            getattr(self, "slider_grain_strength", None),
+            getattr(self, "slider_grain_size", None),
+        ]
+        for s in grain_sliders:
+            if s is not None:
+                s.setEnabled(grain_available)
+                s.setToolTip(getattr(s, "default_tooltip", "") if grain_available else grain_hint)
+                for child in [s] + s.findChildren(QWidget):
+                    child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not grain_available)
+        colour_slider = getattr(self, "slider_grain_colour", None)
+        if colour_slider is not None:
+            colour_ok = grain_available and not is_bw_film
+            colour_slider.setEnabled(colour_ok)
+            if not grain_available:
+                colour_slider.setToolTip(grain_hint)
+            elif is_bw_film:
+                colour_slider.setToolTip("黑白胶卷只有单一银影，无彩色颗粒可调")
+            else:
+                colour_slider.setToolTip(getattr(colour_slider, "default_tooltip", ""))
+            for child in [colour_slider] + colour_slider.findChildren(QWidget):
+                child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not colour_ok)
 
         # Left panel paper cards: lock and dim when in bypass or positive reversal film
         if hasattr(self, 'paper_cards') and self.paper_cards:
