@@ -2281,8 +2281,8 @@ class SpektraEngine:
         # EXPERIMENTAL, on by default on this branch so it can be judged on real frames;
         # `film_look=0` in the parameter set restores the pure physical result exactly.
         return (round(float(p.get("film_look", 1.0) or 0.0), 2),
-                round(float(p.get("film_look_saturation", 0.66) or 0.66), 2),
-                round(float(p.get("film_look_midtone", 0.0) or 0.0), 1),
+                round(float(p.get("film_look_saturation", 0.72) or 0.72), 2),
+                round(float(p.get("film_look_midtone", 2.0) or 0.0), 1),
                 # 1.5 puts the sky's hue exactly on the reference (257.7 -> 247.3 deg, measured),
                 # with the chroma effectively unchanged.  Blossoms still sit ~13 deg purple of
                 # the reference and do not respond to this band -- they need their own mapping.
