@@ -26,6 +26,8 @@ from __future__ import annotations
 import numpy as np
 from OpenGL import GL
 
+import core.grain_bake as grain_bake
+
 # The document/export parameter ``grain`` is a fotufilm-era slider value (0.4 by default),
 # not a physical quantity.  The gold200 calibration was made at reference strength 1.0, so
 # 0.4 has to land on 1.0: the slider becomes a multiplier around the calibrated reference
@@ -431,7 +433,6 @@ class GLCubeGrain:
         key = (round(float(pixel_size_um), 5), round(final_blur, 4), decay_um,
                unsharp, bool(u_1fv))
         if self._kernel_key != key:
-            import core.grain_bake as grain_bake
             self._kernel = grain_bake.grain_kernel_1d(
                 float(pixel_size_um), final_blur_px=final_blur, decay_um=decay_um,
                 unsharp=unsharp)
