@@ -197,14 +197,18 @@ vec3 grain_apply(vec3 density, ivec2 px) {
         total[ch] = mean + sqrt(max(var, 0.0)) * gauss_unit(state);
         mean_total[ch] = mean;
     }
-    // The reference's baseline is the *layer sum*, not the density it was handed:
-    // ``apply_grain_to_density_layers`` sets ``density_cmy_base = sum(layers)``, perturbs the
-    // particles, and then puts the mixed fluctuation back on that base.  Whenever the layer
-    // split does not reproduce the density exactly -- which for a reversal stock it does not,
-    // by a lot at high density -- the difference is a real tonal modulation of the frame and
-    // it belongs in the output.  Using ``density`` here instead discards it, and on a positive
-    // that is most of what the eye reads as grain.
-    vec3 base = mean_total - u_grain_dmin;
+    // The reference's baseline is the *layer sum*, and this port used to replace the handed
+    // density with the table reconstruction (``mean_total - u_grain_dmin``) for the reason
+    // below.  But the reference's develop() produces densities AS layer sums, so its sum IS
+    // the base; here the handed density comes from the density cube, and the 256-sample
+    // uniform-axis table resampling does not reproduce it exactly.  That difference is a
+    // smooth, stock-dependent density offset that reads as a colour cast the moment grain
+    // switches on (measured 2026-11-05: gray04 E[fluct] +0.13 density on cinestill_400d,
+    // -0.07 G on f_64d, dE 26+ in the display; the calibrated gold_200 happened to sit near
+    // zero, which is why only some stocks cast).  The base is therefore the handed density
+    // itself: E[fluct] == 0 by construction, so grain on/off render identical colours and
+    // only the fluctuation differs.  The noise texture (Poisson counts -> amp scaling) is
+    // untouched, so sigma / lag / colour correlation cannot move.
     if (u_grain_probe == 6) return total;
     // The reference does not ship three independent dye-cloud fields: it mixes them back
     // towards their common mean (fotufilm's ``Look.mix``, ``mix_chroma_grain`` upstream).
@@ -213,12 +217,11 @@ vec3 grain_apply(vec3 density, ivec2 px) {
     // variance rises by 1/sqrt(0.557) = 1.34x -- the grain stops reading as coloured noise
     // and starts reading as silver.  Skipping this was a large part of "the grain is weak":
     // two thirds of the energy was landing in chroma, where the eye barely sees it.
-    vec3 net = total - u_grain_dmin;
-    vec3 fluct = net - base;
+    vec3 fluct = total - mean_total;          // zero-mean by construction
     float own = clamp(u_grain_colour, 0.0, 1.0);
     float shared = sqrt(max(0.0, 3.0 - 2.0 * own * own)) - own;
     float mean_fluct = (fluct.r + fluct.g + fluct.b) / 3.0;
-    return base + own * fluct + shared * mean_fluct;
+    return density + own * fluct + shared * mean_fluct;
 }
 
 // The reference ends with two convolutions on the assembled density: the four Jarvis dye-cloud
