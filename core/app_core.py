@@ -2275,6 +2275,12 @@ class SpektraEngine:
     # full strength: saturation multiplier, midtone lift in L*, and a band-limited hue pull that
     # moves sky toward cyan and blossoms toward warm pink without rotating skin hues.
 
+    # Measured L* mapping (our render -> fotufilm, binned by our L*), nodes at every 10 L*.
+    # Flat below L* 10 and at paper white; the dip at 20-40 is the toe being lifted too far
+    # in ours, the rise above 50 is the reference being more open through the midtones.
+    _LOOK_CURVE_X = np.array([0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])
+    _LOOK_CURVE_Y = np.array([0.0, -0.3, -1.1, -2.1, -0.9, -0.1, 0.7, 1.2, 1.5, 1.5, 1.0])
+
     @staticmethod
     def _film_look_settings(params_dict):
         p = params_dict or {}
@@ -2282,11 +2288,12 @@ class SpektraEngine:
         # `film_look=0` in the parameter set restores the pure physical result exactly.
         return (round(float(p.get("film_look", 1.0) or 0.0), 2),
                 round(float(p.get("film_look_saturation", 0.72) or 0.72), 2),
-                round(float(p.get("film_look_midtone", 2.0) or 0.0), 1),
-                # 1.5 puts the sky's hue exactly on the reference (257.7 -> 247.3 deg, measured),
-                # with the chroma effectively unchanged.  Blossoms still sit ~13 deg purple of
-                # the reference and do not respond to this band -- they need their own mapping.
-                round(float(p.get("film_look_hue", 1.5) or 0.0), 2))
+                round(float(p.get("film_look_midtone", 0.0) or 0.0), 1),
+                # 1.5 puts the sky's hue exactly on the reference (257.8 -> 247.4 deg, measured),
+                # with the chroma effectively unchanged.
+                round(float(p.get("film_look_hue", 1.5) or 0.0), 2),
+                # Tone curve strength; 1.0 is the measured mapping in `_LOOK_CURVE_*`.
+                round(float(p.get("film_look_curve", 1.0) or 0.0), 2))
 
     @staticmethod
     def _srgb_to_lab(rgb):
@@ -2346,12 +2353,13 @@ class SpektraEngine:
 
     def _apply_film_look(self, table, params_dict, is_bw=False):
         """Saturation / midtone / band-limited hue pass on a finished display table."""
-        strength, sat, mid, hue = self._film_look_settings(params_dict)
+        strength, sat, mid, hue, curve = self._film_look_settings(params_dict)
         if is_bw or strength <= 0.001:
             return table
         sat = 1.0 + (sat - 1.0) * strength
         mid *= strength
         hue *= strength
+        curve *= strength
 
         lab = self._srgb_to_lab(table)
         L = lab[..., 0]
@@ -2371,6 +2379,14 @@ class SpektraEngine:
         hd = hd + hue * (-8.0 * band(247.0, 28.0))
         # Midtone lift: a bell that is zero by L*=10 and L*=94, so toe and shoulder stay put.
         L = L + mid * np.clip(1.0 - np.abs(L - 52.0) / 42.0, 0.0, 1.0)
+
+        # Tone curve.  Binned by input L* against the reference, the difference is not a
+        # uniform shift but an S: our toe sits 1-2 L* high and everything above L* 50 sits
+        # 1-1.5 low, which is exactly the "flat and dull" read -- a print that never gets
+        # out of its own shadow.  Values are the measured medians, smoothed at the ends so
+        # pure black and paper white stay put.
+        if curve > 0.001:
+            L = L + curve * np.interp(L, self._LOOK_CURVE_X, self._LOOK_CURVE_Y)
 
         # Chroma is pulled down by *lightness*, not globally: measured against the reference the
         # sky (L* 64) sits 42% high while the blossoms (L* 46) are 18% high, so one flat
@@ -2474,7 +2490,7 @@ class SpektraEngine:
         # files miss instead of serving an un-lifted curve from disk.
         wp_tag = f"__wp{round(wp_lift, 1):g}"
         look = self._film_look_settings(params_dict)
-        look_tag = f"__fl{look[0]:g}_{look[1]:g}_{look[2]:g}_{look[3]:g}"
+        look_tag = "__fl" + "_".join(f"{v:g}" for v in look)
         if is_default_params and not push_stops:
             cache_file = os.path.join(cache_dir, f"v11_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}{wp_tag}{look_tag}.npy")
             bundled_file = os.path.join(bundled_cache_dir, f"v11_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}{wp_tag}{look_tag}.npy")

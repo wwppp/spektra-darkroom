@@ -4784,6 +4784,30 @@ class DarkroomMainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
+        # Appearance layer.  It is baked into the LUT, so switching it changes the table and
+        # needs a rebake -- hence it lives here next to the other look-level controls rather
+        # than in the parameter sliders.
+        self.menu_film_look = view_menu.addMenu("外观 (Film Look)")
+        self.menu_film_look.setStyleSheet(get_darkroom_menu_style())
+        self.act_film_look = QAction("启用胶片外观", self)
+        self.act_film_look.setCheckable(True)
+        self.act_film_look.setChecked(True)
+        self.act_film_look.toggled.connect(self._on_film_look_toggled)
+        self.menu_film_look.addAction(self.act_film_look)
+        self.menu_film_look.addSeparator()
+        self.film_look_strength_actions = {}
+        for key, text, sat in (("soft", "弱（保留更多色彩）", 0.85),
+                               ("std", "标准", 0.72),
+                               ("strong", "强", 0.60)):
+            act = QAction(text, self)
+            act.setCheckable(True)
+            act.triggered.connect(lambda chk=False, s=sat: self._set_film_look_strength(s))
+            self.menu_film_look.addAction(act)
+            self.film_look_strength_actions[key] = act
+        self.menu_film_look.aboutToShow.connect(self._sync_film_look_actions)
+
+        view_menu.addSeparator()
+
         self.act_reset_layout = QAction("恢复默认布局", self)
         self.act_reset_layout.setShortcut(QKeySequence("Ctrl+Shift+R"))
         self.act_reset_layout.triggered.connect(self.reset_default_layout)
@@ -7348,7 +7372,52 @@ aspect_ratio=self._lens_frame_aspect(photo),
             round(float(p.get("morph_gamma", 1.0)), 2),
             round(float(p.get("developer_exhaustion", 0.0)), 2),
             int(round(float(p.get("push_ev", 0) or 0))),
+            # The appearance layer is baked into the table, so it belongs in the identity of
+            # the bake -- without it toggling the menu item would leave the old table on screen.
+            round(float(p.get("film_look", 1.0) or 0.0), 2),
+            round(float(p.get("film_look_saturation", 0.72) or 0.72), 2),
+            round(float(p.get("film_look_hue", 1.5) or 0.0), 2),
+            round(float(p.get("film_look_curve", 1.0) or 0.0), 2),
         )
+
+    # -- film look menu ---------------------------------------------------------------------
+    def _current_film_look(self):
+        p = self.current_params
+        return (float(p.get("film_look", 1.0) or 0.0),
+                float(p.get("film_look_saturation", 0.72) or 0.72))
+
+    def _on_film_look_toggled(self, checked):
+        if getattr(self, "_syncing_film_look", False):
+            return
+        self.current_params["film_look"] = 1.0 if checked else 0.0
+        self._apply_film_look_change()
+
+    def _set_film_look_strength(self, saturation):
+        if getattr(self, "_syncing_film_look", False):
+            return
+        self.current_params["film_look_saturation"] = float(saturation)
+        self.current_params["film_look"] = 1.0
+        self._apply_film_look_change()
+
+    def _apply_film_look_change(self):
+        # Re-bake rather than relight: the pass runs on the cube, so the table itself changes.
+        self._pending_lut_refresh = True
+        self._request_async_lut()
+        self._mark_current_photo_dirty()
+        self._schedule_histogram_update()
+        self._sync_film_look_actions()
+
+    def _sync_film_look_actions(self):
+        on, sat = self._current_film_look()
+        self._syncing_film_look = True
+        try:
+            self.act_film_look.setChecked(on > 0.001)
+            for key, target in (("soft", 0.85), ("std", 0.72), ("strong", 0.60)):
+                self.film_look_strength_actions[key].setChecked(abs(sat - target) < 0.02)
+            for act in self.film_look_strength_actions.values():
+                act.setEnabled(on > 0.001)
+        finally:
+            self._syncing_film_look = False
 
     def _schedule_live_lut_preview(self):
         """Live preview of LUT-baked parameters (DIR / morph / exhaustion).
