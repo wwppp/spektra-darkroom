@@ -258,6 +258,9 @@ class GLCubeGrain:
         self.ready = False
         self._signature = None
         self._pending = None
+        # Which bake the uploaded cubes came from (`get_grain_bundle` records its LUT key).
+        # `bind` refuses to draw when the caller asks for a different one.
+        self.key = None
 
     # -- upload ------------------------------------------------------------------------------
     def set_bundle(self, bundle):
@@ -265,9 +268,11 @@ class GLCubeGrain:
         if bundle is None:
             self._pending = None
             self._signature = None
+            self.key = None
             self.ready = False
             return
         signature = (id(bundle.get("density")), id(bundle.get("cube")))
+        self.key = bundle.get("key")
         if signature == self._signature:
             return
         self._signature = signature
@@ -345,8 +350,16 @@ class GLCubeGrain:
 
     # -- bind --------------------------------------------------------------------------------
     def bind(self, u_1i, u_1f, u_3f, u_3fv, pixel_size_um, params,
-             unit_a=5, unit_b=6, unit_c=7, u_1fv=None):
+             unit_a=5, unit_b=6, unit_c=7, u_1fv=None, expect_key=None):
         if not self.ready:
+            u_1i("u_grain_cubes", 0)
+            return False
+        # The cubes describe one specific bake. Drawing a frame whose parameters belong to a
+        # different one is not a small error: the density axis and the print table stop
+        # agreeing, and a negative comes out as an orange positive (measured 2026-11-05).
+        # The caller says which bake this frame is; if it is not the one we hold, hand the
+        # frame to the single 3D LUT instead -- less grain, but the right picture.
+        if expect_key is not None and self.key is not None and expect_key != self.key:
             u_1i("u_grain_cubes", 0)
             return False
         for unit, tex, name in ((unit_a, self._density_tex, "u_density_lut"),

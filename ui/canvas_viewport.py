@@ -2828,6 +2828,47 @@ class DarkroomGLCanvas(QOpenGLWidget):
         else:
             super().mouseDoubleClickEvent(event)
 
+    def _grain_key_for(self, params):
+        """The LUT key this frame's parameters would bake to, or ``None`` if we cannot tell.
+
+        The grain stage is fed the density and print cubes directly and skips the 3D LUT, so
+        the cubes and the frame have to describe the *same* bake. Comparing keys is how the
+        canvas finds out before drawing; ``None`` means "cannot tell" and keeps the old
+        behaviour rather than turning the grain off on a guess.
+        """
+        eng = getattr(self, "engine", None)
+        if eng is None:
+            parent = self.parent()
+            eng = getattr(parent, "engine", None) if parent is not None else None
+        if eng is None or not hasattr(eng, "_lut_cache_key"):
+            return None
+        try:
+            # `params_override` does not always carry the stock ids (the export path forwards
+            # only the sliders), and a key built from ``None`` would never match the bundle --
+            # the guard would then silently drop the grain on every export.  Fall back to the
+            # same sources the render uses for its own ids.
+            # The outermost window owns the current selection; ``parent()`` here is a plain
+            # container QWidget, and the canvas keeps no copy of its own.  A key built without
+            # them can never match the bundle, and the guard would then silently drop the
+            # grain (measured: film came back as ``none`` on every export).
+            owner = self.window() or self.parent()
+            film = params.get("film_stock") or ""
+            if not film or film == "none":
+                film = (getattr(owner, "current_film_stock", None)
+                        or getattr(self, "current_film_stock", None) or "none")
+            paper = params.get("paper_profile") or params.get("paper_stock") or ""
+            if not paper or paper == "none":
+                paper = (getattr(owner, "current_paper_stock", None)
+                         or getattr(self, "current_paper_stock", None) or "none")
+            pmode = str(params.get("print_mode")
+                        or getattr(self, "current_print_mode", None) or "optical").lower()
+            # 17 is the size the bundle is baked at (`_grain_bundle_for_current`).
+            key, _ = eng._lut_cache_key(film, paper, 17, params, pmode)
+            return key
+        except Exception as ex:      # noqa: BLE001 - a missing key must not break an export
+            print(f"[DarkroomGLCanvas] grain key 计算失败，退回纯 LUT: {ex}")
+            return None
+
     def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None):
         """Render image at target resolution on GPU using an offscreen FBO.
         Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
@@ -3239,12 +3280,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # The pitch belongs to the frame being *written*, not to the source: a half-size
             # export samples the same film with pixels twice as wide, so it must draw its own
             # particle counts or the grain would scale with the downscale.
-            _px_um = (float(self.params.get("film_format_mm", 35.0)) * 1000.0
+            # Everything here comes from `eff_params`, not `self.params`: an export can carry a
+            # different film, exposure, print mode or grain setting than the live preview, and
+            # reading the preview's copy is how the grain used to be drawn from the wrong bake.
+            _px_um = (float(eff_params.get("film_format_mm", 35.0)) * 1000.0
                       / float(max(1, int(target_w), int(target_h))))
-            _override = self.params.get("grain_px_um_override")   # diagnostic: pin the pitch
+            _override = eff_params.get("grain_px_um_override")   # diagnostic: pin the pitch
             if _override:
                 _px_um = float(_override)
-            self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params, u_1fv=u_1fv)
+            self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, eff_params, u_1fv=u_1fv,
+                                   expect_key=self._grain_key_for(eff_params))
 
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 

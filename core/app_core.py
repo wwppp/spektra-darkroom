@@ -2278,6 +2278,11 @@ class SpektraEngine:
         dir_same = round(float(params_dict.get("dir_samelayer", 1.0)), 2)
         morph_gamma = round(float(params_dict.get("morph_gamma", 1.0)), 2)
         dev_exh = round(float(params_dict.get("developer_exhaustion", 0.0)), 2)
+        # The white-point lift rewrites the top of the cube, so it belongs to the table's
+        # identity -- and it has to be the *same* rounding `_lut_cache_key` uses, or the grain
+        # bundle looks up a key this bake never writes (measured: grain vanished because the
+        # stored key was 12-tuple while lookups had grown to 13).
+        wp_lift = float(params_dict.get("white_point_lift", 1.0))
 
         is_default_params = (
             illuminant in ("TH-KG3", "lamp") and
@@ -2295,7 +2300,7 @@ class SpektraEngine:
         base_paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
         neutral, neutral_digest = self._filter_fingerprint(base_paper_key, film_stock, push_stops)
         cache_key = (film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same,
-                     morph_gamma, dev_exh, push_stops, base_paper_key, neutral)
+                     morph_gamma, dev_exh, push_stops, base_paper_key, neutral, round(wp_lift, 1))
         with self._render_lock:
             if cache_key in self._lut_cache:
                 self._lut_cache.move_to_end(cache_key)
@@ -2338,9 +2343,13 @@ class SpektraEngine:
         # The bundled tables are all standard development; a pushed bake must never be served one.
         # ``neutral_digest`` is what makes a re-solved filtration miss: the profile fingerprint
         # above only covers the curves, and the filters live in their own file.
+        # The white-point lift rewrites the top of every table, so a table baked before it
+        # existed is a *different* table: v10 + the lift value in the name makes the old
+        # files miss instead of serving an un-lifted curve from disk.
+        wp_tag = f"__wp{round(wp_lift, 1):g}"
         if is_default_params and not push_stops:
-            cache_file = os.path.join(cache_dir, f"v9_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
-            bundled_file = os.path.join(bundled_cache_dir, f"v9_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}.npy")
+            cache_file = os.path.join(cache_dir, f"v10_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}{wp_tag}.npy")
+            bundled_file = os.path.join(bundled_cache_dir, f"v10_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}{wp_tag}.npy")
             load_target = cache_file if os.path.exists(cache_file) else (bundled_file if os.path.exists(bundled_file) else None)
             # The grain law reads the negative density, not the LUT. Serving a cached LUT without
             # its density cube would silently drop the grain back to the -log10(lin) domain, so a
@@ -2540,6 +2549,30 @@ class SpektraEngine:
         lut_output = sim._pipeline.process(log_e_film, inject=Tap.LOG_E_FILM, collect=Tap.RGB_OUT)
         lut_3d = np.clip(lut_output.reshape(lut_size, lut_size, lut_size, 3), 0.0, 1.0).astype(np.float32)
 
+        # White point lift.
+        #
+        # The physical chain stops well short of white: a negative's clear base is not a
+        # perfect transmitter, the paper has its own Dmin, and `lut_mode` additionally forces
+        # `scanner.white_correction` and the sharpening off (neither is a per-pixel table
+        # transform once the image-wide max is involved). Measured on a sunlit frame the
+        # densest highlight lands at 0.83 in sRGB, so the histogram's right edge sits 20
+        # levels below 255 and every frame reads a stop duller than the reference.
+        #
+        # So lift the top end of the table to `target`, leaving everything below `lo`
+        # untouched: a smoothstep ramp means m id-grey does not move at all, and only the
+        # highlights gain. This is a per-pixel transform, which is exactly why it can live
+        # in the cube.
+        if wp_lift > 0.001:
+            peak = float(np.nanmax(lut_3d))
+            wp_target = 0.975
+            wp_lo = 0.45
+            if wp_lo < peak < wp_target - 0.005:
+                t = np.clip((lut_3d - wp_lo) / (peak - wp_lo), 0.0, 1.0)
+                w = t * t * (3.0 - 2.0 * t)
+                lut_3d = np.clip(lut_3d + (wp_target - peak) * w * wp_lift, 0.0, 1.0).astype(np.float32)
+                print(f"[SpektraEngine] 白点抬升: 峰值 {peak:.3f} -> {float(np.nanmax(lut_3d)):.3f} "
+                      f"(lo={wp_lo}, lift={wp_lift:g})")
+
         if is_bw:
             # Enforce strictly neutral monochrome output (Rec.709 luminance)
             luma = 0.2126 * lut_3d[..., 0] + 0.7152 * lut_3d[..., 1] + 0.0722 * lut_3d[..., 2]
@@ -2703,9 +2736,13 @@ class SpektraEngine:
             film_stock, int(round(float(params_dict.get("push_ev", 0) or 0))))
         base_paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
         neutral, _ = self._filter_fingerprint(base_paper_key, film_stock, push_stops)
+        # Part of the table's *contents*: the white-point lift rewrites the top of the cube,
+        # so two bakes that differ only in it are different tables. Rounding to 0.1 keeps the
+        # usual 0/0.5/1 settings from spraying the disk cache with near-identical entries.
+        wp_lift = round(float(params_dict.get("white_point_lift", 1.0)), 1)
 
         return ((film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same,
-                 morph_gamma, dev_exh, push_stops, base_paper_key, neutral),
+                 morph_gamma, dev_exh, push_stops, base_paper_key, neutral, wp_lift),
                 (film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same,
                  push_stops))
 
@@ -2752,15 +2789,35 @@ class SpektraEngine:
         lo, hi = grain_bake.density_axis_range(density, film_data)
         t0 = time.time()
         print_cube = grain_bake.bake_density_to_rgb(sim, lut_size, lo, hi)
+
+        # The 3D LUT gets a white-point lift at the end of its bake, and this cube has to get
+        # the *same* one: it is what the frame is actually drawn through whenever the grain
+        # stage is on, so without it turning grain on would pull the highlights back down
+        # (measured p99.9 0.770 -> 0.728, max 0.814 -> 0.771 on one frame). Same ramp, same
+        # target, peak taken from this cube because its own top differs from the LUT's.
+        wp_lift = float((params_dict or {}).get("white_point_lift", 1.0))
+        if wp_lift > 0.001:
+            peak = float(np.nanmax(print_cube))
+            if 0.45 < peak < 0.970:
+                t = np.clip((print_cube - 0.45) / (peak - 0.45), 0.0, 1.0)
+                w = t * t * (3.0 - 2.0 * t)
+                print_cube = np.clip(print_cube + (0.975 - peak) * w * wp_lift,
+                                     0.0, 1.0).astype(np.float32)
+
         print(f"[SpektraGrain] 打印立方体烘焙完毕 ({lut_size}^3, "
               f"{round((time.time() - t0) * 1000, 1)}ms)")
 
         # The LUT's Simulator carries grain- and scan-disabled parameters (particle area zeroed,
         # unsharp zeroed by `digest_params`, because neither can be baked into a table), so the
         # grain law and the scan sharpening both come from a clean parameter set for this stock.
+        # The paper is only there because `init_params` needs one to build a params object: a
+        # positive stock scans straight off the film, and a scanned negative has no sheet, so
+        # neither reads the print profile at all. Passing None used to reach `load_profile` and
+        # raise `NoneType + str`, which `_grain_bundle_for_current` swallows into a None bundle --
+        # and that is a frame with *no grain at all*, on every slide stock in the app.
         from spektrafilm import init_params
         paper_for_grain = None if paper_stock in (None, "", "none", "scan") else paper_stock
-        clean_params = init_params(film_stock, paper_for_grain)
+        clean_params = init_params(film_stock, paper_for_grain or "kodak_2383")
         grain_params = clean_params.film_render.grain
 
         bundle = {
@@ -2775,6 +2832,14 @@ class SpektraEngine:
             # without it the frame loses a third of its high-frequency energy.
             "unsharp": tuple(getattr(clean_params.scanner, "unsharp_mask", (0.0, 0.0))),
             "film": film_stock,
+            # The bake this bundle describes. The grain stage is fed the density and print cubes
+            # directly, so it bypasses the 3D LUT entirely -- if a frame is rendered with a
+            # *different* parameter set than the one these cubes were baked for, the two tables
+            # describe different prints and the frame comes out inverted orange (measured
+            # 2026-11-05: R150/G83/B61 where the correct render is R50/G45/B38). The canvas
+            # compares this against the parameters it is about to draw and falls back to the
+            # single LUT when they disagree.
+            "key": lut_key,
         }
         if len(self._grain_bundle_cache) >= 8:
             self._grain_bundle_cache.pop(next(iter(self._grain_bundle_cache)))
