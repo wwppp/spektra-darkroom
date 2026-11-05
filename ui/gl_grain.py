@@ -285,18 +285,31 @@ class GLCubeGrain:
 
     # -- upload ------------------------------------------------------------------------------
     def set_bundle(self, bundle):
-        """Stage a bundle for the next paint; ``None`` turns the path off."""
+        """Stage a bundle for the next paint; ``None`` turns the path off.
+
+        The change-detection signature must be CONTENT, not object identity: the old
+        code compared ``id(density)``/``id(cube)``, and Python recycles the addresses
+        of garbage-collected arrays -- when the app switched films, the new stock's
+        cubes could land on the exact addresses the previous stock's had, the check
+        then concluded "same bundle", skipped the upload, and the shader kept reading
+        the PREVIOUS film's density/print cubes under the new film's LUT (measured:
+        gray04 came out magenta dE 26 for f_64d whenever it followed gold_200 in the
+        same process).  The bundle key is the engine's own full cache identity, so it
+        is the honest fingerprint; shapes ride along as a cheap sanity net.
+        """
         if bundle is None:
             self._pending = None
             self._signature = None
             self.key = None
             self.ready = False
             return
-        signature = (id(bundle.get("density")), id(bundle.get("cube")))
-        self.key = bundle.get("key")
+        signature = (bundle.get("key"),
+                     np.shape(bundle.get("density")),
+                     np.shape(bundle.get("cube")))
         if signature == self._signature:
             return
         self._signature = signature
+        self.key = bundle.get("key")
         self._pending = bundle
 
     def upload_pending(self, unit_a=5, unit_b=6, unit_c=7):
