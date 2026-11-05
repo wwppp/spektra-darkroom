@@ -520,6 +520,19 @@ class ParamScrubSlider(QWidget):
         self.apply_theme()
         theme_manager.themeChanged.connect(self.apply_theme)
 
+    def add_header_widget(self, w, stretch=0):
+        """Mount an extra control in the header row, right after the scrub title.
+
+        Used for compact per-parameter actions (e.g. the AU metered-exposure button
+        on the exposure slider) that would otherwise eat a full panel row.
+        """
+        item = self.layout().itemAt(0)
+        if item is None:
+            return
+        header = item.layout()
+        if header is not None:
+            header.addWidget(w, stretch)
+
     def apply_theme(self, theme_name=None):
         is_dark = theme_manager.is_dark()
         input_bg = "#141414" if is_dark else "#ffffff"

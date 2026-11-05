@@ -1,7 +1,7 @@
 import os
 import math
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF, QTimer
+from PySide6.QtCore import Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF, QTimer, QEvent
 from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QActionGroup, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
 from PySide6.QtWidgets import QMenu, QLabel, QWidget, QPushButton, QVBoxLayout
 from ui.window_utils import get_darkroom_menu_style, get_icon
@@ -1307,6 +1307,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._canvas_long_press_timer.timeout.connect(self._on_canvas_long_press_timeout)
         self._is_canvas_long_pressing = False
         self._press_start_pos = None
+
+        # Tablet/touch: accept raw touch so two-finger pinch can zoom (single finger
+        # pans in touchEvent).  Accepting touch suppresses the synthesized mouse
+        # events, so the touch handler below mirrors the mouse pan/long-press paths.
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self._touch_pan_active = False
+        self._touch_last_pos = None
 
         # Parameters
         self.params = {
@@ -2665,6 +2672,92 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         menu.exec(event.globalPos())
 
+    def _zoom_at(self, factor: float, ax: float, ay: float):
+        """Zoom by ``factor`` anchored at widget coordinates (ax, ay). Shared by
+        the wheel handler and the two-finger pinch path so the anchor math cannot
+        drift between them."""
+        ref_w = float(getattr(self, "_master_width", 0) or self._image_width)
+        ref_h = float(getattr(self, "_master_height", 0) or self._image_height)
+        aspect = ref_w / float(max(1.0, ref_h)) if ref_w > 0 else 1.0
+        screen_aspect = float(self.width()) / float(max(1.0, self.height())) if self.width() > 0 else 1.0
+        base_w = self.height() * aspect if screen_aspect > aspect else self.width()
+        zoom_100 = (ref_w / float(max(1.0, base_w))) if (ref_w > 0 and base_w > 0) else 1.0
+        max_zoom = max(24.0, zoom_100 * 4.0)
+
+        old_zoom = self.zoom
+        new_zoom = max(0.2, min(max_zoom, self.zoom * factor))
+        if new_zoom == old_zoom:
+            return
+        self.zoom = new_zoom
+
+        anchor_norm_x = (ax / float(max(1, self.width())) - 0.5) * 2.0
+        anchor_norm_y = ((self.height() - ay) / float(max(1, self.height())) - 0.5) * 2.0
+
+        self.pan_x = anchor_norm_x - (anchor_norm_x - self.pan_x) * (new_zoom / old_zoom)
+        self.pan_y = anchor_norm_y - (anchor_norm_y - self.pan_y) * (new_zoom / old_zoom)
+        self._clamp_pan()
+
+        if self.params.get("view_mode") == 1:
+            self._clamp_split_to_image()
+            self._update_badges()
+
+        self.zoomChanged.emit(self.get_actual_zoom_ratio())
+        self.update()
+
+    def event(self, e):
+        # Native touch: one finger pans (mirrors the mouse pan path), two fingers
+        # pinch-zoom anchored between the fingertips.  Handled directly on the raw
+        # touch stream rather than through QPinchGesture so behaviour does not
+        # depend on the platform gesture recognizer (Windows precision touchpads
+        # deliver palm/rejection noise that the recognizer drops frames for).
+        t = e.type()
+        if t == QEvent.Type.TouchBegin:
+            self.begin_interaction()
+            pts = e.touchPoints()
+            self._touch_pan_active = len(pts) == 1
+            self._touch_last_pos = pts[0].position() if pts else None
+            e.accept()
+            return True
+        if t == QEvent.Type.TouchUpdate:
+            pts = e.touchPoints()
+            n = len(pts)
+            if n >= 2:
+                self._touch_pan_active = False
+                p0, p1 = pts[0], pts[1]
+                d0 = p0.startPos() - p0.position()
+                d1 = p1.startPos() - p1.position()
+                dist0 = max(1e-3, float(d0.manhattanLength()))
+                dist1 = max(1e-3, float(d1.manhattanLength()))
+                w0, w1 = dist1 / (dist0 + dist1), dist0 / (dist0 + dist1)
+                cx = p0.position().x() * w0 + p1.position().x() * w1
+                cy = p0.position().y() * w0 + p1.position().y() * w1
+                sd0 = max(1e-3, float((p0.startPos() - p1.startPos()).manhattanLength()))
+                sd1 = max(1e-3, float((p0.position() - p1.position()).manhattanLength()))
+                self._zoom_at(sd1 / sd0, cx, cy)
+                e.accept()
+                return True
+            if n == 1 and self._touch_pan_active and self._touch_last_pos is not None:
+                pos = pts[0].position()
+                delta = pos - self._touch_last_pos
+                self._touch_last_pos = pos
+                if self._has_image:
+                    dx = (delta.x() / float(max(1, self.width()))) * 2.0
+                    dy = -(delta.y() / float(max(1, self.height()))) * 2.0
+                    self.pan_x += dx
+                    self.pan_y += dy
+                    self._clamp_pan()
+                    self.update()
+                e.accept()
+                return True
+            e.accept()
+            return True
+        if t == QEvent.Type.TouchEnd:
+            self._touch_pan_active = False
+            self._touch_last_pos = None
+            e.accept()
+            return True
+        return super().event(e)
+
     def _clamp_pan(self):
         """Clamp pan_x and pan_y to prevent the image from being thrown out of the viewport."""
         limit = max(1.5, self.zoom * 2.0)
@@ -2677,33 +2770,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if delta == 0:
             return
 
-        ref_w = float(getattr(self, "_master_width", 0) or self._image_width)
-        ref_h = float(getattr(self, "_master_height", 0) or self._image_height)
-        aspect = ref_w / float(max(1.0, ref_h)) if ref_w > 0 else 1.0
-        screen_aspect = float(self.width()) / float(max(1.0, self.height())) if self.width() > 0 else 1.0
-        base_w = self.height() * aspect if screen_aspect > aspect else self.width()
-        zoom_100 = (ref_w / float(max(1.0, base_w))) if (ref_w > 0 and base_w > 0) else 1.0
-        max_zoom = max(24.0, zoom_100 * 4.0)
-
         factor = 1.15 if delta > 0 else 0.87
-        old_zoom = self.zoom
-        new_zoom = max(0.2, min(max_zoom, self.zoom * factor))
-        self.zoom = new_zoom
-
-        # Mouse relative zoom
-        mouse_norm_x = (event.position().x() / float(max(1, self.width())) - 0.5) * 2.0
-        mouse_norm_y = ((self.height() - event.position().y()) / float(max(1, self.height())) - 0.5) * 2.0
-
-        self.pan_x = mouse_norm_x - (mouse_norm_x - self.pan_x) * (new_zoom / old_zoom)
-        self.pan_y = mouse_norm_y - (mouse_norm_y - self.pan_y) * (new_zoom / old_zoom)
-        self._clamp_pan()
-
-        if self.params.get("view_mode") == 1:
-            self._clamp_split_to_image()
-            self._update_badges()
-
-        self.zoomChanged.emit(self.get_actual_zoom_ratio())
-        self.update()
+        self._zoom_at(factor, event.position().x(), event.position().y())
         event.accept()
 
     def _on_canvas_long_press_timeout(self):

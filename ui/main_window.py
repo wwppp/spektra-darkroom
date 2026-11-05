@@ -3955,6 +3955,15 @@ class DarkroomMainWindow(QMainWindow):
                     ev = float(c_chk.get("auto_ev", 0.0) or 0.0)
             except Exception:
                 pass
+        # Last resort: the meter is idempotent, so measuring the already-loaded linear
+        # ProPhoto preview here gives the same answer the decode worker would have
+        # stored (covers previews cached by builds that predate the auto_ev field).
+        if abs(ev) < 1e-4 and photo is not None and photo.get("float_img") is not None:
+            try:
+                ev = float(SpektraEngine.calculate_auto_exposure_ev(photo["float_img"]))
+                photo["auto_ev"] = ev
+            except Exception:
+                pass
         if abs(ev) < 1e-4:
             self.set_app_status("测光建议为 0 EV，无需调整", timeout_ms=2500)
             return
@@ -3980,18 +3989,21 @@ class DarkroomMainWindow(QMainWindow):
         # One-tap metered exposure, mirroring the reference's Auto Adjust: the meter runs on
         # every decode but nothing ships until this button applies its suggestion to the
         # exposure slider (the default chain stays at 0 EV -- see decode_photo_data).
-        self.btn_auto_ev = QPushButton("自动曝光")
-        self.btn_auto_ev.setToolTip("按 18% 中灰与高光测光建议设置曝光（不改变其他参数）")
-        self.btn_auto_ev.setFixedHeight(24)
+        # Compact "AU" chip in the exposure slider's header row (user request: the old
+        # full-width row button was oversized on tablets).
+        self.btn_auto_ev = QPushButton("AU")
+        self.btn_auto_ev.setToolTip("自动曝光 (AU)：按 18% 中灰与高光测光建议设置曝光（不改变其他参数）")
+        self.btn_auto_ev.setFixedSize(38, 22)
         self.btn_auto_ev.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_auto_ev.setStyleSheet("""
             QPushButton {
                 background: #2a2f3a;
                 color: #cbd5e1;
-                font-size: 12px;
+                font-size: 11px;
+                font-weight: 600;
                 border: 1px solid #3b4252;
                 border-radius: 5px;
-                padding: 2px 10px;
+                padding: 0px 4px;
             }
             QPushButton:hover {
                 background: #374151;
@@ -4002,7 +4014,7 @@ class DarkroomMainWindow(QMainWindow):
             }
         """)
         self.btn_auto_ev.clicked.connect(self._on_auto_exposure)
-        self.sec_exposure.addWidget(self.btn_auto_ev)
+        self.slider_ev.add_header_widget(self.btn_auto_ev)
 
         self.slider_highlights = AdobeScrubSlider(
             "高光", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
@@ -10698,12 +10710,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 cached_prev = session_cache_manager.get_photo_preview(photo["path"])
                 if cached_prev is not None:
                     photo["float_img"] = cached_prev
-                    if abs(base_ev) < 0.0001 and photo.get("is_raw", True):
-                        base_ev = SpektraEngine.calculate_auto_exposure_ev(cached_prev)
-                        photo["base_ev"] = base_ev
-                        self._active_base_ev = base_ev
-                        self.current_params["base_ev"] = base_ev
-                        session_cache_manager.save_photo_cache(photo["path"], photo, save_preview=False)
+                    # NOTE: no automatic metering here.  The decode worker stores the metered
+                    # suggestion in auto_ev and keeps base_ev at 0 (2026-11-04 decision: the
+                    # reference engine ships no automatic adjustment on load).  An older build
+                    # recomputed the meter into base_ev on this cached-preview path, which
+                    # pre-applied the correction AND made the AU button double-apply or
+                    # report "0 EV, nothing to do" -- the "auto exposure does nothing" report.
                 else:
                     if os.environ.get("FAST_TEST"):
                         res = self.engine.load_image(photo["path"])
