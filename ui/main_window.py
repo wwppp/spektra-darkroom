@@ -4562,17 +4562,19 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_grain_strength = AdobeScrubSlider(
             "颗粒强度", 0.0, 3.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="颗粒强度倍率：1.0 = gold200 标定参考（内部 grain = 倍率 × 0.4）。\n"
-                    "0 = 无颗粒；>1 加粗颗粒速率，对黑白与彩色同时生效"
+            tooltip="颗粒强度倍率（σ 语义）：1.0 = gold200 标定参考，0 = 无颗粒，\n"
+                    "2.0 = 颗粒噪声幅度 ×2。内部按 Selwyn 反解写入粒子速率（grain = 0.4/倍率²）——\n"
+                    "速率越高颗粒越细密、观感越弱，所以倍率与速率是平方反比关系"
         )
         self.slider_grain_strength.valueChanged.connect(
-            lambda v: self._on_slider_live("grain", round(v * 0.4, 4)))
+            lambda v: self._on_slider_live("grain", round(0.4 / (v * v), 6) if v > 1e-3 else 0.0))
         self.slider_grain_strength.sliderReleased.connect(self._on_slider_committed)
         self.sec_grain.addWidget(self.slider_grain_strength)
 
         self.slider_grain_size = AdobeScrubSlider(
             "颗粒大小", 0.5, 2.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="颗粒粒子面积倍率：1.0 = 档案标定值；放大颗粒尺度，不改变速率"
+            tooltip="颗粒空间尺度：放大/缩小整个颗粒图案（团簇尺寸随倍率变化，σ 不变）。\n"
+                    "1.0 = 档案标定几何；颗粒密度（噪声幅度）由「颗粒强度」控制"
         )
         self.slider_grain_size.valueChanged.connect(lambda v: self._on_slider_live("grain_size", v))
         self.slider_grain_size.sliderReleased.connect(self._on_slider_committed)
@@ -8278,8 +8280,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'slider_halation'): self.slider_halation.set_value(p.get("halation_amount", p.get("halation", 1.0)))
             if hasattr(self, 'slider_halation_boost'): self.slider_halation_boost.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
 
-            # 银盐颗粒：滑块显示倍率，内部 grain = 倍率 × 0.4（M4 参考）
-            if hasattr(self, 'slider_grain_strength'): self.slider_grain_strength.set_value(float(p.get("grain", 0.4)) / 0.4)
+            # 银盐颗粒：强度滑块显示 σ 倍率，内部 grain = 0.4/σ²（Selwyn 反解；grain=0 → 无颗粒 → 滑块 0）
+            _g = float(p.get("grain", 0.4))
+            if hasattr(self, 'slider_grain_strength'):
+                self.slider_grain_strength.set_value((0.4 / _g) ** 0.5 if _g > 1e-6 else 0.0)
             if hasattr(self, 'slider_grain_size'): self.slider_grain_size.set_value(p.get("grain_size", 1.0))
             if hasattr(self, 'slider_grain_colour'): self.slider_grain_colour.set_value(p.get("grain_colour", 1.0))
 

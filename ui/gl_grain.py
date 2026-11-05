@@ -183,7 +183,7 @@ vec3 grain_apply(vec3 density, ivec2 px) {
         float var = 0.0;
         for (int sl = 0; sl < 3; sl++) {
             float dmax = u_grain_dmax_layer[sl][ch];
-            float npp = u_grain_ppu[sl][ch] * area * u_grain_strength / u_grain_size;
+            float npp = u_grain_ppu[sl][ch] * area * u_grain_strength;
             if (npp <= 0.0 || dmax <= 0.0) continue;
             float d = layer[sl] + u_grain_min_layer[sl][ch];
             float p = clamp(d / dmax, 1e-6, 1.0 - 1e-6);
@@ -233,13 +233,25 @@ vec3 grain_apply(vec3 density, ivec2 px) {
 uniform float u_grain_kernel[5];
 
 vec3 grain_field(vec3 density, vec2 image_px) {
-    ivec2 px = ivec2(floor(image_px + 0.5));
+    // u_grain_size is the *spatial* scale of the grain pattern: the lattice the RNG draws
+    // on and the dye-cloud convolution offsets are both divided by it, so 2.0 renders the
+    // calibrated clumps magnified 2x at unchanged sigma (the kernel weights still sum to 1),
+    // and 0.5 renders them finer.  The particle *rate* is strength's business alone (Selwyn:
+    // sigma ~ 1/sqrt(rate) -- a rate multiplier reads as an inverse graininess, which is why
+    // the strength slider is a sigma multiplier in the UI, not this uniform's raw value).
+    // At size = 1.0 both the lattice and the offsets are the calibrated geometry bit-for-bit.
+    float sc = max(u_grain_size, 0.05);
+    ivec2 px = ivec2(floor(image_px / sc + 0.5));
     if (u_grain_taps < 2) return grain_apply(density, px);
+    // Minification guard: below 1.0 the RNG lattice refines (finer pattern) but the
+    // convolution offsets stay >= 1 px apart -- scaling them down would collapse taps
+    // onto duplicate samples and alias (measured: sigma x1.7, lag-1 -> 0 at size 0.5).
+    float os = max(sc, 1.0);
     vec3 acc = vec3(0.0);
     for (int dy = -2; dy <= 2; dy++) {
         for (int dx = -2; dx <= 2; dx++) {
             float w = u_grain_kernel[dx + 2] * u_grain_kernel[dy + 2];
-            acc += grain_apply(density, px + ivec2(dx, dy)) * w;
+            acc += grain_apply(density, px + ivec2(ivec2(vec2(dx, dy) * os))) * w;
         }
     }
     return acc;
