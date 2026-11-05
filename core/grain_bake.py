@@ -138,7 +138,7 @@ def bake_layer_table(film_data, samples=256):
     }
 
 
-def grain_kernel_1d(pixel_size_um, final_blur_px=0.65, radius=2, decay_um=1.45):
+def grain_kernel_1d(pixel_size_um, final_blur_px=0.65, radius=2, decay_um=1.45, unsharp=None):
     """The discrete kernel the reference's dye-cloud cascade reduces to at this pitch.
 
     ``apply_grain_to_density_layers`` ends with two convolutions: the four Jarvis dye-cloud
@@ -147,8 +147,17 @@ def grain_kernel_1d(pixel_size_um, final_blur_px=0.65, radius=2, decay_um=1.45):
     separable kernel -- but the *discrete* weights are not the sampled gaussian: scipy's
     ``gaussian_filter`` truncates and renormalises each of the four terms at its own radius.
 
-    Rather than re-derive that (the first attempt at doing so came out 13 % too wide and
-    cost 0.87x the reference's sigma), the cascade is simply run on a delta here and the
+    ``unsharp`` folds the scanner's sharpening into the same kernel.  ``scan()`` runs
+    ``unsharp_mask(sigma, amount)`` on the display RGB *after* the grain has been developed,
+    and a pointwise print cube cannot carry a spatial filter at all -- so left out, the frame
+    loses 34 % of its high-frequency energy, grain included (measured: the reference's whole
+    frame comes out at sigma 8.77/9.94/10.27 through the scan, 6.58/7.35/7.58 with the mask
+    off).  Folding it here is exact for the grain: the density -> RGB cube is pointwise, so a
+    linear operator applied after it equals the same operator applied to the density
+    perturbation with the local slope as a scalar.
+
+    Rather than re-derive any of that (the first attempt at doing so came out 13 % too wide
+    and cost 0.87x the reference's sigma), the cascade is simply run on a delta here and the
     centre row read back.  The numbers handed to the shader are therefore the reference's
     own, at the resolution being rendered.
 
@@ -167,6 +176,11 @@ def grain_kernel_1d(pixel_size_um, final_blur_px=0.65, radius=2, decay_um=1.45):
         out += weight * gaussian_filter(delta, max(decay_px * factor, 0.1))
     if final_blur_px and final_blur_px > 0:
         out = gaussian_filter(out, float(final_blur_px))
+    if unsharp is not None:
+        sigma, amount = float(unsharp[0]), float(unsharp[1])
+        if sigma > 0 and amount > 0:
+            from spektrafilm.model.diffusion import apply_unsharp_mask
+            out = apply_unsharp_mask(np.repeat(out[..., None], 3, axis=2), sigma, amount)[..., 0]
 
     centre = radius + pad
     row = out[centre, centre - radius:centre + radius + 1].astype(np.float64)

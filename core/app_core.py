@@ -2755,11 +2755,13 @@ class SpektraEngine:
         print(f"[SpektraGrain] 打印立方体烘焙完毕 ({lut_size}^3, "
               f"{round((time.time() - t0) * 1000, 1)}ms)")
 
-        # The LUT's Simulator carries grain-disabled parameters (particle area zeroed by
-        # `digest_params`), so the grain law comes from a clean parameter set for this stock.
+        # The LUT's Simulator carries grain- and scan-disabled parameters (particle area zeroed,
+        # unsharp zeroed by `digest_params`, because neither can be baked into a table), so the
+        # grain law and the scan sharpening both come from a clean parameter set for this stock.
         from spektrafilm import init_params
         paper_for_grain = None if paper_stock in (None, "", "none", "scan") else paper_stock
-        grain_params = init_params(film_stock, paper_for_grain).film_render.grain
+        clean_params = init_params(film_stock, paper_for_grain)
+        grain_params = clean_params.film_render.grain
 
         bundle = {
             "density": np.ascontiguousarray(density, dtype=np.float32),
@@ -2768,6 +2770,10 @@ class SpektraEngine:
             "cube": print_cube,
             "layer_table": grain_bake.bake_layer_table(film_data),
             "grain": grain_bake.layer_scalars(film_data, grain_params, 1.0),
+            # The scanner's sharpening, folded into the grain kernel: `scan()` runs it on the
+            # display RGB, and a pointwise print cube cannot carry a spatial filter, so
+            # without it the frame loses a third of its high-frequency energy.
+            "unsharp": tuple(getattr(clean_params.scanner, "unsharp_mask", (0.0, 0.0))),
             "film": film_stock,
         }
         if len(self._grain_bundle_cache) >= 8:

@@ -250,6 +250,7 @@ class GLCubeGrain:
         self.density_min = np.zeros(3, dtype=np.float32)
         self.density_max = np.ones(3, dtype=np.float32)
         self.grain = {}
+        self.unsharp = (0.0, 0.0)
         self.layer_axis_min = np.zeros(3, dtype=np.float32)
         self.layer_axis_max = np.ones(3, dtype=np.float32)
         self._kernel = np.full(5, 0.2, dtype=np.float32)
@@ -290,6 +291,7 @@ class GLCubeGrain:
         self.layer_axis_min = np.asarray(layer_table["axis_min"], dtype=np.float32)
         self.layer_axis_max = np.asarray(layer_table["axis_max"], dtype=np.float32)
         self.grain = pending["grain"]
+        self.unsharp = tuple(pending.get("unsharp") or (0.0, 0.0))
         self.ready = True
         self._pending = None
 
@@ -392,14 +394,17 @@ class GLCubeGrain:
         mode = int(params.get("grain_kernel_mode", 0))
         final_blur = float(g.get("final_blur_px", 0.65) or 0.0)
         decay_um = 0.0 if mode == 1 else 1.45
+        unsharp = self.unsharp if mode == 0 else (0.0, 0.0)
         if mode == 2:
             final_blur = 0.0
             decay_um = 0.0
-        key = (round(float(pixel_size_um), 5), round(final_blur, 4), decay_um, bool(u_1fv))
+        key = (round(float(pixel_size_um), 5), round(final_blur, 4), decay_um,
+               unsharp, bool(u_1fv))
         if self._kernel_key != key:
             import core.grain_bake as grain_bake
             self._kernel = grain_bake.grain_kernel_1d(
-                float(pixel_size_um), final_blur_px=final_blur, decay_um=decay_um)
+                float(pixel_size_um), final_blur_px=final_blur, decay_um=decay_um,
+                unsharp=unsharp)
             self._kernel_key = key
         if u_1fv is not None:
             u_1fv("u_grain_kernel", self._kernel)
