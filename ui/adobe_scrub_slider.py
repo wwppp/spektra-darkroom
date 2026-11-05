@@ -17,17 +17,25 @@ class ScrubLabel(QLabel):
     - Seamless cursor wrapping across screen boundaries for infinite continuous dragging.
     - Modifier keys: Ctrl/Alt for ultra-fine (0.2x), Shift for accelerated (2.5x).
     - Double-click resets to default value.
+    - Touch / remote-mouse friendly: the press does not grab until the gesture proves
+      horizontal (>= ~7 px, x-dominant); a vertical intent cancels the scrub so the
+      panel scroll keeps working when the drag starts on a label.
     """
     scrubDelta = Signal(float)
     scrubFinished = Signal()
     doubleClicked = Signal()
 
+    INTENT_PX = 7.0
+
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
         self._dragging = False
+        self._intent = None            # None | 'h' | 'v'
+        self._press_global = None
         self._last_global_x = 0.0
         self.setMinimumWidth(10)
+        self.setMinimumHeight(22)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.apply_theme()
         theme_manager.themeChanged.connect(self.apply_theme)
@@ -66,18 +74,33 @@ class ScrubLabel(QLabel):
             event.ignore()
             return
         if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True
+            # Intent lock: wait for the gesture to prove horizontal before grabbing.
+            self._intent = None
+            self._press_global = event.globalPosition()
             self._last_global_x = float(event.globalPosition().x())
-            try:
-                self.grabMouse(Qt.CursorShape.SizeHorCursor)
-            except Exception:
-                pass
-            QApplication.setOverrideCursor(Qt.CursorShape.SizeHorCursor)
             event.accept()
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._press_global is not None and not self._dragging and self._intent is None:
+            pos = event.globalPosition()
+            dx = abs(pos.x() - self._press_global.x())
+            dy = abs(pos.y() - self._press_global.y())
+            if max(dx, dy) >= self.INTENT_PX:
+                if dy > dx:
+                    self._intent = 'v'      # vertical intent: give the gesture to the scroll
+                    self._press_global = None
+                    event.accept()
+                    return
+                self._intent = 'h'
+                self._dragging = True
+                self._last_global_x = float(pos.x())
+                try:
+                    self.grabMouse(Qt.CursorShape.SizeHorCursor)
+                except Exception:
+                    pass
+                QApplication.setOverrideCursor(Qt.CursorShape.SizeHorCursor)
         if self._dragging:
             cur_global_pos = event.globalPosition()
             cur_x = float(cur_global_pos.x())
@@ -129,6 +152,8 @@ class ScrubLabel(QLabel):
                 except Exception:
                     pass
                 self.scrubFinished.emit()
+            self._intent = None
+            self._press_global = None
             event.accept()
         else:
             super().mouseReleaseEvent(event)
@@ -136,6 +161,8 @@ class ScrubLabel(QLabel):
     def hideEvent(self, event):
         if self._dragging:
             self._dragging = False
+            self._intent = None
+            self._press_global = None
             try:
                 self.releaseMouse()
             except Exception:
@@ -163,17 +190,27 @@ class RoundScrubSlider(QSlider):
     infinitely continuous smooth visual knob movement (no jerky stepping feel),
     stepped discrete value quantization, optional color gradient track,
     and center detent indicator.
+
+    Touch behaviour: the value does not jump on touch-down.  The first ~8 px of
+    travel decide the gesture -- horizontal grabs the knob (jumping to the finger
+    once, then tracking it), vertical cancels so the panel scroll keeps working.
+    A clean tap (no intent) still sets the value at the tap position, so both
+    click-to-set on the desktop and tap-to-set on a tablet keep working.
     """
     doubleClicked = Signal()
+    INTENT_PX = 8.0
+    KNOB_R = 9.0
 
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
         self._hover = False
         self._pressed = False
         self._smooth_x = None
+        self._press_pos = None
+        self._intent = None            # None | 'h' | 'v'
         self.track_gradient = None
         self.has_center_detent = False
-        self.setFixedHeight(18)
+        self.setFixedHeight(28)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         theme_manager.themeChanged.connect(lambda _: self.update())
 
@@ -189,7 +226,7 @@ class RoundScrubSlider(QSlider):
 
     def _update_from_mouse_x(self, mouse_x):
         w = self.width()
-        r = 6.0
+        r = self.KNOB_R
         x_start = r + 2.0
         x_end = w - r - 2.0
         span = max(1.0, x_end - x_start)
@@ -209,7 +246,7 @@ class RoundScrubSlider(QSlider):
     def set_continuous_ratio(self, ratio: float):
         """Set continuous floating visual knob position from external continuous ratio [0.0..1.0]."""
         w = self.width()
-        r = 6.0
+        r = self.KNOB_R
         x_start = r + 2.0
         x_end = w - r - 2.0
         span = max(1.0, x_end - x_start)
@@ -228,7 +265,8 @@ class RoundScrubSlider(QSlider):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             self._pressed = True
-            self._update_from_mouse_x(event.position().x())
+            self._press_pos = event.position()
+            self._intent = None          # no value change until the gesture proves horizontal
             event.accept()
         else:
             super().mousePressEvent(event)
@@ -238,14 +276,38 @@ class RoundScrubSlider(QSlider):
             event.ignore()
             return
         if self._pressed:
-            self._update_from_mouse_x(event.position().x())
+            if self._intent is None:
+                pos = event.position()
+                dx = abs(pos.x() - self._press_pos.x())
+                dy = abs(pos.y() - self._press_pos.y())
+                if max(dx, dy) < self.INTENT_PX:
+                    event.accept()
+                    return
+                if dy > dx:
+                    self._intent = 'v'   # vertical intent: cancel, keep the value untouched
+                    self._pressed = False
+                    self._smooth_x = None
+                    self.update()
+                    event.accept()
+                    return
+                self._intent = 'h'       # horizontal: take the knob to the finger once, then track
+                self._update_from_mouse_x(event.position().x())
+                event.accept()
+                return
+            if self._intent == 'h':
+                self._update_from_mouse_x(event.position().x())
             event.accept()
         else:
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._pressed and self._intent is None:
+                # A clean tap on the track still sets the value at the tap position.
+                self._update_from_mouse_x(event.position().x())
             self._pressed = False
+            self._intent = None
+            self._press_pos = None
             self._smooth_x = None
             self.update()
             self.sliderReleased.emit()
@@ -273,7 +335,7 @@ class RoundScrubSlider(QSlider):
         w = self.width()
         h = self.height()
         cy = h / 2.0
-        r = 6.0  # knob radius = 6px (12px diameter)
+        r = self.KNOB_R  # touch-friendly knob radius
 
         x_start = r + 2.0
         x_end = w - r - 2.0
@@ -404,7 +466,8 @@ class ParamScrubSlider(QWidget):
 
         self.value_edit = QLineEdit()
         self.value_edit.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.value_edit.setFixedWidth(52)
+        self.value_edit.setFixedWidth(64)
+        self.value_edit.setMinimumHeight(24)
         self.value_edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.value_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.value_edit.setToolTip("点击输入精确数值，Enter 确认")
@@ -414,7 +477,7 @@ class ParamScrubSlider(QWidget):
 
         self.reset_btn = QPushButton()
         self.reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.reset_btn.setFixedSize(16, 16)
+        self.reset_btn.setFixedSize(22, 22)
         self.reset_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.reset_btn.setToolTip("默认值")
@@ -426,12 +489,12 @@ class ParamScrubSlider(QWidget):
             self._icon_reset_disabled = QIcon(path_dis)
             self._icon_reset_active = QIcon(path_act)
             self.reset_btn.setIcon(self._icon_reset_disabled)
-            self.reset_btn.setIconSize(QSize(11, 11))
+            self.reset_btn.setIconSize(QSize(14, 14))
         else:
             reset_icon_path = get_icon_path("reset.png")
             if os.path.exists(reset_icon_path):
                 self.reset_btn.setIcon(QIcon(reset_icon_path))
-                self.reset_btn.setIconSize(QSize(11, 11))
+                self.reset_btn.setIconSize(QSize(14, 14))
             else:
                 self.reset_btn.setText("R")
         self.reset_btn.clicked.connect(self.reset)
@@ -478,8 +541,8 @@ class ParamScrubSlider(QWidget):
                     color: {input_fg};
                     border: 1px solid {input_border};
                     border-radius: 3px;
-                    padding: 1px 3px;
-                    font-size: 11px;
+                    padding: 2px 4px;
+                    font-size: 12px;
                     font-family: "Segoe UI", "Microsoft YaHei UI", Consolas, monospace;
                 }}
                 QLineEdit:focus {{
@@ -698,7 +761,7 @@ class DarkroomComboItemDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         w = option.rect.width() if (option and hasattr(option, "rect")) else 100
-        return QSize(w, 24)
+        return QSize(w, 32)
 
     def paint(self, painter, option, index):
         painter.save()
@@ -725,7 +788,7 @@ class DarkroomComboItemDelegate(QStyledItemDelegate):
             painter.fillRect(QRect(r.x(), r.y() + 2, 3, r.height() - 4), bar_color)
 
         # Text: 8px left margin matching the unexpanded combobox padding
-        txt_rect = QRect(r.x() + 8, r.y(), r.width() - 16, r.height())
+        txt_rect = QRect(r.x() + 10, r.y(), r.width() - 18, r.height())
         if is_selected:
             painter.setPen(QColor("#f59e0b") if is_dark else QColor("#d97706"))
             font = painter.font()
@@ -891,7 +954,7 @@ class DarkroomComboBox(QComboBox):
         space_below = avail.bottom() - (p_global.y() + self.height())
         space_above = p_global.y() - avail.top()
 
-        item_h = 24
+        item_h = 32
         max_space = max(space_below, space_above)
         fit_items = max(6, min(24, int((max_space - 20) / item_h)))
         self.setMaxVisibleItems(min(self.count(), fit_items))
@@ -979,7 +1042,7 @@ class ComboBoxRow(QWidget):
         layout.addWidget(self.label)
 
         self.combo = DarkroomComboBox()
-        self.combo.setFixedHeight(24)
+        self.combo.setFixedHeight(30)
         self.combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo.setMinimumWidth(100)
         if self.default_tooltip:
@@ -1046,8 +1109,8 @@ class ComboBoxRow(QWidget):
                 color: {combo_fg};
                 border: 1px solid {combo_border};
                 border-radius: 4px;
-                padding: 3px 22px 3px 8px;
-                font-size: 11px;
+                padding: 4px 24px 4px 8px;
+                font-size: 12px;
                 min-width: 100px;
             }}
             QComboBox:hover {{

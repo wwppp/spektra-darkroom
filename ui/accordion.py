@@ -170,10 +170,10 @@ class ParameterGroupCard(QWidget):
                     background: transparent;
                     border: none;
                     color: #f59e0b !important;
-                    font-size: 10.5px;
+                    font-size: 11px;
                     font-weight: 600;
-                    padding: 2px 5px;
-                    border-radius: 3px;
+                    padding: 5px 10px;
+                    border-radius: 4px;
                 }}
                 #accordionResetBtn:hover {{
                     color: #fde68a !important;
@@ -193,9 +193,9 @@ class ParameterGroupCard(QWidget):
                     background: transparent;
                     border: none;
                     color: {dim_color} !important;
-                    font-size: 10.5px;
+                    font-size: 11px;
                     font-weight: normal;
-                    padding: 2px 5px;
+                    padding: 5px 10px;
                 }}
                 {tt_ss}
             """)
