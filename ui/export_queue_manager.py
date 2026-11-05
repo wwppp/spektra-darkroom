@@ -512,6 +512,18 @@ class ExportQueueManager(QObject):
         worker.start()
 
     def _start_cpu_export(self, task):
+        # M4: the CPU block pipeline has no grain stage -- it was removed together with the
+        # tile model in 347b5cb, and the two-cube shader only exists on the GPU offscreen path.
+        # Falling back silently used to hand back a grain-free file while the preview still
+        # showed grain.  Say so instead of pretending the two paths are equivalent.
+        try:
+            grain_on = float(task.params.get("grain", 0.0)) > 0.0
+        except (TypeError, ValueError):
+            grain_on = False
+        if grain_on:
+            msg = "CPU 导出管线不含颗粒：本次导出无颗粒（请开启 GPU 全局加速）"
+            logger.warning("%s", msg)
+            self.status_updated.emit(msg, False)
         worker = _CpuExportWorker(self.engine, task)
         self._current_worker = worker
 

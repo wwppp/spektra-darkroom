@@ -26,6 +26,13 @@ from __future__ import annotations
 import numpy as np
 from OpenGL import GL
 
+# The document/export parameter ``grain`` is a fotufilm-era slider value (0.4 by default),
+# not a physical quantity.  The gold200 calibration was made at reference strength 1.0, so
+# 0.4 has to land on 1.0: the slider becomes a multiplier around the calibrated reference
+# instead of quietly halving the grain on every fresh document.  0 is a real "off".
+# M5 will rebuild the panel; M4 only makes the value live on both the preview and the export.
+GRAIN_REFERENCE = 0.4
+
 GRAIN_GLSL = r"""
 // ---------------------------------------------------------------------------------------------
 // Negative density and the print, as two tables with room for grain in between.
@@ -389,12 +396,19 @@ class GLCubeGrain:
         u_3f("u_grain_dmin", *[float(v) for v in np.asarray(g.get("density_min", np.zeros(3)))])
 
         u_1f("u_grain_px_um", float(pixel_size_um))
-        # `grain` is the old fotufilm-era slider and stays inert until M5 re-maps it; the
-        # reference strength is what ships today, so a fresh document renders the film as the
-        # upstream does rather than at 40 % of it.
-        u_1f("u_grain_strength", float(params.get("grain_amount", 1.0)))
+        # M4 parameter mapping.  `grain_amount` is a diagnostic key used by scratch probes
+        # (including the grain-free half of the residual acceptance pair); it wins when present.
+        # Otherwise the real document/export key `grain` drives the particle rate -- and
+        # `eff_params` reaches here on the offscreen path, so an export honours its own grain
+        # setting rather than silently rendering at full strength.
+        amount = params.get("grain_amount", None)
+        strength = (float(amount) if amount is not None
+                    else float(params.get("grain", GRAIN_REFERENCE)) / GRAIN_REFERENCE)
+        u_1f("u_grain_strength", max(0.0, strength))
         u_1f("u_grain_size", max(0.05, float(params.get("grain_size", 1.0))))
-        u_1f("u_grain_colour", float(g.get("colour_grain", 0.5)))
+        # The colour slider is M5's job: for now the calibrated per-bundle value stands, so a
+        # future per-stock colour mapping is not overridden by a stale fotufilm-era param.
+        u_1f("u_grain_colour", float(g.get("colour_grain", 1.0)))
         u_1i("u_grain_seed", int(params.get("grain_seed", 0)))
         u_1i("u_grain_taps", int(params.get("grain_taps", 25)))
         u_1i("u_grain_probe", int(params.get("grain_probe", 0)))
