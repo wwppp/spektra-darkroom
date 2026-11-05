@@ -230,28 +230,27 @@ vec3 grain_apply(vec3 density, ivec2 px) {
 //
 // A pointwise renderer cannot express a spatial filter for free, so the taps are evaluated:
 // every tap is the same pure function of its own pixel, which is what a two-pass blur does.
-uniform float u_grain_kernel[5];
+uniform float u_grain_kernel[9];
 
 vec3 grain_field(vec3 density, vec2 image_px) {
-    // u_grain_size is the *spatial* scale of the grain pattern: the lattice the RNG draws
-    // on and the dye-cloud convolution offsets are both divided by it, so 2.0 renders the
-    // calibrated clumps magnified 2x at unchanged sigma (the kernel weights still sum to 1),
-    // and 0.5 renders them finer.  The particle *rate* is strength's business alone (Selwyn:
-    // sigma ~ 1/sqrt(rate) -- a rate multiplier reads as an inverse graininess, which is why
-    // the strength slider is a sigma multiplier in the UI, not this uniform's raw value).
-    // At size = 1.0 both the lattice and the offsets are the calibrated geometry bit-for-bit.
-    float sc = max(u_grain_size, 0.05);
-    ivec2 px = ivec2(floor(image_px / sc + 0.5));
+    // u_grain_size scales the grain pattern through the KERNEL WEIGHTS, not the offsets and
+    // not the RNG lattice: the CPU resamples the calibrated 1D cascade onto a ±4 support
+    // (dilated for size > 1, narrowed for size < 1) and compensates the particle rate by the
+    // sum-of-squares ratio so sigma stays put.  Integer 1 px offsets keep the taps on smooth
+    // neighbouring draws -- a coarsened RNG lattice renders as hard square blocks (user
+    // report at size > 1.5) and scaled sparse offsets punch a correlation hole at lag 1.
+    // At size = 1.0 the uploaded kernel is the calibrated 5-tap centred in the 9 slots and
+    // the zero-weight taps skip, so both the numbers and the cost are the calibrated path.
+    ivec2 px = ivec2(floor(image_px + 0.5));
     if (u_grain_taps < 2) return grain_apply(density, px);
-    // Minification guard: below 1.0 the RNG lattice refines (finer pattern) but the
-    // convolution offsets stay >= 1 px apart -- scaling them down would collapse taps
-    // onto duplicate samples and alias (measured: sigma x1.7, lag-1 -> 0 at size 0.5).
-    float os = max(sc, 1.0);
     vec3 acc = vec3(0.0);
-    for (int dy = -2; dy <= 2; dy++) {
-        for (int dx = -2; dx <= 2; dx++) {
-            float w = u_grain_kernel[dx + 2] * u_grain_kernel[dy + 2];
-            acc += grain_apply(density, px + ivec2(ivec2(vec2(dx, dy) * os))) * w;
+    for (int dy = -4; dy <= 4; dy++) {
+        float wy = u_grain_kernel[dy + 4];
+        if (wy <= 0.0) continue;
+        for (int dx = -4; dx <= 4; dx++) {
+            float w = u_grain_kernel[dx + 4] * wy;
+            if (w <= 0.0) continue;
+            acc += grain_apply(density, px + ivec2(dx, dy)) * w;
         }
     }
     return acc;
@@ -410,6 +409,54 @@ class GLCubeGrain:
         u_3f("u_grain_dmin", *[float(v) for v in np.asarray(g.get("density_min", np.zeros(3)))])
 
         u_1f("u_grain_px_um", float(pixel_size_um))
+
+        # ---- dye-cloud + frame-blur kernel, sized for the grain_size slider ---------------
+        # The calibrated 1D cascade is 5 taps on ±2 px (below 1% of centre by |dx| = 2 at
+        # every pitch this app renders).  The size slider resamples that cascade onto a ±4
+        # support -- dilated for size > 1, narrowed for size < 1 -- and the rate is
+        # compensated by the sum-of-squares ratio so sigma is size-invariant
+        # (sigma ~ sqrt(sum k^2 / rate); integer 1 px offsets, no lattice coarsening).
+        # At size = 1.0 k9 is the base kernel centred in 9 slots: identical numbers, and the
+        # shader's zero-weight skip keeps the tap cost at the calibrated 5x5.
+        mode = int(params.get("grain_kernel_mode", 0))
+        final_blur = float(g.get("final_blur_px", 0.0) or 0.0)
+        # The decay length is resolved per stock from the archive fields now (see
+        # CRYSTAL_ANCHOR), so it rides with the bundle; the fallback is the anchor value.
+        decay_um = 0.0 if mode == 1 else float(g.get("dye_cloud_decay_um", grain_bake.DYE_CLOUD_DECAY_UM))
+        unsharp = self.unsharp if mode == 0 else (0.0, 0.0)
+        if mode == 2:
+            final_blur = 0.0
+            decay_um = 0.0
+        grain_size = max(0.05, float(params.get("grain_size", 1.0)))
+        key = (round(float(pixel_size_um), 5), round(final_blur, 4), decay_um,
+               unsharp, round(grain_size, 4), bool(u_1fv))
+        if self._kernel_key != key:
+            base = grain_bake.grain_kernel_1d(
+                float(pixel_size_um), final_blur_px=final_blur, decay_um=decay_um,
+                unsharp=unsharp)
+            if abs(grain_size - 1.0) < 1e-6:
+                k9 = np.zeros(9, dtype=np.float64)
+                k9[2:7] = base
+            else:
+                xs = np.arange(-4, 5) / grain_size
+                k9 = np.interp(xs, np.arange(-2, 3), base, left=0.0, right=0.0)
+                k9 = np.clip(k9, 0.0, None)
+                total = float(k9.sum())
+                k9 = k9 / total if total > 1e-12 else np.concatenate([np.zeros(3), base, np.zeros(2)])[:9]
+            self._kernel = base
+            self._kernel9 = k9
+            self._kernel_key = key
+        k9 = getattr(self, "_kernel9", None)
+        if k9 is None:                                # first frame raced the cache init
+            k9 = np.zeros(9, dtype=np.float64)
+            k9[2:7] = np.asarray(self._kernel)
+        # sigma ~ (sum k^2) / sqrt(rate) for a 2-D separable kernel -- the kernel factor
+        # enters LINEARLY (variance picks up (sum k^2)^2), not as a square root, so the
+        # rate compensation that keeps sigma size-invariant is the square of the
+        # sum-of-squares ratio.  Verified empirically: per-px variance follows 1/rate
+        # exactly (taps=1 probe) and the convolved factor equals sum k^2 at every size.
+        comp = ((k9 ** 2).sum() / max((np.asarray(self._kernel) ** 2).sum(), 1e-12)) ** 2
+
         # M4 parameter mapping.  `grain_amount` is a diagnostic key used by scratch probes
         # (including the grain-free half of the residual acceptance pair); it wins when present.
         # Otherwise the real document/export key `grain` drives the particle rate -- and
@@ -418,8 +465,7 @@ class GLCubeGrain:
         amount = params.get("grain_amount", None)
         strength = (float(amount) if amount is not None
                     else float(params.get("grain", GRAIN_REFERENCE)) / GRAIN_REFERENCE)
-        u_1f("u_grain_strength", max(0.0, strength))
-        u_1f("u_grain_size", max(0.05, float(params.get("grain_size", 1.0))))
+        u_1f("u_grain_strength", max(0.0, strength) * comp)
         # Colour grain is multiplicative: the calibrated per-bundle value from the profile
         # (1 = independent dye clouds, 0 = the single silver image of a B&W stock) times the
         # editorial `grain_colour` slider (M5, 1 = as calibrated).  A B&W bundle already
@@ -430,30 +476,8 @@ class GLCubeGrain:
         u_1i("u_grain_taps", int(params.get("grain_taps", 25)))
         u_1i("u_grain_probe", int(params.get("grain_probe", 0)))
 
-        # The dye-cloud + frame-blur kernel belongs to the pitch, so it is sized here rather
-        # than baked into the bundle.  Five nodes: the reference's cascade has fallen below
-        # 1 % of its centre by |dx| = 2 at every pitch this app renders.
-        # 0 = the reference cascade as-is, 1 = frame blur only (no dye cloud),
-        # 2 = no convolution at all.  The last two exist so the cost of each stage can be
-        # measured instead of guessed at.
-        mode = int(params.get("grain_kernel_mode", 0))
-        final_blur = float(g.get("final_blur_px", 0.0) or 0.0)
-        # The decay length is resolved per stock from the archive fields now (see
-        # CRYSTAL_ANCHOR), so it rides with the bundle; the fallback is the anchor value.
-        decay_um = 0.0 if mode == 1 else float(g.get("dye_cloud_decay_um", grain_bake.DYE_CLOUD_DECAY_UM))
-        unsharp = self.unsharp if mode == 0 else (0.0, 0.0)
-        if mode == 2:
-            final_blur = 0.0
-            decay_um = 0.0
-        key = (round(float(pixel_size_um), 5), round(final_blur, 4), decay_um,
-               unsharp, bool(u_1fv))
-        if self._kernel_key != key:
-            self._kernel = grain_bake.grain_kernel_1d(
-                float(pixel_size_um), final_blur_px=final_blur, decay_um=decay_um,
-                unsharp=unsharp)
-            self._kernel_key = key
         if u_1fv is not None:
-            u_1fv("u_grain_kernel", self._kernel)
+            u_1fv("u_grain_kernel", k9)
         return True
 
     def release(self):
