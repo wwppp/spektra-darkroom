@@ -2279,7 +2279,11 @@ class SpektraEngine:
     # Flat below L* 10 and at paper white; the dip at 20-40 is the toe being lifted too far
     # in ours, the rise above 50 is the reference being more open through the midtones.
     _LOOK_CURVE_X = np.array([0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])
-    _LOOK_CURVE_Y = np.array([0.0, -0.3, -1.1, -2.1, -0.9, -0.1, 0.7, 1.2, 1.5, 1.5, 1.0])
+    # Only the upper half rises.  The measured mapping also wanted the toe pushed DOWN, but
+    # that is wrong as a look: on a frame the user already finds dull, darkening its shadows
+    # makes it duller, and it compounds with however the frame was exposed.  A pure lift above
+    # the midtone opens the picture without touching what is already dense.
+    _LOOK_CURVE_Y = np.array([0.0, 0.0, 0.0, 0.0, 0.1, 0.4, 0.8, 1.2, 1.5, 1.5, 1.0])
 
     @staticmethod
     def _film_look_settings(params_dict):
