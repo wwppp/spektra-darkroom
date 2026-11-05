@@ -1985,6 +1985,16 @@ class SpektraEngine:
 
         return [0.0, 60.0, 60.0]
 
+    def is_bw_stock(self, film_stock: str) -> bool:
+        """True for monochrome (silver) negatives -- they take the B&W grain/print path."""
+        if not film_stock or film_stock == "none":
+            return False
+        prof = self._load_profile(film_stock)
+        if not prof:
+            return False
+        info = getattr(prof, "info", None)
+        return getattr(info, "channel_model", None) == "bw"
+
     def is_positive_film(self, film_stock: str) -> bool:
         """Returns True if the film stock is a positive/reversal (slide) film."""
         if not film_stock or film_stock == "none":
@@ -3044,7 +3054,8 @@ class SpektraEngine:
             # anchor constants per stock (see CRYSTAL_ANCHOR); stocks without the fields --
             # and any read failure -- fall back to the anchor constants unchanged.
             "grain": grain_bake.layer_scalars(film_data, grain_params, 1.0,
-                                              crystal=self._crystal_grain_fields(film_stock)),
+                                              crystal=self._crystal_grain_fields(film_stock),
+                                              is_bw=self.is_bw_stock(film_stock)),
             # The scanner's sharpening, folded into the grain kernel: `scan()` runs it on the
             # display RGB, and a pointwise print cube cannot carry a spatial filter, so
             # without it the frame loses a third of its high-frequency energy.

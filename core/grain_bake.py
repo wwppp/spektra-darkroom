@@ -99,6 +99,31 @@ DYE_CLOUD_DECAY_UM = 6.7
 CHANNEL_RATE_SCALE = (1.19, 0.36, 0.47)
 COLOUR_GRAIN = 1.0
 
+# ---------------------------------------------------------------------------------------
+# Monochrome stocks take their own path -- fotufilm's B&W renders measure identical grain
+# on TriX and HP5 (lag-1 0.556 / 0.561, equal output sigma 0.032, channel corr +0.99)
+# regardless of their nominal size/strength fields, so the archive fields are ignored here
+# and three measured constants stand in.
+#
+#   * ``BW_DYE_CLOUD_DECAY_UM`` -- kernel lag-1 at 5.83 um/px with the scanner unsharp
+#     folded in: 5.2 -> 0.509, 5.6 -> 0.556, 5.8 -> 0.578.  5.6 lands between the two
+#     measured references; 8 um of *size_mm* would have predicted 10.7 um and a lag of 0.80,
+#     i.e. the size mapping does not extend to the mono path.
+#   * ``BW_RATE_SCALE`` -- per-record rate over the reference's own particle scale.  The
+#     colour mapping would hand weights (1,1,1) the rate (1.7, 0.36, 0.35), which printed
+#     the output R channel nearly silent (sigma 0.007 against G 0.058) -- colour speckle
+#     on a black-and-white print.  Equal records plus the shared draw fix the structure;
+#     the overall scale is set against fotufilm's midtone sigma of 0.032.
+BW_DYE_CLOUD_DECAY_UM = 5.6
+# Overall amplitude: measured on the chart at matched OUTPUT L* (the tone curves differ
+# between the engines, so sigma must be compared at the same print level, not the same
+# block) ours ran 1.27-1.40x hot across the whole scale; sigma goes as 1/sqrt(rate), and
+# 1.34^2 = 1.8.  The per-record rates are deliberately equal: the probe renders showed
+# each record's rate moves all three output channels alike, so rates cannot -- and need
+# not -- decouple the residual few-percent channel imbalance that the colour paper's own
+# slope mismatch produces.
+BW_RATE_SCALE = (1.8, 1.8, 1.8)
+
 # The stock whose measured chart calibration fixes the three constants above.  When a stock
 # carries fotufilm crystal-grain archive fields (`physical_extensions.crystal_grain`), the
 # resolver below scales the anchor by the field ratios -- linear first-order, refined later
@@ -262,7 +287,7 @@ def grain_kernel_1d(pixel_size_um, final_blur_px=FRAME_BLUR_PX, radius=2,
     return (row / total).astype(np.float32)
 
 
-def layer_scalars(film_data, grain, pixel_size_um, crystal=None):
+def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False):
     """Per (record, sub-layer) numbers the shader needs besides the table.
 
     ``crystal`` is the stock's fotufilm archive dict (``size_mm`` / ``strength`` /
@@ -297,7 +322,18 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None):
     # Per-channel rate multipliers over the reference's own particle_scale -- see the
     # CHANNEL_RATE_SCALE calibration block above.  Dividing the area multiplies the rate;
     # the vector rides the channel axis of the (sublayer, channel) grid.
-    if crystal is not None:
+    if is_bw:
+        # One silver image, one draw.  fotufilm's own B&W renders measure identical grain
+        # structure on TriX and HP5 (lag-1 0.556 / 0.561, equal output sigma, corr +0.99)
+        # regardless of their -- nominal -- size/strength fields, i.e. the mono path ignores
+        # the archive fields entirely.  The three records here are the same emulsion seen
+        # three times, so they get equal rates, and `colour_grain` 0 collapses the mix to
+        # the shared field: one fluctuation, which is what a single silver image is.
+        # See the BW_ constants below for the measured values.
+        decay_um = float(BW_DYE_CLOUD_DECAY_UM)
+        rate = np.asarray(BW_RATE_SCALE, dtype=np.float64)
+        area_mul = 1.0
+    elif crystal is not None:
         try:
             decay_um = DYE_CLOUD_DECAY_UM * float(crystal["size_mm"]) / CRYSTAL_ANCHOR["size_mm"]
             weights = crystal.get("layer_weights")
@@ -336,7 +372,7 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None):
         # How far the three records keep their own dye clouds (`mix_chroma_grain` upstream).
         # 0.5 is the reference's value -- half independent, half shared luminance; see the
         # calibration block above for why this is 1.0 here.
-        "colour_grain": COLOUR_GRAIN,
+        "colour_grain": 0.0 if is_bw else COLOUR_GRAIN,
         "blur_sigma": blur_sigma.astype(np.float32),
         "blur_um": float(grain.blur_dye_clouds_um),
         # The Jarvis cascade's decay length.  Not in ``grain`` -- upstream hard-codes 1.45 in
