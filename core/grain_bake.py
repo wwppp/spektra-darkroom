@@ -46,43 +46,52 @@ _MIN_SPAN = 0.2
 # gold 200 + ektacolor edge) 0.65 puts the grain one full step wider than the reference.
 #
 # Its job used to be to carry the whole correlation, because the reference's 1.45 um dye cloud
-# is 0.16 px at export pitch and does nothing there.  Now that the clump is modelled properly
-# (see ``DYE_CLOUD_DECAY_UM``) this is only the residual: at 8.9 um/px the cascade alone sits
-# at lag-1 0.65 and 0.45 px of frame blur takes it to 0.72, the reference's 0.706.
+# is 0.25 px at export pitch and does nothing there.  Now that the clump is modelled properly
+# (see ``DYE_CLOUD_DECAY_UM``) this is only the residual: at 5.81 um/px the cascade alone sits
+# at lag-1 0.60 and 0.45 px of frame blur takes it to 0.685, against the reference's 0.706.
 #
 # Because it is expressed in pixels rather than micrometres it does not scale with pitch, so
-# at a 60 um/px preview it is the *only* term left and the grain is again 1 px white noise --
-# which is what a 60 um sampling of a 10 um clump can resolve.
+# at a 60 um/px preview it is the *only* term left and the grain is again 1 px white noise
+# (0.172) -- which is what a 60 um sampling of a 6 um clump can resolve.
 FRAME_BLUR_PX = 0.45
 
 # ---------------------------------------------------------------------------------------
-# Grain scale, as fotufilm draws gold 200 at 1:1 (4024 px across the 36 mm frame = 8.9 um/px).
+# Grain scale, as fotufilm draws gold 200 at 1:1 (the 4024 x 6024 export is 5.81 um/px
+# across the short edge -- measured on the probe, `_preview_export_parity.py`).
 #
 # The reference's dye-cloud decay is a single 1.45 um for all 61 stocks -- a format default,
-# not a per-film calibration -- and at 8.9 um/px that puts the noise at a lag-1 autocorrelation
-# of 0.20 with a 1 px half width.  fotufilm's own render of the same frame sits at 0.706 / 2 px:
-# its grains are *clumps*, several pixels across, not per-pixel white noise.
+# not a per-film calibration -- and at 5.81 um/px that puts the noise at a lag-1
+# autocorrelation of 0.24 with a 1 px half width.  fotufilm's own render of the same frame
+# sits at 0.706 / 2 px: its grains are *clumps*, several pixels across, not per-pixel white
+# noise.
 #
-# ``DYE_CLOUD_DECAY_UM`` is what sets that, and it was measured rather than reasoned about:
-# on the cascade alone at 8.9 um/px, 1.45 um gives lag-1 0.19 / half width 1 px, 3.6 um gives
-# 0.32 / 1 px, 10 um gives 0.72 / 2 px.  With the 0.45 px frame blur on top, 10 um lands on
-# 0.719 -- the reference's 0.706.  That is a clump, not a crystal: 5 um is fotufilm's *clump
-# radius* for gold 200, and a decay of twice that is the same object read through a point
-# spread that carries 27 % of its weight outside one sigma.
+# ``DYE_CLOUD_DECAY_UM`` is what sets that, and it was measured rather than reasoned about.
+# On the CPU reference at 5.81 um/px (which carries the per-layer cloud blur as well):
+#
+#     decay  1.45 um (0.25 px) -> lag-1 0.237, half 1 px
+#     decay  5.0  um (0.86 px) ->          0.622, half 2 px
+#     decay  6.0  um (1.03 px) ->          0.712, half 2 px
+#     decay  6.5  um (1.12 px) ->          0.748, half 2 px
+#
+# 6.0 um it is: the shader's own kernel (no per-layer blur) lands on 0.685 at this pitch.
+# That is a clump, not a crystal -- 5 um is fotufilm's *clump radius* for gold 200, and a
+# decay of 6 um is the same object read through a point spread that carries 27 % of its
+# weight outside one sigma.
 #
 # The amplitude needs **no** correction, and the earlier "we are 3.2x too loud at 4024 px"
-# reading was an artefact of the old width: widening the kernel drops per-pixel sigma by more
-# than three (measured on a flat mid-grey at 8.9 um/px: 0.0286 -> 0.0087 in density), and
-# through the print's midtone slope that is ~0.020 in RGB against fotufilm's 0.0207.  So the
-# particle area stays at the reference's 0.2 um^2 -- scaling it down as well would have halved
-# the *preview*, where the clump is 0.17 px and only the particle rate survives.
+# reading was an artefact of the old width: widening the kernel drops per-pixel sigma by
+# nearly three (measured on a flat mid-grey at 5.81 um/px: 0.0402 -> 0.0144 in density).
+# Through the print's midtone slope that lands within ~30 % of fotufilm's measured sigma,
+# so the particle area stays at the reference's 0.2 um^2.  Scaling it down as well would
+# have moved the *preview* instead, where the clump is 0.10 px and only the particle rate
+# survives -- measured there, amplitude goes 0.0046 -> 0.0043, i.e. unchanged.
 #
 # ``COLOUR_GRAIN``: 0.5 makes every record share half its draw, so R/G/B come out correlated
-# at 0.75-0.90 and the frame reads as luminance noise with a colour cast.  fotufilm's own
-# frame measures +0.07 / -0.13 / +0.18 -- three independent dye layers, which is also what
-# the physics says (the records are separate emulsions).  1.0 degenerates the variance-
-# preserving mix to the identity in both the shader and the CPU reference.
-DYE_CLOUD_DECAY_UM = 10.0
+# at 0.78 and the frame reads as luminance noise with a colour cast.  fotufilm's own frame
+# measures +0.15 / -0.08 / +0.18 on the grain residual -- three independent dye layers, which
+# is also what the physics says (the records are separate emulsions).  1.0 degenerates the
+# variance-preserving mix to the identity in both the shader and the CPU reference.
+DYE_CLOUD_DECAY_UM = 6.0
 COLOUR_GRAIN = 1.0
 
 
