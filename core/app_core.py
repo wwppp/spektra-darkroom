@@ -2297,7 +2297,9 @@ class SpektraEngine:
                 # with the chroma effectively unchanged.
                 round(float(p.get("film_look_hue", 1.5) or 0.0), 2),
                 # Tone curve strength; 1.0 is the measured mapping in `_LOOK_CURVE_*`.
-                round(float(p.get("film_look_curve", 1.0) or 0.0), 2))
+                round(float(p.get("film_look_curve", 1.0) or 0.0), 2),
+                # Blossom band strength: brighter petals, slightly more chroma.
+                round(float(p.get("film_look_pink", 1.0) or 0.0), 2))
 
     @staticmethod
     def _srgb_to_lab(rgb):
@@ -2357,13 +2359,14 @@ class SpektraEngine:
 
     def _apply_film_look(self, table, params_dict, is_bw=False):
         """Saturation / midtone / band-limited hue pass on a finished display table."""
-        strength, sat, mid, hue, curve = self._film_look_settings(params_dict)
+        strength, sat, mid, hue, curve, pink = self._film_look_settings(params_dict)
         if is_bw or strength <= 0.001:
             return table
         sat = 1.0 + (sat - 1.0) * strength
         mid *= strength
         hue *= strength
         curve *= strength
+        pink *= strength
 
         lab = self._srgb_to_lab(table)
         L = lab[..., 0]
@@ -2380,9 +2383,23 @@ class SpektraEngine:
         # hue statistic, but that is an artefact: hue is circular, and the pixels straddling 360
         # drag the median down.  Comparing median a*/b* instead puts them at 346.2 deg against
         # 347.9 -- already right, and the earlier "+10 deg warm" term pushed them to 356.6.
-        hd = hd + hue * (-8.0 * band(247.0, 28.0))
+        # Two bands.  The sky one is fixed by measurement (257.8 -> 247.4 against 248.0).  The
+        # blossom band is centred at 320 deg, not on the blossoms themselves: the print stock
+        # decides where they land -- on ektacolor edge they already sit at ~346 and must not be
+        # touched, on crystal archive they land at ~327 and read purple.  A centre at 320 with a
+        # 20 deg falloff moves the latter to ~335 while leaving the former within 1.5 deg.
+        hd = hd + hue * (-8.0 * band(247.0, 28.0) + 8.0 * band(320.0, 20.0))
         # Midtone lift: a bell that is zero by L*=10 and L*=94, so toe and shoulder stay put.
         L = L + mid * np.clip(1.0 - np.abs(L - 52.0) / 42.0, 0.0, 1.0)
+
+        # Blossom band: the reference keeps petals 2 L* brighter and a touch more saturated
+        # than we do, which is most of the "pink and fresh" read.  Narrow band around 325 deg
+        # with a 22 deg falloff, so skin (50-60 deg) is untouched by construction.
+        C_boost = 1.0
+        if pink > 0.001:
+            w_pink = band(325.0, 22.0)
+            L = L + pink * 2.0 * w_pink
+            C_boost = 1.0 + pink * 0.10 * w_pink
 
         # Tone curve.  Binned by input L* against the reference, the difference is not a
         # uniform shift but an S: our toe sits 1-2 L* high and everything above L* 50 sits
@@ -2392,17 +2409,17 @@ class SpektraEngine:
         if curve > 0.001:
             L = L + curve * np.interp(L, self._LOOK_CURVE_X, self._LOOK_CURVE_Y)
 
-        # Chroma is pulled down by *lightness*, not globally: measured against the reference the
-        # sky (L* 64) sits 42% high while the blossoms (L* 46) are 18% high, so one flat
-        # multiplier cannot serve both.  The weight ramps in over L* 30-70 -- dark colour keeps
-        # more of its chroma, bright areas calm down the most.
-        w_sat = np.clip((L - 30.0) / 40.0, 0.0, 1.0)
+        # Chroma is pulled down by *lightness*, not globally: the excess sits in the bright
+        # areas (open sky), while the blossoms at L* 46 on crystal archive actually come out
+        # 7% *under* the reference.  The ramp therefore starts at L* 55 -- dark and midtone
+        # colour keeps all of its chroma, only the top end calms down.
+        w_sat = np.clip((L - 55.0) / 30.0, 0.0, 1.0)
         w_sat = w_sat * w_sat * (3.0 - 2.0 * w_sat)
         sat_l = 1.0 + (sat - 1.0) * w_sat
 
         out = np.stack([np.clip(L, 0.0, 100.0),
-                        C * sat_l * np.cos(np.radians(hd)),
-                        C * sat_l * np.sin(np.radians(hd))], -1)
+                        C * sat_l * C_boost * np.cos(np.radians(hd)),
+                        C * sat_l * C_boost * np.sin(np.radians(hd))], -1)
         return np.ascontiguousarray(self._lab_to_srgb(out), dtype=np.float32)
 
     def _build_3d_lut(self, film_stock="kodak_portra_400", paper_stock="kodak_2383", lut_size=33, params_dict=None, print_mode=None):
