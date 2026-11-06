@@ -8500,7 +8500,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         # Selecting "none" film (Bypass / original raw) or positive reversal slide film locks paper to "none" (scan / bypass)
         is_pos = self.engine.is_positive_film(stock_id) if hasattr(self.engine, 'is_positive_film') else False
-        if (stock_id == "none" or is_pos) and push_undo:
+        # 锁死与撤销无关：之前这里带 `and push_undo`，走 undo/会话恢复那条路时反转片会带着
+        # 上一次的相纸进来，下拉框显示成一张纸、而渲染其实没用它，状态和画面对不上。
+        if stock_id == "none" or is_pos:
             self.current_paper_stock = "none"
             self.current_print_mode = "scan"
             self.current_params["print_mode"] = "scan"
@@ -8551,6 +8553,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
     def on_switch_print_mode(self, mode, push_undo=True):
         if mode not in ("optical", "scan"):
             mode = "optical"
+        # 反转片只有"直接看片"一条路：相纸印相在物理上不存在（引擎里它的介质永远是
+        # Digital Reference），所以模式也一起锁死，别让 UI 停在一个渲染不出来的状态上。
+        if mode == "optical" and hasattr(self.engine, "is_positive_film") \
+                and self.engine.is_positive_film(getattr(self, "current_film_stock", "none")):
+            self.set_app_status("反转片直接看片，不经过相纸印相", timeout_ms=2500)
+            return
         if push_undo and mode != getattr(self, "current_print_mode", "optical"):
             self._mark_current_photo_dirty()
 
@@ -9878,6 +9886,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # 右侧相纸下拉框跟随当前状态（切换底片/撤销/相纸变更都走这里）
         combo_paper = getattr(self, "combo_paper", None)
         if combo_paper is not None:
+            # 保险：反转片与旁通态只允许"胶片直扫"。撤销、会话恢复、旧 .sdc 都可能把一张
+            # 纸带进来，这里统一归位，免得下拉显示一张其实没参与成像的相纸。
+            if (is_pos or is_none) and getattr(self, "current_paper_stock", "none") != "none":
+                self.current_paper_stock = "none"
+                if hasattr(self, "canvas"):
+                    self.canvas.update_params(paper_profile="none")
             combo_paper.set_value(getattr(self, "current_paper_stock", "none"))
             paper_ok = not (is_pos or is_none)
             combo_paper.setEnabled(paper_ok)
