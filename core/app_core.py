@@ -2424,6 +2424,59 @@ class SpektraEngine:
         cache[key] = entry
         return entry
 
+    # -- fotufilm 点式链（P1）-----------------------------------------------------------------
+    FFCHAIN_POINT_DIR = "fotufilm_chain/point"
+
+    def _ffchain_point_file(self, film_stock, paper_key):
+        return os.path.join(self.resources_dir, self.FFCHAIN_POINT_DIR,
+                            f"{film_stock}__{paper_key}__point.npz")
+
+    def get_ffchain_point_bundle(self, film_stock, paper_stock="kodak_2383",
+                                 print_mode="optical", params_dict=None):
+        """点式链要的全部表；不适用返回 None，画布自动回落到单表。
+
+        与 `_fotufilm_chain_lut` 的区别：这条不依赖 65³ 文件，也不看 DIR / morph 那几个
+        参数闸门 —— DIR 是实时算的，参数变了不需要换表。只有"卷 + 纸 + optical"三个条件。
+        """
+        if os.environ.get("SPECTRA_FFCHAIN_POINT", "1") == "0":
+            return None
+        if not self._is_fotufilm_chain_stock(film_stock):
+            return None
+        if str(print_mode or "").lower() != "optical":
+            return None
+        paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
+        if paper_key not in self.FFCHAIN_PAPERS:
+            return None
+        path = self._ffchain_point_file(film_stock, paper_key)
+        if not os.path.exists(path):
+            return None
+
+        cache = getattr(self, "_ff_point_cache", None)
+        if cache is None:
+            cache = self._ff_point_cache = {}
+        sig = (path, os.path.getmtime(path))
+        if sig in cache:
+            return cache[sig]
+        try:
+            with np.load(path) as z:
+                bundle = {k: np.ascontiguousarray(z[k]) for k in z.files}
+            # ascontiguousarray 会把 0 维字符串数组变成 1 维，所以这里必须 ravel 取 [0]
+            pkey = str(np.ravel(bundle["paperKey"])[0])
+            paper_path = os.path.join(os.path.dirname(path), f"{pkey}__paperout.npz")
+            if not os.path.exists(paper_path):
+                print(f"[FFChain] 缺 paperOut：{os.path.basename(paper_path)}")
+                return None
+            with np.load(paper_path) as z:
+                bundle["paperOut"] = np.ascontiguousarray(z["paperOut"])
+        except Exception as exc:                        # noqa: BLE001 - 坏文件不炸整个渲染
+            print(f"[FFChain] 点式链表读不出来（{film_stock}）: {exc}")
+            return None
+        bundle["key"] = sig
+        if len(cache) >= 4:
+            cache.pop(next(iter(cache)))
+        cache[sig] = bundle
+        return bundle
+
     def _ffchain_grain_bundle(self, film_stock, paper_stock, print_mode, params_dict, lut_key):
         """新链的颗粒 bundle；不适用就返回 None，调用方照旧回落到单表路径。"""
         # 画布是把 print_mode 塞进 params 里传进来的（get_grain_bundle 的形参默认 None），

@@ -4375,29 +4375,16 @@ class DarkroomMainWindow(QMainWindow):
         self.chk_push_under.setStyleSheet(get_standard_checkbox_style())
         self.sec_chemistry.addWidget(self.chk_push_under)
 
+        # DIR 只有一个自由度。fotufilm 上游只有 COUPLER_SCALE 一个量，没有"跨层/同层"的划分；
+        # spektrafilm 那边的 dir_interlayer / dir_samelayer 也只是 dir_amount 的乘数。
+        # 所以三个滑块合并成一个「总量」，另两个键保留在参数里固定为 1.0（旧文件仍可读）。
         self.slider_dir_amount = AdobeScrubSlider(
-            "抑制剂总量", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="显影抑制剂的总体强度，影响色彩密度。"
+            "DIR 总量", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
+            tooltip="显影抑制剂的总体强度。中性灰不受影响，只改变有色彩差异处的密度分离。"
         )
         self.slider_dir_amount.valueChanged.connect(lambda v: self._on_slider_live("dir_amount", v))
         self.slider_dir_amount.sliderReleased.connect(self._on_slider_committed)
         self.sec_chemistry.addWidget(self.slider_dir_amount)
-
-        self.slider_dir_interlayer = AdobeScrubSlider(
-            "跨层色彩纯度", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="相邻感光层的相互抑制程度，决定色彩纯度。"
-        )
-        self.slider_dir_interlayer.valueChanged.connect(lambda v: self._on_slider_live("dir_interlayer", v))
-        self.slider_dir_interlayer.sliderReleased.connect(self._on_slider_committed)
-        self.sec_chemistry.addWidget(self.slider_dir_interlayer)
-
-        self.slider_dir_samelayer = AdobeScrubSlider(
-            "同层抑制", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="单色层自抑制强度，影响高密度区的色彩堆积。"
-        )
-        self.slider_dir_samelayer.valueChanged.connect(lambda v: self._on_slider_live("dir_samelayer", v))
-        self.slider_dir_samelayer.sliderReleased.connect(self._on_slider_committed)
-        self.sec_chemistry.addWidget(self.slider_dir_samelayer)
 
         self.sidebar_layout.addWidget(self.sec_chemistry)
         self._update_push_ui_state()
@@ -6830,6 +6817,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             else:
                 self.current_params = copy.deepcopy(copied_params)
             self.current_params["print_mode"] = copied_print_mode
+            self._flatten_dir_params(self.current_params)
 
             # Enable sidebar controls BEFORE updating slider/combo values so Qt schedules repaints properly
             self._update_stock_mode_ui()
@@ -6924,6 +6912,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.current_print_mode = state.get("print_mode", "optical")
         self.current_params = dict(state.get("params") or {})
         self.current_params["print_mode"] = self.current_print_mode
+        self._flatten_dir_params(self.current_params)
 
         default_crop = {
             "enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0,
@@ -7096,6 +7085,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             act_params["crop"] = dict(act_crop)
             self.current_params = act_params
             self.current_params["print_mode"] = self.current_print_mode
+            self._flatten_dir_params(self.current_params)
             self._photo_is_dirty = bool(act_data.get("is_dirty", False))
 
             if getattr(self.canvas, "is_crop_editing", False):
@@ -7362,9 +7352,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._refresh_push_readout()
         # DIR / morph / exhaustion are baked into the 3D LUT: preview them by rebaking the same
         # full-resolution LUT in the background, everything else is applied post-LUT by the shader.
-        if param_key in ("dir_amount", "dir_interlayer", "dir_samelayer", "morph_gamma", "developer_exhaustion"):
-            self._pending_lut_refresh = True
-            self._schedule_live_lut_preview()
+        # DIR 是例外——点式链接手后它是逐像素算的，滑块只改一个 uniform。
+        if param_key in ("dir_amount", "dir_interlayer", "dir_samelayer",
+                         "morph_gamma", "developer_exhaustion"):
+            ff = getattr(self.canvas, "_ffchain", None)
+            if param_key == "dir_amount" and getattr(ff, "ready", False):
+                self.canvas.update_params(dir_amount=val)
+            else:
+                self._pending_lut_refresh = True
+                self._schedule_live_lut_preview()
         else:
             self.canvas.update_params(**{param_key: val})
         self._schedule_histogram_update()
@@ -7374,15 +7370,51 @@ aspect_ratio=self._lens_frame_aspect(photo),
     LUT_CHEM_KEYS = ("dir_amount", "dir_interlayer", "dir_samelayer",
                      "morph_gamma", "developer_exhaustion", "push_ev")
 
+    @staticmethod
+    def _flatten_dir_params(params):
+        """DIR 的三个滑块已合并成一个「总量」，跨层/同层固定 1.0。
+
+        fotufilm 上游只有 COUPLER_SCALE 一个量，没有跨层/同层的划分；spektrafilm 那边
+        dir_interlayer / dir_samelayer 也只是 dir_amount 的乘数。键继续保留（旧 .sdc 不报错、
+        照常读），但不再让它们生效 —— 否则"同一个总量"在不同工程里会给出不同的图。
+        """
+        if isinstance(params, dict):
+            params["dir_interlayer"] = 1.0
+            params["dir_samelayer"] = 1.0
+        return params
+
     def _apply_lut(self, lut_3d):
         """Upload a committed LUT and record which parameter key it represents, so the live
         preview can tell "already showing this" from "still stale"."""
         self.canvas.set_lut(lut_3d)
         self.canvas.set_grain_bundle(self._grain_bundle_for_current())
+        self.canvas.set_ffchain_bundle(self._ffchain_bundle_for_current())
         self._lut_applied_key = self._current_lut_key()
         queued = getattr(self, "_lut_job", None)
         if queued is not None and queued[0] != self._lut_applied_key:
             self._lut_job = None       # superseded: never spend a bake on outdated parameters
+
+    def _on_ffchain_now(self):
+        """当前参数是不是走 fotufilm 点式链（决定哪些 spektrafilm 参数已失效）。"""
+        try:
+            return self._ffchain_bundle_for_current() is not None
+        except Exception:                           # noqa: BLE001 - 只用于 UI 状态
+            return False
+
+    def _ffchain_bundle_for_current(self):
+        """fotufilm 点式链的表；不适用返回 None，画布回落到单张 65³。"""
+        eng = getattr(self, "engine", None)
+        film = getattr(self, "current_film_stock", "none")
+        if eng is None or film in (None, "", "none"):
+            return None
+        params = dict(self.current_params)
+        try:
+            return eng.get_ffchain_point_bundle(
+                film, getattr(self, "current_paper_stock", "kodak_2383"),
+                getattr(self, "current_print_mode", "optical"), params)
+        except Exception as exc:                    # noqa: BLE001 - never break a paint
+            print(f"[FFChain] 点式链获取失败: {exc}")
+            return None
 
     def _grain_bundle_for_current(self):
         """The two density tables for the LUT on screen, or ``None`` when that bake has none.
@@ -7494,6 +7526,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
             return
         if getattr(self, "current_film_stock", "none") == "none":
+            return
+        # 点式链能接手时，65³ 根本不会被采样（u_ff_on 的分支优先于 u_has_lut），
+        # 所以为它烘一次表纯属白跑 25 s。这里只换 bundle 并记账，不启动烘焙。
+        ff_bundle = self._ffchain_bundle_for_current()
+        if ff_bundle is not None:
+            self.canvas.set_ffchain_bundle(ff_bundle)
+            self._lut_applied_key = self._current_lut_key()
+            self._lut_job = None
             return
         self._ensure_lut_bake_bridge()
         key = self._current_lut_key()
@@ -7705,6 +7745,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._ensure_lut_bake_bridge()
         key = self._current_lut_key()
         if key == self._lut_applied_key:
+            return
+        # 点式链接手时这张 33³ 不会被采样，别为它同步烘一次（会卡住松手）。
+        if self._on_ffchain_now():
+            self._lut_applied_key = key
+            self._lut_job = None
             return
         if key == self._lut_inflight_key:
             return
@@ -8271,8 +8316,6 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'slider_diff_warmth'): self.slider_diff_warmth.set_value(p.get("diffusion_warmth", 0.0))
 
             if hasattr(self, 'slider_dir_amount'): self.slider_dir_amount.set_value(p.get("dir_amount", 1.0))
-            if hasattr(self, 'slider_dir_interlayer'): self.slider_dir_interlayer.set_value(p.get("dir_interlayer", 1.0))
-            if hasattr(self, 'slider_dir_samelayer'): self.slider_dir_samelayer.set_value(p.get("dir_samelayer", 1.0))
             if hasattr(self, 'combo_push'): self._update_push_ui_state()
 
             if hasattr(self, 'combo_illuminant'): self.combo_illuminant.set_value(p.get("enlarger_illuminant", "TH-KG3"))
@@ -9797,6 +9840,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if w is not None:
                 w.setEnabled(enlarger_available)
                 w.setToolTip(getattr(w, "default_tooltip", "") if enlarger_available else enlarger_hint)
+        # fotufilm 点式链没有 morph / 显影衰竭这两个自由度（上游配置里根本没有这两类槽）。
+        # 置灰并说明，而不是让它们看着能拖、实际什么都不做。
+        if enlarger_available and self._on_ffchain_now():
+            for slider, reason in (
+                    (getattr(self, 'slider_morph_gamma', None), "fotufilm 链不含形态学伽马"),
+                    (getattr(self, 'slider_exhaustion', None), "fotufilm 链不含显影衰竭")):
+                if slider is not None:
+                    slider.setEnabled(False)
+                    slider.setToolTip(f"{reason}，切回 spektrafilm 原链才生效")
                 for child in [w] + w.findChildren(QWidget):
                     child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not enlarger_available)
 

@@ -459,6 +459,8 @@ vec3 diffusion_disc(vec2 sample_uv, vec2 radius_uv) {
     return acc / max(0.0001, w_sum);
 }
 
+// {{FFCHAIN}}
+
 // {{GRAIN}}
 
 // The enlarger and the paper, applied to one patch of the negative: steps 4 to 8 of the
@@ -467,7 +469,10 @@ vec3 diffusion_disc(vec2 sample_uv, vec2 radius_uv) {
 // averaging before it is what a different-looking picture does.
 vec3 develop_negative(vec3 linear_rgb, vec2 image_px) {
     vec3 film_rgb;
-    if (u_grain_cubes == 1) {
+    if (u_ff_on == 1) {
+        // fotufilm 点式链：DIR 在这里实时算，不再烘进表里。
+        film_rgb = ffchain_run(linear_rgb);
+    } else if (u_grain_cubes == 1) {
         // Density first, so the grain has somewhere to go: the stage between these two calls
         // is the film's development, and it cannot be baked into a pointwise table.
         // The grain stage *replaces* the density (the reference returns an absolute density,
@@ -1187,7 +1192,10 @@ void main() {
 
 # The two-cube grain stage: its GLSL lives beside the tables it reads.
 from .gl_grain import GRAIN_GLSL as _GRAIN_GLSL, GLCubeGrain   # noqa: E402
+# fotufilm pointwise chain: replaces the 65³ all-in-one LUT so DIR stays live.
+from .gl_ffchain import FFCHAIN_GLSL as _FFCHAIN_GLSL, GLFFChain   # noqa: E402
 
+FRAGMENT_SHADER_SRC = FRAGMENT_SHADER_SRC.replace("// {{FFCHAIN}}", _FFCHAIN_GLSL)
 FRAGMENT_SHADER_SRC = FRAGMENT_SHADER_SRC.replace("// {{GRAIN}}", _GRAIN_GLSL)
 
 
@@ -1298,6 +1306,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # The two-cube grain stage. Inert until a bundle is handed over; when it is, the shader
         # takes the density route instead of the single RGB table.
         self._grain_cubes = GLCubeGrain()
+        # fotufilm 点式链。同样是 inert：没有 bundle 时 u_ff_on=0，走原来的单表路径。
+        self._ffchain = GLFFChain()
         self._gl_initialized = False
 
         # Long-press on canvas to preview original (Before)
@@ -1600,6 +1610,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self._do_upload_lut(self._pending_lut)
             self._pending_lut = None
         self._grain_cubes.upload_pending()
+        self._ffchain.upload_pending()
 
         funcs = QOpenGLContext.currentContext().functions()
         # One line per state change, never per frame: when a paint comes out black this is what
@@ -1941,6 +1952,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if _override:
             _px_um = float(_override)
         self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params, u_1fv=u_1fv)
+        self._ffchain.bind(self.shader_program,
+                           dir_total=float(self.params.get("dir_amount", 1.0)))
 
         if self._lut_tex_id:
             funcs.glActiveTexture(0x84C1)
@@ -2160,6 +2173,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def set_grain_bundle(self, bundle):
         """Hand over the two density tables. ``None`` falls back to the single RGB table."""
         self._grain_cubes.set_bundle(bundle)
+        self.update()
+
+    def set_ffchain_bundle(self, bundle):
+        """Hand over the fotufilm pointwise tables. ``None`` falls back to the single LUT.
+
+        开这条路时颗粒暂不作用——它要接在密度域，而新链的密度是逐像素算的、不落表。
+        见 docs §15。
+        """
+        self._ffchain.set_bundle(bundle)
         self.update()
 
     def _do_upload_lut(self, lut_array_3d):
@@ -3369,6 +3391,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 _px_um = float(_override)
             self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, eff_params, u_1fv=u_1fv,
                                    expect_key=self._grain_key_for(eff_params))
+            self._ffchain.bind(self.shader_program,
+                               dir_total=float(eff_params.get("dir_amount", 1.0)))
 
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 
