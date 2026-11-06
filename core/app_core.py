@@ -2384,6 +2384,97 @@ class SpektraEngine:
             print(f"[SpektraEngine] fotufilm 链 LUT 读不出来（{film_stock}）: {exc}")
             return None
 
+    # -- grain on the ported chain -------------------------------------------------------------
+    #
+    # 老路径的颗粒级要两份东西：一张"场景 → 净密度"的立方体，和一张"净密度 → 显示 RGB"的
+    # 打印立方体。老路径靠 Simulator 现烘（_bake_film_density + bake_density_to_rgb），
+    # 新链的物理在 Python 里跑一次 27 万个点要半分钟，所以这两张表跟显示 LUT 一起离线烘好，
+    # 放在同一个目录：<卷>__<相纸>__grain33.npz。
+    #
+    # 口径与 core/grain_bake.py 一致：density 是净密度（已减 dMin），通道 C/M/Y（= 记录 R/G/B）；
+    # cube 按 [Y, M, C] 摆，这样 texture(cube, vec3(C, M, Y)) 采到对的点。
+    # 差别只在物理：这两张表由移植链的 develop() / print_net() 烘，不是 spektrafilm 的管线。
+    FFCHAIN_GRAIN_SIZE = 33
+
+    def _ffchain_film_data(self, film_stock, paper_stock):
+        """颗粒分层表与标量要的 film_data（外加一份干净参数）。
+
+        转换卷的 profile 里带着 fotufilm 的 crystal_grain 字段，所以分层/颗粒参数仍然
+        走 spektrafilm 这套读取，只是不参与任何颜色计算。
+        """
+        cache = getattr(self, "_ffchain_film_cache", None)
+        if cache is None:
+            cache = self._ffchain_film_cache = {}
+        paper_for_grain = None if paper_stock in (None, "", "none", "scan") else paper_stock
+        key = (film_stock, paper_for_grain)
+        if key in cache:
+            return cache[key]
+        try:
+            from spektrafilm.runtime.process import Simulator
+            params = init_params(film_stock, paper_for_grain or "kodak_2383")
+            params.film_render.halation.active = False
+            params.film_render.grain.active = False
+            sim = Simulator(digest_params(params))
+            entry = (sim._pipeline.film.data, params)
+        except Exception as exc:                        # noqa: BLE001 - 没颗粒总比炸掉好
+            print(f"[SpektraGrain] fotufilm 链取不到 film data（{film_stock}）: {exc}")
+            return None
+        if len(cache) >= 8:
+            cache.pop(next(iter(cache)))
+        cache[key] = entry
+        return entry
+
+    def _ffchain_grain_bundle(self, film_stock, paper_stock, print_mode, params_dict, lut_key):
+        """新链的颗粒 bundle；不适用就返回 None，调用方照旧回落到单表路径。"""
+        # 画布是把 print_mode 塞进 params 里传进来的（get_grain_bundle 的形参默认 None），
+        # 这里跟 _build_3d_lut 一样自己兜底，否则永远判成"不是 optical"。
+        if print_mode is None:
+            print_mode = str((params_dict or {}).get("print_mode", "optical")).lower()
+        if self._fotufilm_chain_lut(film_stock, paper_stock, print_mode, params_dict) is None:
+            return None
+        paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
+        path = os.path.join(self.resources_dir, "fotufilm_chain",
+                            f"{film_stock}__{paper_key}__grain{self.FFCHAIN_GRAIN_SIZE}.npz")
+        if not os.path.exists(path):
+            return None
+        entry = self._ffchain_film_data(film_stock, paper_stock)
+        if entry is None:
+            return None
+        film_data, clean_params = entry
+
+        import core.grain_bake as grain_bake
+        try:
+            with np.load(path) as z:
+                density = np.ascontiguousarray(z["density"], dtype=np.float32)
+                cube = np.ascontiguousarray(z["cube"], dtype=np.float32)
+                dmin = np.asarray(z["dmin"], dtype=np.float32)
+                dmax = np.asarray(z["dmax"], dtype=np.float32)
+        except Exception as exc:                        # noqa: BLE001
+            print(f"[SpektraGrain] fotufilm 链颗粒表读不出来（{film_stock}）: {exc}")
+            return None
+
+        try:
+            is_bw = self.is_bw_stock(film_stock)
+        except Exception:                               # noqa: BLE001
+            is_bw = False
+
+        bundle = {
+            "density": density,
+            "density_min": dmin,
+            "density_max": dmax,
+            "cube": cube,
+            "layer_table": grain_bake.bake_layer_table(film_data),
+            "grain": grain_bake.layer_scalars(film_data, clean_params.film_render.grain, 1.0,
+                                              crystal=self._crystal_grain_fields(film_stock),
+                                              is_bw=is_bw),
+            "unsharp": tuple(getattr(clean_params.scanner, "unsharp_mask", (0.0, 0.0))),
+            "film": film_stock,
+            # 打印立方体已经含了整条链的观感（新链不走 film_look / 白点抬升），
+            # 所以这里的 key 只用于画布比对参数是否同一套。
+            "key": lut_key,
+        }
+        return bundle
+
     # -- film look: an appearance layer, deliberately outside the physics ---------------------
     #
     # Measured against fotufilm's own PNG of the same frame (DSC02662, gold 200 + ektacolor edge,
@@ -3083,6 +3174,15 @@ class SpektraEngine:
             self._grain_bundle_cache = {}
         if lut_key in self._grain_bundle_cache:
             return self._grain_bundle_cache[lut_key]
+
+        # 转换卷走移植链：两张立方体是离线烘的，不需要 Simulator 现烘。
+        ff_bundle = self._ffchain_grain_bundle(film_stock, paper_stock, print_mode,
+                                               params_dict, lut_key)
+        if ff_bundle is not None:
+            if len(self._grain_bundle_cache) >= 8:
+                self._grain_bundle_cache.pop(next(iter(self._grain_bundle_cache)))
+            self._grain_bundle_cache[lut_key] = ff_bundle
+            return ff_bundle
 
         sim = getattr(self, "_lut_sims", {}).get(lut_key)
         density = getattr(self, "_film_density_cache", {}).get(density_key)
