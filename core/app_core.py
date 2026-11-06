@@ -2306,6 +2306,84 @@ class SpektraEngine:
         digest = hashlib.sha1(repr(values).encode()).hexdigest()[:8]
         return values, digest
 
+    # -- fotufilm port chain -------------------------------------------------------------------
+    #
+    # 转换卷（profile 的 `metadata.version == "fotufilm-port-2.0"`）的物理管线是
+    # fotufilm 引擎的 1:1 移植：曝光表 → 胶片曲线 → DIR 耦合 → filmOutput → 相纸曲线 →
+    # paperOutput。整条链是逐像素的，所以可以烘成一张 3D LUT，按目录里的 shaper 网格
+    # （scene-linear ProPhoto → 显示 sRGB）交付，着色器与导出两侧都不用改。
+    #
+    # 表由 `scratch/fotufilm_port/bake_ffchain_lut.py` 离线生成：它从引擎导出的
+    # configuration + 三张光谱表算 65³ 个点，float16 压缩存盘。这里只做加载。
+    #
+    # 为什么是 65³ 而不是 33³：65³ 把彩块误差从 3.3/255 压到 1.7/255（色卡 108 块实测），
+    # 而且和 "none" 那条分支同样的做法——表是标量函数烘的，多出来的一兆多换的是可测的精度。
+    #
+    # 每种相纸是一张独立的表（相纸是另一种材料，曲线和光谱都不同），只有下面这些烘过。
+    # 换到没烘过的相纸必须回原链，绝不能拿错相纸的表凑。
+    FFCHAIN_SIZE = 65
+    FFCHAIN_PAPERS = ("kodak_ektacolor_edge", "kodak_2383")
+
+    def _ffchain_file(self, film_stock, paper_key):
+        return os.path.join(self.resources_dir, "fotufilm_chain",
+                            f"{film_stock}__{paper_key}__{self.FFCHAIN_SIZE}.npz")
+
+    def _is_fotufilm_chain_stock(self, film_stock):
+        """转换卷判别 + 有没有烘好的表。按 stock id 缓存，热路径上只查一次字典。"""
+        if not film_stock or film_stock == "none":
+            return False
+        cache = getattr(self, "_ffchain_stock_cache", None)
+        if cache is None:
+            cache = self._ffchain_stock_cache = {}
+        if film_stock in cache:
+            return cache[film_stock]
+        ok = any(os.path.exists(self._ffchain_file(film_stock, p))
+                 for p in self.FFCHAIN_PAPERS)
+        if ok:
+            try:
+                with open(os.path.join(self.profiles_dir, f"{film_stock}.json"),
+                          "r", encoding="utf-8") as fp:
+                    meta = json.load(fp).get("metadata") or {}
+                ok = str(meta.get("version", "")) == "fotufilm-port-2.0"
+            except Exception:                          # noqa: BLE001 - 判不出来就当不是
+                ok = False
+        cache[film_stock] = ok
+        return ok
+
+    def _fotufilm_chain_lut(self, film_stock, paper_stock, print_mode, params_dict):
+        """返回烘好的转换卷 LUT；任何一项不适用都返回 None，调用方回落到原链。"""
+        if not self._is_fotufilm_chain_stock(film_stock):
+            return None
+        if str(print_mode).lower() != "optical":
+            return None
+        paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
+        if paper_key not in self.FFCHAIN_PAPERS:
+            return None
+        if not os.path.exists(self._ffchain_file(film_stock, paper_key)):
+            return None
+        p = params_dict or {}
+        # 表里烘的是"默认显影 + 默认放大机"。任一参数被推离默认，原链才是对的。
+        if abs(float(p.get("dir_amount", 1.0)) - 1.0) > 0.01:
+            return None
+        if abs(float(p.get("dir_interlayer", 1.0)) - 1.0) > 0.01:
+            return None
+        if abs(float(p.get("dir_samelayer", 1.0)) - 1.0) > 0.01:
+            return None
+        if abs(float(p.get("morph_gamma", 1.0)) - 1.0) > 0.01:
+            return None
+        if abs(float(p.get("developer_exhaustion", 0.0))) > 0.01:
+            return None
+        if abs(float(p.get("white_point_lift", 1.0)) - 1.0) > 0.005:
+            return None
+        if int(round(float(p.get("push_ev", 0) or 0))) != 0:
+            return None
+        try:
+            with np.load(self._ffchain_file(film_stock, paper_key)) as z:
+                return np.ascontiguousarray(z["lut"], dtype=np.float32)
+        except Exception as exc:                       # noqa: BLE001 - 坏文件不炸整个烘焙
+            print(f"[SpektraEngine] fotufilm 链 LUT 读不出来（{film_stock}）: {exc}")
+            return None
+
     # -- film look: an appearance layer, deliberately outside the physics ---------------------
     #
     # Measured against fotufilm's own PNG of the same frame (DSC02662, gold 200 + ektacolor edge,
@@ -2537,6 +2615,34 @@ class SpektraEngine:
                 if len(self._lut_cache) > self._max_lut_cache_size:
                     self._lut_cache.popitem(last=False)
             return identity_lut
+
+        # 2b. fotufilm 移植链：转换卷（fotufilm-port-2.0）走引擎自己的物理管线。
+        # 表是离线烘好的（scratch/fotufilm_port/bake_ffchain_lut.py，从引擎导出的光谱表算），
+        # 放在 resources/fotufilm_chain/。原生卷永远不进这条分支，表逐位不变。
+        ff_lut = self._fotufilm_chain_lut(film_stock, paper_stock, print_mode, params_dict)
+        if ff_lut is not None:
+            # 这条链把 DIR / 相纸化学 / 外观层全都算进表里了，post-LUT 的增量必须是 0。
+            self._record_lut_baked(ff_lut, {
+                "dir_amount": 1.0,
+                "dir_interlayer": 1.0,
+                "dir_samelayer": 1.0,
+                "morph_gamma": 1.0,
+                "developer_exhaustion": 0.0,
+            })
+            with self._render_lock:
+                self._lut_cache[cache_key] = ff_lut
+                self._lut_cache.move_to_end(cache_key)
+                if len(self._lut_cache) > self._max_lut_cache_size:
+                    self._lut_cache.popitem(last=False)
+            seen = getattr(self, "_ffchain_announced", None)
+            if seen is None:
+                seen = self._ffchain_announced = set()
+            tag = (film_stock, self._resolve_base_paper(film_stock, paper_stock, print_mode))
+            if tag not in seen:
+                seen.add(tag)
+                print(f"[SpektraEngine] fotufilm 链 LUT: {tag[0]} + {tag[1]} "
+                      f"({ff_lut.shape[0]}^3)")
+            return ff_lut
 
         from .path_utils import get_user_lut_cache_dir
         cache_dir = get_user_lut_cache_dir()
