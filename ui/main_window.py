@@ -1905,6 +1905,13 @@ class CenteredViewToolbar(QFrame):
 
 class DarkroomMainWindow(QMainWindow):
     """SpektraDarkroom Complete Application Window."""
+
+    # 推拉（P4）暂时不提供 UI 入口。fotufilm 点式链不消费 push_ev，而 65³ 退役后也没有
+    # 回落路径，于是 19 支"同时有点式表和推拉表"的卷会选了档位毫无反应；原生卷虽然还能推，
+    # 但一个只在部分卷生效、又没有任何提示的下拉，比没有这个入口更糟。
+    # 逻辑全部保留（控件、参数、push 档案都在），P4 落地后把这里改回 True 即可。
+    PUSH_UI_ENABLED = False
+
     def __init__(self, engine, initial_session=None, initial_files=None):
         super().__init__()
         self.engine = engine
@@ -4374,6 +4381,13 @@ class DarkroomMainWindow(QMainWindow):
         self.chk_push_under.toggled.connect(self._on_push_underexpose_toggled)
         self.chk_push_under.setStyleSheet(get_standard_checkbox_style())
         self.sec_chemistry.addWidget(self.chk_push_under)
+
+        # 暂时藏起来（见类顶 PUSH_UI_ENABLED）。QWidget 一旦不可见，布局就不占空间，
+        # 所以侧栏不会留空档；控件本身仍然存在，`_update_push_ui_state` / 会话恢复 /
+        # 旧 .sdc 的 push_ev 全部照旧工作 —— 只是用户点不到，也就不会被"点了没反应"误导。
+        if not self.PUSH_UI_ENABLED:
+            for _w in (self.combo_push, self.chk_push_under):
+                _w.setVisible(False)
 
         # DIR 只有一个自由度。fotufilm 上游只有 COUPLER_SCALE 一个量，没有"跨层/同层"的划分；
         # spektrafilm 那边的 dir_interlayer / dir_samelayer 也只是 dir_amount 的乘数。
