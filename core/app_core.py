@@ -1461,11 +1461,20 @@ class SpektraEngine:
                 cg = (json.load(fp).get("data") or {}).get("physical_extensions", {}).get("crystal_grain")
             if isinstance(cg, dict) and cg.get("size_mm") and cg.get("strength"):
                 weights = cg.get("layer_weights")
+                law = cg.get("density_law")
+                rows = cg.get("density_profile")
                 fields = {
                     "size_mm": float(cg["size_mm"]),
                     "strength": float(cg["strength"]),
                     "layer_weights": (tuple(float(x) for x in weights)
                                       if isinstance(weights, (list, tuple)) and len(weights) == 3 else None),
+                    # The density law and its measured profile: how granularity scales away
+                    # from the datasheet read density.  A negative is not monotone, so this
+                    # cannot be folded into ``strength``.
+                    "density_law": int(law) if isinstance(law, (int, float)) else 0,
+                    "density_profile": ([[float(v) for v in row] for row in rows]
+                                        if isinstance(rows, (list, tuple)) and len(rows) == 3
+                                        else None),
                 }
         except Exception:                       # noqa: BLE001 - fields must never break a bake
             fields = None
@@ -2520,10 +2529,16 @@ class SpektraEngine:
             is_bw = False
 
         bundle = {
-            "layer_table": grain_bake.bake_layer_table(film_data),
+            # 层表的第四列是"颗粒随密度的倍率"，按这支卷自己的定律烘进去：
+            # shader 只乘一个分量，不内联公式（内联会让 24 MP 路径出全黑帧）。
+            "layer_table": grain_bake.bake_layer_table(
+                film_data,
+                crystal=self._crystal_grain_fields(film_stock),
+                is_reversal=self.is_positive_film(film_stock)),
             "grain": grain_bake.layer_scalars(film_data, clean_params.film_render.grain, 1.0,
                                               crystal=self._crystal_grain_fields(film_stock),
-                                              is_bw=is_bw),
+                                              is_bw=is_bw,
+                                              is_reversal=self.is_positive_film(film_stock)),
             "unsharp": tuple(getattr(clean_params.scanner, "unsharp_mask", (0.0, 0.0))),
             "film": film_stock,
             # 故意不放 density / cube：颗粒每帧的密度来自点式链，不来自烘好的表。
@@ -3320,13 +3335,19 @@ class SpektraEngine:
             "density_min": lo,
             "density_max": hi,
             "cube": print_cube,
-            "layer_table": grain_bake.bake_layer_table(film_data),
+            # 层表的第四列是"颗粒随密度的倍率"，按这支卷自己的定律烘进去：
+            # shader 只乘一个分量，不内联公式（内联会让 24 MP 路径出全黑帧）。
+            "layer_table": grain_bake.bake_layer_table(
+                film_data,
+                crystal=self._crystal_grain_fields(film_stock),
+                is_reversal=self.is_positive_film(film_stock)),
             # The stock's fotufilm crystal-grain archive fields resolve the three gold-200
             # anchor constants per stock (see CRYSTAL_ANCHOR); stocks without the fields --
             # and any read failure -- fall back to the anchor constants unchanged.
             "grain": grain_bake.layer_scalars(film_data, grain_params, 1.0,
                                               crystal=self._crystal_grain_fields(film_stock),
-                                              is_bw=self.is_bw_stock(film_stock)),
+                                              is_bw=self.is_bw_stock(film_stock),
+                                              is_reversal=self.is_positive_film(film_stock)),
             # The scanner's sharpening, folded into the grain kernel: `scan()` runs it on the
             # display RGB, and a pointwise print cube cannot carry a spatial filter, so
             # without it the frame loses a third of its high-frequency energy.

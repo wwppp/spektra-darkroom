@@ -7138,7 +7138,7 @@
                     1,
                     1.35
                 ],
-                "density_law": 2
+                "density_law": 0
             },
             "halation": {
                 "look_scale": 1,

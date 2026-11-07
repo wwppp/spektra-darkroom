@@ -201,7 +201,10 @@ vec3 grain_apply(vec3 density, ivec2 px) {
             var += amp * amp * mu;
         }
         uvec3 state = uvec3(uint(px.x), uint(px.y), uint(u_grain_seed + ch));
-        total[ch] = mean + sqrt(max(var, 0.0)) * gauss_unit(state);
+        // `layer.a` is the baked granularity-against-density multiplier for this record:
+        // fotufilm's law evaluated per stock, resampled onto the same axis this table uses.
+        // It rescales sigma only -- the mean stays the layer sum, so the picture cannot move.
+        total[ch] = mean + sqrt(max(var, 0.0)) * gauss_unit(state) * layer.a;
         mean_total[ch] = mean;
     }
     // The reference's baseline is the *layer sum*, and this port used to replace the handed
@@ -511,6 +514,7 @@ class GLCubeGrain:
         # carries colour_grain = 0, so the slider cannot re-colour a monochrome stock.
         colour = float(g.get("colour_grain", 1.0)) * max(0.0, min(1.0, float(params.get("grain_colour", 1.0))))
         u_1f("u_grain_colour", colour)
+
         u_1i("u_grain_seed", int(params.get("grain_seed", 0)))
         u_1i("u_grain_taps", int(params.get("grain_taps", 25)))
         u_1i("u_grain_probe", int(params.get("grain_probe", 0)))

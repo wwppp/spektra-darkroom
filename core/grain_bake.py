@@ -134,6 +134,103 @@ BW_RATE_SCALE = (1.8, 1.8, 1.8)
 # onto our density channels (C, M, Y) one to one: the red-sensitive record lays cyan.
 CRYSTAL_ANCHOR = {"size_mm": 0.005, "strength": 0.0105, "weights": (0.7, 1.0, 1.35)}
 
+# -- granularity against density -----------------------------------------------------------
+#
+# fotufilm's published RMS figure is read at one density; away from it the emulsion's own law
+# decides how loud the grain is (`FilmStock.grainDensityModulation`).  A colour negative is
+# not monotone -- the measured shape rises to a peak 0.15-0.2 above D-min, falls, and rises
+# again near net 1.1-1.5 where the slow sub-layer comes in -- so this cannot be folded into
+# the strength constant.  Both renderers evaluate the same closed form per pixel.
+#
+# The three numbers below are fotufilm's own defaults (`FilmStock.defaultGrainFogDensity`,
+# `defaultGrainReversalProfile`, `FilmStockDefaults.grainDensityRecords`); a profile overrides
+# only the profile, the law and the anchor.
+GRAIN_FOG_DENSITY = 0.03
+GRAIN_REVERSAL_PROFILE = (1.1, 3.0)
+GRAIN_DENSITY_PROFILE_DEFAULT = (
+    (20.0, 0.3373, 0.2629, 0.8187, 1.1811, 0.3212),
+    (20.0, 0.3583, 0.3183, 1.6514, 1.4856, 0.3631),
+    (20.0, 0.1069, 0.5457, 4.2644, 1.3800, 0.3446),
+)
+
+
+def grain_law_variance(response, channel, density):
+    """Granularity variance at ``density`` for one record, in arbitrary units.
+
+    Mirrors fotufilm's ``grainDensityProfile.variance`` and the three material laws it
+    switches between.  Only the ratio to the anchor is ever used, so the scale cancels.
+    """
+    law = int(response["grain_law"])
+    d = np.asarray(density, dtype=np.float64)
+    if law == 1:                                    # silver: covered area, not density
+        return d * 10.0 ** (0.21004 * d + 0.06114 * d * d)
+    if law == 2:                                    # legacy single population: var ~ D
+        return np.maximum(d, 0.0)
+    if law == 3:                                    # dye reversal
+        p, ds = (float(v) for v in np.asarray(response["grain_reversal"]))
+        q = np.power(np.maximum(d, 1e-6) / max(ds, 1e-6), 2.0 * p)
+        return q / (1.0 + q)
+    a, toe, decay, hump, centre, width = (float(v)
+                                          for v in np.asarray(response["grain_profile"])[channel])
+    toe, decay, width = max(toe, 1e-4), max(decay, 1e-4), max(width, 1e-4)
+    off = (d - centre) / width
+    return (1.0 - np.exp(-d / toe)) * (
+        1.0 + a * np.exp(-d / decay) + hump * np.exp(-0.5 * off * off))
+
+
+def modulation_curve(response, channel, density):
+    """Sigma multiplier at ``density`` relative to the datasheet read density.
+
+    fotufilm's ``grainDensityModulation``.  This is a scalar function of density, so the
+    shader does not evaluate it: :func:`bake_layer_table` resamples it onto the table's own
+    axis.  An inline copy in the fragment shader made the 24 MP path return black frames
+    without a single error -- the same scale ceiling that bit the grain field itself.
+    """
+    fog = float(response["grain_fog"])
+    here = np.maximum(np.asarray(density, dtype=np.float64), 0.0) + fog
+    anchor = max(float(np.asarray(response["grain_anchor"])[channel]), 0.0) + fog
+    if anchor <= 1e-9:
+        return np.ones_like(here)
+    ratio = (grain_law_variance(response, channel, here)
+             / max(float(grain_law_variance(response, channel, anchor)), 1e-20))
+    return np.sqrt(np.maximum(ratio, 0.0))
+
+
+def density_response(film_data, crystal=None, is_reversal=False):
+    """The per-record anchor density and the law that rescales sigma away from it.
+
+    ``grainDensityModulation`` upstream divides the variance at the density in hand by the
+    variance at the datasheet's read density and takes the square root -- the number is a
+    sigma multiplier, so it must not touch the mean.  ``granularityReadDensity`` is gross for
+    a reversal and net otherwise, which is the only place the two materials differ here.
+    """
+    curves = np.asarray(film_data.density_curves, dtype=np.float64)
+    d_min = np.nanmin(curves, axis=0)
+    d_max = np.nanmax(curves, axis=0)
+    span = np.maximum(d_max - d_min, 1e-6)
+    net = (1.0 - d_min) if is_reversal else np.ones(3)
+    anchor = np.clip(net, 0.05 * span, 0.9 * span)
+
+    crystal = crystal or {}
+    try:
+        law = int(crystal.get("density_law"))
+    except (TypeError, ValueError):
+        law = 0
+    try:
+        profile = np.asarray(crystal.get("density_profile"), dtype=np.float64)
+        if profile.shape != (3, 6) or not np.isfinite(profile).all():
+            raise ValueError(profile.shape)
+    except (TypeError, ValueError):
+        # `GrainDensityProfile(records:)` falls back to the family shape on anything malformed.
+        profile = np.asarray(GRAIN_DENSITY_PROFILE_DEFAULT, dtype=np.float64)
+    return {
+        "grain_law": law,
+        "grain_profile": np.ascontiguousarray(profile, dtype=np.float32),
+        "grain_anchor": anchor.astype(np.float32),
+        "grain_fog": float(GRAIN_FOG_DENSITY),
+        "grain_reversal": np.asarray(GRAIN_REVERSAL_PROFILE, dtype=np.float32),
+    }
+
 
 def normalized_density_curves(film_data):
     """The film's curves as ``develop()`` uses them: baseline-zeroed.
@@ -196,16 +293,18 @@ def bake_density_to_rgb(sim, lut_size, dens_min, dens_max):
     return np.clip(cube, 0.0, 1.0)
 
 
-def bake_layer_table(film_data, samples=256):
+def bake_layer_table(film_data, samples=256, crystal=None, is_reversal=False):
     """Resample the sub-layer split onto a uniform density axis, ready for a 3-D texture.
 
     Returns ``dict`` with
 
     ``axis_min`` / ``axis_max``  (3,)  -- the density range each record is resampled over
-    ``table``                    (samples, 3, 4) -- (layer0, layer1, layer2, 0) per record
+    ``table``                    (samples, 3, 4) -- (layer0, layer1, layer2, modulation)
 
     Column order inside ``table`` matches ``density_curves_layers[:, sl, ch]``: the three
-    coated layers of record ``ch``, fast -> slow.
+    coated layers of record ``ch``, fast -> slow.  The fourth column carries the stock's
+    granularity-against-density multiplier on this same axis, so the shader gets the whole
+    law for one component instead of an inlined branch tree.
     """
     axis = normalized_density_curves(film_data)                     # (M, 3)
     layers = np.asarray(film_data.density_curves_layers, dtype=np.float64)  # (M, 3, 3)
@@ -214,6 +313,7 @@ def bake_layer_table(film_data, samples=256):
     hi = axis.max(axis=0)
     uniform = np.linspace(0.0, 1.0, samples, dtype=np.float64)
     table = np.zeros((samples, 3, 4), dtype=np.float32)
+    response = density_response(film_data, crystal, is_reversal)
 
     for ch in range(3):
         x = axis[:, ch]
@@ -224,6 +324,8 @@ def bake_layer_table(film_data, samples=256):
             ys = layers[order, sl, ch]
             values = np.interp(uniform * (hi[ch] - lo[ch]) + lo[ch], xs, ys)
             table[:, ch, sl] = values.astype(np.float32)
+        table[:, ch, 3] = modulation_curve(
+            response, ch, uniform * (hi[ch] - lo[ch]) + lo[ch]).astype(np.float32)
 
     return {
         "axis_min": lo.astype(np.float32),
@@ -287,7 +389,8 @@ def grain_kernel_1d(pixel_size_um, final_blur_px=FRAME_BLUR_PX, radius=2,
     return (row / total).astype(np.float32)
 
 
-def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False):
+def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
+                  is_reversal=False):
     """Per (record, sub-layer) numbers the shader needs besides the table.
 
     ``crystal`` is the stock's fotufilm archive dict (``size_mm`` / ``strength`` /
@@ -359,7 +462,7 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False):
     od_particle = density_max_abs / np.maximum(particles, 1e-9)
     blur_sigma = float(grain.blur_dye_clouds_um) * np.sqrt(np.maximum(od_particle, 0.0))
 
-    return {
+    out = {
         "density_min": density_min.astype(np.float32),
         "density_min_layers": density_min_layers.astype(np.float32),
         "density_max_layers": density_max_abs.astype(np.float32),
@@ -383,3 +486,7 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False):
         # the CPU reference (grain_model) and the GPU path (gl_grain) both read the same value.
         "final_blur_px": FRAME_BLUR_PX,
     }
+    # Granularity against density: the law, its profile, and the per-record anchor it is
+    # measured from.  Both renderers rescale sigma with it; the mean is untouched.
+    out.update(density_response(film_data, crystal, is_reversal))
+    return out

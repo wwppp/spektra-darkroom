@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-from core.grain_bake import DYE_CLOUD_DECAY_UM
+from core.grain_bake import DYE_CLOUD_DECAY_UM, modulation_curve
 
 __all__ = ["sample_layer_density", "apply_grain"]
 
@@ -62,6 +62,27 @@ def sample_layer_density(density, layer_table):
     return out
 
 
+def density_modulation(scalars, density):
+    """Sigma multiplier per record: fotufilm's ``grainDensityModulation``.
+
+    The published RMS figure is read at one density (``granularityReadDensity``: gross 1 for a
+    reversal, net 1 otherwise).  Away from it the emulsion's own law rescales granularity --
+    a colour negative peaks just above D-min and rises again near net 1.1-1.5, so the shape
+    has to travel with the stock.  Returns ``None`` for a bundle that predates the wiring,
+    which keeps the caller's previous behaviour bit-identical.
+
+    The formula lives in :func:`core.grain_bake.modulation_curve`; the shader reads the same
+    function resampled into the layer table's fourth column, so there is one implementation.
+    """
+    if "grain_law" not in scalars:
+        return None
+    density = np.asarray(density, dtype=np.float64)
+    mod = np.ones_like(density)
+    for ch in range(3):
+        mod[..., ch] = modulation_curve(scalars, ch, density[..., ch])
+    return mod
+
+
 def apply_grain(density, layer_table, scalars, pixel_size_um, strength=1.0, rng=None):
     """Return the density the film would actually have developed, grain included.
 
@@ -88,6 +109,8 @@ def apply_grain(density, layer_table, scalars, pixel_size_um, strength=1.0, rng=
     min_layers = np.asarray(scalars["density_min_layers"], dtype=np.float64)   # (3 sl, 3 ch)
     layers += min_layers[None, None, :, :]
 
+    mod = density_modulation(scalars, density)
+
     out = np.zeros(density.shape, dtype=np.float64)
     for ch in range(3):
         for sl in range(3):
@@ -101,6 +124,10 @@ def apply_grain(density, layer_table, scalars, pixel_size_um, strength=1.0, rng=
             rate = (n / sat) * p
             draw = rng.poisson(rate).astype(np.float64)
             g = draw * (dmax / n) * sat
+            if mod is not None:
+                # Keep this sub-layer's mean, rescale only its spread: the law is a sigma
+                # multiplier, and scaling the draw itself would move the picture.
+                g = d + mod[..., ch] * (g - d)
             # The reference's dye-cloud blur is ``blur_um * sqrt(od_particle)`` *pixels* (it
             # mixes the units, but that is the behaviour we are matching), and od_particle is
             # dmax/n -- so the blur shrinks as the pitch grows.  Baking the sigma once at a
