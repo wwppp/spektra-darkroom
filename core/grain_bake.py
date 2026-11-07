@@ -406,6 +406,44 @@ def grain_kernel_1d(pixel_size_um, final_blur_px=FRAME_BLUR_PX, radius=2,
     return (row / total).astype(np.float32)
 
 
+def _read_density_rate(ceiling, density_min, uniformity):
+    """Per-channel rate factor that pins sigma at the read density to ``strength*weights``.
+
+    ``ceiling`` is ``density_max_abs.sum(0)`` -- the per-record ceiling *including* the
+    record's share of the fog, which is what the shader divides the density by.
+
+    The shader's variance is ``var = sum_l dmax_l^2 * p_l * sat_l / npp_l``.  Writing the
+    layer split ``f_l`` (sum 1), with ``D = ceiling``, ``dmax_l = f_l * D``,
+    ``npp_l = pixel_area * f_l * rate / (base*area_mul)`` and ``p_l = d / D`` with ``d`` the
+    gross density in hand, the sum collapses -- ``sum_l f_l = 1`` -- to
+
+        sigma^2 = D * d * sat * base * area_mul / (pixel_area * rate)
+
+    so at the read density (``d`` is 1.0 gross for both materials: a negative reads at net 1,
+    a reversal at net ``1 - Dmin`` plus its own ``Dmin``) the amplitude carries a ``sqrt(D)``
+    the engine does not have.  Dividing the rate by ``D`` cancels it, and the saturation term
+    ``sat = 1 - p*uniformity`` has to travel with it because ``p = 1/D`` moves with ``D``.
+
+    What is left is ``sigma ~ strength * weight * sqrt(sat_ratio)`` -- the same three things
+    fotufilm's ``readSigma = grainStrength * grainLayerWeights[l]`` names, and nothing about
+    how deep the stock can print.  The anchor stock divides by itself, so its factor is
+    exactly 1 and its render stays bit-identical (pinned, because a float32 round trip
+    through ``density_max_layers`` leaves a 1e-8 residue that tips a few hundred pixels
+    across a quantisation step).
+
+    ``CRYSTAL_ANCHOR_TOTAL`` is the anchor stock's ceiling *before* its fog share, so the
+    reference ``D0`` adds ``density_min`` back; ``ceiling`` arrives already carrying it.
+    """
+    total = np.asarray(ceiling, dtype=np.float64)
+    dmin = np.asarray(density_min, dtype=np.float64)
+    unif = np.asarray(uniformity, dtype=np.float64)
+    span = np.maximum(total, 1e-6)
+    span0 = np.maximum(np.asarray(CRYSTAL_ANCHOR_TOTAL, dtype=np.float64) + dmin, 1e-6)
+    # Read density is 1.0 gross for both materials -- see the docstring.
+    corr = (span / span0) * ((1.0 - unif / span) / (1.0 - unif / span0))
+    return np.where(np.abs(corr - 1.0) < 1e-6, 1.0, corr)
+
+
 def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
                   is_reversal=False):
     """Per (record, sub-layer) numbers the shader needs besides the table.
@@ -467,22 +505,14 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
             rate = np.asarray([CHANNEL_RATE_SCALE[i]
                                * (CRYSTAL_ANCHOR["weights"][i] / float(weights[i])) ** 2
                                for i in range(3)], dtype=np.float64)
-            # Anchor the amplitude on `strength`, not on how deep this stock can go.
-            #
-            # ``dMax = fraction * total`` and the sampled sigma goes as ``dMax/sqrt(rate)``
-            # (``sigma = dMax*sqrt(sat*p/n)`` with ``p = d/dMax``, and ``n`` scales with the
-            # rate).  Dividing the rate by ``total`` alone leaves ``sqrt(total)`` in the
-            # numerator -- measured, that still put a stock with total 2.93 at 0.53 of gold's
-            # grain where its strength ratio says 0.40.  Squaring cancels it: sigma then goes
-            # as ``fraction * strength``, which is what fotufilm's ``readSigma =
-            # strength*grainLayerWeights[l]``, anchored at the read density, means.
-            #
-            # The anchor stock itself must land on exactly 1: its total is only known to
-            # float32 through `density_max_layers`, and a 1e-8 residual is enough to tip a
-            # few hundred pixels across a quantisation step (measured: 7e-6 of the frame).
-            ratio = total / np.maximum(1e-6, np.asarray(CRYSTAL_ANCHOR_TOTAL, dtype=np.float64))
-            ratio = np.where(np.abs(ratio - 1.0) < 1e-6, 1.0, ratio)
-            rate = rate * ratio ** 2
+            # Anchor the amplitude at the *read density*, the way fotufilm's `anchorToSheet`
+            # does: solve the rate so sigma reads `strength * grainLayerWeights[l]`, with how
+            # deep the stock can print cancelled out.  `_read_density_rate` carries the
+            # derivation; the short version is that the sampled sigma goes as
+            # ``sqrt((total+dmin) * d * sat / rate)``, so the ``sqrt(total)`` has to come out
+            # of the rate and the saturation has to travel with it.
+            rate = rate * _read_density_rate(density_max_abs.sum(axis=0), density_min,
+                                             np.asarray(grain.uniformity))
             area_mul = (float(crystal["strength"]) / CRYSTAL_ANCHOR["strength"]) ** 2
         except (KeyError, TypeError, ValueError):
             decay_um = float(DYE_CLOUD_DECAY_UM)
