@@ -463,22 +463,43 @@ vec3 diffusion_disc(vec2 sample_uv, vec2 radius_uv) {
 
 // {{GRAIN}}
 
+// 颗粒的唯一调用点。两条链（点式新链 / 双立方体老路）都汇到"净密度"，颗粒只在这里
+// 出现一次 —— 源码里出现第二份 grain_field，驱动会静默产出一个全黑帧：没有编译错误、
+// 没有链接错误、没有 GL error，只有 readPixels 全 0（实测 2026-11-07，二分到这一处）。
+// 25 个 tap × 3 层 × 多次内联，指令/寄存器压力越线时 NVIDIA 就是这么失败的。
+vec3 grain_on_density(vec3 density, vec2 px) {
+    if (u_grain_cubes != 1) return density;
+    return grain_field(density, px);
+}
+
 // The enlarger and the paper, applied to one patch of the negative: steps 4 to 8 of the
 // pipeline, lifted out of main() so a pixel can run it more than once.  At fit zoom one screen
 // pixel covers several image pixels; averaging them *after* this is what a downsample does --
 // averaging before it is what a different-looking picture does.
 vec3 develop_negative(vec3 linear_rgb, vec2 image_px) {
     vec3 film_rgb;
-    if (u_ff_on == 1) {
+    // 两条链在这里汇合到"净密度"：点式新链逐像素算，老路查 33³ 密度表。
+    // 必须先算完密度再分头出显示值，颗粒才只有一处调用（见 grain_on_density 的注释：
+    // 两个调用点会让驱动静默出全黑帧）。
+    bool use_ff = (u_ff_on == 1);
+    vec4 fd = vec4(0.0);
+    if (use_ff) {
         // fotufilm 点式链：DIR 在这里实时算，不再烘进表里。
-        film_rgb = ffchain_run(linear_rgb);
-    } else if (u_grain_cubes == 1) {
+        fd = ffchain_develop(linear_rgb);
+        if (fd.a != 0.0) return fd.rgb;        // u_ff_debug 命中：诊断色直出
+    }
+    if (use_ff || u_grain_cubes == 1) {
         // Density first, so the grain has somewhere to go: the stage between these two calls
         // is the film's development, and it cannot be baked into a pointwise table.
-        // The grain stage *replaces* the density (the reference returns an absolute density,
-        // not a delta), which is also why the inactive path has to hand the input straight back.
-        vec3 density = grain_field(density_from_linear(linear_rgb), image_px);
-        film_rgb = develop_from_density(density);
+        // 新链的密度是逐像素算出来的（上游顺序 develop → net → grain → print），
+        // 老路查 33³ 表 —— 后者在亮部反推误差 0.22 密度 ≈ 0.73 档，这是新链要修的东西。
+        //
+        // grain_field 返回"以传入密度为基准的零均值涨落"，不是绝对密度，所以不需要
+        // 加减 dmin：grain33 的轴 dmin=0 / dmax=[1.72,2.06,1.94] 与新链的
+        // net ∈ [0, rng]=[1.71,2.06,1.94] 本来对齐（差 ≤0.006）。
+        vec3 density = use_ff ? fd.rgb : density_from_linear(linear_rgb);
+        density = grain_on_density(density, image_px);
+        film_rgb = use_ff ? ffchain_print(density) : develop_from_density(density);
     } else if (u_has_lut == 1) {
         vec3 shaper_in = linear_to_shaper(linear_rgb);
         float lut_dim = float(textureSize(u_lut, 0).x);
@@ -2178,8 +2199,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def set_ffchain_bundle(self, bundle):
         """Hand over the fotufilm pointwise tables. ``None`` falls back to the single LUT.
 
-        开这条路时颗粒暂不作用——它要接在密度域，而新链的密度是逐像素算的、不落表。
-        见 docs §15。
+        开这条路时颗粒接在净密度上：``ffchain_develop`` 交出 net，``grain_field``
+        在 net 上加零均值涨落，``ffchain_print`` 再走相纸。见 docs §15。
         """
         self._ffchain.set_bundle(bundle)
         self.update()
@@ -3041,6 +3062,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if getattr(self, "_pending_lut", None) is not None:
                 self._do_upload_lut(self._pending_lut)
                 self._pending_lut = None
+            # set_bundle() 只是暂存，push 发生在上色那一次；离屏不推就永远用上一张图的表，
+            # 症状是"预览对、导出错"，且只有换卷/换纸才暴露。
+            self._grain_cubes.upload_pending()
+            self._ffchain.upload_pending()
 
             if lut_override is not None:
                 size = lut_override.shape[0]

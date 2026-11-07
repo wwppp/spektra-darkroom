@@ -206,10 +206,16 @@ float ff_warp(int ch, float u) {
     return mix(ff_warp_band(ch, b0, u), ff_warp_band(ch, b0 + 1, u), fb);
 }
 
-vec3 ffchain_run(vec3 prophoto) {
-    if (u_ff_debug == 70) return clamp(prophoto, 0.0, 1.0);
+// 上游的结构是 develop → 净密度 → 颗粒 → print，这里照做。过去整条链是个黑盒，
+// 颗粒只能从 33³ 表反推密度，实测亮部误差 0.221（≈0.73 档），而亮部正是颗粒最显眼
+// 的地方。切开之后 net 是逐像素算出来的浮点数，没有反推这一步。
+//
+// 返回 vec4 是为了让诊断码逐位保持不变：alpha 为 1 表示"这是 u_ff_debug 命中的诊断色，
+// 不是密度，调用方别往下算"。scratch 里那些逐段对比脚本因此不用改。
+vec4 ffchain_develop(vec3 prophoto) {
+    if (u_ff_debug == 70) return vec4(clamp(prophoto, 0.0, 1.0), 1.0);
     vec3 rec = u_ff_pp_to_2020 * prophoto;
-    if (u_ff_debug == 71) return clamp(rec, 0.0, 1.0);
+    if (u_ff_debug == 71) return vec4(clamp(rec, 0.0, 1.0), 1.0);
     // 1. 色度归一化后采样曝光表（四面体）
     float yv = dot(rec, u_ff_luma);
     vec3 d = u_ff_domain * rec;
@@ -225,8 +231,8 @@ vec3 ffchain_run(vec3 prophoto) {
     float scale = max(max(w.x, max(w.y, w.z)), 1e-6);
     vec3 E = ff_tetra3(u_ff_exposure, w / scale, 33.0).rgb * (scale / 0.18);
     vec3 logE = log(max(E, vec3(1e-12))) * 0.4342944819;   // 1/ln10
-    if (u_ff_debug == 1) return w / scale;
-    if (u_ff_debug == 2) return clamp(logE * 0.2 + 0.5, 0.0, 1.0);
+    if (u_ff_debug == 1) return vec4(w / scale, 1.0);
+    if (u_ff_debug == 2) return vec4(clamp(logE * 0.2 + 0.5, 0.0, 1.0), 1.0);
 
     // 2. DIR：释放 → 跨层抑制 → 中性锚定补偿
     vec3 formed0 = vec3(ff_curve(u_ff_curve_film, 0, logE.x),
@@ -264,32 +270,32 @@ vec3 ffchain_run(vec3 prophoto) {
                     u.y + ff_warp(1, u.y),
                     u.z + ff_warp(2, u.z));
 
-    if (u_ff_debug == 3) return clamp(eff * 0.2 + 0.5, 0.0, 1.0);
-    if (u_ff_debug == 8) return clamp(inhib * 0.2 + 0.5, 0.0, 1.0);
-    if (u_ff_debug == 9) return clamp(formed0 / 3.0, 0.0, 1.0);
+    if (u_ff_debug == 3) return vec4(clamp(eff * 0.2 + 0.5, 0.0, 1.0), 1.0);
+    if (u_ff_debug == 8) return vec4(clamp(inhib * 0.2 + 0.5, 0.0, 1.0), 1.0);
+    if (u_ff_debug == 9) return vec4(clamp(formed0 / 3.0, 0.0, 1.0), 1.0);
     if (u_ff_debug == 10) {
         ivec2 s2 = textureSize(u_ff_curve_film, 0);
-        return vec3(float(s2.x) / 2048.0, float(s2.y) / 3.0, 0.0);
+        return vec4(float(s2.x) / 2048.0, float(s2.y) / 3.0, 0.0, 1.0);
     }
-    if (u_ff_debug == 11) return vec3(ff_curve(u_ff_curve_film, 0, 0.0) / 3.0,
+    if (u_ff_debug == 11) return vec4(ff_curve(u_ff_curve_film, 0, 0.0) / 3.0,
                                       ff_curve(u_ff_curve_film, 1, 0.0) / 3.0,
-                                      ff_curve(u_ff_curve_film, 2, 0.0) / 3.0);
-    if (u_ff_debug == 60) return (u_ff_pp_to_2020 * vec3(0.2, 0.5, 0.8)) * 0.5;
-    if (u_ff_debug == 61) return (u_ff_domain * vec3(0.2, 0.5, 0.8)) * 0.5;
-    if (u_ff_debug == 50) return texelFetch(u_ff_exposure, ivec3(32,32,32), 0).rgb;
-    if (u_ff_debug == 51) return texelFetch(u_ff_exposure, ivec3(0,0,0), 0).rgb;
-    if (u_ff_debug == 52) return texelFetch(u_ff_exposure, ivec3(16,16,16), 0).rgb;
-    if (u_ff_debug == 53) return texelFetch(u_ff_exposure, ivec3(32,0,0), 0).rgb;
-    if (u_ff_debug == 40) return (u_ff_domain * vec3(1.0)) / 3.0;
-    if (u_ff_debug == 41) return (u_ff_pp_to_2020 * vec3(1.0)) / 3.0;
-    if (u_ff_debug == 42) return (u_ff_K * vec3(1.0)) / 3.0;
-    if (u_ff_debug == 12) return vec3((u_ff_range.x + 8.0) / 16.0, u_ff_range.y / 16.0, 0.0);
-    if (u_ff_debug == 13) return u_ff_dmin / 3.0;
-    if (u_ff_debug == 14) return vec3(ff_curve(u_ff_curve_film, 0, 0.0),
-                                      ff_curve(u_ff_curve_film, 1, 0.0),
-                                      ff_curve(u_ff_curve_film, 2, 0.0)) / 3.0 * 0.0
-                              + vec3(float(textureSize(u_ff_curve_film, 0).x) / 2048.0,
-                                     (0.0 + 0.5) / 3.0, 0.0);
+                                      ff_curve(u_ff_curve_film, 2, 0.0) / 3.0, 1.0);
+    if (u_ff_debug == 60) return vec4((u_ff_pp_to_2020 * vec3(0.2, 0.5, 0.8)) * 0.5, 1.0);
+    if (u_ff_debug == 61) return vec4((u_ff_domain * vec3(0.2, 0.5, 0.8)) * 0.5, 1.0);
+    if (u_ff_debug == 50) return vec4(texelFetch(u_ff_exposure, ivec3(32,32,32), 0).rgb, 1.0);
+    if (u_ff_debug == 51) return vec4(texelFetch(u_ff_exposure, ivec3(0,0,0), 0).rgb, 1.0);
+    if (u_ff_debug == 52) return vec4(texelFetch(u_ff_exposure, ivec3(16,16,16), 0).rgb, 1.0);
+    if (u_ff_debug == 53) return vec4(texelFetch(u_ff_exposure, ivec3(32,0,0), 0).rgb, 1.0);
+    if (u_ff_debug == 40) return vec4((u_ff_domain * vec3(1.0)) / 3.0, 1.0);
+    if (u_ff_debug == 41) return vec4((u_ff_pp_to_2020 * vec3(1.0)) / 3.0, 1.0);
+    if (u_ff_debug == 42) return vec4((u_ff_K * vec3(1.0)) / 3.0, 1.0);
+    if (u_ff_debug == 12) return vec4((u_ff_range.x + 8.0) / 16.0, u_ff_range.y / 16.0, 0.0, 1.0);
+    if (u_ff_debug == 13) return vec4(u_ff_dmin / 3.0, 1.0);
+    if (u_ff_debug == 14) return vec4(vec3(ff_curve(u_ff_curve_film, 0, 0.0),
+                                           ff_curve(u_ff_curve_film, 1, 0.0),
+                                           ff_curve(u_ff_curve_film, 2, 0.0)) / 3.0 * 0.0
+                                      + vec3(float(textureSize(u_ff_curve_film, 0).x) / 2048.0,
+                                             (0.0 + 0.5) / 3.0, 0.0), 1.0);
     // 3. 显影 → 净密度
     vec3 formed = vec3(ff_curve(u_ff_curve_film, 0, eff.x),
                        ff_curve(u_ff_curve_film, 1, eff.y),
@@ -298,8 +304,13 @@ vec3 ffchain_run(vec3 prophoto) {
         ? (u_ff_dmin + u_ff_rng - (formed - u_ff_dmin)) : formed;
     vec3 net = developed - u_ff_dmin;
 
-    if (u_ff_debug == 4) return clamp(net / max(u_ff_rng, vec3(1e-6)), 0.0, 1.0);
-    // 4. filmOut → 相纸曲线 → paperOut
+    if (u_ff_debug == 4) return vec4(clamp(net / max(u_ff_rng, vec3(1e-6)), 0.0, 1.0), 1.0);
+    return vec4(net, 0.0);          // alpha 0：这是真密度，调用方可以往里插颗粒
+}
+
+// 4. filmOut → 相纸曲线 → paperOut，出口是显示值。
+// 输入是**净密度**（不是 logE，不是显示值），所以颗粒只要加在调用点之间就够了。
+vec3 ffchain_print(vec3 net) {
     vec3 rel2 = ff_linear3(u_ff_film, net / u_ff_rng, 33.0).rgb;
     vec3 pact;
     pact.x = (ff_curve(u_ff_curve_paper, 0, u_ff_mid.x + u_ff_mask.x * rel2.x) - u_ff_pdmin.x)
@@ -318,6 +329,13 @@ vec3 ffchain_run(vec3 prophoto) {
     vec3 v = clamp(lin_srgb, 0.0, 1.0);
     return mix(v * 12.92, 1.055 * pow(v, vec3(1.0 / 2.4)) - 0.055,
                step(vec3(0.0031308), v));
+}
+
+// 整条链一次算完的兼容入口。诊断脚本和"不要颗粒"的调用点走这里。
+vec3 ffchain_run(vec3 prophoto) {
+    vec4 d = ffchain_develop(prophoto);
+    if (d.a != 0.0) return d.rgb;        // debug 命中：诊断色直出，不进 print
+    return ffchain_print(d.rgb);
 }
 """
 

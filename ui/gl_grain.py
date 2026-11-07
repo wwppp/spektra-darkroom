@@ -23,6 +23,8 @@ separately -- see ``u_grain_taps``.)
 
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 from OpenGL import GL
 
@@ -367,7 +369,9 @@ class GLCubeGrain:
         table = np.asarray(layer_table["table"], dtype=np.float32)   # (samples, 3, 4)
         data = np.ascontiguousarray(np.transpose(table, (1, 0, 2)))  # (3, samples, 4)
         samples = data.shape[1]
-        signature = (samples, id(layer_table["table"]))
+        # 内容指纹，不是 id()：地址会被回收复用，换卷后可能"看着没变"而沿用上一支卷的表
+        # （`set_bundle` 的签名曾经踩过同一个坑，见那里的注释）。表只有 12 KB，哈希是白送。
+        signature = (samples, hashlib.blake2b(data.tobytes(), digest_size=8).hexdigest())
         GL.glActiveTexture(0x84C0 + unit)
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
         if self._table_tex and self._table_signature == signature:

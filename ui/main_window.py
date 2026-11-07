@@ -7427,7 +7427,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         film = getattr(self, "current_film_stock", "none")
         if eng is None or film in (None, "", "none"):
             return None
-        params = dict(self.current_params)
+        # 底座用画布自己的 params，不用 current_params：渲染是 `dict(self.params)` 起头的
+        # （会话恢复还会把上张图的编辑参数写进去）。两边的化学参数一旦分叉，算出的 LUT key
+        # 就不同，`GLCubeGrain.bind` 的 expect_key 会判"不是同一套烘"并把颗粒静默关掉 ——
+        # 表现就是预览有颗粒、导出没有，且换卷才复现。
+        canvas_params = getattr(self.canvas, "params", None)
+        params = (dict(canvas_params) if isinstance(canvas_params, dict) and canvas_params
+                  else dict(self.current_params))
         params["print_mode"] = getattr(self, "current_print_mode", "optical")
         try:
             return eng.get_grain_bundle(film, getattr(self, "current_paper_stock", "kodak_2383"),
