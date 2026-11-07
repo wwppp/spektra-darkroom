@@ -2317,23 +2317,18 @@ class SpektraEngine:
     # paperOutput。整条链是逐像素的，所以可以烘成一张 3D LUT，按目录里的 shaper 网格
     # （scene-linear ProPhoto → 显示 sRGB）交付，着色器与导出两侧都不用改。
     #
-    # 表由 `scratch/fotufilm_port/bake_ffchain_lut.py` 离线生成：它从引擎导出的
-    # configuration + 三张光谱表算 65³ 个点，float16 压缩存盘。这里只做加载。
+    # 从 2026-11-07 起这张表**不再离线烘**：`core/ffchain_point` 是点式链的 numpy 版
+    # （与 ui/gl_ffchain.py 的 GLSL 同一套算术），按请求的边长现算格点并落盘缓存。
+    # 之前那 44 组 `<卷>__<纸>__65.npz`（29 MB）已随之退役 —— 见 docs §22.2。
     #
-    # 为什么是 65³ 而不是 33³：65³ 把彩块误差从 3.3/255 压到 1.7/255（色卡 108 块实测），
-    # 而且和 "none" 那条分支同样的做法——表是标量函数烘的，多出来的一兆多换的是可测的精度。
-    #
-    # 每种相纸是一张独立的表（相纸是另一种材料，曲线和光谱都不同），只有下面这些烘过。
-    # 换到没烘过的相纸必须回原链，绝不能拿错相纸的表凑。
-    FFCHAIN_SIZE = 65
+    # 每种相纸是一张独立的表（相纸是另一种材料，曲线和光谱都不同），只有下面这些有。
+    # 换到没有点式表的相纸必须回原链，绝不能拿别的相纸的表凑。
     FFCHAIN_PAPERS = ("kodak_ektacolor_edge", "kodak_2383", "screen")
-
-    def _ffchain_file(self, film_stock, paper_key):
-        return os.path.join(self.resources_dir, "fotufilm_chain",
-                            f"{film_stock}__{paper_key}__{self.FFCHAIN_SIZE}.npz")
+    # 盘缓存版本：改了 ffchain_point 的算术就要 +1，否则旧表会被继续读
+    FFP_LUT_VERSION = "ffp1"
 
     def _is_fotufilm_chain_stock(self, film_stock):
-        """转换卷判别 + 有没有烘好的表。按 stock id 缓存，热路径上只查一次字典。"""
+        """转换卷判别 + 有没有点式表。按 stock id 缓存，热路径上只查一次字典。"""
         if not film_stock or film_stock == "none":
             return False
         cache = getattr(self, "_ffchain_stock_cache", None)
@@ -2341,8 +2336,8 @@ class SpektraEngine:
             cache = self._ffchain_stock_cache = {}
         if film_stock in cache:
             return cache[film_stock]
-        # 判据用点式表，不用 65³ 表：65³ 在退役名单上，而它恰好对反转片不存在
-        # （反转只有 screen 介质的点式表）—— 拿"有没有 65³"当身份证会让整支卷判不出来。
+        # 判据用点式表：65³ 那批已经在 2026-11-07 退役（docs §22.2），而且它恰好对反转片
+        # 不存在（反转只有 screen 介质的点式表）—— 拿"有没有 65³"当身份证会让整支卷判不出来。
         ok = any(os.path.exists(self._ffchain_point_file(film_stock, p))
                  for p in self.FFCHAIN_PAPERS)
         if ok:
@@ -2356,39 +2351,49 @@ class SpektraEngine:
         cache[film_stock] = ok
         return ok
 
-    def _fotufilm_chain_lut(self, film_stock, paper_stock, print_mode, params_dict):
-        """返回烘好的转换卷 LUT；任何一项不适用都返回 None，调用方回落到原链。"""
-        if not self._is_fotufilm_chain_stock(film_stock):
-            return None
-        if str(print_mode).lower() != "optical":
-            return None
-        paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
-        if paper_key not in self.FFCHAIN_PAPERS:
-            return None
-        if not os.path.exists(self._ffchain_file(film_stock, paper_key)):
-            return None
-        p = params_dict or {}
-        # 表里烘的是"默认显影 + 默认放大机"。任一参数被推离默认，原链才是对的。
-        if abs(float(p.get("dir_amount", 1.0)) - 1.0) > 0.01:
-            return None
-        if abs(float(p.get("dir_interlayer", 1.0)) - 1.0) > 0.01:
-            return None
-        if abs(float(p.get("dir_samelayer", 1.0)) - 1.0) > 0.01:
-            return None
-        if abs(float(p.get("morph_gamma", 1.0)) - 1.0) > 0.01:
-            return None
-        if abs(float(p.get("developer_exhaustion", 0.0))) > 0.01:
-            return None
-        if abs(float(p.get("white_point_lift", 1.0)) - 1.0) > 0.005:
-            return None
-        if int(round(float(p.get("push_ev", 0) or 0))) != 0:
-            return None
+    def _ffchain_point_lut(self, film_stock, paper_stock, lut_size, bundle, dir_total):
+        """点式链在 shaper 格点上的显示 LUT（`lut_size³`），带盘缓存。
+
+        只给**非画布**消费者用（缩略图 17³、胶片条卡片、CPU 导出 33³）——画布走 GLSL
+        逐像素。成本：33³ 约 120 ms、65³ 约 1 s，落盘后是读 npy。
+
+        边长有下限 33：缩略图请求 17³ 是冲着"小"去的，但 17³ 在陡峭段插值差到 15/255
+        （灰阶实测），而今天这条路上拿到的其实是整张 65³（旧加载器不看请求边长）。
+        33³ 的代价是 1.5 倍点数、ΔE76 中位 0.17，换掉那 15/255 值得。
+
+        缓存名里带点式表的 mtime + 大小：表换了必须重算，否则旧表会一直服务新物理
+        （`resources/` 是可写目录，重新导出资产是常事）。
+        """
+        paper_key = self._resolve_base_paper(film_stock, paper_stock, "optical")
+        lut_size = max(int(lut_size), 33)
+        point_path = self._ffchain_point_file(film_stock, paper_key)
         try:
-            with np.load(self._ffchain_file(film_stock, paper_key)) as z:
-                return np.ascontiguousarray(z["lut"], dtype=np.float32)
-        except Exception as exc:                       # noqa: BLE001 - 坏文件不炸整个烘焙
-            print(f"[SpektraEngine] fotufilm 链 LUT 读不出来（{film_stock}）: {exc}")
-            return None
+            stamp = f"{int(os.path.getmtime(point_path))}_{os.path.getsize(point_path)}"
+        except OSError:
+            stamp = "0"
+
+        from .path_utils import get_user_lut_cache_dir
+        cache_dir = get_user_lut_cache_dir()
+        name = (f"{self.FFP_LUT_VERSION}__{film_stock}__{paper_key}__{lut_size}"
+                f"__d{dir_total:g}__{stamp}.npy")
+        path = os.path.join(cache_dir, name)
+        want = (lut_size, lut_size, lut_size, 3)
+        if os.path.exists(path):
+            try:
+                lut = np.load(path)
+                if lut.shape == want:
+                    return np.ascontiguousarray(lut, dtype=np.float32)
+            except Exception:                          # noqa: BLE001 - 坏缓存当没有
+                pass
+
+        from .ffchain_point import bake_lut
+        lut = bake_lut(bundle, lut_size, dir_total)
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            np.save(path, lut)
+        except Exception as exc:                       # noqa: BLE001 - 缓存写不进去不影响出图
+            print(f"[SpektraEngine] 点式链 LUT 缓存写不进去: {exc}")
+        return lut
 
     # -- grain on the ported chain -------------------------------------------------------------
     #
@@ -2437,8 +2442,8 @@ class SpektraEngine:
                                  print_mode="optical", params_dict=None):
         """点式链要的全部表；不适用返回 None，画布自动回落到单表。
 
-        与 `_fotufilm_chain_lut` 的区别：这条不依赖 65³ 文件，也不看 DIR / morph 那几个
-        参数闸门 —— DIR 是实时算的，参数变了不需要换表。只有"卷 + 纸 + optical"三个条件。
+        不依赖任何离线烘的表（65³ 已退役），也不看 DIR / morph 那几个参数闸门 ——
+        DIR 是实时算的，参数变了不需要换表。只有"卷 + 纸 + optical"三个条件。
         """
         if os.environ.get("SPECTRA_FFCHAIN_POINT", "1") == "0":
             return None
@@ -2760,13 +2765,21 @@ class SpektraEngine:
             return identity_lut
 
         # 2b. fotufilm 移植链：转换卷（fotufilm-port-2.0）走引擎自己的物理管线。
-        # 表是离线烘好的（scratch/fotufilm_port/bake_ffchain_lut.py，从引擎导出的光谱表算），
-        # 放在 resources/fotufilm_chain/。原生卷永远不进这条分支，表逐位不变。
-        ff_lut = self._fotufilm_chain_lut(film_stock, paper_stock, print_mode, params_dict)
-        if ff_lut is not None:
-            # 这条链把 DIR / 相纸化学 / 外观层全都算进表里了，post-LUT 的增量必须是 0。
+        # 表不再离线烘：缩略图 / 胶片条卡片 / CPU 导出要的只是 size³ 个格点
+        # （17³ ≈ 20 ms、33³ ≈ 150 ms），这里现算并落盘缓存。`core/ffchain_point` 与
+        # 画布的 GLSL（ui/gl_ffchain.py）是同一套算术，所以这三条路与画布显示同源——
+        # 以前它们读离线烘的 65³ 表，与画布最多差 13/255（docs §22.2）。
+        ff_bundle = self.get_ffchain_point_bundle(film_stock, paper_stock, print_mode,
+                                                  params_dict)
+        if ff_bundle is not None:
+            p_dict = params_dict or {}
+            # DIR 总量是这条链唯一的耦合参数（点式链里 DIR 实时算，不烘死）。
+            dir_total = float(p_dict.get("dir_amount", 1.0) or 1.0)
+            ff_lut = self._ffchain_point_lut(film_stock, paper_stock, lut_size,
+                                             ff_bundle, dir_total)
+            # 表里已经有 DIR，post-LUT 的增量必须是 0；记的是实际烘进去的值。
             self._record_lut_baked(ff_lut, {
-                "dir_amount": 1.0,
+                "dir_amount": dir_total,
                 "dir_interlayer": 1.0,
                 "dir_samelayer": 1.0,
                 "morph_gamma": 1.0,
@@ -2783,8 +2796,8 @@ class SpektraEngine:
             tag = (film_stock, self._resolve_base_paper(film_stock, paper_stock, print_mode))
             if tag not in seen:
                 seen.add(tag)
-                print(f"[SpektraEngine] fotufilm 链 LUT: {tag[0]} + {tag[1]} "
-                      f"({ff_lut.shape[0]}^3)")
+                print(f"[SpektraEngine] fotufilm 点式链 LUT: {tag[0]} + {tag[1]} "
+                      f"({ff_lut.shape[0]}^3, 现算)")
             return ff_lut
 
         from .path_utils import get_user_lut_cache_dir
