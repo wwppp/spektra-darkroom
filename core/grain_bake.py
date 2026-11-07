@@ -467,10 +467,15 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
             rate = np.asarray([CHANNEL_RATE_SCALE[i]
                                * (CRYSTAL_ANCHOR["weights"][i] / float(weights[i])) ** 2
                                for i in range(3)], dtype=np.float64)
-            # Anchor the amplitude on `strength`, not on how deep this stock can go: the
-            # sampled sigma is dMax*sqrt(sat*p/n), and n carries no density term, so without
-            # this the port reads sigma ~ dMax*strength.  fotufilm's readSigma is strength
-            # alone (see CRYSTAL_ANCHOR_TOTAL).  rate goes as dMax^2 to cancel it.
+            # Anchor the amplitude on `strength`, not on how deep this stock can go.
+            #
+            # ``dMax = fraction * total`` and the sampled sigma goes as ``dMax/sqrt(rate)``
+            # (``sigma = dMax*sqrt(sat*p/n)`` with ``p = d/dMax``, and ``n`` scales with the
+            # rate).  Dividing the rate by ``total`` alone leaves ``sqrt(total)`` in the
+            # numerator -- measured, that still put a stock with total 2.93 at 0.53 of gold's
+            # grain where its strength ratio says 0.40.  Squaring cancels it: sigma then goes
+            # as ``fraction * strength``, which is what fotufilm's ``readSigma =
+            # strength*grainLayerWeights[l]``, anchored at the read density, means.
             #
             # The anchor stock itself must land on exactly 1: its total is only known to
             # float32 through `density_max_layers`, and a 1e-8 residual is enough to tip a
