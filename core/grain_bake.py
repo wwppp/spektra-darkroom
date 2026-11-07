@@ -134,6 +134,23 @@ BW_RATE_SCALE = (1.8, 1.8, 1.8)
 # onto our density channels (C, M, Y) one to one: the red-sensitive record lays cyan.
 CRYSTAL_ANCHOR = {"size_mm": 0.005, "strength": 0.0105, "weights": (0.7, 1.0, 1.35)}
 
+# The anchor stock's per-channel total layer density -- the sum of
+# ``density_curves_layers`` along the sub-layer axis -- for gold 200 behind the reference
+# process.  It exists so the amplitude can be anchored on ``strength`` alone.
+#
+# Why it is needed: the sampled sigma works out to ``dMax * sqrt(sat*p/n_particles)``, and
+# ``n_particles`` carries no density term, so the port read ``sigma ~ dMax * strength``.
+# fotufilm does not: ``readSigma = grainStrength * grainLayerWeights[l]`` and
+# ``anchorToSheet`` iterates the rendered sigma onto it at the *read density*, so how deep a
+# stock can go never enters the amplitude.  Dividing the rate by ``(total/total_anchor)^2``
+# cancels the dMax factor (``sigma ~ dMax/sqrt(rate)``, and ``dMax = fraction*total``).
+#
+# Measured 2026-11-07 on three stocks whose size/strength/weights/law are all identical --
+# pro_400h, c200, superia_200 -- and whose totals are 1.61/1.64/2.15, 1.73/2.07/2.67 and
+# 2.93/2.93/2.93: before this they came out 0.80 / 0.87 / 1.38 apart, which is a ratio of
+# 1.7 between stocks fotufilm renders identically.  See docs §26.3.
+CRYSTAL_ANCHOR_TOTAL = (1.6269010800000001, 1.5136206699999999, 1.6861682499999999)
+
 # -- granularity against density -----------------------------------------------------------
 #
 # fotufilm's published RMS figure is read at one density; away from it the emulsion's own law
@@ -442,8 +459,25 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
             weights = crystal.get("layer_weights")
             if not weights or len(weights) != 3:
                 weights = CRYSTAL_ANCHOR["weights"]
-            rate = np.asarray([CHANNEL_RATE_SCALE[i] * float(weights[i]) / CRYSTAL_ANCHOR["weights"][i]
+            # `layer_weights` is an *amplitude* per record, not a particle count: fotufilm's
+            # `readSigma = strength * grainLayerWeights[l]`, so a heavier weight means louder
+            # grain.  sigma goes as 1/sqrt(rate), so the weight enters the rate inverted and
+            # squared.  Reading it as a rate (the first wiring) had the sign backwards: gold
+            # 200's blue record at 1.35 came out the *quietest* of the three.
+            rate = np.asarray([CHANNEL_RATE_SCALE[i]
+                               * (CRYSTAL_ANCHOR["weights"][i] / float(weights[i])) ** 2
                                for i in range(3)], dtype=np.float64)
+            # Anchor the amplitude on `strength`, not on how deep this stock can go: the
+            # sampled sigma is dMax*sqrt(sat*p/n), and n carries no density term, so without
+            # this the port reads sigma ~ dMax*strength.  fotufilm's readSigma is strength
+            # alone (see CRYSTAL_ANCHOR_TOTAL).  rate goes as dMax^2 to cancel it.
+            #
+            # The anchor stock itself must land on exactly 1: its total is only known to
+            # float32 through `density_max_layers`, and a 1e-8 residual is enough to tip a
+            # few hundred pixels across a quantisation step (measured: 7e-6 of the frame).
+            ratio = total / np.maximum(1e-6, np.asarray(CRYSTAL_ANCHOR_TOTAL, dtype=np.float64))
+            ratio = np.where(np.abs(ratio - 1.0) < 1e-6, 1.0, ratio)
+            rate = rate * ratio ** 2
             area_mul = (float(crystal["strength"]) / CRYSTAL_ANCHOR["strength"]) ** 2
         except (KeyError, TypeError, ValueError):
             decay_um = float(DYE_CLOUD_DECAY_UM)
