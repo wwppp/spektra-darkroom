@@ -1743,7 +1743,12 @@ class FilmstripWidget(QWidget):
             self._empty_lbl.deleteLater()
             self._empty_lbl = None
 
-        if photo not in self._photos_list:
+        # 按 id 判重，不能写 `photo not in self._photos_list`：photo 是 dict，`in` 会逐键
+        # 比值，而 `thumbnail_rgb` 是 ndarray（main_window 里 `np.full((72,76,3), ...)`），
+        # `ndarray == ndarray` 返回数组，`bool()` 直接抛
+        # "truth value of an array with more than one element is ambiguous"。
+        # 批量导入时每张都会走到这里，所以那是必现崩溃，不是偶发。
+        if not any(p.get("id") == photo.get("id") for p in self._photos_list):
             self._photos_list.append(photo)
         self.count_label.setText(f"{len(self._photos_list)} 张")
 
@@ -1785,7 +1790,8 @@ class FilmstripWidget(QWidget):
         try:
             item_w, item_h = self._compute_item_dimensions()
             for photo in photos_list:
-                if photo not in self._photos_list:
+                # 按 id 判重 —— dict 的 `==` 会碰上 ndarray 值，见 `append_photo` 的注释。
+                if not any(p.get("id") == photo.get("id") for p in self._photos_list):
                     self._photos_list.append(photo)
 
                 pid = photo["id"]
