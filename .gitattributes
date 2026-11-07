@@ -1,0 +1,4 @@
+# Shell scripts run inside WSL, whose bash rejects CRLF ("syntax error near
+# unexpected token `|'").  core.autocrlf=true is on here, so without this every
+# checkout and stash round trip rewrites them as CRLF.
+*.sh text eol=lf
