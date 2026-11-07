@@ -122,7 +122,22 @@ BW_DYE_CLOUD_DECAY_UM = 5.6
 # each record's rate moves all three output channels alike, so rates cannot -- and need
 # not -- decouple the residual few-percent channel imbalance that the colour paper's own
 # slope mismatch produces.
-BW_RATE_SCALE = (1.8, 1.8, 1.8)
+#
+# 2026-11-07: the kernel constant above stands, but the **amplitude** no longer ignores the
+# archive.  The "identical grain on TriX and HP5" evidence was two 400-speed stocks whose
+# fields are nearly equal (0.017 / 0.016) -- generalising that to the whole family is what
+# printed Delta 3200 (strength 0.019, the highest of the seven) as the *quietest* of them.
+# Measured against the engine on the correct paper (vision-2383, §41), our sigma tracked the
+# print's density ceiling (corr 0.85) while the engine tracks the emulsion's strength
+# (corr 0.84).  So `area_mul` now carries the strength and `_read_density_rate` takes the
+# depth of the print back out -- the same two things the colour branch does.
+# 2026-11-07 重新标定：上面两项（strength + _read_density_rate）接进来之后，七支卷实测
+# 比值收到 0.29–0.39（原来 0.34–1.25），几何均值 0.35；sigma ∝ rate^-0.5，故
+# 1.8 × 0.35² = 0.22。旧值 1.8 是在"幅度跟着 Dmax 走"的那套模型下标出来的，不再适用。
+BW_RATE_SCALE = (0.22, 0.22, 0.22)
+# The strength the rate above was calibrated against: the mean of the TriX / HP5 pair the
+# mono path was originally measured on, so those two keep their old amplitude.
+BW_ANCHOR_STRENGTH = 0.0165
 
 # The stock whose measured chart calibration fixes the three constants above.  When a stock
 # carries fotufilm crystal-grain archive fields (`physical_extensions.crystal_grain`), the
@@ -202,7 +217,17 @@ def modulation_curve(response, channel, density):
     shader does not evaluate it: :func:`bake_layer_table` resamples it onto the table's own
     axis.  An inline copy in the fragment shader made the 24 MP path return black frames
     without a single error -- the same scale ceiling that bit the grain field itself.
+
+    A reversal with a measured curve (``response["reversal_gain"]``) returns that curve
+    instead of the law: it was measured as the absolute target modulation, so multiplying the
+    law by it would double-count.  ``docs/fotufilm-port-plan-2026-11-06.md`` §40.
     """
+    if "reversal_gain" in response:
+        span = np.asarray(response["reversal_span"], dtype=np.float64)
+        t = np.asarray(density, dtype=np.float64) / max(float(span[channel]), 1e-6)
+        return np.interp(np.clip(t, 0.0, 1.0),
+                         np.asarray(response["reversal_grid"], dtype=np.float64),
+                         np.asarray(response["reversal_gain"], dtype=np.float64)[channel])
     fog = float(response["grain_fog"])
     here = np.maximum(np.asarray(density, dtype=np.float64), 0.0) + fog
     anchor = max(float(np.asarray(response["grain_anchor"])[channel]), 0.0) + fog
@@ -213,13 +238,18 @@ def modulation_curve(response, channel, density):
     return np.sqrt(np.maximum(ratio, 0.0))
 
 
-def density_response(film_data, crystal=None, is_reversal=False):
+def density_response(film_data, crystal=None, is_reversal=False, stock=None):
     """The per-record anchor density and the law that rescales sigma away from it.
 
     ``grainDensityModulation`` upstream divides the variance at the density in hand by the
     variance at the datasheet's read density and takes the square root -- the number is a
     sigma multiplier, so it must not touch the mean.  ``granularityReadDensity`` is gross for
     a reversal and net otherwise, which is the only place the two materials differ here.
+
+    A reversal that has a **measured** curve (``core.grain_reversal_gain``) carries it instead
+    of the law: the reference we compare against runs fotufilm's crystal simulation, and the
+    analytic reversal law is a poor stand-in for it (§40).  The measured curve is absolute, so
+    the law is replaced, not corrected -- see ``modulation_curve``.
     """
     curves = np.asarray(film_data.density_curves, dtype=np.float64)
     d_min = np.nanmin(curves, axis=0)
@@ -240,13 +270,21 @@ def density_response(film_data, crystal=None, is_reversal=False):
     except (TypeError, ValueError):
         # `GrainDensityProfile(records:)` falls back to the family shape on anything malformed.
         profile = np.asarray(GRAIN_DENSITY_PROFILE_DEFAULT, dtype=np.float64)
-    return {
+    out = {
         "grain_law": law,
         "grain_profile": np.ascontiguousarray(profile, dtype=np.float32),
         "grain_anchor": anchor.astype(np.float32),
         "grain_fog": float(GRAIN_FOG_DENSITY),
         "grain_reversal": np.asarray(GRAIN_REVERSAL_PROFILE, dtype=np.float32),
     }
+    if is_reversal and stock:
+        from . import grain_reversal_gain
+        curve = grain_reversal_gain.load(stock)
+        if curve is not None:
+            out["reversal_gain"] = np.ascontiguousarray(curve["mod"], dtype=np.float32)
+            out["reversal_grid"] = np.ascontiguousarray(curve["grid"], dtype=np.float32)
+            out["reversal_span"] = np.ascontiguousarray(curve["span"], dtype=np.float32)
+    return out
 
 
 def normalized_density_curves(film_data):
@@ -310,7 +348,7 @@ def bake_density_to_rgb(sim, lut_size, dens_min, dens_max):
     return np.clip(cube, 0.0, 1.0)
 
 
-def bake_layer_table(film_data, samples=256, crystal=None, is_reversal=False):
+def bake_layer_table(film_data, samples=256, crystal=None, is_reversal=False, stock=None):
     """Resample the sub-layer split onto a uniform density axis, ready for a 3-D texture.
 
     Returns ``dict`` with
@@ -330,7 +368,7 @@ def bake_layer_table(film_data, samples=256, crystal=None, is_reversal=False):
     hi = axis.max(axis=0)
     uniform = np.linspace(0.0, 1.0, samples, dtype=np.float64)
     table = np.zeros((samples, 3, 4), dtype=np.float32)
-    response = density_response(film_data, crystal, is_reversal)
+    response = density_response(film_data, crystal, is_reversal, stock)
 
     for ch in range(3):
         x = axis[:, ch]
@@ -445,7 +483,7 @@ def _read_density_rate(ceiling, density_min, uniformity):
 
 
 def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
-                  is_reversal=False):
+                  is_reversal=False, stock=None):
     """Per (record, sub-layer) numbers the shader needs besides the table.
 
     ``crystal`` is the stock's fotufilm archive dict (``size_mm`` / ``strength`` /
@@ -481,16 +519,25 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
     # CHANNEL_RATE_SCALE calibration block above.  Dividing the area multiplies the rate;
     # the vector rides the channel axis of the (sublayer, channel) grid.
     if is_bw:
-        # One silver image, one draw.  fotufilm's own B&W renders measure identical grain
-        # structure on TriX and HP5 (lag-1 0.556 / 0.561, equal output sigma, corr +0.99)
-        # regardless of their -- nominal -- size/strength fields, i.e. the mono path ignores
-        # the archive fields entirely.  The three records here are the same emulsion seen
-        # three times, so they get equal rates, and `colour_grain` 0 collapses the mix to
-        # the shared field: one fluctuation, which is what a single silver image is.
-        # See the BW_ constants below for the measured values.
+        # One silver image, one draw: the three records are the same emulsion seen three
+        # times, so they get equal rates, and `colour_grain` 0 collapses the mix to the
+        # shared field -- one fluctuation, which is what a single silver image is.
+        #
+        # The **kernel** stays the measured constant: mapping `size_mm` to the dye-cloud
+        # decay predicts a lag-1 of 0.80 for these stocks against 0.556 / 0.561 measured, so
+        # that mapping does not extend to the mono path.  The **amplitude** does follow the
+        # archive though -- see the BW_ block above.  `_read_density_rate` takes the print's
+        # own depth back out, exactly as it does for colour.
         decay_um = float(BW_DYE_CLOUD_DECAY_UM)
         rate = np.asarray(BW_RATE_SCALE, dtype=np.float64)
         area_mul = 1.0
+        if crystal is not None:
+            try:
+                area_mul = (float(crystal["strength"]) / BW_ANCHOR_STRENGTH) ** 2
+            except (KeyError, TypeError, ValueError):
+                area_mul = 1.0
+        rate = rate * _read_density_rate(density_max_abs.sum(axis=0), density_min,
+                                         np.asarray(grain.uniformity))
     elif crystal is not None:
         try:
             decay_um = DYE_CLOUD_DECAY_UM * float(crystal["size_mm"]) / CRYSTAL_ANCHOR["size_mm"]
@@ -557,5 +604,5 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
     }
     # Granularity against density: the law, its profile, and the per-record anchor it is
     # measured from.  Both renderers rescale sigma with it; the mean is untouched.
-    out.update(density_response(film_data, crystal, is_reversal))
+    out.update(density_response(film_data, crystal, is_reversal, stock))
     return out

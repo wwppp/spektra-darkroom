@@ -2534,11 +2534,13 @@ class SpektraEngine:
             "layer_table": grain_bake.bake_layer_table(
                 film_data,
                 crystal=self._crystal_grain_fields(film_stock),
-                is_reversal=self.is_positive_film(film_stock)),
+                is_reversal=self.is_positive_film(film_stock),
+                stock=film_stock),
             "grain": grain_bake.layer_scalars(film_data, clean_params.film_render.grain, 1.0,
                                               crystal=self._crystal_grain_fields(film_stock),
                                               is_bw=is_bw,
-                                              is_reversal=self.is_positive_film(film_stock)),
+                                              is_reversal=self.is_positive_film(film_stock),
+                                              stock=film_stock),
             "unsharp": tuple(getattr(clean_params.scanner, "unsharp_mask", (0.0, 0.0))),
             "film": film_stock,
             # 故意不放 density / cube：颗粒每帧的密度来自点式链，不来自烘好的表。
@@ -3250,10 +3252,15 @@ class SpektraEngine:
         lut_key, density_key = self._lut_cache_key(
             film_stock, paper_stock, lut_size, params_dict, print_mode)
 
+        # 反转的颗粒密度曲线是**盘上的实测数据**，不进 lut_key（那是给 LUT 的，改了会让
+        # 所有磁盘缓存作废）。这里单独挂一个戳：曲线文件一改，这个缓存就自动失效。
+        from . import grain_reversal_gain
+        bundle_key = (lut_key, grain_reversal_gain.stamp(film_stock))
+
         if not hasattr(self, "_grain_bundle_cache"):
             self._grain_bundle_cache = {}
-        if lut_key in self._grain_bundle_cache:
-            return self._grain_bundle_cache[lut_key]
+        if bundle_key in self._grain_bundle_cache:
+            return self._grain_bundle_cache[bundle_key]
 
         # 转换卷走移植链：两张立方体是离线烘的，不需要 Simulator 现烘。
         ff_bundle = self._ffchain_grain_bundle(film_stock, paper_stock, print_mode,
@@ -3261,7 +3268,7 @@ class SpektraEngine:
         if ff_bundle is not None:
             if len(self._grain_bundle_cache) >= 8:
                 self._grain_bundle_cache.pop(next(iter(self._grain_bundle_cache)))
-            self._grain_bundle_cache[lut_key] = ff_bundle
+            self._grain_bundle_cache[bundle_key] = ff_bundle
             return ff_bundle
 
         sim = getattr(self, "_lut_sims", {}).get(lut_key)
@@ -3364,7 +3371,7 @@ class SpektraEngine:
         }
         if len(self._grain_bundle_cache) >= 8:
             self._grain_bundle_cache.pop(next(iter(self._grain_bundle_cache)))
-        self._grain_bundle_cache[lut_key] = bundle
+        self._grain_bundle_cache[bundle_key] = bundle
         return bundle
 
     def _gate_dir_neutral_axis(self, lut_3d, lattice, film_stock, paper_stock, lut_size,
