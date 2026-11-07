@@ -488,15 +488,16 @@ vec3 develop_negative(vec3 linear_rgb, vec2 image_px) {
         fd = ffchain_develop(linear_rgb);
         if (fd.a != 0.0) return fd.rgb;        // u_ff_debug 命中：诊断色直出
     }
-    if (use_ff || u_grain_cubes == 1) {
+    // u_grain_has_cubes：点式链的颗粒 bundle 不带那两张立方体（密度逐像素算），
+    // 所以"老路 + 颗粒"只有真的绑了立方体才成立。点式链分支不受影响。
+    if (use_ff || (u_grain_cubes == 1 && u_grain_has_cubes == 1)) {
         // Density first, so the grain has somewhere to go: the stage between these two calls
         // is the film's development, and it cannot be baked into a pointwise table.
         // 新链的密度是逐像素算出来的（上游顺序 develop → net → grain → print），
         // 老路查 33³ 表 —— 后者在亮部反推误差 0.22 密度 ≈ 0.73 档，这是新链要修的东西。
         //
         // grain_field 返回"以传入密度为基准的零均值涨落"，不是绝对密度，所以不需要
-        // 加减 dmin：grain33 的轴 dmin=0 / dmax=[1.72,2.06,1.94] 与新链的
-        // net ∈ [0, rng]=[1.71,2.06,1.94] 本来对齐（差 ≤0.006）。
+        // 加减 dmin：新链的 net ∈ [0, rng] 从 0 起算，与颗粒表的轴天然对齐。
         vec3 density = use_ff ? fd.rgb : density_from_linear(linear_rgb);
         density = grain_on_density(density, image_px);
         film_rgb = use_ff ? ffchain_print(density) : develop_from_density(density);

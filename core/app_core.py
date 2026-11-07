@@ -2393,14 +2393,10 @@ class SpektraEngine:
     # -- grain on the ported chain -------------------------------------------------------------
     #
     # 老路径的颗粒级要两份东西：一张"场景 → 净密度"的立方体，和一张"净密度 → 显示 RGB"的
-    # 打印立方体。老路径靠 Simulator 现烘（_bake_film_density + bake_density_to_rgb），
-    # 新链的物理在 Python 里跑一次 27 万个点要半分钟，所以这两张表跟显示 LUT 一起离线烘好，
-    # 放在同一个目录：<卷>__<相纸>__grain33.npz。
-    #
-    # 口径与 core/grain_bake.py 一致：density 是净密度（已减 dMin），通道 C/M/Y（= 记录 R/G/B）；
-    # cube 按 [Y, M, C] 摆，这样 texture(cube, vec3(C, M, Y)) 采到对的点。
-    # 差别只在物理：这两张表由移植链的 develop() / print_net() 烘，不是 spektrafilm 的管线。
-    FFCHAIN_GRAIN_SIZE = 33
+    # 打印立方体（老路径靠 Simulator 现烘，见 get_grain_bundle 的 else 分支）。
+    # 点式链把"逐像素算密度"这件事自己做了，颗粒只吃分层表 —— 所以这条链**没有**
+    # 任何立方体。曾经有 44 个离线烘的 `<卷>__<相纸>__grain33.npz` 只为这两张表存在，
+    # 2026-11-07 核实它们在 u_ff_on 下从不被采样后整批删除（8.9 MB）。
 
     def _ffchain_film_data(self, film_stock, paper_stock):
         """颗粒分层表与标量要的 film_data（外加一份干净参数）。
@@ -2490,17 +2486,21 @@ class SpektraEngine:
         return bundle
 
     def _ffchain_grain_bundle(self, film_stock, paper_stock, print_mode, params_dict, lut_key):
-        """新链的颗粒 bundle；不适用就返回 None，调用方照旧回落到单表路径。"""
+        """新链的颗粒 bundle；不适用就返回 None，调用方照旧回落到单表路径。
+
+        只带 ``layer_table`` + 标量。旧路的 (density, cube) 两张 33³ 立方体在 ``u_ff_on``
+        下**一次都不会被采样**：点式链自己逐像素算净密度和相纸，颗粒只吃分层表。
+        2026-11-07 之前这里唯一的用途是读 ``<卷>__<纸>__grain33.npz`` 拿那两张表 ——
+        44 个文件 8.9 MB 换零像素收益，现在全部删掉，表由 film_data 现算（本来就现算）。
+        """
         # 画布是把 print_mode 塞进 params 里传进来的（get_grain_bundle 的形参默认 None），
         # 这里跟 _build_3d_lut 一样自己兜底，否则永远判成"不是 optical"。
         if print_mode is None:
             print_mode = str((params_dict or {}).get("print_mode", "optical")).lower()
-        if self._fotufilm_chain_lut(film_stock, paper_stock, print_mode, params_dict) is None:
-            return None
-        paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
-        path = os.path.join(self.resources_dir, "fotufilm_chain",
-                            f"{film_stock}__{paper_key}__grain{self.FFCHAIN_GRAIN_SIZE}.npz")
-        if not os.path.exists(path):
+        # 判据是点式表在不在，不是 65³：反转片从来没有 65³，但它一直跑在点式链上。
+        # 用 65³ 当门会让整批反转掉回 spektrafilm 立方体（现烘 33³ + 打印立方体，秒级）。
+        if self.get_ffchain_point_bundle(film_stock, paper_stock, print_mode,
+                                         params_dict) is None:
             return None
         entry = self._ffchain_film_data(film_stock, paper_stock)
         if entry is None:
@@ -2508,15 +2508,6 @@ class SpektraEngine:
         film_data, clean_params = entry
 
         import core.grain_bake as grain_bake
-        try:
-            with np.load(path) as z:
-                density = np.ascontiguousarray(z["density"], dtype=np.float32)
-                cube = np.ascontiguousarray(z["cube"], dtype=np.float32)
-                dmin = np.asarray(z["dmin"], dtype=np.float32)
-                dmax = np.asarray(z["dmax"], dtype=np.float32)
-        except Exception as exc:                        # noqa: BLE001
-            print(f"[SpektraGrain] fotufilm 链颗粒表读不出来（{film_stock}）: {exc}")
-            return None
 
         try:
             is_bw = self.is_bw_stock(film_stock)
@@ -2524,18 +2515,14 @@ class SpektraEngine:
             is_bw = False
 
         bundle = {
-            "density": density,
-            "density_min": dmin,
-            "density_max": dmax,
-            "cube": cube,
             "layer_table": grain_bake.bake_layer_table(film_data),
             "grain": grain_bake.layer_scalars(film_data, clean_params.film_render.grain, 1.0,
                                               crystal=self._crystal_grain_fields(film_stock),
                                               is_bw=is_bw),
             "unsharp": tuple(getattr(clean_params.scanner, "unsharp_mask", (0.0, 0.0))),
             "film": film_stock,
-            # 打印立方体已经含了整条链的观感（新链不走 film_look / 白点抬升），
-            # 所以这里的 key 只用于画布比对参数是否同一套。
+            # 故意不放 density / cube：颗粒每帧的密度来自点式链，不来自烘好的表。
+            # 画布按"这两个键在不在"决定要不要绑定立方体纹理（见 GLCubeGrain.upload_pending）。
             "key": lut_key,
         }
         return bundle

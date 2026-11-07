@@ -41,7 +41,8 @@ GRAIN_GLSL = r"""
 // ---------------------------------------------------------------------------------------------
 // Negative density and the print, as two tables with room for grain in between.
 // ---------------------------------------------------------------------------------------------
-uniform int       u_grain_cubes;      // 1 = the two-cube path is uploaded and current
+uniform int       u_grain_cubes;      // 1 = the grain stage runs at all (see grain_on_density)
+uniform int       u_grain_has_cubes;  // 1 = the two cubes below are uploaded; 0 = point chain only
 uniform sampler3D u_density_lut;      // shaper(linear RGB) -> (C, M, Y) net density
 uniform sampler3D u_print_lut;        // normalised (C, M, Y) -> output RGB
 uniform vec3      u_density_min;      // the density range the print cube covers
@@ -69,12 +70,16 @@ uniform int       u_grain_taps;       // 1 = off for the spatial blur, 9 = 3x3 g
 uniform int       u_grain_probe;      // diagnostic: paint the density delta instead of the print
 
 vec3 density_from_linear(vec3 linear_rgb) {
+    // 点式链的颗粒 bundle 不带立方体（密度是逐像素算的）。这条老路没有表可查，
+    // 返回 0 而不是去采一个没绑定的 3D 纹理 —— 后者在驱动上是未定义的。
+    if (u_grain_has_cubes != 1) return vec3(0.0);
     float dim = float(textureSize(u_density_lut, 0).x);
     vec3 coord = linear_to_shaper(linear_rgb) * ((dim - 1.0) / dim) + (0.5 / dim);
     return texture(u_density_lut, coord).rgb;              // C, M, Y
 }
 
 vec3 develop_from_density(vec3 density) {
+    if (u_grain_has_cubes != 1) return vec3(0.0);
     float dim = float(textureSize(u_print_lut, 0).x);
     vec3 u = (density - u_density_min) / max(u_density_max - u_density_min, vec3(1e-6));
     vec3 coord = clamp(u, 0.0, 1.0) * ((dim - 1.0) / dim) + (0.5 / dim);
@@ -282,6 +287,9 @@ class GLCubeGrain:
         self._kernel = np.full(5, 0.2, dtype=np.float32)
         self._kernel_key = None
         self.ready = False
+        # False = this bundle has no cubes (point chain): the density is computed per pixel
+        # upstream, and the two textures below stay unbound. See `upload_pending`.
+        self.has_cubes = False
         self._signature = None
         self._pending = None
         # Which bake the uploaded cubes came from (`get_grain_bundle` records its LUT key).
@@ -308,7 +316,7 @@ class GLCubeGrain:
             self.key = None
             self.ready = False
             return
-        signature = (bundle.get("key"),
+        signature = (bundle.get("key"), bundle.get("film"),
                      np.shape(bundle.get("density")),
                      np.shape(bundle.get("cube")))
         if signature == self._signature:
@@ -322,16 +330,21 @@ class GLCubeGrain:
         pending = self._pending
         if pending is None:
             return
-        self._density_tex, self._density_size = self._upload_cube(
-            self._density_tex, self._density_size, pending["density"], unit_a)
-        self._print_tex, self._print_size = self._upload_cube(
-            self._print_tex, self._print_size, pending["cube"], unit_b)
+        # 点式链的 bundle 只有分层表：密度逐像素算，两张立方体不存在也不该存在
+        # （44 个 grain33.npz 就是为它们烘的，2026-11-07 已删）。老路仍走这一步。
+        has_cubes = pending.get("density") is not None and pending.get("cube") is not None
+        if has_cubes:
+            self._density_tex, self._density_size = self._upload_cube(
+                self._density_tex, self._density_size, pending["density"], unit_a)
+            self._print_tex, self._print_size = self._upload_cube(
+                self._print_tex, self._print_size, pending["cube"], unit_b)
+            self.density_min = np.asarray(pending["density_min"], dtype=np.float32)
+            self.density_max = np.asarray(pending["density_max"], dtype=np.float32)
+        self.has_cubes = has_cubes
 
         layer_table = pending["layer_table"]
         self._upload_table(layer_table, unit_c)
 
-        self.density_min = np.asarray(pending["density_min"], dtype=np.float32)
-        self.density_max = np.asarray(pending["density_max"], dtype=np.float32)
         self.layer_axis_min = np.asarray(layer_table["axis_min"], dtype=np.float32)
         self.layer_axis_max = np.asarray(layer_table["axis_max"], dtype=np.float32)
         self.grain = pending["grain"]
@@ -394,6 +407,7 @@ class GLCubeGrain:
              unit_a=5, unit_b=6, unit_c=7, u_1fv=None, expect_key=None):
         if not self.ready:
             u_1i("u_grain_cubes", 0)
+            u_1i("u_grain_has_cubes", 0)
             return False
         # The cubes describe one specific bake. Drawing a frame whose parameters belong to a
         # different one is not a small error: the density axis and the print table stop
@@ -402,15 +416,20 @@ class GLCubeGrain:
         # frame to the single 3D LUT instead -- less grain, but the right picture.
         if expect_key is not None and self.key is not None and expect_key != self.key:
             u_1i("u_grain_cubes", 0)
+            u_1i("u_grain_has_cubes", 0)
             return False
-        for unit, tex, name in ((unit_a, self._density_tex, "u_density_lut"),
-                                (unit_b, self._print_tex, "u_print_lut"),
-                                (unit_c, self._table_tex, "u_grain_table")):
+        for unit, tex, name, bindable in (
+                (unit_c, self._table_tex, "u_grain_table", True),
+                (unit_a, self._density_tex, "u_density_lut", self.has_cubes),
+                (unit_b, self._print_tex, "u_print_lut", self.has_cubes)):
+            if not bindable:
+                continue
             GL.glActiveTexture(0x84C0 + unit)
             GL.glBindTexture(GL.GL_TEXTURE_3D if name != "u_grain_table" else GL.GL_TEXTURE_2D, tex)
             u_1i(name, unit)
 
         u_1i("u_grain_cubes", 1)
+        u_1i("u_grain_has_cubes", 1 if self.has_cubes else 0)
         u_3f("u_density_min", *[float(v) for v in self.density_min])
         u_3f("u_density_max", *[float(v) for v in self.density_max])
         u_3f("u_grain_axis_min", *[float(v) for v in self.layer_axis_min])
