@@ -2280,7 +2280,11 @@ class SpektraEngine:
         is_pos = bool(getattr(prof, "is_positive", False)) or \
             (info is not None and getattr(info, "type", None) == "positive")
         if is_pos:
-            return "none"
+            # 反转片没有相纸：引擎对它恒用 `.screen`（Digital Reference），请求哪张纸都一样，
+            # 所以相纸选择器对它没有意义，UI 也已经把 print_mode 锁在 scan。
+            # 这里必须给出 `screen` 而不是 `none` —— 点式链和颗粒都按介质键找表，
+            # 返回 `none` 会让它永远匹配不上任何一张烘好的表。
+            return "screen"
         if info is not None and getattr(info, "channel_model", None) == "bw":
             return "kodak_2383" if paper_stock == "none" else paper_stock
         if print_mode == "scan":
@@ -2322,7 +2326,7 @@ class SpektraEngine:
     # 每种相纸是一张独立的表（相纸是另一种材料，曲线和光谱都不同），只有下面这些烘过。
     # 换到没烘过的相纸必须回原链，绝不能拿错相纸的表凑。
     FFCHAIN_SIZE = 65
-    FFCHAIN_PAPERS = ("kodak_ektacolor_edge", "kodak_2383")
+    FFCHAIN_PAPERS = ("kodak_ektacolor_edge", "kodak_2383", "screen")
 
     def _ffchain_file(self, film_stock, paper_key):
         return os.path.join(self.resources_dir, "fotufilm_chain",
@@ -2337,7 +2341,9 @@ class SpektraEngine:
             cache = self._ffchain_stock_cache = {}
         if film_stock in cache:
             return cache[film_stock]
-        ok = any(os.path.exists(self._ffchain_file(film_stock, p))
+        # 判据用点式表，不用 65³ 表：65³ 在退役名单上，而它恰好对反转片不存在
+        # （反转只有 screen 介质的点式表）—— 拿"有没有 65³"当身份证会让整支卷判不出来。
+        ok = any(os.path.exists(self._ffchain_point_file(film_stock, p))
                  for p in self.FFCHAIN_PAPERS)
         if ok:
             try:
@@ -2442,7 +2448,13 @@ class SpektraEngine:
             return None
         if not self._is_fotufilm_chain_stock(film_stock):
             return None
-        if str(print_mode or "").lower() != "optical":
+        # `scan` 只有反转片走（它没有相纸选择，UI 把 print_mode 锁在 scan）。
+        # 负片的 scan 仍留在原路：那是"扫描负片"的显示语义，与 screen 不是一回事。
+        mode = str(print_mode or "").lower()
+        if mode == "scan":
+            if not self.is_positive_film(film_stock):
+                return None
+        elif mode != "optical":
             return None
         paper_key = self._resolve_base_paper(film_stock, paper_stock, print_mode)
         if paper_key not in self.FFCHAIN_PAPERS:

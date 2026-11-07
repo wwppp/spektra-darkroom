@@ -7434,7 +7434,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         canvas_params = getattr(self.canvas, "params", None)
         params = (dict(canvas_params) if isinstance(canvas_params, dict) and canvas_params
                   else dict(self.current_params))
-        params["print_mode"] = getattr(self, "current_print_mode", "optical")
+        # 只在画布没带 print_mode 时兜底。原来是无条件覆盖成 current_print_mode，
+        # 而反转片的 UI 状态（optical）与它实际的介质（screen/scan）会分叉 ——
+        # 覆盖后算出的 key 与渲染那帧不同，expect_key 判"不是同一套烘"，颗粒静默消失。
+        if "print_mode" not in params:
+            params["print_mode"] = getattr(self, "current_print_mode", "optical")
         try:
             return eng.get_grain_bundle(film, getattr(self, "current_paper_stock", "kodak_2383"),
                                         17, params)
