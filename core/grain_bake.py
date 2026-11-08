@@ -163,7 +163,18 @@ BW_ANCHOR_STRENGTH = 0.0165
 GROUP_KERNEL_SCALE = 0.65
 
 
-def _group_kernel_scale(is_bw, is_reversal):
+# Per-stock overrides, checked before the group rule.  harman_phoenix_200 is the one colour
+# negative whose kernel is too wide: its archive size_mm is 0.008, twice Superia's, so the
+# dye-cloud decay comes out at 10.7 um and the field lands 22% coarser than the engine.  The
+# slider resamples the whole cascade, and on this stock it does **not** hold sigma (the
+# variance compensation assumes a shorter cascade), so the level is folded back into
+# negative_gain.json rather than left to drift.
+STOCK_KERNEL_SCALE = {"harman_phoenix_200": 0.65}
+
+
+def _group_kernel_scale(is_bw, is_reversal, stock=None):
+    if stock and stock in STOCK_KERNEL_SCALE:
+        return STOCK_KERNEL_SCALE[stock]
     return GROUP_KERNEL_SCALE if (is_bw or is_reversal) else 1.0
 
 
@@ -652,7 +663,7 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
         # Group-wide width of the dye-cloud cascade, folded into the shader's `grain_size`
         # slider.  See GROUP_KERNEL_SCALE: the two groups that carry their own rate/size
         # calibration come out ~11% coarser than the engine, colour negatives do not.
-        "kernel_scale": float(_group_kernel_scale(is_bw, is_reversal)),
+        "kernel_scale": float(_group_kernel_scale(is_bw, is_reversal, stock)),
     }
     # Granularity against density: the law, its profile, and the per-record anchor it is
     # measured from.  Both renderers rescale sigma with it; the mean is untouched.
