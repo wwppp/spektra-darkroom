@@ -134,7 +134,9 @@ BW_DYE_CLOUD_DECAY_UM = 5.6
 # 2026-11-07 重新标定：上面两项（strength + _read_density_rate）接进来之后，七支卷实测
 # 比值收到 0.29–0.39（原来 0.34–1.25），几何均值 0.35；sigma ∝ rate^-0.5，故
 # 1.8 × 0.35² = 0.22。旧值 1.8 是在"幅度跟着 Dmax 走"的那套模型下标出来的，不再适用。
-BW_RATE_SCALE = (0.22, 0.22, 0.22)
+# 2026-11-08：内核宽度 ×0.65（§42）让 sigma@2px 整体上浮约 6%。全量重测七支后几何均值
+# 1.0541，故 0.22 × 1.0541² = 0.2444 —— 这一笔是补那次收窄内核的副作用，不是新模型。
+BW_RATE_SCALE = (0.2444, 0.2444, 0.2444)
 # The strength the rate above was calibrated against: the mean of the TriX / HP5 pair the
 # mono path was originally measured on, so those two keep their old amplitude.
 BW_ANCHOR_STRENGTH = 0.0165
