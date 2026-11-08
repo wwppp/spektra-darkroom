@@ -470,6 +470,11 @@ class GLCubeGrain:
             final_blur = 0.0
             decay_um = 0.0
         grain_size = max(0.05, float(params.get("grain_size", 1.0)))
+        # The bundle carries a group-wide width correction (see grain_bake.GROUP_KERNEL_SCALE):
+        # reversal and monochrome render ~11% coarser than the engine, colour negatives do not.
+        # Folding it in here -- rather than into the cascade's own constants -- keeps the
+        # sigma-invariant rate compensation below on the same code path the slider uses.
+        grain_size *= max(0.05, float(g.get("kernel_scale", 1.0)))
         key = (round(float(pixel_size_um), 5), round(final_blur, 4), decay_um,
                unsharp, round(grain_size, 4), bool(u_1fv))
         if self._kernel_key != key:

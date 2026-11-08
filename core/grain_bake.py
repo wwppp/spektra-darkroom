@@ -139,6 +139,32 @@ BW_RATE_SCALE = (0.22, 0.22, 0.22)
 # mono path was originally measured on, so those two keep their old amplitude.
 BW_ANCHOR_STRENGTH = 0.0165
 
+# ---------------------------------------------------------------------------------------
+# Group-wide grain *width*, as a factor on the dye-cloud cascade (folded into the shader's
+# `grain_size` slider, whose implementation compensates the rate so sigma is invariant).
+#
+# Measured 2026-11-07 on real frames, shape = sigma@16px / sigma@2px:
+#
+#   group            ours    engine   ratio
+#   colour negative  1.00    1.05     0.93-1.06
+#   reversal         1.18    1.05     1.09-1.13   (flat across the whole tone scale)
+#   monochrome       1.18    1.04     1.11-1.15
+#
+# So the two groups that carry their own rate/size calibration render ~11% coarser, while
+# the colour negatives -- which never had that patchwork -- are already right.  The archive's
+# `size_mm` is NOT the lever: scaling it 15% down moved shape only 0.03 and pushed sigma up
+# 18%.  `FRAME_BLUR_PX` is not either: going 0.45 -> 0.65 (the upstream value) dropped sigma
+# 30% and made the shape *worse* (1.07 -> 1.18).  The slider works because it resamples the
+# whole cascade rather than one term of it.
+#
+# 0.65 was measured: shape 1.07 -> 1.00 (velvia), 1.10 -> 1.02 (tri_x), sigma within 5-9%.
+GROUP_KERNEL_SCALE = 0.65
+
+
+def _group_kernel_scale(is_bw, is_reversal):
+    return GROUP_KERNEL_SCALE if (is_bw or is_reversal) else 1.0
+
+
 # The stock whose measured chart calibration fixes the three constants above.  When a stock
 # carries fotufilm crystal-grain archive fields (`physical_extensions.crystal_grain`), the
 # resolver below scales the anchor by the field ratios -- linear first-order, refined later
@@ -601,6 +627,10 @@ def layer_scalars(film_data, grain, pixel_size_um, crystal=None, is_bw=False,
         # Deliberately *not* ``grain.blur`` -- see ``FRAME_BLUR_PX``.  Keeping it here means
         # the CPU reference (grain_model) and the GPU path (gl_grain) both read the same value.
         "final_blur_px": FRAME_BLUR_PX,
+        # Group-wide width of the dye-cloud cascade, folded into the shader's `grain_size`
+        # slider.  See GROUP_KERNEL_SCALE: the two groups that carry their own rate/size
+        # calibration come out ~11% coarser than the engine, colour negatives do not.
+        "kernel_scale": float(_group_kernel_scale(is_bw, is_reversal)),
     }
     # Granularity against density: the law, its profile, and the per-record anchor it is
     # measured from.  Both renderers rescale sigma with it; the mean is untouched.
