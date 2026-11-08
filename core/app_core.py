@@ -3347,14 +3347,16 @@ class SpektraEngine:
             "layer_table": grain_bake.bake_layer_table(
                 film_data,
                 crystal=self._crystal_grain_fields(film_stock),
-                is_reversal=self.is_positive_film(film_stock)),
+                is_reversal=self.is_positive_film(film_stock),
+                stock=film_stock),
             # The stock's fotufilm crystal-grain archive fields resolve the three gold-200
             # anchor constants per stock (see CRYSTAL_ANCHOR); stocks without the fields --
             # and any read failure -- fall back to the anchor constants unchanged.
             "grain": grain_bake.layer_scalars(film_data, grain_params, 1.0,
                                               crystal=self._crystal_grain_fields(film_stock),
                                               is_bw=self.is_bw_stock(film_stock),
-                                              is_reversal=self.is_positive_film(film_stock)),
+                                              is_reversal=self.is_positive_film(film_stock),
+                                              stock=film_stock),
             # The scanner's sharpening, folded into the grain kernel: `scan()` runs it on the
             # display RGB, and a pointwise print cube cannot carry a spatial filter, so
             # without it the frame loses a third of its high-frequency energy.

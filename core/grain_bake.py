@@ -319,10 +319,13 @@ def density_response(film_data, crystal=None, is_reversal=False, stock=None):
             out["reversal_gain"] = np.ascontiguousarray(curve["mod"], dtype=np.float32)
             out["reversal_grid"] = np.ascontiguousarray(curve["grid"], dtype=np.float32)
             out["reversal_span"] = np.ascontiguousarray(curve["span"], dtype=np.float32)
-    elif stock:
-        # A colour negative keeps the analytic law and takes a measured *level* on top of it
-        # (see ``grain_reversal_gain.load_negative``).  Only stocks listed in the file are
-        # touched, so monochrome and native stocks are bit-for-bit unaffected.
+    if stock and "reversal_gain" not in out:
+        # A measured *level* on top of whatever law the stock uses (see
+        # ``grain_reversal_gain.load_negative``).  Both colour negatives and the native
+        # positives that have no measured reversal curve take this path: they keep the
+        # analytic law -- the shape was never the problem there -- and only the amplitude
+        # is corrected.  Only stocks listed in the file are touched, so everything else
+        # stays bit-for-bit identical.
         from . import grain_reversal_gain
         gain = grain_reversal_gain.load_negative(stock)
         if gain is not None:
