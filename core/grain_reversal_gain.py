@@ -33,24 +33,33 @@ import os
 
 import numpy as np
 
-__all__ = ["load", "stamp", "FILE"]
+__all__ = ["load", "load_negative", "stamp", "FILE", "FILE_NEG"]
 
 FILE = "reversal_gain.json"
+FILE_NEG = "negative_gain.json"
 _cache = {}
+_neg_cache = {}
 
 
-def _path():
+def _path(name=FILE):
     from .path_utils import get_resource_dir
-    return os.path.join(get_resource_dir(), "fotufilm_chain", FILE)
+    return os.path.join(get_resource_dir(), "fotufilm_chain", name)
 
 
 def stamp(stock=None):
-    """A cheap fingerprint for cache keys: the file's mtime and size, or None."""
-    try:
-        st = os.stat(_path())
-    except OSError:
-        return None
-    return (os.path.basename(_path()), st.st_mtime_ns, st.st_size)
+    """A cheap fingerprint for cache keys: the mtime and size of every measured file.
+
+    Both files go in, so touching either one invalidates the baked bundles -- a correction
+    that silently kept serving the old layer table would be indistinguishable from a no-op.
+    """
+    parts = []
+    for name in (FILE, FILE_NEG):
+        try:
+            st = os.stat(_path(name))
+        except OSError:
+            continue
+        parts.append((name, st.st_mtime_ns, st.st_size))
+    return tuple(parts) or None
 
 
 def load(stock):
@@ -87,3 +96,40 @@ def lookup(curve, channel, density):
     span = max(float(curve["span"][channel]), 1e-6)
     d = np.asarray(density, dtype=np.float64) / span
     return np.interp(np.clip(d, 0.0, 1.0), curve["grid"], curve["mod"][channel])
+
+
+def load_negative(stock):
+    """The measured amplitude correction for a colour negative: ``(3,)`` or ``None``.
+
+    A *level*, not a curve.  For a reversal the analytic law has the wrong shape and gets
+    replaced by a measured one; for a negative the ``dyeCloud`` profile already carries the
+    right shape (its residual is the 1.6-1.8x level accepted in §36, plus a per-record
+    imbalance).  So this is one number per record, applied on top of the law.
+
+    Measured on a real photograph, whole frame, against the engine in film mode.  The
+    synthetic ramp that works for reversals is **not** valid here: a negative goes through
+    the optical print and a colour scene puts each record at a different density for the same
+    display brightness, so the engine's own sigma at matched brightness disagrees by ~2x
+    between ramp and photograph.  Whole-frame ratios are the only numbers we trust, which is
+    why this is a scale and not a curve (see docs §43).
+    """
+    path = _path(FILE_NEG)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    if _neg_cache.get("key") != key:
+        try:
+            with open(path, encoding="utf-8") as fp:
+                raw = json.load(fp)
+        except (OSError, ValueError):
+            return None
+        _neg_cache["table"] = {name: np.asarray(entry["gain"], dtype=np.float64)
+                               for name, entry in raw.items()}
+        _neg_cache["key"] = key
+    gain = _neg_cache["table"].get(stock)
+    if gain is None or gain.shape != (3,) or not np.isfinite(gain).all():
+        return None
+    return gain
+

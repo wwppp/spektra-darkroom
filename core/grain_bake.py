@@ -247,6 +247,9 @@ def modulation_curve(response, channel, density):
     A reversal with a measured curve (``response["reversal_gain"]``) returns that curve
     instead of the law: it was measured as the absolute target modulation, so multiplying the
     law by it would double-count.  ``docs/fotufilm-port-plan-2026-11-06.md`` §40.
+
+    A colour negative with a measured level (``response["grain_gain"]``) keeps the law and is
+    scaled by it -- that one was measured as a ratio, not as a target.
     """
     if "reversal_gain" in response:
         span = np.asarray(response["reversal_span"], dtype=np.float64)
@@ -258,10 +261,16 @@ def modulation_curve(response, channel, density):
     here = np.maximum(np.asarray(density, dtype=np.float64), 0.0) + fog
     anchor = max(float(np.asarray(response["grain_anchor"])[channel]), 0.0) + fog
     if anchor <= 1e-9:
-        return np.ones_like(here)
-    ratio = (grain_law_variance(response, channel, here)
-             / max(float(grain_law_variance(response, channel, anchor)), 1e-20))
-    return np.sqrt(np.maximum(ratio, 0.0))
+        mod = np.ones_like(here)
+    else:
+        ratio = (grain_law_variance(response, channel, here)
+                 / max(float(grain_law_variance(response, channel, anchor)), 1e-20))
+        mod = np.sqrt(np.maximum(ratio, 0.0))
+    gain = response.get("grain_gain")
+    if gain is not None:
+        mod = mod * float(np.asarray(gain, dtype=np.float64)[channel])
+    return mod
+
 
 
 def density_response(film_data, crystal=None, is_reversal=False, stock=None):
@@ -310,6 +319,14 @@ def density_response(film_data, crystal=None, is_reversal=False, stock=None):
             out["reversal_gain"] = np.ascontiguousarray(curve["mod"], dtype=np.float32)
             out["reversal_grid"] = np.ascontiguousarray(curve["grid"], dtype=np.float32)
             out["reversal_span"] = np.ascontiguousarray(curve["span"], dtype=np.float32)
+    elif stock:
+        # A colour negative keeps the analytic law and takes a measured *level* on top of it
+        # (see ``grain_reversal_gain.load_negative``).  Only stocks listed in the file are
+        # touched, so monochrome and native stocks are bit-for-bit unaffected.
+        from . import grain_reversal_gain
+        gain = grain_reversal_gain.load_negative(stock)
+        if gain is not None:
+            out["grain_gain"] = np.ascontiguousarray(gain, dtype=np.float32)
     return out
 
 
