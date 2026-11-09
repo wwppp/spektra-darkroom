@@ -269,8 +269,14 @@ def setup_solid_combobox(combo):
         combo.setItemDelegate(delegate)
         view.setAutoFillBackground(True)
         if hasattr(view, "window"):
-            view.window().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-            view.window().setAutoFillBackground(True)
+            cont = view.window()
+            if cont is not None and cont is not view:
+                # The native popup shadow is a hard offset bar on the right/bottom, not a
+                # soft halo; it read as a second frame behind the list.  Match the parameter
+                # panel's DarkroomComboBox flags exactly.
+                cont.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
+                                   | Qt.WindowType.NoDropShadowWindowHint)
+                cont.setAutoFillBackground(False)
         combo.setCursor(Qt.CursorShape.PointingHandCursor)
         combo.wheelEvent = lambda ev: ev.ignore()
 
@@ -342,7 +348,7 @@ def setup_solid_combobox(combo):
             combo.view().setMinimumWidth(target_width)
             combo.view().setMaximumWidth(target_width)
 
-            item_h = 24
+            item_h = 26
             space_below = avail.bottom() - (p_global.y() + combo.height())
             space_above = p_global.y() - avail.top()
             max_space = max(space_below, space_above)
@@ -372,7 +378,9 @@ def setup_solid_combobox(combo):
                     combo._popup_anim.stop()
 
                 # Ensure final dest_geo uses adaptive target_x and target_width!
-                dest_geo = QRect(target_x, orig_geo.y(), target_width, orig_geo.height())
+                from ui.adobe_scrub_slider import POPUP_GAP
+                dest_geo = QRect(target_x, orig_geo.y() + (-POPUP_GAP if is_upward else POPUP_GAP),
+                                 target_width, orig_geo.height())
 
                 if is_upward:
                     start_geo = QRect(target_x, dest_geo.bottom(), target_width, 1)

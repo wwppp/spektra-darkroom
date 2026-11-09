@@ -128,7 +128,9 @@ def get_cache_key(file_path: str, normcase: bool = True) -> str:
     # calculate_auto_exposure_ev), so every cached base_ev from v3 is a different number for
     # the same file. Bumping the token drops the stale anchors -- and the stale previews with
     # them, some of which were saved at full resolution.
-    token = f"prophoto_v4|{norm_path}|{mtime}|{size}|res_{max_edge}".encode("utf-8")
+    # v5: raw_border.repair_demosaic_border fixes a corrupted outermost demosaic column.
+    # Cached previews were decoded before that fix, so they still carry the 1px cyan rim.
+    token = f"prophoto_v5|{norm_path}|{mtime}|{size}|res_{max_edge}".encode("utf-8")
     return hashlib.sha256(token).hexdigest()[:24]
 
 

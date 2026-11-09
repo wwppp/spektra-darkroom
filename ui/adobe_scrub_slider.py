@@ -938,7 +938,7 @@ class DarkroomComboItemDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         w = option.rect.width() if (option and hasattr(option, "rect")) else 100
-        return QSize(w, 32)
+        return QSize(w, 26)
 
     def paint(self, painter, option, index):
         painter.save()
@@ -991,6 +991,9 @@ AdobeComboItemDelegate = DarkroomComboItemDelegate
 
 
 POPUP_RADIUS = 5.0
+# A small air gap keeps the collapsed combo's own square bottom corner from touching the
+# popup's rounded top corner (they used to read as one rectangle with a right angle stuck on).
+POPUP_GAP = 5
 
 
 def style_popup_view(view):
@@ -1010,6 +1013,10 @@ def style_popup_view(view):
     border = "#3a3f4e" if is_dark else "#b9c3d3"
     handle = "rgba(255,255,255,0.18)" if is_dark else "rgba(15,23,42,0.20)"
     try:
+        # autoFillBackground would paint a square palette rectangle over the rounded QSS
+        # background, which is what left a hard right angle at the top of the card.
+        view.setAutoFillBackground(False)
+        view.viewport().setAutoFillBackground(False)
         view.setStyleSheet(
             "QListView { background: %s; border: 1px solid %s; border-radius: %gpx; }"
             "QListView::item { background: transparent; }"
@@ -1132,11 +1139,11 @@ class DarkroomComboBox(QComboBox):
         if hasattr(self.combo_view, "window"):
             container = self.combo_view.window()
             if container:
-                # One plain frameless popup.  NoDropShadowWindowHint is deliberately absent:
-                # Qt's native CS_DROPSHADOW is the single subtle outline that lifts the list
-                # off the panel.  The container must NOT fill its own background -- that was
-                # the second, larger frame visible around an earlier version of the popup.
-                container.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+                # One plain frameless popup.  The native CS_DROPSHADOW is a hard offset bar
+                # down the right and bottom edges rather than a shadow around the card, which
+                # read as a second frame; the 1px rounded border does the job instead.
+                container.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
+                                        | Qt.WindowType.NoDropShadowWindowHint)
                 container.setAutoFillBackground(False)
                 container.setWindowOpacity(0.0)
         self.wheelEvent = lambda ev: ev.ignore()
@@ -1187,7 +1194,7 @@ class DarkroomComboBox(QComboBox):
         space_below = avail.bottom() - (p_global.y() + self.height())
         space_above = p_global.y() - avail.top()
 
-        item_h = 32
+        item_h = 26
         max_space = max(space_below, space_above)
         fit_items = max(6, min(24, int((max_space - 20) / item_h)))
         self.setMaxVisibleItems(min(self.count(), fit_items))
@@ -1211,7 +1218,8 @@ class DarkroomComboBox(QComboBox):
                 self._popup_anim.stop()
 
             # Ensure final dest_geo uses adaptive target_x and target_width!
-            dest_geo = QRect(target_x, orig_geo.y(), target_width, orig_geo.height())
+            dest_geo = QRect(target_x, orig_geo.y() + (-POPUP_GAP if is_upward else POPUP_GAP),
+                             target_width, orig_geo.height())
 
             if is_upward:
                 start_geo = QRect(target_x, dest_geo.bottom(), target_width, 1)

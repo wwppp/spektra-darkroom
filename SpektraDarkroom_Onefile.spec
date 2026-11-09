@@ -28,6 +28,7 @@ added_hidden = [
     'core',
     'core.path_utils',
     'core.app_core',
+    'core.raw_border',
     'core.config_manager',
     'core.session_cache_manager',
     'core.sdc_manager',

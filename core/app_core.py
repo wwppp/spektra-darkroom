@@ -8,6 +8,7 @@ import collections
 import threading
 import uuid
 import numpy as np
+from .raw_border import repair_demosaic_border
 import cv2
 import logging
 from PIL import Image
@@ -3971,6 +3972,7 @@ class SpektraEngine:
                                         no_auto_scale=False
                                     )
                                     if rgb8 is not None:
+                                        rgb8 = repair_demosaic_border(rgb8)
                                         th_h = 72
                                         th_w = max(48, int(rgb8.shape[1] * (th_h / float(rgb8.shape[0]))))
                                         th_u8 = cv2.resize(rgb8, (th_w, th_h), interpolation=cv2.INTER_AREA)
@@ -4087,6 +4089,7 @@ class SpektraEngine:
                             highlight_mode=rawpy.HighlightMode.Clip
                         )
                 # Linear ProPhoto float32 representation
+                rgb16 = repair_demosaic_border(rgb16)
                 rgb_linear_pro = (rgb16.astype(np.float32) / 65535.0)
                 del rgb16
                 # Ensure original_meta orientation matches demosaiced array
@@ -4392,6 +4395,7 @@ class SpektraEngine:
                             use_auto_wb=True,
                             highlight_mode=rawpy.HighlightMode.Clip
                         )
+                    rgb16 = repair_demosaic_border(rgb16)
                     rgb_pro = (rgb16.astype(np.float32) / 65535.0)
                     return rgb_pro
         else:
