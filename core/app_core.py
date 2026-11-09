@@ -2549,165 +2549,6 @@ class SpektraEngine:
         }
         return bundle
 
-    # -- film look: an appearance layer, deliberately outside the physics ---------------------
-    #
-    # Measured against fotufilm's own PNG of the same frame (DSC02662, gold 200 + ektacolor edge,
-    # both at the same median luminance within 0.06 EV): our table comes out about 20% more
-    # saturated -- sky C* 18.3 vs 14.9, blossoms 18.1 vs 15.2 -- and colder in hue (sky 254 deg
-    # vs 243, blossoms 325 deg vs 335).  That is what the dye model does, not a porting error
-    # (the same parameter set renders bit-identically to the kernel), so it stays out of the
-    # physical chain: a Lab-domain pass on the finished table, with its own switch.
-    #
-    # `film_look` is the master strength (0 = pure physics).  The other three are the targets at
-    # full strength: saturation multiplier, midtone lift in L*, and a band-limited hue pull that
-    # moves sky toward cyan and blossoms toward warm pink without rotating skin hues.
-
-    # Measured L* mapping (our render -> fotufilm, binned by our L*), nodes at every 10 L*.
-    # Flat below L* 10 and at paper white; the dip at 20-40 is the toe being lifted too far
-    # in ours, the rise above 50 is the reference being more open through the midtones.
-    _LOOK_CURVE_X = np.array([0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])
-    # Only the upper half rises.  The measured mapping also wanted the toe pushed DOWN, but
-    # that is wrong as a look: on a frame the user already finds dull, darkening its shadows
-    # makes it duller, and it compounds with however the frame was exposed.  A pure lift above
-    # the midtone opens the picture without touching what is already dense.
-    _LOOK_CURVE_Y = np.array([0.0, 0.0, 0.0, 0.0, 0.1, 0.4, 0.8, 1.2, 1.5, 1.5, 1.0])
-
-    @staticmethod
-    def _film_look_settings(params_dict):
-        p = params_dict or {}
-        # EXPERIMENTAL, on by default on this branch so it can be judged on real frames;
-        # `film_look=0` in the parameter set restores the pure physical result exactly.
-        return (round(float(p.get("film_look", 1.0) or 0.0), 2),
-                round(float(p.get("film_look_saturation", 0.72) or 0.72), 2),
-                round(float(p.get("film_look_midtone", 0.0) or 0.0), 1),
-                # 1.5 puts the sky's hue exactly on the reference (257.8 -> 247.4 deg, measured),
-                # with the chroma effectively unchanged.
-                round(float(p.get("film_look_hue", 1.5) or 0.0), 2),
-                # Tone curve strength; 1.0 is the measured mapping in `_LOOK_CURVE_*`.
-                round(float(p.get("film_look_curve", 1.0) or 0.0), 2),
-                # Blossom band strength: brighter petals, slightly more chroma.
-                round(float(p.get("film_look_pink", 1.0) or 0.0), 2))
-
-    @staticmethod
-    def _srgb_to_lab(rgb):
-        """Display sRGB [0,1] -> CIE Lab under D65, vectorised."""
-        a = np.asarray(rgb, np.float64)
-        lin = np.where(a <= 0.04045, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
-        m = np.array([[0.4124564, 0.3575761, 0.1804375],
-                      [0.2126729, 0.7151522, 0.0721750],
-                      [0.0193339, 0.1191920, 0.9503041]])
-        xyz = lin @ m.T
-        t = xyz / np.array([0.95047, 1.0, 1.08883])
-        d = 6.0 / 29.0
-        f = np.where(t > d ** 3, np.cbrt(t), t / (3.0 * d * d) + 4.0 / 29.0)
-        return np.stack([116.0 * f[..., 1] - 16.0,
-                         500.0 * (f[..., 0] - f[..., 1]),
-                         200.0 * (f[..., 1] - f[..., 2])], -1)
-
-    @staticmethod
-    def _lab_to_srgb(lab, max_iter=8):
-        """CIE Lab -> display sRGB, with chroma reduction instead of a hard RGB clip.
-
-        Clipping the linear RGB out of a rotated hue is what made the hue pass unusable in
-        the first place: on a saturated pink the rotation pushed a channel past 1.0, the clip
-        collapsed it, and the measured hue moved *away* from the target even though the
-        rotation was in the right direction.  So colours that leave the gamut are pulled back
-        by scaling a*/b* toward the neutral axis -- lightness and hue are kept, only chroma
-        gives way, which is what a film print does at the gamut edge anyway.
-        """
-        L = np.clip(lab[..., 0], 0.0, 100.0)
-        A = lab[..., 1].copy()
-        B = lab[..., 2].copy()
-        d = 6.0 / 29.0
-        m = np.array([[3.2404542, -1.5371385, -0.4985314],
-                      [-0.9692660, 1.8760108, 0.0415560],
-                      [0.0556434, -0.2040259, 1.0572252]])
-
-        def to_linear(a_, b_):
-            fy = (L + 16.0) / 116.0
-            fx = fy + a_ / 500.0
-            fz = fy - b_ / 200.0
-            xyz = np.stack([np.where(fx > d, fx ** 3, 3.0 * d * d * (fx - 4.0 / 29.0)) * 0.95047,
-                            np.where(fy > d, fy ** 3, 3.0 * d * d * (fy - 4.0 / 29.0)),
-                            np.where(fz > d, fz ** 3, 3.0 * d * d * (fz - 4.0 / 29.0)) * 1.08883], -1)
-            return xyz @ m.T
-
-        lin = to_linear(A, B)
-        for _ in range(max_iter):
-            bad = ((lin < -1e-4) | (lin > 1.0 + 1e-4)).any(-1)
-            if not bad.any():
-                break
-            A = np.where(bad, A * 0.82, A)
-            B = np.where(bad, B * 0.82, B)
-            lin = to_linear(A, B)
-        lin = np.clip(lin, 0.0, 1.0)
-        out = np.where(lin <= 0.0031308, lin * 12.92, 1.055 * np.power(lin, 1.0 / 2.4) - 0.055)
-        return np.clip(out, 0.0, 1.0)
-
-    def _apply_film_look(self, table, params_dict, is_bw=False):
-        """Saturation / midtone / band-limited hue pass on a finished display table."""
-        strength, sat, mid, hue, curve, pink = self._film_look_settings(params_dict)
-        if is_bw or strength <= 0.001:
-            return table
-        sat = 1.0 + (sat - 1.0) * strength
-        mid *= strength
-        hue *= strength
-        curve *= strength
-        pink *= strength
-
-        lab = self._srgb_to_lab(table)
-        L = lab[..., 0]
-        C = np.hypot(lab[..., 1], lab[..., 2])
-        # Hue in degrees, lifted toward the reference on two bands only: sky (cyan-ward) and
-        # blossom / skin-adjacent pink (warm-ward).  Everything else keeps its hue.
-        hd = np.degrees(np.arctan2(lab[..., 2], lab[..., 1])) % 360.0
-
-        def band(center, sigma):
-            d = (hd - center + 180.0) % 360.0 - 180.0
-            return np.exp(-(d / sigma) ** 2)
-
-        # Only the sky band.  The blossoms looked 13 deg purple of the reference in a median-of-
-        # hue statistic, but that is an artefact: hue is circular, and the pixels straddling 360
-        # drag the median down.  Comparing median a*/b* instead puts them at 346.2 deg against
-        # 347.9 -- already right, and the earlier "+10 deg warm" term pushed them to 356.6.
-        # Two bands.  The sky one is fixed by measurement (257.8 -> 247.4 against 248.0).  The
-        # blossom band is centred at 320 deg, not on the blossoms themselves: the print stock
-        # decides where they land -- on ektacolor edge they already sit at ~346 and must not be
-        # touched, on crystal archive they land at ~327 and read purple.  A centre at 320 with a
-        # 20 deg falloff moves the latter to ~335 while leaving the former within 1.5 deg.
-        hd = hd + hue * (-8.0 * band(247.0, 28.0) + 8.0 * band(320.0, 20.0))
-        # Midtone lift: a bell that is zero by L*=10 and L*=94, so toe and shoulder stay put.
-        L = L + mid * np.clip(1.0 - np.abs(L - 52.0) / 42.0, 0.0, 1.0)
-
-        # Blossom band: the reference keeps petals 2 L* brighter and a touch more saturated
-        # than we do, which is most of the "pink and fresh" read.  Narrow band around 325 deg
-        # with a 22 deg falloff, so skin (50-60 deg) is untouched by construction.
-        C_boost = 1.0
-        if pink > 0.001:
-            w_pink = band(325.0, 22.0)
-            L = L + pink * 2.0 * w_pink
-            C_boost = 1.0 + pink * 0.10 * w_pink
-
-        # Tone curve.  Binned by input L* against the reference, the difference is not a
-        # uniform shift but an S: our toe sits 1-2 L* high and everything above L* 50 sits
-        # 1-1.5 low, which is exactly the "flat and dull" read -- a print that never gets
-        # out of its own shadow.  Values are the measured medians, smoothed at the ends so
-        # pure black and paper white stay put.
-        if curve > 0.001:
-            L = L + curve * np.interp(L, self._LOOK_CURVE_X, self._LOOK_CURVE_Y)
-
-        # Chroma is pulled down by *lightness*, not globally: the excess sits in the bright
-        # areas (open sky), while the blossoms at L* 46 on crystal archive actually come out
-        # 7% *under* the reference.  The ramp therefore starts at L* 55 -- dark and midtone
-        # colour keeps all of its chroma, only the top end calms down.
-        w_sat = np.clip((L - 55.0) / 30.0, 0.0, 1.0)
-        w_sat = w_sat * w_sat * (3.0 - 2.0 * w_sat)
-        sat_l = 1.0 + (sat - 1.0) * w_sat
-
-        out = np.stack([np.clip(L, 0.0, 100.0),
-                        C * sat_l * C_boost * np.cos(np.radians(hd)),
-                        C * sat_l * C_boost * np.sin(np.radians(hd))], -1)
-        return np.ascontiguousarray(self._lab_to_srgb(out), dtype=np.float32)
 
     def _build_3d_lut(self, film_stock="kodak_portra_400", paper_stock="kodak_2383", lut_size=33, params_dict=None, print_mode=None):
         """Unlocked LUT build body - call get_3d_lut() instead."""
@@ -2833,11 +2674,9 @@ class SpektraEngine:
         # existed is a *different* table: v10 + the lift value in the name makes the old
         # files miss instead of serving an un-lifted curve from disk.
         wp_tag = f"__wp{round(wp_lift, 1):g}"
-        look = self._film_look_settings(params_dict)
-        look_tag = "__fl" + "_".join(f"{v:g}" for v in look)
         if is_default_params and not push_stops:
-            cache_file = os.path.join(cache_dir, f"v11_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}{wp_tag}{look_tag}.npy")
-            bundled_file = os.path.join(bundled_cache_dir, f"v11_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}{wp_tag}{look_tag}.npy")
+            cache_file = os.path.join(cache_dir, f"v11_shaper__{self._push_cache_tag(push_stops)}{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}{wp_tag}.npy")
+            bundled_file = os.path.join(bundled_cache_dir, f"v11_shaper__{fingerprint}_{film_stock}__{eff_paper}__{lut_size}__{neutral_digest}{wp_tag}.npy")
             load_target = cache_file if os.path.exists(cache_file) else (bundled_file if os.path.exists(bundled_file) else None)
             # The grain law reads the negative density, not the LUT. Serving a cached LUT without
             # its density cube would silently drop the grain back to the -log10(lin) domain, so a
@@ -3082,9 +2921,6 @@ class SpektraEngine:
             lut_3d = self._gate_dir_neutral_axis(
                 lut_3d, lattice, film_stock, paper_stock, lut_size, params_dict, print_mode)
 
-        # Appearance pass, last: everything above is the physics, this is the look.
-        lut_3d = self._apply_film_look(lut_3d, params_dict, is_bw=is_bw)
-
         dir_baked = has_dir
         morph_baked = params.print is not None
         self._record_lut_baked(lut_3d, {
@@ -3232,11 +3068,9 @@ class SpektraEngine:
         # so two bakes that differ only in it are different tables. Rounding to 0.1 keeps the
         # usual 0/0.5/1 settings from spraying the disk cache with near-identical entries.
         wp_lift = round(float(params_dict.get("white_point_lift", 1.0)), 1)
-        look = self._film_look_settings(params_dict)
 
         return ((film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same,
-                 morph_gamma, dev_exh, push_stops, base_paper_key, neutral, wp_lift,
-                 look),
+                 morph_gamma, dev_exh, push_stops, base_paper_key, neutral, wp_lift),
                 (film_stock, eff_paper, lut_size, illuminant, dir_amt, dir_intl, dir_same,
                  push_stops))
 
@@ -3311,15 +3145,6 @@ class SpektraEngine:
                 w = t * t * (3.0 - 2.0 * t)
                 print_cube = np.clip(print_cube + (0.975 - peak) * w * wp_lift,
                                      0.0, 1.0).astype(np.float32)
-
-        # Same appearance pass the 3D LUT gets -- the grain stage draws through this cube, so
-        # skipping it here would make the look pop on and off with the grain switch.
-        try:
-            _prof = self._load_profile(film_stock)
-            _is_bw = getattr(getattr(_prof, "info", None), "channel_model", None) == "bw"
-        except Exception:                              # noqa: BLE001 - never fail a bake
-            _is_bw = False
-        print_cube = self._apply_film_look(print_cube, params_dict, is_bw=_is_bw)
 
         print(f"[SpektraGrain] 打印立方体烘焙完毕 ({lut_size}^3, "
               f"{round((time.time() - t0) * 1000, 1)}ms)")

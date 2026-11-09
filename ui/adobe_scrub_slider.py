@@ -199,7 +199,13 @@ class RoundScrubSlider(QSlider):
     """
     doubleClicked = Signal()
     INTENT_PX = 8.0
-    KNOB_R = 9.0
+    # Knob diameter ~= the 11px label text, and the groove starts at x=0 so the track's left
+    # edge lines up with the label above it (it used to be inset by r+2, which read as
+    # "everything is indented by 11px and nothing is flush").
+    KNOB_R = 7.0
+    # Fraction of a full-track sweep per pixel when dragging the groove instead of the knob:
+    # roughly a quarter speed, so it reads as fine adjustment rather than a scrub race.
+    TRACK_RATE = 0.30
 
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
@@ -208,10 +214,14 @@ class RoundScrubSlider(QSlider):
         self._smooth_x = None
         self._press_pos = None
         self._intent = None            # None | 'h' | 'v'
+        self._drag_mode = None         # None | 'knob' | 'track'
+        self._grab_offset = 0.0
+        self._last_drag_x = None
+        self._track_accum = 0.0
         self.track_gradient = None
         self.has_center_detent = False
-        self.setFixedHeight(28)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(22)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
         theme_manager.themeChanged.connect(lambda _: self.update())
 
     def enterEvent(self, event):
@@ -224,12 +234,16 @@ class RoundScrubSlider(QSlider):
         self.update()
         super().leaveEvent(event)
 
-    def _update_from_mouse_x(self, mouse_x):
-        w = self.width()
+    def _track_span(self):
+        """Knob-centre travel range.  The groove itself is drawn 0..width; the knob centre is
+        clamped to [r, w-r] so the circle never crosses the row edge."""
         r = self.KNOB_R
-        x_start = r + 2.0
-        x_end = w - r - 2.0
-        span = max(1.0, x_end - x_start)
+        x_start = r
+        x_end = max(x_start + 1.0, self.width() - r)
+        return x_start, x_end, max(1.0, x_end - x_start)
+
+    def _update_from_mouse_x(self, mouse_x):
+        x_start, x_end, span = self._track_span()
 
         # 1. Continuous smooth visual position (sub-pixel precision)
         clamped_x = max(x_start, min(x_end, float(mouse_x)))
@@ -245,11 +259,7 @@ class RoundScrubSlider(QSlider):
 
     def set_continuous_ratio(self, ratio: float):
         """Set continuous floating visual knob position from external continuous ratio [0.0..1.0]."""
-        w = self.width()
-        r = self.KNOB_R
-        x_start = r + 2.0
-        x_end = w - r - 2.0
-        span = max(1.0, x_end - x_start)
+        x_start, x_end, span = self._track_span()
         clamped_ratio = max(0.0, min(1.0, float(ratio)))
         self._smooth_x = x_start + clamped_ratio * span
         self.update()
@@ -259,59 +269,126 @@ class RoundScrubSlider(QSlider):
         self._smooth_x = None
         self.update()
 
+    def _knob_cx(self):
+        if self._smooth_x is not None:
+            x_start, x_end, _ = self._track_span()
+            return max(x_start, min(x_end, self._smooth_x))
+        x_start, x_end, span = self._track_span()
+        frac = 0.0
+        if self.maximum() > self.minimum():
+            frac = (self.value() - self.minimum()) / float(self.maximum() - self.minimum())
+            frac = max(0.0, min(1.0, frac))
+        return x_start + frac * span
+
+    def _nudge_from_drag(self, mouse_x):
+        """Relative scrub used when the press landed on the groove instead of the knob.
+
+        Same feel as dragging the parameter title: slow, proportional, and it never jumps the
+        value to wherever the pointer happens to be.
+        """
+        if self._last_drag_x is None:
+            self._last_drag_x = float(mouse_x)
+            return
+        delta = float(mouse_x) - self._last_drag_x
+        self._last_drag_x = float(mouse_x)
+        total = self.maximum() - self.minimum()
+        if delta == 0.0 or total <= 0:
+            return
+        _, _, span = self._track_span()
+        self._track_accum += delta * (total / span) * self.TRACK_RATE
+        steps = int(self._track_accum)
+        if steps == 0:
+            return
+        self._track_accum -= steps
+        new_val = max(self.minimum(), min(self.maximum(), self.value() + steps))
+        if new_val != self.value():
+            self.setValue(new_val)
+            x_start, x_end, sp = self._track_span()
+            frac = (new_val - self.minimum()) / float(max(1, self.maximum() - self.minimum()))
+            self._smooth_x = x_start + frac * sp
+        self.update()
+
     def mousePressEvent(self, event):
         if not self.isEnabled():
             event.ignore()
             return
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._pressed = True
-            self._press_pos = event.position()
-            self._intent = None          # no value change until the gesture proves horizontal
-            event.accept()
-        else:
+        if event.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
+            return
+        pos = event.position()
+        self._pressed = True
+        self._press_pos = pos
+        self._intent = None
+        self._last_drag_x = None
+        self._track_accum = 0.0
+        # A press on the knob drags it; a press anywhere else on the groove scrubs relatively.
+        # Nothing jumps to the click point any more, and a bare click changes nothing.
+        if abs(pos.x() - self._knob_cx()) <= self.KNOB_R + 5.0:
+            self._drag_mode = 'knob'
+            self._grab_offset = pos.x() - self._knob_cx()
+        else:
+            self._drag_mode = 'track'
+            self._grab_offset = 0.0
+        # Grab right away: without it the drag is lost the moment the pointer leaves this
+        # 22px-tall row, which is exactly what read as "the knob sticks".
+        try:
+            self.grabMouse()
+        except Exception:
+            pass
+        event.accept()
 
     def mouseMoveEvent(self, event):
         if not self.isEnabled():
             event.ignore()
             return
-        if self._pressed:
-            if self._intent is None:
-                pos = event.position()
-                dx = abs(pos.x() - self._press_pos.x())
-                dy = abs(pos.y() - self._press_pos.y())
-                if max(dx, dy) < self.INTENT_PX:
-                    event.accept()
-                    return
-                if dy > dx:
-                    self._intent = 'v'   # vertical intent: cancel, keep the value untouched
-                    self._pressed = False
-                    self._smooth_x = None
-                    self.update()
-                    event.accept()
-                    return
-                self._intent = 'h'       # horizontal: take the knob to the finger once, then track
-                self._update_from_mouse_x(event.position().x())
+        if not self._pressed:
+            super().mouseMoveEvent(event)
+            return
+        pos = event.position()
+        if self._intent is None:
+            dx = abs(pos.x() - self._press_pos.x())
+            dy = abs(pos.y() - self._press_pos.y())
+            if max(dx, dy) < self.INTENT_PX:
                 event.accept()
                 return
-            if self._intent == 'h':
-                self._update_from_mouse_x(event.position().x())
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
+            if dy > dx:
+                # Vertical intent: hand the gesture back to the panel scroll untouched.
+                self._intent = 'v'
+                self._pressed = False
+                self._smooth_x = None
+                self._release_grab()
+                self.update()
+                event.accept()
+                return
+            self._intent = 'h'
+        if self._intent == 'h':
+            if self._drag_mode == 'knob':
+                if self._smooth_x is None:
+                    self._smooth_x = self._knob_cx()
+                self._update_from_mouse_x(pos.x() - self._grab_offset)
+            else:
+                self._nudge_from_drag(pos.x())
+        event.accept()
+
+    def _release_grab(self):
+        try:
+            self.releaseMouse()
+        except Exception:
+            pass
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._pressed and self._intent is None:
-                # A clean tap on the track still sets the value at the tap position.
-                self._update_from_mouse_x(event.position().x())
             self._pressed = False
             self._intent = None
             self._press_pos = None
             self._smooth_x = None
+            self._last_drag_x = None
+            self._track_accum = 0.0
+            self._release_grab()
             self.update()
             self.sliderReleased.emit()
             event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -335,11 +412,9 @@ class RoundScrubSlider(QSlider):
         w = self.width()
         h = self.height()
         cy = h / 2.0
-        r = self.KNOB_R  # touch-friendly knob radius
+        r = self.KNOB_R
 
-        x_start = r + 2.0
-        x_end = w - r - 2.0
-        span = max(1.0, x_end - x_start)
+        x_start, x_end, span = self._track_span()
 
         # Knob center X calculation: continuous if dragging/scrubbing, snapped if idle
         if self._smooth_x is not None:
@@ -351,13 +426,15 @@ class RoundScrubSlider(QSlider):
                 frac = max(0.0, min(1.0, frac))
             knob_cx = x_start + frac * span
 
-        # Disabled rendering: flat muted slot + dimmed knob
+        # The groove spans the full row width so its left edge sits on the same x as the label.
+        groove_w = float(w)
+        # Track colours need contrast on their own; on a 3px line the fill is what carries state.
         if not self.isEnabled():
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(25, 27, 33) if is_dark else QColor(226, 232, 240))
-            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
+            painter.drawRoundedRect(QRectF(0.0, cy - 1.5, groove_w, 3.0), 1.5, 1.5)
             if self.has_center_detent:
-                mid_x = x_start + span * 0.5
+                mid_x = groove_w * 0.5
                 painter.setPen(QColor(255, 255, 255, 25) if is_dark else QColor(0, 0, 0, 30))
                 painter.drawLine(QPointF(mid_x, cy - 2.0), QPointF(mid_x, cy + 2.0))
                 painter.setPen(Qt.PenStyle.NoPen)
@@ -368,32 +445,32 @@ class RoundScrubSlider(QSlider):
             painter.drawEllipse(QPointF(knob_cx, cy), r, r)
             return
 
-        # 1. Background Groove (Strict 3.0px height as requested)
+        # 1. Background groove: full row width, 3px tall
         painter.setPen(Qt.PenStyle.NoPen)
         if self.track_gradient:
             from PySide6.QtGui import QLinearGradient
-            grad = QLinearGradient(x_start, cy, x_end, cy)
+            grad = QLinearGradient(0.0, cy, groove_w, cy)
             for stop, color in self.track_gradient:
                 grad.setColorAt(stop, color)
             painter.setBrush(grad)
-            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
+            painter.drawRoundedRect(QRectF(0.0, cy - 1.5, groove_w, 3.0), 1.5, 1.5)
             # Subtle 0.5px border to ensure contrast
             painter.setPen(QColor(0, 0, 0, 100) if is_dark else QColor(0, 0, 0, 40))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
+            painter.drawRoundedRect(QRectF(0.0, cy - 1.5, groove_w, 3.0), 1.5, 1.5)
             painter.setPen(Qt.PenStyle.NoPen)
         else:
             groove_bg = QColor(42, 44, 52) if is_dark else QColor(218, 222, 230)
             active_bg = QColor(90, 95, 110) if is_dark else QColor(140, 146, 160)
             painter.setBrush(groove_bg)
-            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, span, 3.0), 1.5, 1.5)
+            painter.drawRoundedRect(QRectF(0.0, cy - 1.5, groove_w, 3.0), 1.5, 1.5)
             # Active subpage track for normal uncolored slider
             painter.setBrush(active_bg)
-            painter.drawRoundedRect(QRectF(x_start, cy - 1.5, max(0.0, knob_cx - x_start), 3.0), 1.5, 1.5)
+            painter.drawRoundedRect(QRectF(0.0, cy - 1.5, max(0.0, knob_cx), 3.0), 1.5, 1.5)
 
         # 2. Optional Center Detent tick mark (1px clean mark for center-balanced sliders)
         if self.has_center_detent:
-            mid_x = x_start + span * 0.5
+            mid_x = groove_w * 0.5
             detent_color = QColor(255, 255, 255, 150) if is_dark else QColor(71, 85, 105, 180)
             painter.setPen(detent_color)
             painter.drawLine(QPointF(mid_x, cy - 2.5), QPointF(mid_x, cy + 2.5))
@@ -447,8 +524,8 @@ class ParamScrubSlider(QWidget):
     def _init_ui(self, label_text):
         self.setStyleSheet(f"ParamScrubSlider, AdobeScrubSlider {{ background: transparent; border: none; }}\n{theme_manager.widget_tooltip_stylesheet()}")
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 3, 0, 4)
-        main_layout.setSpacing(2)
+        main_layout.setContentsMargins(0, 2, 0, 2)
+        main_layout.setSpacing(1)
 
         # Header row: Label + Value edit + Reset button
         header_layout = QHBoxLayout()
@@ -489,12 +566,12 @@ class ParamScrubSlider(QWidget):
             self._icon_reset_disabled = QIcon(path_dis)
             self._icon_reset_active = QIcon(path_act)
             self.reset_btn.setIcon(self._icon_reset_disabled)
-            self.reset_btn.setIconSize(QSize(14, 14))
+            self.reset_btn.setIconSize(QSize(12, 12))
         else:
             reset_icon_path = get_icon_path("reset.png")
             if os.path.exists(reset_icon_path):
                 self.reset_btn.setIcon(QIcon(reset_icon_path))
-                self.reset_btn.setIconSize(QSize(14, 14))
+                self.reset_btn.setIconSize(QSize(12, 12))
             else:
                 self.reset_btn.setText("R")
         self.reset_btn.clicked.connect(self.reset)
@@ -517,21 +594,38 @@ class ParamScrubSlider(QWidget):
         self.slider.doubleClicked.connect(self.reset)
         main_layout.addWidget(self.slider)
 
+        # Push the default through the display path once, so the knob and the numeric field
+        # agree with `current_val` from the very first paint (they used to disagree until the
+        # first value change, which also made the knob look stuck at the minimum).
+        self._update_display(self.default_val)
+
         self.apply_theme()
         theme_manager.themeChanged.connect(self.apply_theme)
 
     def add_header_widget(self, w, stretch=0):
-        """Mount an extra control in the header row, right after the scrub title.
+        """Mount an extra control in the header row, right *after* the scrub title.
 
-        Used for compact per-parameter actions (e.g. the AU metered-exposure button
-        on the exposure slider) that would otherwise eat a full panel row.
+        Used for compact per-parameter actions (e.g. the AU metered-exposure button on the
+        exposure slider).  Appending it at the end of the row (the old behaviour) pushed the
+        numeric box and the reset button leftwards, so that row's reset no longer lined up
+        with the column every other row builds.  Inserting at index 1 keeps the trailing
+        controls in place, and the added stretch keeps the chip hugging the label text
+        instead of floating in the middle of the row.
         """
         item = self.layout().itemAt(0)
         if item is None:
             return
         header = item.layout()
-        if header is not None:
-            header.addWidget(w, stretch)
+        if header is None:
+            return
+        header.insertWidget(1, w, stretch)
+        if not getattr(self, "_header_stretch_added", False):
+            header.insertStretch(2)
+            # The label must stop absorbing the spare width, or the chip is pushed to the far
+            # right and only *looks* like it follows the label.
+            self.label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+            header.setStretch(0, 0)
+            self._header_stretch_added = True
 
     def apply_theme(self, theme_name=None):
         is_dark = theme_manager.is_dark()
@@ -1037,6 +1131,10 @@ AdobeComboBox = DarkroomComboBox
 class ComboBoxRow(QWidget):
     """Modern horizontal parameter row with label and drop-down selection."""
     valueChanged = Signal(object)
+    # One height for every combo in the app: the preferences dialog's padding (4px + 11px text
+    # + 2px border) works out to 26, and the parameter panel used to be 30 -- two different
+    # "standard" control heights side by side in the same window.
+    CONTROL_H = 26
 
     def __init__(self, label_text, items, default_val=None, tooltip="", parent=None):
         super().__init__(parent)
@@ -1055,7 +1153,7 @@ class ComboBoxRow(QWidget):
         layout.addWidget(self.label)
 
         self.combo = DarkroomComboBox()
-        self.combo.setFixedHeight(30)
+        self.combo.setFixedHeight(self.CONTROL_H)
         self.combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo.setMinimumWidth(100)
         if self.default_tooltip:

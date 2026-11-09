@@ -1142,7 +1142,7 @@ class SingleExportDialog(BaseExportDialog):
     def __init__(self, default_file_path: str, parent=None, source_path: str = ""):
         super().__init__(parent)
         self.setWindowTitle("单片扫描")
-        self.setFixedSize(620, 360)
+        self.setFixedSize(620, 338)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         # 源文件路径模式需要知道底片落在哪；缺省时按默认输出路径反推目录。
@@ -1162,7 +1162,7 @@ class SingleExportDialog(BaseExportDialog):
         # Row 4: Exact Save Path for Single Photo
         row_path = QVBoxLayout()
         row_path.setContentsMargins(0, 2, 0, 0)
-        row_path.setSpacing(6)
+        row_path.setSpacing(3)
         lbl_path = QLabel("输出位置:")
         lbl_path.setStyleSheet("font-size: 12px; background: transparent;")
         row_path.addWidget(lbl_path)
@@ -1183,10 +1183,6 @@ class SingleExportDialog(BaseExportDialog):
         self._btn_browse = btn_browse
 
         row_path.addLayout(path_box)
-
-        self.lbl_path_hint = QLabel("")
-        self.lbl_path_hint.setStyleSheet("color: #64748b; font-size: 11px;")
-        row_path.addWidget(self.lbl_path_hint)
 
         self.edit_path.modeChanged.connect(self._on_path_mode_changed)
         self._on_path_mode_changed(self.edit_path.mode())
@@ -1263,10 +1259,6 @@ class SingleExportDialog(BaseExportDialog):
             self._btn_browse.setEnabled(not is_source)
             self._btn_browse.setCursor(
                 Qt.CursorShape.PointingHandCursor if not is_source else Qt.CursorShape.ForbiddenCursor)
-        if hasattr(self, "lbl_path_hint"):
-            self.lbl_path_hint.setText(
-                "输出到源文件所在目录，文件名沿用原文件名，扩展名随格式自动修正"
-                if is_source else "可手动输入路径，或点“浏览...”选择保存位置")
 
     def _on_format_changed(self, index):
         super()._on_format_changed(index)
@@ -1369,10 +1361,10 @@ class BatchExportDialog(BaseExportDialog):
         # fields silently changed meaning depending on how many frames were selected.
         if batch_count == 1:
             self.setWindowTitle("扫描当前底片")
-            self.setFixedSize(620, 410)
+            self.setFixedSize(620, 388)
         else:
             self.setWindowTitle(f"批量扫描：{self.batch_count}张")
-            self.setFixedSize(620, 410)
+            self.setFixedSize(620, 388)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
@@ -1447,7 +1439,7 @@ class BatchExportDialog(BaseExportDialog):
         # Row 6: Strictly Destination Directory
         row_path = QVBoxLayout()
         row_path.setContentsMargins(0, 2, 0, 0)
-        row_path.setSpacing(6)
+        row_path.setSpacing(3)
         lbl_path = QLabel("输出位置:")
         lbl_path.setStyleSheet("font-size: 12px; background: transparent;")
         row_path.addWidget(lbl_path)
@@ -1468,10 +1460,6 @@ class BatchExportDialog(BaseExportDialog):
         self._btn_browse = btn_browse
 
         row_path.addLayout(path_box)
-
-        self.lbl_path_hint = QLabel("")
-        self.lbl_path_hint.setStyleSheet("color: #64748b; font-size: 11px;")
-        row_path.addWidget(self.lbl_path_hint)
 
         self.edit_path.modeChanged.connect(self._on_path_mode_changed)
         self._on_path_mode_changed(self.edit_path.mode())
@@ -1535,10 +1523,6 @@ class BatchExportDialog(BaseExportDialog):
             self._btn_browse.setEnabled(not is_source)
             self._btn_browse.setCursor(
                 Qt.CursorShape.PointingHandCursor if not is_source else Qt.CursorShape.ForbiddenCursor)
-        if hasattr(self, "lbl_path_hint"):
-            self.lbl_path_hint.setText(
-                "每张输出到各自源文件所在目录，文件名沿用原名"
-                if is_source else "全部输出到同一个文件夹，可手动输入或点“浏览...”选择")
 
     def _browse_save_dir(self):
         start_dir = self.edit_path.text().strip()

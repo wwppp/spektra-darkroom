@@ -2238,20 +2238,8 @@ class FilmstripWidget(QWidget):
 
         menu.addSeparator()
 
-        # Submenu: 星标筛选
-        b_filter_menu = menu.addMenu("星标筛选")
-        b_filter_menu.setStyleSheet(get_darkroom_menu_style())
-        b_filter_menu.setEnabled(bool(self._photos_list))
-        for key, text in self.get_filter_menu_items():
-            if key == "separator":
-                b_filter_menu.addSeparator()
-                continue
-            act_bf = b_filter_menu.addAction(text)
-            act_bf.setCheckable(True)
-            act_bf.setChecked(self._rating_filter == key)
-            act_bf.triggered.connect(lambda chk=False, k=key: self.set_rating_filter(k))
-
-        # Submenu: 整理底片
+        # Submenu: 整理底片 (the rating-filter submenu lives above, next to 底片评级 -- it used
+        # to be duplicated here, which put two identical 星标筛选 entries in one menu)
         sort_menu = menu.addMenu("整理底片")
         sort_menu.setStyleSheet(get_darkroom_menu_style())
         act_s1 = sort_menu.addAction("按拍摄时间升序 (旧 → 新)")

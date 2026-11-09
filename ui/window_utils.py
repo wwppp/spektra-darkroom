@@ -405,6 +405,14 @@ def setup_solid_combobox(combo):
                 container.setWindowOpacity(0.0)
             orig_hide_popup()
 
+    # One control height for every combo in the app.  The preferences dialog's padding
+    # (4px + 11px text + 1px borders) lands on 26px; the export dialog and the parameter
+    # panel each used to pick their own, so identical fields sat at two or three heights.
+    try:
+        combo.setFixedHeight(26)
+    except RuntimeError:
+        pass
+
         combo.showPopup = _hooked_show_popup
         combo.hidePopup = _hooked_hide_popup
 
@@ -419,7 +427,9 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
             is_dark = True
 
     from core.path_utils import get_resource_dir
-    chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_amber.png").replace("\\", "/")
+    # Round, text-sized indicator: a 14px ring that reads at the same weight as the 11px label
+    # instead of the old 12px hard square.  Checked fills amber and carries a dark tick.
+    chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_circle.png").replace("\\", "/")
     from ui.theme_manager import theme_manager
     tt_ss = theme_manager.widget_tooltip_stylesheet()
 
@@ -440,10 +450,10 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 outline: none;
             }}
             QCheckBox::indicator {{
-                width: 12px;
-                height: 12px;
+                width: 14px;
+                height: 14px;
                 border: 1px solid #8b92a5;
-                border-radius: 2px;
+                border-radius: 7px;
                 background: transparent;
                 outline: none;
             }}
@@ -452,7 +462,7 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
             }}
             QCheckBox::indicator:checked {{
                 border: 1px solid #f59e0b;
-                background: #14151a;
+                background: #f59e0b;
                 image: url("{chk_amber}");
             }}
             QCheckBox:disabled {{
@@ -460,7 +470,12 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
             }}
             QCheckBox::indicator:disabled {{
                 border: 1px solid #282a36;
-                background: #0f1013;
+                background: transparent;
+            }}
+            QCheckBox::indicator:checked:disabled {{
+                border: 1px solid #3a3d4a;
+                background: #3a3d4a;
+                image: none;
             }}
             {tt_ss}
         """
@@ -481,10 +496,10 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 outline: none;
             }}
             QCheckBox::indicator {{
-                width: 12px;
-                height: 12px;
+                width: 14px;
+                height: 14px;
                 border: 1px solid #94a3b8;
-                border-radius: 2px;
+                border-radius: 7px;
                 background: #ffffff;
                 outline: none;
             }}
@@ -493,7 +508,7 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
             }}
             QCheckBox::indicator:checked {{
                 border: 1px solid #f59e0b;
-                background: #ffffff;
+                background: #f59e0b;
                 image: url("{chk_amber}");
             }}
             QCheckBox:disabled {{
@@ -501,7 +516,12 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
             }}
             QCheckBox::indicator:disabled {{
                 border: 1px solid #cbd5e1;
-                background: #f1f5f9;
+                background: #ffffff;
+            }}
+            QCheckBox::indicator:checked:disabled {{
+                border: 1px solid #d6dae2;
+                background: #d6dae2;
+                image: none;
             }}
             {tt_ss}
         """

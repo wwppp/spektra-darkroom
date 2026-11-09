@@ -1518,82 +1518,54 @@ class FadingSplitterHandle(QSplitterHandle):
         bg_col = QColor('#121316') if is_dark else QColor('#ebedf2')
         painter.fillRect(0, 0, w, h, bg_col)
 
+        # The indicator is a hover affordance only: it stays invisible until the pointer is
+        # actually on the handle, then runs almost edge to edge so it reads as a grab bar
+        # rather than a stray dash in the middle of the pane gap.
+        if not self._hovered:
+            return
+
         if self.orientation() == Qt.Orientation.Vertical:
-            # Horizontal line separating vertical tiers (left sidebar, center splitter)
+            # Horizontal bar separating vertically stacked panes
             cy = h // 2
-            # User requirement: 10% length centered, gray-white subtle indicator
-            line_w = max(24, int(w * 0.10))
-            start_x = (w - line_w) // 2
-            end_x = start_x + line_w
-
+            start_x = 8
+            end_x = max(start_x + 24, w - 8)
             grad = QLinearGradient(start_x, cy, end_x, cy)
-            if self._hovered:
-                if is_dark:
-                    grad.setColorAt(0.0, QColor(248, 250, 252, 20))
-                    grad.setColorAt(0.2, QColor(248, 250, 252, 180))
-                    grad.setColorAt(0.5, QColor(255, 255, 255, 240))
-                    grad.setColorAt(0.8, QColor(248, 250, 252, 180))
-                    grad.setColorAt(1.0, QColor(248, 250, 252, 20))
-                else:
-                    grad.setColorAt(0.0, QColor(51, 65, 85, 20))
-                    grad.setColorAt(0.2, QColor(51, 65, 85, 180))
-                    grad.setColorAt(0.5, QColor(15, 23, 42, 240))
-                    grad.setColorAt(0.8, QColor(51, 65, 85, 180))
-                    grad.setColorAt(1.0, QColor(51, 65, 85, 20))
+            if is_dark:
+                grad.setColorAt(0.0, QColor(248, 250, 252, 20))
+                grad.setColorAt(0.08, QColor(248, 250, 252, 180))
+                grad.setColorAt(0.5, QColor(255, 255, 255, 240))
+                grad.setColorAt(0.92, QColor(248, 250, 252, 180))
+                grad.setColorAt(1.0, QColor(248, 250, 252, 20))
             else:
-                if is_dark:
-                    grad.setColorAt(0.0, QColor(203, 213, 225, 0))
-                    grad.setColorAt(0.2, QColor(203, 213, 225, 60))
-                    grad.setColorAt(0.5, QColor(226, 232, 240, 110))
-                    grad.setColorAt(0.8, QColor(203, 213, 225, 60))
-                    grad.setColorAt(1.0, QColor(203, 213, 225, 0))
-                else:
-                    grad.setColorAt(0.0, QColor(100, 116, 139, 0))
-                    grad.setColorAt(0.2, QColor(100, 116, 139, 80))
-                    grad.setColorAt(0.5, QColor(71, 85, 105, 140))
-                    grad.setColorAt(0.8, QColor(100, 116, 139, 80))
-                    grad.setColorAt(1.0, QColor(100, 116, 139, 0))
+                grad.setColorAt(0.0, QColor(51, 65, 85, 20))
+                grad.setColorAt(0.08, QColor(51, 65, 85, 180))
+                grad.setColorAt(0.5, QColor(15, 23, 42, 240))
+                grad.setColorAt(0.92, QColor(51, 65, 85, 180))
+                grad.setColorAt(1.0, QColor(51, 65, 85, 20))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(grad)
-            painter.drawRect(start_x, cy, line_w, 1)
+            painter.drawRect(start_x, cy, end_x - start_x, 1)
         else:
-            # Vertical line separating horizontal columns
+            # Vertical bar separating horizontally arranged panes
             cx = w // 2
-            # User requirement: 10% length centered, gray-white subtle indicator
-            line_h = max(32, int(h * 0.10))
-            start_y = (h - line_h) // 2
-            end_y = start_y + line_h
-
+            start_y = 8
+            end_y = max(start_y + 32, h - 8)
             grad = QLinearGradient(cx, start_y, cx, end_y)
-            if self._hovered:
-                if is_dark:
-                    grad.setColorAt(0.0, QColor(248, 250, 252, 20))
-                    grad.setColorAt(0.2, QColor(248, 250, 252, 180))
-                    grad.setColorAt(0.5, QColor(255, 255, 255, 240))
-                    grad.setColorAt(0.8, QColor(248, 250, 252, 180))
-                    grad.setColorAt(1.0, QColor(248, 250, 252, 20))
-                else:
-                    grad.setColorAt(0.0, QColor(51, 65, 85, 20))
-                    grad.setColorAt(0.2, QColor(51, 65, 85, 180))
-                    grad.setColorAt(0.5, QColor(15, 23, 42, 240))
-                    grad.setColorAt(0.8, QColor(51, 65, 85, 180))
-                    grad.setColorAt(1.0, QColor(51, 65, 85, 20))
+            if is_dark:
+                grad.setColorAt(0.0, QColor(248, 250, 252, 20))
+                grad.setColorAt(0.08, QColor(248, 250, 252, 180))
+                grad.setColorAt(0.5, QColor(255, 255, 255, 240))
+                grad.setColorAt(0.92, QColor(248, 250, 252, 180))
+                grad.setColorAt(1.0, QColor(248, 250, 252, 20))
             else:
-                if is_dark:
-                    grad.setColorAt(0.0, QColor(203, 213, 225, 0))
-                    grad.setColorAt(0.2, QColor(203, 213, 225, 60))
-                    grad.setColorAt(0.5, QColor(226, 232, 240, 110))
-                    grad.setColorAt(0.8, QColor(203, 213, 225, 60))
-                    grad.setColorAt(1.0, QColor(203, 213, 225, 0))
-                else:
-                    grad.setColorAt(0.0, QColor(100, 116, 139, 0))
-                    grad.setColorAt(0.2, QColor(100, 116, 139, 80))
-                    grad.setColorAt(0.5, QColor(71, 85, 105, 140))
-                    grad.setColorAt(0.8, QColor(100, 116, 139, 80))
-                    grad.setColorAt(1.0, QColor(100, 116, 139, 0))
+                grad.setColorAt(0.0, QColor(51, 65, 85, 20))
+                grad.setColorAt(0.08, QColor(51, 65, 85, 180))
+                grad.setColorAt(0.5, QColor(15, 23, 42, 240))
+                grad.setColorAt(0.92, QColor(51, 65, 85, 180))
+                grad.setColorAt(1.0, QColor(51, 65, 85, 20))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(grad)
-            painter.drawRect(cx, start_y, 1, line_h)
+            painter.drawRect(cx, start_y, 1, end_y - start_y)
 
 
 class FadingSplitter(QSplitter):
@@ -1739,26 +1711,9 @@ class StatusSlotWidget(QWidget):
         self.btn_cancel_import.setVisible(False)
         self.btn_cancel_import.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel_import.setToolTip("中断当前正在进行的底片批量导入流程")
-        self.btn_cancel_import.setStyleSheet("""
-            QPushButton {
-                background: #2a1515;
-                color: #ef4444;
-                border: 1px solid #7f1d1d;
-                border-radius: 3px;
-                padding: 1px 7px;
-                font-size: 11px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #3f1d1d;
-                color: #f87171;
-                border-color: #ef4444;
-            }
-            QPushButton:pressed {
-                background: #1f0d0d;
-            }
-        """)
         l_status.addWidget(self.btn_cancel_import)
+        self.apply_theme()
+        theme_manager.themeChanged.connect(self.apply_theme)
 
         # Graphics Opacity Effects for smooth cross-fading
         self.eff_info = QGraphicsOpacityEffect(self.w_info)
@@ -1772,6 +1727,66 @@ class StatusSlotWidget(QWidget):
         self.eff_info.setOpacity(1.0)
         self.eff_status.setOpacity(0.0)
         self._mode = "info"
+
+    def apply_theme(self, theme_name=None):
+        """Repaint the status texts and the cancel-import chip for the active theme.
+
+        The chip used to carry a hard-coded dark red sheet, so in light mode it stayed a
+        near-black pill on a near-white bar.  Callers that restyle `status_label` per message
+        still win, because this only runs on construction and on a theme switch.
+        """
+        is_dark = theme_manager.is_dark()
+        info_fg = "#cbd5e1" if is_dark else "#334155"
+        status_fg = "#94a3b8" if is_dark else "#64748b"
+        if hasattr(self, "lbl_photo_info") and self.lbl_photo_info:
+            self.lbl_photo_info.setStyleSheet(
+                f"QLabel#lbl_photo_info {{ color: {info_fg}; font-size: 11px; "
+                f"font-weight: 500; padding-top: 1px; }}")
+        if hasattr(self, "status_label") and self.status_label:
+            self.status_label.setStyleSheet(
+                f"QLabel#status_label {{ color: {status_fg}; font-size: 11px; padding-top: 1px; }}")
+        if not hasattr(self, "btn_cancel_import") or not self.btn_cancel_import:
+            return
+        if is_dark:
+            self.btn_cancel_import.setStyleSheet("""
+                QPushButton {
+                    background: #2a1515;
+                    color: #ef4444;
+                    border: 1px solid #7f1d1d;
+                    border-radius: 3px;
+                    padding: 1px 7px;
+                    font-size: 11px;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background: #3f1d1d;
+                    color: #f87171;
+                    border-color: #ef4444;
+                }
+                QPushButton:pressed {
+                    background: #1f0d0d;
+                }
+            """)
+        else:
+            self.btn_cancel_import.setStyleSheet("""
+                QPushButton {
+                    background: #fdeceb;
+                    color: #dc2626;
+                    border: 1px solid #f3b8b3;
+                    border-radius: 3px;
+                    padding: 1px 7px;
+                    font-size: 11px;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background: #fbdbd7;
+                    color: #b91c1c;
+                    border-color: #dc2626;
+                }
+                QPushButton:pressed {
+                    background: #f6c8c3;
+                }
+            """)
         self._anim_group = None
 
     def sizeHint(self):
@@ -1843,6 +1858,7 @@ class CenteredViewToolbar(QFrame):
         self.center_widget = None
         self.status_slot = None
         self.status_label = None
+        self.right_widget = None
         self._rating_enabled = False
 
     def set_center_widget(self, w):
@@ -1850,6 +1866,12 @@ class CenteredViewToolbar(QFrame):
         if w:
             w.setParent(self)
             self._update_center()
+
+    def set_right_widget(self, w):
+        """Widget pinned to the right end of the bar (the scan/export capsule).  The centred
+        rating stars have to yield to it as well as to the left-hand status text."""
+        self.right_widget = w
+        self._update_center()
 
     def set_status_slot(self, slot):
         self.status_slot = slot
@@ -1899,6 +1921,13 @@ class CenteredViewToolbar(QFrame):
                 status_right = lbl_x + txt_w
                 if status_right + 12 >= x:
                     should_hide = True
+
+        # ...and with the right-hand scan capsule.  A narrow window used to let "扫描中 (1/1)"
+        # run straight over the stars.
+        if not should_hide and self.right_widget is not None and not self.right_widget.isHidden():
+            right_left = self.right_widget.x()
+            if right_left > 0 and x + cw + 14 >= right_left:
+                should_hide = True
 
         self.center_widget.setVisible(not should_hide)
 
@@ -3402,7 +3431,7 @@ class DarkroomMainWindow(QMainWindow):
         self.film_grid.setContentsMargins(4, 4, 4, 4)
         self.film_grid.setHorizontalSpacing(6)
         self.film_grid.setVerticalSpacing(6)
-        self.film_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.film_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.film_scroll.setWidget(self.film_container)
 
         self.film_scroll.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -3524,7 +3553,6 @@ class DarkroomMainWindow(QMainWindow):
         self.view_toolbar.set_center_widget(self.canvas_rating)
         self.view_toolbar.set_status_slot(self.status_slot)
         self.view_toolbar.set_status_label(self.status_label)
-
         # Right: Dedicated Export Status Prompt (Pure text + underline, matching left status bar)
         self.export_status_container = QWidget()
         self.export_status_container.setObjectName("export_status_container")
@@ -3543,7 +3571,9 @@ class DarkroomMainWindow(QMainWindow):
         self.lbl_export_status = QLabel("")
         self.lbl_export_status.setObjectName("lbl_export_status")
         self.lbl_export_status.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; padding-top: 1px; }")
+        self.lbl_export_status.setStyleSheet(
+            "QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; "
+            "text-decoration: underline; background: transparent; border: none; padding: 0; }")
         export_layout.addWidget(self.lbl_export_status)
 
         self.export_status_container.setStyleSheet("""
@@ -3554,12 +3584,13 @@ class DarkroomMainWindow(QMainWindow):
             }
         """)
         tb_layout.addWidget(self.export_status_container)
+        self.view_toolbar.set_right_widget(self.export_status_container)
 
         self.export_sep = QLabel("│")
         self.export_sep.setObjectName("export_sep")
         self.export_sep.setFixedWidth(12)
         self.export_sep.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
-        self.export_sep.setStyleSheet("QLabel#export_sep { color: #2e3444; font-size: 11px; padding-top: 1px; }")
+        self.export_sep.setStyleSheet("QLabel#export_sep { color: #2e3444; font-size: 11px; padding: 0; }")
         self.export_sep.setVisible(False)
         tb_layout.addWidget(self.export_sep)
 
@@ -3693,7 +3724,7 @@ class DarkroomMainWindow(QMainWindow):
         self.histogram_exif_bar = HistogramExifBar(self)
         sb_outer_layout.addWidget(self.histogram_exif_bar)
 
-        sidebar_scroll = SmoothScrollArea()
+        sidebar_scroll = SmoothScrollArea(crisp=True)
         sidebar_scroll.setWidgetResizable(True)
         sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -3853,6 +3884,14 @@ class DarkroomMainWindow(QMainWindow):
     def _on_film_category_changed(self, category: str):
         self._film_category_filter = category
         self._apply_film_filters()
+        # Each category opens at its own top: the offset used to be inherited, so a short
+        # category could open half-way down (or apparently empty).  If the active stock lives
+        # in this category, land on it instead -- that is the one row worth scrolling to.
+        if hasattr(self, "film_scroll"):
+            self.film_scroll.scroll_to(0, animate=False)
+            card = self.film_cards.get(getattr(self, "current_film_stock", None))
+            if card is not None and getattr(card, "is_filter_matched", False):
+                QTimer.singleShot(0, lambda c=card: self.film_scroll.ensureWidgetVisible(c, 0, 12))
 
     def _apply_film_filters(self):
         query = getattr(self, "_film_search_query", "").strip().lower()
@@ -4797,21 +4836,38 @@ class DarkroomMainWindow(QMainWindow):
         self.act_100.triggered.connect(self.canvas.set_zoom_100)
         view_menu.addAction(self.act_100)
 
+        def _seqs(*specs):
+            """Build a shortcut list with duplicates removed.
+
+            Qt's shortcut map treats a repeated sequence as *ambiguous* even when both copies
+            belong to the same action and reject it silently: registering StandardKey.ZoomOut
+            (which already is Ctrl+-) next to the literal "Ctrl+-" is what made Ctrl+- do
+            nothing while Ctrl+Shift+- still worked.
+            """
+            out, seen = [], set()
+            for spec in specs:
+                seq = QKeySequence(spec)
+                key = seq.toString()
+                if key and key not in seen:
+                    seen.add(key)
+                    out.append(seq)
+            return out
+
         self.act_zoom_in = QAction("放大", self)
-        self.act_zoom_in.setShortcuts([
+        self.act_zoom_in.setShortcuts(_seqs(
             QKeySequence.StandardKey.ZoomIn,
-            QKeySequence("Ctrl+="),
-            QKeySequence("Ctrl++")
-        ])
+            "Ctrl+=",            # plain "=" -- what people actually press
+            "Ctrl+Shift+=",      # "Ctrl++" as Qt spells it
+        ))
         self.act_zoom_in.triggered.connect(lambda: self.canvas.zoom_in(animate=True))
         view_menu.addAction(self.act_zoom_in)
         self.addAction(self.act_zoom_in)
 
         self.act_zoom_out = QAction("缩小", self)
-        self.act_zoom_out.setShortcuts([
+        self.act_zoom_out.setShortcuts(_seqs(
             QKeySequence.StandardKey.ZoomOut,
-            QKeySequence("Ctrl+-")
-        ])
+            "Ctrl+Shift+-",      # the keyboard's "-" with Shift, and numpad minus
+        ))
         self.act_zoom_out.triggered.connect(lambda: self.canvas.zoom_out(animate=True))
         view_menu.addAction(self.act_zoom_out)
         self.addAction(self.act_zoom_out)
@@ -4840,30 +4896,6 @@ class DarkroomMainWindow(QMainWindow):
                 act.triggered.connect(lambda chk=False, k=key: self._on_menu_filter_selected(k))
                 self.menu_star_filter.addAction(act)
                 self.star_filter_actions[key] = act
-
-        view_menu.addSeparator()
-
-        # Appearance layer.  It is baked into the LUT, so switching it changes the table and
-        # needs a rebake -- hence it lives here next to the other look-level controls rather
-        # than in the parameter sliders.
-        self.menu_film_look = view_menu.addMenu("外观 (Film Look)")
-        self.menu_film_look.setStyleSheet(get_darkroom_menu_style())
-        self.act_film_look = QAction("启用胶片外观", self)
-        self.act_film_look.setCheckable(True)
-        self.act_film_look.setChecked(True)
-        self.act_film_look.toggled.connect(self._on_film_look_toggled)
-        self.menu_film_look.addAction(self.act_film_look)
-        self.menu_film_look.addSeparator()
-        self.film_look_strength_actions = {}
-        for key, text, sat in (("soft", "弱（保留更多色彩）", 0.85),
-                               ("std", "标准", 0.72),
-                               ("strong", "强", 0.60)):
-            act = QAction(text, self)
-            act.setCheckable(True)
-            act.triggered.connect(lambda chk=False, s=sat: self._set_film_look_strength(s))
-            self.menu_film_look.addAction(act)
-            self.film_look_strength_actions[key] = act
-        self.menu_film_look.aboutToShow.connect(self._sync_film_look_actions)
 
         view_menu.addSeparator()
 
@@ -5314,9 +5346,14 @@ class DarkroomMainWindow(QMainWindow):
             mods = event.modifiers()
             has_ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
             has_alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+            # "Ctrl++" arrives as Ctrl+Shift+= on a normal layout and as Ctrl+Shift+numpad+
+            # on the keypad, so the Shift bit must be ignored for the zoom chords -- otherwise
+            # they only fired when the user pressed Ctrl+Shift manually.  Every other shortcut
+            # below still sees the real modifiers.
+            zoom_ctrl = bool((mods & ~Qt.KeyboardModifier.ShiftModifier) & Qt.KeyboardModifier.ControlModifier)
 
             # Zoom shortcuts: Ctrl + Plus / Equal / Minus / Underscore / 0 / 1
-            if has_ctrl and not has_alt:
+            if zoom_ctrl and not has_alt:
                 if event.key() in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
                     if hasattr(self, "canvas") and self.canvas._has_image:
                         self.canvas.zoom_in(animate=True)
@@ -5506,11 +5543,15 @@ class DarkroomMainWindow(QMainWindow):
             self.export_status_container.setVisible(False)
             if hasattr(self, "export_sep"):
                 self.export_sep.setVisible(False)
+            if hasattr(self, "view_toolbar") and hasattr(self.view_toolbar, "_update_center"):
+                self.view_toolbar._update_center()
             return
 
         self.export_status_container.setVisible(True)
         if hasattr(self, "export_sep"):
             self.export_sep.setVisible(True)
+        if hasattr(self, "view_toolbar") and hasattr(self.view_toolbar, "_update_center"):
+            self.view_toolbar._update_center()
 
         self.lbl_export_status.setText(text)
 
@@ -7486,52 +7527,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             round(float(p.get("morph_gamma", 1.0)), 2),
             round(float(p.get("developer_exhaustion", 0.0)), 2),
             int(round(float(p.get("push_ev", 0) or 0))),
-            # The appearance layer is baked into the table, so it belongs in the identity of
-            # the bake -- without it toggling the menu item would leave the old table on screen.
-            round(float(p.get("film_look", 1.0) or 0.0), 2),
-            round(float(p.get("film_look_saturation", 0.72) or 0.72), 2),
-            round(float(p.get("film_look_hue", 1.5) or 0.0), 2),
-            round(float(p.get("film_look_curve", 1.0) or 0.0), 2),
         )
-
-    # -- film look menu ---------------------------------------------------------------------
-    def _current_film_look(self):
-        p = self.current_params
-        return (float(p.get("film_look", 1.0) or 0.0),
-                float(p.get("film_look_saturation", 0.72) or 0.72))
-
-    def _on_film_look_toggled(self, checked):
-        if getattr(self, "_syncing_film_look", False):
-            return
-        self.current_params["film_look"] = 1.0 if checked else 0.0
-        self._apply_film_look_change()
-
-    def _set_film_look_strength(self, saturation):
-        if getattr(self, "_syncing_film_look", False):
-            return
-        self.current_params["film_look_saturation"] = float(saturation)
-        self.current_params["film_look"] = 1.0
-        self._apply_film_look_change()
-
-    def _apply_film_look_change(self):
-        # Re-bake rather than relight: the pass runs on the cube, so the table itself changes.
-        self._pending_lut_refresh = True
-        self._request_async_lut()
-        self._mark_current_photo_dirty()
-        self._schedule_histogram_update()
-        self._sync_film_look_actions()
-
-    def _sync_film_look_actions(self):
-        on, sat = self._current_film_look()
-        self._syncing_film_look = True
-        try:
-            self.act_film_look.setChecked(on > 0.001)
-            for key, target in (("soft", 0.85), ("std", 0.72), ("strong", 0.60)):
-                self.film_look_strength_actions[key].setChecked(abs(sat - target) < 0.02)
-            for act in self.film_look_strength_actions.values():
-                act.setEnabled(on > 0.001)
-        finally:
-            self._syncing_film_look = False
 
     def _schedule_live_lut_preview(self):
         """Live preview of LUT-baked parameters (DIR / morph / exhaustion).

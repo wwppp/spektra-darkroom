@@ -18,19 +18,28 @@ class SmoothScrollArea(QScrollArea):
     3. Seamless interruption on opposite-direction scroll, viewport click, or manual scrollbar grab.
     4. Subtle top/bottom or left/right edge fade indicators showing scroll limits.
     """
-    def __init__(self, parent=None, is_horizontal=False, enable_edge_fade=None):
+    def __init__(self, parent=None, is_horizontal=False, enable_edge_fade=None, crisp=False):
         super().__init__(parent)
         self.is_horizontal = is_horizontal
         self.enable_edge_fade = (not is_horizontal) if enable_edge_fade is None else enable_edge_fade
+        self._crisp = bool(crisp)
         self.setWidgetResizable(True)
 
-        # Physics simulation tuning
-        # Vertical lists: 38px/notch (fine control, comfortable speed)
-        # Horizontal filmstrip: 60px/notch (natural thumbnail navigation)
-        self._step_size = 60.0 if self.is_horizontal else 38.0
-        self._friction = 0.91 if self.is_horizontal else 0.895
-        self._max_velocity = 55.0 if self.is_horizontal else 40.0
-        self._threshold = 0.30
+        # Physics simulation tuning.
+        # Vertical lists: 76px/notch (was 38 -- the wheel felt sluggish on a long parameter
+        # panel), horizontal filmstrip: 120px/notch.
+        self._step_size = 120.0 if self.is_horizontal else 76.0
+        if self._crisp:
+            # Form panels: one notch = one clean step.  High friction keeps the dist/notch
+            # calibration but kills the long tail, so the content settles instead of drifting
+            # past the row the user was aiming at.
+            self._friction = 0.70
+            self._max_velocity = 400.0
+            self._threshold = 0.8
+        else:
+            self._friction = 0.88 if self.is_horizontal else 0.86
+            self._max_velocity = 140.0 if self.is_horizontal else 110.0
+            self._threshold = 0.30
 
         # Dynamic physics state
         self._velocity = 0.0
@@ -371,7 +380,7 @@ class SmoothScrollArea(QScrollArea):
         self._last_wheel_time = now
 
         accel = 1.0
-        if dt < 0.12 and (self._velocity * ticks > 0):
+        if not self._crisp and dt < 0.12 and (self._velocity * ticks > 0):
             speed_ratio = max(0.0, (0.12 - dt) / 0.12)
             accel = 1.0 + speed_ratio * 0.75
 
