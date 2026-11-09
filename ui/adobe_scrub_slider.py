@@ -1,6 +1,6 @@
 import re
 import os
-from PySide6.QtCore import Qt, Signal, QPoint, QSize, QRect, QVariantAnimation, QEasingCurve, QEvent, QTimer
+from PySide6.QtCore import Qt, Signal, QPoint, QSize, QRect, QVariantAnimation, QEasingCurve, QEvent, QTimer, QObject
 from PySide6.QtGui import QCursor, QFont, QIcon, QGuiApplication, QPainter, QColor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication, QListView, QStyledItemDelegate, QAbstractItemView, QStyle
@@ -185,6 +185,23 @@ from PySide6.QtCore import Qt, Signal, QPoint, QSize, QRectF, QPointF
 from PySide6.QtGui import QCursor, QFont, QIcon, QPainter, QColor, QPen
 
 
+_VALUE_BOX_CACHE = {}
+# The longest strings a parameter row can display.  "-9999 K" covers the Kelvin readout (the
+# widest unit), "-100.00" the two-decimal percentages, "1.00 EV" the exposure row.
+_VALUE_BOX_SAMPLES = ("-9999 K", "-100.00", "100.00x", "1.00 EV")
+
+
+def _uniform_value_width(fm) -> int:
+    """One numeric-box width for every parameter row, cached per font."""
+    key = (fm.height(), fm.horizontalAdvance("0000"))
+    width = _VALUE_BOX_CACHE.get(key)
+    if width is None:
+        widest = max(fm.horizontalAdvance(s) for s in _VALUE_BOX_SAMPLES)
+        width = int(widest + 12)          # 1px border + 4px padding on each side
+        _VALUE_BOX_CACHE[key] = width
+    return width
+
+
 class RoundScrubSlider(QSlider):
     """Horizontal slider with custom vector anti-aliased circular knob,
     infinitely continuous smooth visual knob movement (no jerky stepping feel),
@@ -220,8 +237,13 @@ class RoundScrubSlider(QSlider):
         self._track_accum = 0.0
         self.track_gradient = None
         self.has_center_detent = False
+        self._hover_knob = False
         self.setFixedHeight(18)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
+        # Without mouse tracking a widget only receives move events while a button is held, so
+        # the cursor/knob-hover feedback below could never fire -- the arrow over the knob was
+        # simply never set, and the row stayed on the resize cursor everywhere.
+        self.setMouseTracking(True)
         theme_manager.themeChanged.connect(lambda _: self.update())
 
     def enterEvent(self, event):
@@ -277,18 +299,27 @@ class RoundScrubSlider(QSlider):
 
         The knob used to show a hand, which is a big shape that sits on top of the very pixel
         you are trying to line the knob up with -- for a 7px knob that reads as imprecise.  The
-        groove keeps the resize cursor because there the drag is relative.
+        groove keeps the resize cursor because there the drag is relative.  The knob itself
+        lights up amber when the pointer is on it, so the arrow still has a visible "you can
+        grab this" cue.
         """
         if not self.isEnabled():
             return
         if self._pressed:
             self.setCursor(Qt.CursorShape.ArrowCursor
                            if self._drag_mode == 'knob' else Qt.CursorShape.SizeHorCursor)
+            self._set_hover_knob(False)
             return
         if x is None:
             x = self.mapFromGlobal(QCursor.pos()).x()
-        self.setCursor(Qt.CursorShape.ArrowCursor if self._hit_knob(x)
-                       else Qt.CursorShape.SizeHorCursor)
+        on_knob = self._hit_knob(x)
+        self.setCursor(Qt.CursorShape.ArrowCursor if on_knob else Qt.CursorShape.SizeHorCursor)
+        self._set_hover_knob(on_knob)
+
+    def _set_hover_knob(self, on):
+        if self._hover_knob != bool(on):
+            self._hover_knob = bool(on)
+            self.update()
 
     def enterEvent(self, event):
         self._update_hover_cursor()
@@ -297,6 +328,7 @@ class RoundScrubSlider(QSlider):
     def leaveEvent(self, event):
         if not self._pressed:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self._set_hover_knob(False)
         super().leaveEvent(event)
 
     def _knob_cx(self):
@@ -508,13 +540,19 @@ class RoundScrubSlider(QSlider):
             painter.drawLine(QPointF(mid_x, cy - 2.5), QPointF(mid_x, cy + 2.5))
             painter.setPen(Qt.PenStyle.NoPen)
 
-        # 3. Vector circular knob
+        # 3. Vector circular knob.  The halo only appears when the pointer is actually on the
+        # knob -- lighting the whole row amber said "this slider is hovered", not "you can grab
+        # this dot", which is the cue that was missing.
         if self._pressed:
             knob_color = QColor(217, 119, 6)   # deep amber
             border_pen = QPen(QColor(245, 158, 11), 1.5)
-        elif self._hover:
+        elif self._hover_knob:
             knob_color = QColor(245, 158, 11)  # bright amber
             border_pen = QPen(QColor(255, 255, 255), 1.5)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(245, 158, 11, 45 if is_dark else 38))
+            halo = r + 4.0
+            painter.drawEllipse(QPointF(knob_cx, cy), halo, halo)
         else:
             knob_color = QColor(228, 230, 238) if is_dark else QColor(255, 255, 255)
             border_pen = QPen(QColor(30, 32, 38) if is_dark else QColor(148, 163, 184), 1.2)
@@ -738,18 +776,16 @@ class ParamScrubSlider(QWidget):
         return f"{prefix}{val:.{self.decimals}f}{self.unit}"
 
     def _resize_value_edit(self, *_):
-        """Size the numeric box from the widest string it will ever hold.
+        """Give every numeric box the same width.
 
-        The box used to be a fixed 52px, which clipped "0.60 EV" and "5350 K" as soon as the
-        interface font went up a step.  Measuring the extremes keeps it stable (no jitter as
-        the value changes) and lets it follow the font-size preference.
+        Measuring each row's own range made a column of numbers come out ragged -- "1.00" sat in
+        a 44px box while "12000 K" needed 58px, so the right edge of the panel looked chewed.
+        One width for all rows, sized from the longest string any parameter can hold, reads as a
+        column and still follows the font-size preference.
         """
         try:
             self.value_edit.ensurePolished()
-            fm = self.value_edit.fontMetrics()
-            widest = max(fm.horizontalAdvance(self._format_value(v))
-                         for v in (self.min_val, self.max_val, self.default_val, 0.0))
-            self.value_edit.setFixedWidth(int(widest + 16))
+            self.value_edit.setFixedWidth(_uniform_value_width(self.value_edit.fontMetrics()))
         except Exception:
             pass
 
@@ -875,6 +911,31 @@ class DarkroomComboItemDelegate(QStyledItemDelegate):
         # Dropdown popup items do not show hover tooltips (popup list has elastic width)
         return True
 
+    def _clip_panel_corners(self, painter, rect):
+        """Clip the row so the panel's rounded corners survive, scroll position included."""
+        try:
+            view = self.combo.view()
+            vp = view.viewport().rect()
+        except Exception:
+            return
+        radius = float(POPUP_RADIUS) - 2.0
+        top = rect.top() <= vp.top() + 1
+        bottom = rect.bottom() >= vp.bottom() - 1
+        if not (top or bottom):
+            return
+        from PySide6.QtGui import QPainterPath
+        path = QPainterPath()
+        rr = QRectF(rect)
+        if top and bottom:
+            path.addRoundedRect(rr, radius, radius)
+        elif top:
+            # Extending past the row keeps the two bottom corners out of the painted area, so
+            # only the top pair is actually rounded.
+            path.addRoundedRect(rr.adjusted(0, 0, 0, radius), radius, radius)
+        else:
+            path.addRoundedRect(rr.adjusted(0, -radius, 0, 0), radius, radius)
+        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+
     def sizeHint(self, option, index):
         w = option.rect.width() if (option and hasattr(option, "rect")) else 100
         return QSize(w, 32)
@@ -886,6 +947,11 @@ class DarkroomComboItemDelegate(QStyledItemDelegate):
         row = index.row()
         is_selected = (row == self.combo.currentIndex())
         is_hovered = (row == self.hovered_row)
+
+        # Round the row that meets the panel's top / bottom edge.  The popup window is no longer
+        # masked (a 1-bit mask is what produced the stair-stepped "dog teeth" corners), so the
+        # rounding has to live in the paint itself; clipping with a path is antialiased.
+        self._clip_panel_corners(painter, r)
 
         is_dark = theme_manager.is_dark()
         if is_selected and is_hovered:
@@ -924,19 +990,150 @@ class DarkroomComboItemDelegate(QStyledItemDelegate):
 AdobeComboItemDelegate = DarkroomComboItemDelegate
 
 
-POPUP_RADIUS = 6
+POPUP_RADIUS = 10
+# Room left between the list view and the window edge for the shadow to live in.
+POPUP_SHADOW = 14
+
+
+class _PopupShellFilter(QObject):
+    """Paints a combo popup window ourselves: soft shadow, rounded panel, hairline border.
+
+    Qt hands back a plain rectangular popup window whose item delegate fills every row edge to
+    edge.  A stylesheet border-radius on the list view therefore only ever rounded the place the
+    rows did not reach, and let the window's own square background and its offset system shadow
+    show as a second layer behind the panel.  Here the window is made translucent, the view is
+    inset by POPUP_SHADOW, and the window itself is painted: the shadow can then fall *outside*
+    the panel in every direction, and the corners are round because nothing opaque exists beyond
+    them.
+    """
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t == QEvent.Type.Paint:
+            try:
+                self._paint(obj)
+            except Exception:
+                return False
+            return True                      # painted; the default frame must not draw over it
+        if t in (QEvent.Type.Hide, QEvent.Type.Close):
+            self._reset(obj)
+        return False
+
+    def _reset(self, w):
+        lay = w.layout()
+        if lay is not None and getattr(w, "_dr_padded", False):
+            lay.setContentsMargins(0, 0, 0, 0)
+            w._dr_padded = False
+        w._dr_expanded = False
+
+    def _paint(self, w):
+        from PySide6.QtGui import QPainterPath
+        p = QPainter(w)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        is_dark = theme_manager.is_dark()
+        s = POPUP_SHADOW
+        ww, hh = float(w.width()), float(w.height())
+        panel = QRectF(s - 1.0, s - 1.0, ww - 2.0 * (s - 1.0), hh - 2.0 * (s - 1.0))
+        # Even halo: one 1px ring per step, drawn as a rounded rect with a rounded hole, so a
+        # pixel is covered by exactly one ring and the alpha ramps smoothly outward instead of
+        # stacking into a dark plate under the panel.
+        p.setPen(Qt.PenStyle.NoPen)
+        base = QColor(0, 0, 0)
+        for i in range(s, 0, -1):
+            f = 1.0 - (i - 1) / float(s)
+            a = int(70 * (f ** 2.6))
+            if a <= 0:
+                continue
+            outer = panel.adjusted(-i, -i + 2.0, i, i + 2.0)
+            inner = panel.adjusted(-(i - 1), -(i - 1) + 2.0, i - 1, i - 1 + 2.0)
+            path = QPainterPath()
+            path.setFillRule(Qt.FillRule.OddEvenFill)
+            path.addRoundedRect(outer, POPUP_RADIUS + i, POPUP_RADIUS + i)
+            path.addRoundedRect(inner, POPUP_RADIUS + i - 1.0, POPUP_RADIUS + i - 1.0)
+            p.fillPath(path, QColor(base.red(), base.green(), base.blue(),
+                                    a if is_dark else int(a * 0.7)))
+        # Panel + 1px border; the view is masked to a radius one smaller so this ring shows.
+        p.setBrush(QColor(24, 25, 32) if is_dark else QColor(255, 255, 255))
+        p.setPen(QPen(QColor(62, 67, 82) if is_dark else QColor(214, 220, 232), 1.0))
+        p.drawRoundedRect(panel.adjusted(0.5, 0.5, -0.5, -0.5), POPUP_RADIUS, POPUP_RADIUS)
+        p.end()
+
+
+_POPUP_FILTER = None
+
+
+def _popup_filter():
+    global _POPUP_FILTER
+    if _POPUP_FILTER is None:
+        _POPUP_FILTER = _PopupShellFilter()
+    return _POPUP_FILTER
+
+
+def _style_popup_view(view):
+    """Let the shell's rounded panel show through the list and its scrollbar.
+
+    The rows are painted by the delegate, so the view's own background only mattered at the
+    corners -- and it squared them off.  The scrollbar gets a transparent track and a thin
+    rounded handle for the same reason: it sits on the panel's right edge.
+    """
+    is_dark = theme_manager.is_dark()
+    handle = "rgba(255,255,255,0.22)" if is_dark else "rgba(15,23,42,0.22)"
+    try:
+        view.setAutoFillBackground(False)
+        view.viewport().setAutoFillBackground(False)
+        view.setStyleSheet(
+            "QListView { background: transparent; border: none; }"
+            "QListView::item { background: transparent; }"
+            "QScrollBar:vertical { background: transparent; width: 7px; margin: 0px; }"
+            "QScrollBar::handle:vertical { background: %s; border-radius: 3px; min-height: 24px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+            % handle)
+    except RuntimeError:
+        pass
+
+
+def prepare_popup_shell(view):
+    """Make the popup window translucent *before* it is painted for the first time.
+
+    Qt creates the popup window inside showPopup(), so setting WA_TranslucentBackground
+    afterwards has no effect: the platform window keeps its opaque backbuffer and every pixel
+    outside the panel comes out black.  Recreating the native window once, while the popup is
+    still at opacity 0, is the only way to get real transparency without owning the popup.
+    """
+    try:
+        container = view.window()
+    except RuntimeError:
+        return None
+    if container is None or container is view:
+        return container
+    if not getattr(container, "_dr_shell", False):
+        container._dr_shell = True
+        container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        container.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        container.setAutoFillBackground(False)
+        try:
+            from PySide6.QtWidgets import QFrame
+            container.setFrameShape(QFrame.Shape.NoFrame)
+        except Exception:
+            pass
+        container.installEventFilter(_popup_filter())
+        try:
+            geo = container.geometry()
+            was_visible = container.isVisible()
+            container.hide()
+            container.destroy()          # drop the opaque native window
+            if was_visible:
+                container.show()         # and recreate it with the attribute in place
+            container.setGeometry(geo)
+        except Exception:
+            pass
+    _style_popup_view(view)
+    return container
 
 
 def round_popup_container(view):
-    """Clip a combo popup window to a rounded rect.
-
-    The list view can carry a border-radius in QSS, but the popup *window* behind it is a
-    plain rectangle and the item delegate paints its rows edge to edge -- so the corners of a
-    dropdown came out square on the left (where rows and the accent bar touch the border) and
-    only looked round on the right, where the scrollbar strip left the window's background
-    showing.  Masking the popup window itself clips rows, delegate fill and border together,
-    which is the only way to make all four corners agree.
-    """
+    """Turn a combo popup window into the rounded shell drawn by _PopupShellFilter."""
     if view is None:
         return
     try:
@@ -945,11 +1142,26 @@ def round_popup_container(view):
         return
     if container is None or container is view:
         return
-    from PySide6.QtGui import QRegion, QPainterPath
-    from PySide6.QtCore import QRectF
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(container.rect()), POPUP_RADIUS, POPUP_RADIUS)
-    container.setMask(QRegion(path.toFillPolygon().toPolygon()))
+    if not getattr(container, "_dr_shell", False):
+        container = prepare_popup_shell(view)
+        if container is None:
+            return
+
+    if getattr(container, "_dr_expanded", False):
+        return
+
+    s = POPUP_SHADOW
+    g = container.geometry()
+    # The view keeps exactly the size Qt chose for it; the window grows around it so the shadow
+    # has somewhere to land.  The margins are reset in the filter when the popup hides, which is
+    # what stops the next open from inheriting an already-padded window.
+    lay = container.layout()
+    if lay is not None:
+        lay.setContentsMargins(s, s, s, s)
+        container._dr_padded = True
+    view.setGeometry(s, s, g.width(), g.height())
+    container.setGeometry(g.x() - s, g.y() - s, g.width() + 2 * s, g.height() + 2 * s)
+    container._dr_expanded = True
 
 
 class DarkroomComboListView(QListView):
@@ -1116,6 +1328,10 @@ class DarkroomComboBox(QComboBox):
         self.combo_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         super().showPopup()
+
+        # The popup window only exists now.  Give it translucency before the first frame it
+        # paints at full opacity (it is still at 0 here, so the window recreation is invisible).
+        container = prepare_popup_shell(self.combo_view) or container
 
         # 5. Opening animation (smooth expansion from height 1 + opacity fade)
         if container:

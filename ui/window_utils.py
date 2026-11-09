@@ -359,6 +359,11 @@ def setup_solid_combobox(combo):
 
             orig_show_popup()
 
+            # The popup window exists only from this point; make it translucent while it is
+            # still at opacity 0 so the rounded shell + shadow below can be painted at all.
+            from ui.adobe_scrub_slider import prepare_popup_shell
+            container = prepare_popup_shell(combo.view()) or container
+
             if container:
                 orig_geo = container.geometry()
                 is_upward = orig_geo.y() < p_global.y()
@@ -462,8 +467,8 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 outline: none;
             }}
             QCheckBox::indicator {{
-                width: 10px;
-                height: 10px;
+                width: 13px;
+                height: 13px;
                 border: none;
                 background: transparent;
                 outline: none;
@@ -500,8 +505,8 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 outline: none;
             }}
             QCheckBox::indicator {{
-                width: 10px;
-                height: 10px;
+                width: 13px;
+                height: 13px;
                 border: none;
                 background: transparent;
                 outline: none;
