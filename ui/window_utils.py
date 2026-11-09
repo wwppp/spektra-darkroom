@@ -359,10 +359,11 @@ def setup_solid_combobox(combo):
 
             orig_show_popup()
 
-            # The popup window exists only from this point; make it translucent while it is
-            # still at opacity 0 so the rounded shell + shadow below can be painted at all.
-            from ui.adobe_scrub_slider import prepare_popup_shell
-            container = prepare_popup_shell(combo.view()) or container
+            # Plain QComboBoxes only get their popup container at this moment, so the
+            # post-animation hook alone can miss them (that is why the preferences dropdowns
+            # kept a different, unstyled popup).  Style it now as well as at the end.
+            from ui.adobe_scrub_slider import style_popup_view
+            style_popup_view(combo.view())
 
             if container:
                 orig_geo = container.geometry()
@@ -420,8 +421,8 @@ def setup_solid_combobox(combo):
     except RuntimeError:
         pass
 
-        combo.showPopup = _hooked_show_popup
-        combo.hidePopup = _hooked_hide_popup
+    combo.showPopup = _hooked_show_popup
+    combo.hidePopup = _hooked_hide_popup
 
 
 def get_standard_checkbox_style(is_dark: bool = None) -> str:
