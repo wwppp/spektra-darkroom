@@ -169,6 +169,17 @@ class FilmFilterHeader(QWidget):
         """)
         self.search_box.textChanged.connect(self._on_search_changed)
 
+        # ClickFocus alone leaves the caret blinking after the user clicks anywhere that does
+        # not accept focus (cards, pills, bare panel).  Watch presses application-wide and drop
+        # focus as soon as one lands outside the field.
+        try:
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
+        except Exception:
+            pass
+
         # Category Buttons Group
         self.btn_group = QButtonGroup(self)
         self.btn_group.setExclusive(True)
@@ -331,6 +342,14 @@ class FilmFilterHeader(QWidget):
             """
         for btn in self.pills_dict.values():
             btn.setStyleSheet(pill_style)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress and self.search_box.hasFocus():
+            from PySide6.QtWidgets import QWidget
+            w = obj if isinstance(obj, QWidget) else None
+            if w is not None and w is not self.search_box and not self.search_box.isAncestorOf(w):
+                self.search_box.clearFocus()
+        return super().eventFilter(obj, event)
 
     def _on_search_changed(self, text: str):
         self._current_query = text.strip()

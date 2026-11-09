@@ -18,46 +18,37 @@ class SmoothScrollArea(QScrollArea):
     3. Seamless interruption on opposite-direction scroll, viewport click, or manual scrollbar grab.
     4. Subtle top/bottom or left/right edge fade indicators showing scroll limits.
     """
-    def __init__(self, parent=None, is_horizontal=False, enable_edge_fade=None, crisp=False):
+    def __init__(self, parent=None, is_horizontal=False, enable_edge_fade=None):
         super().__init__(parent)
         self.is_horizontal = is_horizontal
         self.enable_edge_fade = (not is_horizontal) if enable_edge_fade is None else enable_edge_fade
-        self._crisp = bool(crisp)
         self.setWidgetResizable(True)
 
-        # Physics simulation tuning.
-        # Vertical lists: 76px/notch (was 38 -- the wheel felt sluggish on a long parameter
-        # panel), horizontal filmstrip: 120px/notch.
+        # Distance per wheel notch.  Vertical lists: 76px, horizontal filmstrip: 120px.
         self._step_size = 120.0 if self.is_horizontal else 76.0
-        if self._crisp:
-            # Form panels: one notch = one clean step.  High friction keeps the dist/notch
-            # calibration but kills the long tail, so the content settles instead of drifting
-            # past the row the user was aiming at.
-            self._friction = 0.70
-            self._max_velocity = 400.0
-            self._threshold = 0.8
-        else:
-            self._friction = 0.88 if self.is_horizontal else 0.86
-            self._max_velocity = 140.0 if self.is_horizontal else 110.0
-            self._threshold = 0.30
 
-        # Dynamic physics state
+        # Dynamic state.  The physics integrator is gone; these stay because the overlay,
+        # the resize handler and scroll_to all read them.
         self._velocity = 0.0
         self._current_pos = 0.0
         self._is_internal_scroll = False
         self._last_wheel_time = 0.0
 
-        # 60 FPS physics integration timer (16ms)
-        self._physics_timer = QTimer(self)
-        self._physics_timer.setInterval(16)
-        self._physics_timer.timeout.connect(self._on_physics_tick)
-
-        # Programmatic animation on scrollbar (used by scroll_to)
-        sb = self.horizontalScrollBar() if self.is_horizontal else self.verticalScrollBar()
-        self._anim = QPropertyAnimation(sb, b"value", self)
+        sb0 = self.horizontalScrollBar() if self.is_horizontal else self.verticalScrollBar()
+        self._anim = QPropertyAnimation(sb0, b"value", self)
         self._anim.setDuration(220)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.finished.connect(self._on_anim_finished)
+
+        # Wheel scrolling is a retargetable eased animation, not a velocity integrator.
+        # Exponential friction decay has a near-linear tail and its reach depends on how fast
+        # the notches arrive.  Aiming at a target with OutQuart instead gives the iOS feel --
+        # a quick start and a long, gentle settle -- and extra notches just push the target
+        # further out while the running animation retargets from wherever it is.
+        self._wheel_anim = QPropertyAnimation(sb0, b"value", self)
+        self._wheel_anim.setEasingCurve(QEasingCurve.Type.OutQuart)
+        self._wheel_anim.finished.connect(self._on_anim_finished)
+        self._wheel_target = 0
 
         # Connect scrollbar signals to maintain sync with manual interactions
         v_bar = self.verticalScrollBar()
@@ -258,60 +249,26 @@ class SmoothScrollArea(QScrollArea):
                     self._overlay.raise_()
             self._overlay.update()
 
+    def _is_animating(self) -> bool:
+        return (self._anim.state() == QPropertyAnimation.State.Running
+                or self._wheel_anim.state() == QPropertyAnimation.State.Running)
+
     def _on_scroll_value_changed(self, val):
-        if not self._is_internal_scroll:
-            # Value changed externally (manual thumb drag, track click, keyboard)
+        # While one of our own animations drives the bar the value change is not user input:
+        # stopping the animation here is what used to make `scroll_to`, and then the eased
+        # wheel, die after a single frame.
+        if not self._is_internal_scroll and not self._is_animating():
             self._current_pos = float(val)
             self._stop_physics()
-            if self._anim.state() == QPropertyAnimation.State.Running:
-                self._anim.stop()
         self._sync_overlay()
 
     def _stop_physics(self):
-        if hasattr(self, '_physics_timer') and self._physics_timer.isActive():
-            self._physics_timer.stop()
+        """Stop any in-flight scroll motion (wheel easing or programmatic animation)."""
         self._velocity = 0.0
-
-    def _on_physics_tick(self):
-        sb = self.horizontalScrollBar() if self.is_horizontal else self.verticalScrollBar()
-        if not sb or sb.maximum() <= sb.minimum():
-            self._stop_physics()
-            return
-
-        min_val = float(sb.minimum())
-        max_val = float(sb.maximum())
-
-        # Advance continuous floating-point position
-        self._current_pos += self._velocity
-
-        # Boundary clamping with immediate velocity kill
-        hit_boundary = False
-        if self._current_pos <= min_val:
-            self._current_pos = min_val
-            self._velocity = 0.0
-            hit_boundary = True
-        elif self._current_pos >= max_val:
-            self._current_pos = max_val
-            self._velocity = 0.0
-            hit_boundary = True
-
-        # Apply integer value to scrollbar
-        target_int = int(round(self._current_pos))
-        if sb.value() != target_int:
-            self._is_internal_scroll = True
-            sb.setValue(target_int)
-            self._is_internal_scroll = False
-
-        if hit_boundary:
-            self._stop_physics()
-            self._sync_overlay()
-            return
-
-        # Natural friction decay (惯性滑动收尾)
-        self._velocity *= self._friction
-        if abs(self._velocity) < self._threshold:
-            self._stop_physics()
-            self._sync_overlay()
+        if getattr(self, "_wheel_anim", None) is not None:
+            self._wheel_anim.stop()
+        if getattr(self, "_anim", None) is not None:
+            self._anim.stop()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -321,7 +278,7 @@ class SmoothScrollArea(QScrollArea):
         self._sync_overlay()
 
     def wheelEvent(self, event):
-        """Intercept mouse wheel to drive smooth physical momentum animation."""
+        """Move the scrollbar with a retargetable eased animation (iOS-style settle)."""
         # Cancel any delayed filmstrip or layout alignment timers up the parent hierarchy
         p = self.parent()
         while p is not None:
@@ -358,48 +315,37 @@ class SmoothScrollArea(QScrollArea):
 
         # delta > 0 is scroll up / left (decrease position)
         # delta < 0 is scroll down / right (increase position)
-        ticks = - (delta / 120.0)
+        ticks = -(delta / 120.0)
 
         # If already at edge and trying to push beyond, ignore
         if (current_sb_val <= min_val and ticks < 0) or (current_sb_val >= max_val and ticks > 0):
             event.accept()
             return
 
-        # If programmatic animation was running, interrupt it immediately
-        if self._anim.state() == QPropertyAnimation.State.Running:
-            self._anim.stop()
-            self._current_pos = current_sb_val
-
-        # Sync position if physics was idle
-        if not self._physics_timer.isActive():
-            self._current_pos = current_sb_val
-
-        # Responsive acceleration for continuous fast flicking
-        now = time.monotonic()
-        dt = now - self._last_wheel_time if self._last_wheel_time > 0 else 1.0
-        self._last_wheel_time = now
-
-        accel = 1.0
-        if not self._crisp and dt < 0.12 and (self._velocity * ticks > 0):
-            speed_ratio = max(0.0, (0.12 - dt) / 0.12)
-            accel = 1.0 + speed_ratio * 0.75
-
-        # Impulse calibrated so single notch moves approx self._step_size pixels
-        impulse = ticks * self._step_size * (1.0 - self._friction) * accel
-
-        # Direction change handling:
-        # If user rolls opposite to current motion, immediately kill old momentum and reverse
-        if (self._velocity > 0 and ticks < 0) or (self._velocity < 0 and ticks > 0):
-            self._velocity = impulse
+        # Retarget from where the previous notch was heading, so a burst of notches stacks
+        # instead of restarting from the current pixel every time.
+        if self._wheel_anim.state() == QPropertyAnimation.State.Running:
+            base = float(self._wheel_target)
         else:
-            self._velocity = self._velocity + impulse
+            base = current_sb_val
 
-        # Clamp velocity
-        self._velocity = max(-self._max_velocity, min(self._max_velocity, self._velocity))
+        self._anim.stop()
+        target = max(min_val, min(max_val, base + ticks * self._step_size))
+        self._wheel_target = int(round(target))
 
-        if not self._physics_timer.isActive():
-            self._physics_timer.start(16)
-
+        dist = abs(self._wheel_target - current_sb_val)
+        if dist <= 0:
+            event.accept()
+            return
+        # Longer for a bigger step, but never a snap: one 76px notch lands at ~310ms and the
+        # OutQuart tail keeps the last few pixels crawling in.
+        duration = int(min(620, max(220, 160 + dist * 2.0)))
+        self._wheel_anim.stop()
+        self._wheel_anim.setDuration(duration)
+        self._wheel_anim.setStartValue(current_sb_val)
+        self._wheel_anim.setEndValue(float(self._wheel_target))
+        self._wheel_anim.start()
+        self._current_pos = current_sb_val
         event.accept()
 
     def scroll_to(self, target_value: int, animate: bool = True):

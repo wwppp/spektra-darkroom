@@ -3,10 +3,12 @@ Permanently flat and tiled layout: clean headers with reset buttons,
 and immediate vertical layout for sliders. Zero animation, zero collapsible lag.
 """
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
 )
+from core.path_utils import get_icon_path
 from ui.theme_manager import theme_manager
 
 
@@ -48,10 +50,18 @@ class ParameterGroupCard(QWidget):
         self.title_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         header_layout.addWidget(self.title_label, 1)
 
-        self.reset_btn = QPushButton("重置")
+        # Section reset: an icon, not the word 重置.  The per-row chips are gone, so this is
+        # the only reset affordance a section has and it should read as an action, not a label.
+        self.reset_btn = QPushButton()
         self.reset_btn.setObjectName("accordionResetBtn")
         self.reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reset_btn.setFixedSize(20, 20)
+        self.reset_btn.setIconSize(QSize(13, 13))
+        self.reset_btn.setToolTip("重置本节全部参数")
+        self._icon_reset_disabled = QIcon(get_icon_path("reset_disabled.png"))
+        self._icon_reset_active = QIcon(get_icon_path("reset_active.png"))
+        self.reset_btn.setIcon(self._icon_reset_disabled)
         self.reset_btn.clicked.connect(self.resetClicked.emit)
         header_layout.addWidget(self.reset_btn)
 
@@ -163,39 +173,33 @@ class ParameterGroupCard(QWidget):
         self.reset_btn.setEnabled(enabled)
         is_dark = theme_manager.is_dark()
         tt_ss = theme_manager.widget_tooltip_stylesheet()
+        self.reset_btn.setIcon(self._icon_reset_active if enabled else self._icon_reset_disabled)
+        self.reset_btn.setToolTip("重置本节全部参数" if enabled else "本节参数均为默认值")
         if enabled:
             self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.reset_btn.setStyleSheet(f"""
                 #accordionResetBtn {{
                     background: transparent;
                     border: none;
-                    color: #f59e0b !important;
-                    font-size: 11px;
-                    font-weight: 600;
-                    padding: 5px 10px;
+                    padding: 0px;
                     border-radius: 4px;
                 }}
                 #accordionResetBtn:hover {{
-                    color: #fde68a !important;
                     background: rgba(245, 158, 11, 0.15);
                 }}
                 #accordionResetBtn:pressed {{
-                    color: #d97706 !important;
                     background: rgba(245, 158, 11, 0.25);
                 }}
                 {tt_ss}
             """)
         else:
             self.reset_btn.setCursor(Qt.CursorShape.ArrowCursor)
-            dim_color = "#383a48" if is_dark else "#94a3b8"
             self.reset_btn.setStyleSheet(f"""
                 #accordionResetBtn {{
                     background: transparent;
                     border: none;
-                    color: {dim_color} !important;
-                    font-size: 11px;
-                    font-weight: normal;
-                    padding: 5px 10px;
+                    padding: 0px;
+                    border-radius: 4px;
                 }}
                 {tt_ss}
             """)

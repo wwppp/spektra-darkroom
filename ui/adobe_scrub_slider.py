@@ -1,6 +1,6 @@
 import re
 import os
-from PySide6.QtCore import Qt, Signal, QPoint, QSize, QRect, QVariantAnimation, QEasingCurve, QEvent
+from PySide6.QtCore import Qt, Signal, QPoint, QSize, QRect, QVariantAnimation, QEasingCurve, QEvent, QTimer
 from PySide6.QtGui import QCursor, QFont, QIcon, QGuiApplication, QPainter, QColor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication, QListView, QStyledItemDelegate, QAbstractItemView, QStyle
@@ -202,7 +202,7 @@ class RoundScrubSlider(QSlider):
     # Knob diameter ~= the 11px label text, and the groove starts at x=0 so the track's left
     # edge lines up with the label above it (it used to be inset by r+2, which read as
     # "everything is indented by 11px and nothing is flush").
-    KNOB_R = 7.0
+    KNOB_R = 3.5
     # Fraction of a full-track sweep per pixel when dragging the groove instead of the knob:
     # roughly a quarter speed, so it reads as fine adjustment rather than a scrub race.
     TRACK_RATE = 0.30
@@ -220,7 +220,7 @@ class RoundScrubSlider(QSlider):
         self._track_accum = 0.0
         self.track_gradient = None
         self.has_center_detent = False
-        self.setFixedHeight(22)
+        self.setFixedHeight(18)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
         theme_manager.themeChanged.connect(lambda _: self.update())
 
@@ -524,8 +524,8 @@ class ParamScrubSlider(QWidget):
     def _init_ui(self, label_text):
         self.setStyleSheet(f"ParamScrubSlider, AdobeScrubSlider {{ background: transparent; border: none; }}\n{theme_manager.widget_tooltip_stylesheet()}")
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 2, 0, 2)
-        main_layout.setSpacing(1)
+        main_layout.setContentsMargins(0, 1, 0, 0)
+        main_layout.setSpacing(0)
 
         # Header row: Label + Value edit + Reset button
         header_layout = QHBoxLayout()
@@ -543,8 +543,8 @@ class ParamScrubSlider(QWidget):
 
         self.value_edit = QLineEdit()
         self.value_edit.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.value_edit.setFixedWidth(64)
-        self.value_edit.setMinimumHeight(24)
+        self.value_edit.setFixedWidth(52)
+        self.value_edit.setMinimumHeight(20)
         self.value_edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.value_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.value_edit.setToolTip("点击输入精确数值，Enter 确认")
@@ -552,31 +552,9 @@ class ParamScrubSlider(QWidget):
         self.value_edit.editingFinished.connect(self._on_text_edited)
         header_layout.addWidget(self.value_edit)
 
-        self.reset_btn = QPushButton()
-        self.reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.reset_btn.setFixedSize(22, 22)
-        self.reset_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.reset_btn.setToolTip("默认值")
-        self._icon_reset_disabled = None
-        self._icon_reset_active = None
-        path_dis = get_icon_path("reset_disabled.png")
-        path_act = get_icon_path("reset_active.png")
-        if os.path.exists(path_dis) and os.path.exists(path_act):
-            self._icon_reset_disabled = QIcon(path_dis)
-            self._icon_reset_active = QIcon(path_act)
-            self.reset_btn.setIcon(self._icon_reset_disabled)
-            self.reset_btn.setIconSize(QSize(12, 12))
-        else:
-            reset_icon_path = get_icon_path("reset.png")
-            if os.path.exists(reset_icon_path):
-                self.reset_btn.setIcon(QIcon(reset_icon_path))
-                self.reset_btn.setIconSize(QSize(12, 12))
-            else:
-                self.reset_btn.setText("R")
-        self.reset_btn.clicked.connect(self.reset)
-        header_layout.addWidget(self.reset_btn)
-
+        # No per-row reset chip: every row lands on the same default with a double click on the
+        # label, the track or the field, so the column of little circular arrows was noise.
+        # The section keeps one reset control in its own header (see ui/accordion.py).
         main_layout.addLayout(header_layout)
 
         # Slider track with perfectly round knob
@@ -663,25 +641,6 @@ class ParamScrubSlider(QWidget):
                 }}
                 {tt_ss}
             """)
-        if hasattr(self, 'reset_btn') and self.reset_btn:
-            self.reset_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent;
-                    border: none;
-                    padding: 1px;
-                    border-radius: 2px;
-                }}
-                QPushButton:hover {{
-                    background: {btn_hover};
-                }}
-                QPushButton:pressed {{
-                    background: {btn_pressed};
-                }}
-                QPushButton:disabled {{
-                    opacity: 0.25;
-                }}
-                {tt_ss}
-            """)
         if hasattr(self, 'label') and self.label:
             self.label.apply_theme()
         if hasattr(self, 'slider') and self.slider:
@@ -730,16 +689,6 @@ class ParamScrubSlider(QWidget):
         else:
             formatted = f"{prefix}{val:.{self.decimals}f}{self.unit}"
         self.value_edit.setText(formatted)
-
-        # Update reset button state: grey for default, yellow for edited
-        if hasattr(self, 'reset_btn') and hasattr(self, '_icon_reset_active') and self._icon_reset_active:
-            is_modified = abs(val - self.default_val) > (self.step * 0.4)
-            if is_modified:
-                self.reset_btn.setIcon(self._icon_reset_active)
-                self.reset_btn.setToolTip("已修改：点击重置为默认值")
-            else:
-                self.reset_btn.setIcon(self._icon_reset_disabled)
-                self.reset_btn.setToolTip("默认值")
 
         self._is_updating = False
         self.slider.update()
@@ -838,8 +787,6 @@ class ParamScrubSlider(QWidget):
             self.slider.update()
         if hasattr(self, 'value_edit') and self.value_edit:
             self.value_edit.setEnabled(enabled)
-        if hasattr(self, 'reset_btn') and self.reset_btn:
-            self.reset_btn.setEnabled(enabled)
         self.update()
 
     def wheelEvent(self, event):
@@ -916,6 +863,34 @@ class DarkroomComboItemDelegate(QStyledItemDelegate):
 AdobeComboItemDelegate = DarkroomComboItemDelegate
 
 
+POPUP_RADIUS = 6
+
+
+def round_popup_container(view):
+    """Clip a combo popup window to a rounded rect.
+
+    The list view can carry a border-radius in QSS, but the popup *window* behind it is a
+    plain rectangle and the item delegate paints its rows edge to edge -- so the corners of a
+    dropdown came out square on the left (where rows and the accent bar touch the border) and
+    only looked round on the right, where the scrollbar strip left the window's background
+    showing.  Masking the popup window itself clips rows, delegate fill and border together,
+    which is the only way to make all four corners agree.
+    """
+    if view is None:
+        return
+    try:
+        container = view.window()
+    except RuntimeError:
+        return
+    if container is None or container is view:
+        return
+    from PySide6.QtGui import QRegion, QPainterPath
+    from PySide6.QtCore import QRectF
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(container.rect()), POPUP_RADIUS, POPUP_RADIUS)
+    container.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+
 class DarkroomComboListView(QListView):
     """Custom popup listview with smooth inertial scrolling and row hover tracking."""
     def __init__(self, parent=None):
@@ -925,7 +900,9 @@ class DarkroomComboListView(QListView):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._scroll_anim = QVariantAnimation(self)
-        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # OutQuart + a longer duration: same iOS-like settle as the scroll panels, so a wheel
+        # notch in a dropdown does not just stop dead at the end of its travel.
+        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutQuart)
         self._scroll_anim.valueChanged.connect(self._on_scroll_anim_step)
         self._target_scroll = 0
         self.delegate = None
@@ -961,7 +938,7 @@ class DarkroomComboListView(QListView):
         curr = sb.value()
         dist = abs(target - curr)
         if dist > 0:
-            duration = min(320, max(160, int(dist * 2.2)))
+            duration = min(620, max(220, int(160 + dist * 2.0)))
             self._scroll_anim.stop()
             self._scroll_anim.setDuration(duration)
             self._scroll_anim.setStartValue(curr)
@@ -1108,6 +1085,9 @@ class DarkroomComboBox(QComboBox):
                 container.setWindowOpacity(1.0)
                 if hasattr(self, '_orig_sb_policy') and self._orig_sb_policy is not None:
                     self.combo_view.setVerticalScrollBarPolicy(self._orig_sb_policy)
+                # Deferred: the native window is still resizing as the popup settles, and a
+                # resize on Windows drops the mask we just set.
+                QTimer.singleShot(0, lambda: round_popup_container(self.combo_view))
 
             self._popup_anim.valueChanged.connect(_on_step)
             self._popup_anim.finished.connect(_on_finished)

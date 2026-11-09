@@ -390,6 +390,8 @@ def setup_solid_combobox(combo):
                     container.setWindowOpacity(1.0)
                     if hasattr(combo, '_orig_sb_policy') and combo._orig_sb_policy is not None:
                         combo.view().setVerticalScrollBarPolicy(combo._orig_sb_policy)
+                    from ui.adobe_scrub_slider import round_popup_container
+                    round_popup_container(combo.view())
 
                 combo._popup_anim.valueChanged.connect(_on_step)
                 combo._popup_anim.finished.connect(_on_finished)
@@ -427,9 +429,19 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
             is_dark = True
 
     from core.path_utils import get_resource_dir
-    # Round, text-sized indicator: a 14px ring that reads at the same weight as the 11px label
-    # instead of the old 12px hard square.  Checked fills amber and carries a dark tick.
-    chk_amber = os.path.join(get_resource_dir(), "icons", "chk_checked_circle.png").replace("\\", "/")
+
+    def _icon(name):
+        return os.path.join(get_resource_dir(), "icons", name).replace("\\", "/")
+
+    # The indicator is drawn by four pre-rendered 10px images instead of border-radius QSS.
+    # A stylesheet circle only stays circular when the radius happens to survive Qt's device
+    # pixel rounding -- on a scaled display the 14px/7px pair rendered as a rounded *square*.
+    # Images are scale-independent and let the control be as small as the labels it sits next
+    # to.  Sources are 40px, so they stay crisp at any DPI.
+    ring = _icon("chk_ring_dark.png" if is_dark else "chk_ring_light.png")
+    ring_off = _icon("chk_ring_dis_dark.png" if is_dark else "chk_ring_dis_light.png")
+    disc = _icon("chk_disc_amber.png")
+    disc_off = _icon("chk_disc_dis_dark.png" if is_dark else "chk_disc_dis_light.png")
     from ui.theme_manager import theme_manager
     tt_ss = theme_manager.widget_tooltip_stylesheet()
 
@@ -450,32 +462,24 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 outline: none;
             }}
             QCheckBox::indicator {{
-                width: 14px;
-                height: 14px;
-                border: 1px solid #8b92a5;
-                border-radius: 7px;
+                width: 10px;
+                height: 10px;
+                border: none;
                 background: transparent;
                 outline: none;
-            }}
-            QCheckBox::indicator:hover {{
-                border-color: #f59e0b;
+                image: url("{ring}");
             }}
             QCheckBox::indicator:checked {{
-                border: 1px solid #f59e0b;
-                background: #f59e0b;
-                image: url("{chk_amber}");
+                image: url("{disc}");
             }}
             QCheckBox:disabled {{
                 color: #4b5563;
             }}
             QCheckBox::indicator:disabled {{
-                border: 1px solid #282a36;
-                background: transparent;
+                image: url("{ring_off}");
             }}
             QCheckBox::indicator:checked:disabled {{
-                border: 1px solid #3a3d4a;
-                background: #3a3d4a;
-                image: none;
+                image: url("{disc_off}");
             }}
             {tt_ss}
         """
@@ -496,32 +500,24 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 outline: none;
             }}
             QCheckBox::indicator {{
-                width: 14px;
-                height: 14px;
-                border: 1px solid #94a3b8;
-                border-radius: 7px;
-                background: #ffffff;
+                width: 10px;
+                height: 10px;
+                border: none;
+                background: transparent;
                 outline: none;
-            }}
-            QCheckBox::indicator:hover {{
-                border-color: #f59e0b;
+                image: url("{ring}");
             }}
             QCheckBox::indicator:checked {{
-                border: 1px solid #f59e0b;
-                background: #f59e0b;
-                image: url("{chk_amber}");
+                image: url("{disc}");
             }}
             QCheckBox:disabled {{
                 color: #94a3b8;
             }}
             QCheckBox::indicator:disabled {{
-                border: 1px solid #cbd5e1;
-                background: #ffffff;
+                image: url("{ring_off}");
             }}
             QCheckBox::indicator:checked:disabled {{
-                border: 1px solid #d6dae2;
-                background: #d6dae2;
-                image: none;
+                image: url("{disc_off}");
             }}
             {tt_ss}
         """

@@ -1685,7 +1685,7 @@ class StatusSlotWidget(QWidget):
         self.lbl_photo_info.setObjectName("lbl_photo_info")
         self.lbl_photo_info.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self.lbl_photo_info.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.lbl_photo_info.setStyleSheet("QLabel#lbl_photo_info { color: #cbd5e1; font-size: 11px; font-weight: 500; padding-top: 1px; }")
+        self.lbl_photo_info.setStyleSheet("QLabel#lbl_photo_info { color: #cbd5e1; font-size: 11px; font-weight: 500; }")
         l_info.addWidget(self.lbl_photo_info)
 
         # Layer 1: Transient Status / Notification / Import Layer
@@ -1704,7 +1704,7 @@ class StatusSlotWidget(QWidget):
         self.status_label.setObjectName("status_label")
         self.status_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; padding-top: 1px; }")
+        self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; }")
         l_status.addWidget(self.status_label)
 
         self.btn_cancel_import = QPushButton("✕ 取消导入")
@@ -1741,10 +1741,10 @@ class StatusSlotWidget(QWidget):
         if hasattr(self, "lbl_photo_info") and self.lbl_photo_info:
             self.lbl_photo_info.setStyleSheet(
                 f"QLabel#lbl_photo_info {{ color: {info_fg}; font-size: 11px; "
-                f"font-weight: 500; padding-top: 1px; }}")
+                f"font-weight: 500; }}")
         if hasattr(self, "status_label") and self.status_label:
             self.status_label.setStyleSheet(
-                f"QLabel#status_label {{ color: {status_fg}; font-size: 11px; padding-top: 1px; }}")
+                f"QLabel#status_label {{ color: {status_fg}; font-size: 11px; }}")
         if not hasattr(self, "btn_cancel_import") or not self.btn_cancel_import:
             return
         if is_dark:
@@ -1940,6 +1940,10 @@ class DarkroomMainWindow(QMainWindow):
     # 但一个只在部分卷生效、又没有任何提示的下拉，比没有这个入口更糟。
     # 逻辑全部保留（控件、参数、push 档案都在），P4 落地后把这里改回 True 即可。
     PUSH_UI_ENABLED = False
+
+    # 负片默认落在放大印相上，用 Kodak Supra Endura（用户指定）。原来切到负片时相纸停在
+    # "none"/胶片直扫，右栏一片空白，第一次手动选相纸反而像没反应。
+    DEFAULT_NEGATIVE_PAPER = "kodak_supra_endura"
 
     def __init__(self, engine, initial_session=None, initial_files=None):
         super().__init__()
@@ -2939,9 +2943,9 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'view_toolbar'):
             self.view_toolbar.setStyleSheet(f"background: {colors['view_toolbar_bg']}; border: none;")
         if hasattr(self, 'lbl_photo_info'):
-            self.lbl_photo_info.setStyleSheet(f"QLabel#lbl_photo_info {{ color: {colors['text_secondary']}; font-size: 11px; font-weight: 500; padding-top: 1px; }}")
+            self.lbl_photo_info.setStyleSheet(f"QLabel#lbl_photo_info {{ color: {colors['text_secondary']}; font-size: 11px; font-weight: 500; }}")
         if hasattr(self, 'status_label'):
-            self.status_label.setStyleSheet(f"QLabel#status_label {{ color: {colors['text_muted']}; font-size: 11px; padding-top: 1px; }}")
+            self.status_label.setStyleSheet(f"QLabel#status_label {{ color: {colors['text_muted']}; font-size: 11px; }}")
 
         btn_bg = colors['view_toolbar_btn_bg']
         btn_border = colors['view_toolbar_btn_border']
@@ -3530,7 +3534,9 @@ class DarkroomMainWindow(QMainWindow):
         self.view_toolbar.setFixedHeight(28)
         self.view_toolbar.setStyleSheet(f"background: {theme_manager.color('view_toolbar_bg')}; border: none;")
         tb_layout = QHBoxLayout(self.view_toolbar)
-        tb_layout.setContentsMargins(10, 2, 10, 1)
+        # Symmetric vertical margins: the old 2/1 split pushed the whole row half a pixel up,
+        # which is what made the right-hand capsule sit slightly above the filename on the left.
+        tb_layout.setContentsMargins(10, 0, 10, 0)
         tb_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         tb_layout.setSpacing(5)
 
@@ -3724,7 +3730,7 @@ class DarkroomMainWindow(QMainWindow):
         self.histogram_exif_bar = HistogramExifBar(self)
         sb_outer_layout.addWidget(self.histogram_exif_bar)
 
-        sidebar_scroll = SmoothScrollArea(crisp=True)
+        sidebar_scroll = SmoothScrollArea()
         sidebar_scroll.setWidgetResizable(True)
         sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -4039,17 +4045,17 @@ class DarkroomMainWindow(QMainWindow):
         # full-width row button was oversized on tablets).
         self.btn_auto_ev = QPushButton("AU")
         self.btn_auto_ev.setToolTip("自动曝光 (AU)：按 18% 中灰与高光测光建议设置曝光（不改变其他参数）")
-        self.btn_auto_ev.setFixedSize(38, 22)
+        self.btn_auto_ev.setFixedSize(30, 18)
         self.btn_auto_ev.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_auto_ev.setStyleSheet("""
             QPushButton {
                 background: #2a2f3a;
                 color: #cbd5e1;
-                font-size: 11px;
+                font-size: 10px;
                 font-weight: 600;
                 border: 1px solid #3b4252;
-                border-radius: 5px;
-                padding: 0px 4px;
+                border-radius: 4px;
+                padding: 0px 2px;
             }
             QPushButton:hover {
                 background: #374151;
@@ -5213,7 +5219,7 @@ class DarkroomMainWindow(QMainWindow):
         self.status_label.setText("")
         self.status_label.setCursor(Qt.CursorShape.ArrowCursor)
         colors = theme_manager.get_colors() if hasattr(theme_manager, 'get_colors') else {'text_muted': '#94a3b8'}
-        self.status_label.setStyleSheet(f"QLabel#status_label {{ color: {colors['text_muted']}; font-size: 11px; padding-top: 1px; }}")
+        self.status_label.setStyleSheet(f"QLabel#status_label {{ color: {colors['text_muted']}; font-size: 11px; }}")
         self.status_label.setToolTip("")
         self.spinner.stop()
         self.spinner.setVisible(False)
@@ -5492,7 +5498,7 @@ class DarkroomMainWindow(QMainWindow):
         self.status_label.setText(text)
         self.status_label.setCursor(Qt.CursorShape.ArrowCursor)
         colors = theme_manager.get_colors() if hasattr(theme_manager, 'get_colors') else {'text_muted': '#94a3b8'}
-        self.status_label.setStyleSheet(f"QLabel#status_label {{ color: {colors['text_muted']}; font-size: 11px; padding-top: 1px; }}")
+        self.status_label.setStyleSheet(f"QLabel#status_label {{ color: {colors['text_muted']}; font-size: 11px; }}")
         self.status_label.setToolTip("")
 
         if text and text.strip():
@@ -8579,6 +8585,17 @@ aspect_ratio=self._lens_frame_aspect(photo),
             for pid, card in self.paper_cards.items():
                 card.set_active(pid == "none")
             self._update_all_sliders_from_params()
+        elif stock_id != "none":
+            # A negative always prints through paper.  Leaving it at 胶片直扫 made the panel
+            # open with no paper selected, which then read as "the first pick did nothing".
+            if getattr(self, "current_paper_stock", "none") in (None, "", "none"):
+                self.current_paper_stock = self.DEFAULT_NEGATIVE_PAPER
+                self.current_print_mode = "optical"
+                self.current_params["print_mode"] = "optical"
+                if hasattr(self, "combo_paper"):
+                    self.combo_paper.set_value(self.DEFAULT_NEGATIVE_PAPER)
+                for pid, card in self.paper_cards.items():
+                    card.set_active(pid == self.DEFAULT_NEGATIVE_PAPER)
 
         for sid, card in self.film_cards.items():
             card.set_active(sid == stock_id)
@@ -8591,6 +8608,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 if stock_id == "none" or is_pos:
                     photo["paper_profile"] = "none"
                     photo["print_mode"] = "scan"
+                else:
+                    # The default paper (or whatever the user had) is part of the photo state,
+                    # otherwise reopening it would fall back to 胶片直扫.
+                    photo["paper_profile"] = self.current_paper_stock
+                    photo["print_mode"] = self.current_print_mode
                 if stock_id == "none":
                     photo["graded_thumbnail_rgb"] = None
                     self.thumb_controller.revert_photo_to_raw(photo, self.filmstrip)
@@ -8666,14 +8688,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._mark_current_photo_dirty()
         self.current_paper_stock = stock_id
 
-        # Item 9: Selecting "none" (胶片直扫 Film Scan) engages scan mode; selecting physical paper engages Optical Print mode
-        if push_undo:
-            if stock_id == "none":
-                self.current_print_mode = "scan"
-                self.current_params["print_mode"] = "scan"
-            else:
-                self.current_print_mode = "optical"
-                self.current_params["print_mode"] = "optical"
+        # The print mode follows the paper unconditionally.  It used to be updated only when
+        # a user-driven switch came through `push_undo`, so the first pick made through
+        # another path left the render in 胶片直扫 while the panel showed a paper -- which
+        # reads exactly like "the first paper switch did nothing".
+        self.current_print_mode = "scan" if stock_id == "none" else "optical"
+        self.current_params["print_mode"] = self.current_print_mode
 
         for sid, card in self.paper_cards.items():
             card.set_active(sid == stock_id)
