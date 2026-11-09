@@ -8489,6 +8489,55 @@ aspect_ratio=self._lens_frame_aspect(photo),
         else:
             self._enter_crop_workspace()
 
+    # 裁切的"未裁切"基准。切换照片、清除裁切、退出裁切工作区都拿它对齐，避免各处各写一份
+    # 字面量而后漏掉某个键（aspect_ratio 漏了就会沿用上一张的比例）。
+    @staticmethod
+    def _default_crop_dict():
+        return {
+            "enabled": False,
+            "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0,
+            "angle": 0.0, "rot_90": 0,
+            "flip_h": False, "flip_v": False,
+            "aspect_ratio": "original",
+            "custom_ratio": [5.0, 7.0],
+            "is_portrait": False,
+        }
+
+    @classmethod
+    def _normalize_crop(cls, crop):
+        """把任意来源的裁切数据收敛成一份完整的、可直接下发的 dict。
+
+        ``None`` / 非 dict / 空 dict 一律视为"未裁切"；``enabled`` 为假时几何也清零，因为
+        "enabled=False 但 x/y/w/h 还是上一张的"这种脏数据会被画布和侧栏当成真裁切读出来。
+        """
+        out = cls._default_crop_dict()
+        if isinstance(crop, dict):
+            out.update({k: v for k, v in crop.items() if k in out or k == "custom_ratio"})
+        if not out.get("enabled", False):
+            out.update(x=0.0, y=0.0, w=1.0, h=1.0, angle=0.0, rot_90=0,
+                       flip_h=False, flip_v=False, aspect_ratio="original", is_portrait=False)
+        return out
+
+    def _apply_photo_crop_state(self, photo):
+        """把画布 / 遮罩 / 侧栏的裁切对齐到 ``photo`` 自己。
+
+        来源优先级：内存里的 current_params（刚才由 photo["params"] 或 .sdc 合并进来）
+        → photo["crop"] → 整幅未裁切。存在 photo["crop"] 但 params 里没有的情况（旧会话、
+        只写了裁切字段的路径），所以这里补一层兜底。
+        """
+        crop = self._normalize_crop(self.current_params.get("crop") if isinstance(self.current_params.get("crop"), dict) else None)
+        if not crop["enabled"] and photo is not None:
+            alt = photo.get("crop")
+            if isinstance(alt, dict) and alt.get("enabled"):
+                crop = self._normalize_crop(alt)
+        # 若切换发生在裁切工作区内，先真正退出（否则遮罩还挂在这张照片上）
+        if getattr(self.canvas, "is_crop_editing", False):
+            self._exit_crop_workspace()
+        self.current_params["crop"] = dict(crop)
+        self.canvas.set_crop_state(dict(crop))
+        if hasattr(self, "crop_sidebar") and self.crop_sidebar:
+            self.crop_sidebar.sync_from_overlay(dict(crop))
+
     def _enter_crop_workspace(self):
         if hasattr(self, 'btn_crop'):
             self.btn_crop.setChecked(True)
@@ -8511,8 +8560,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.sidebar_stack.setCurrentIndex(1)
 
         # 2. Start crop overlay session & sync controls
-        cur_crop = self.current_params.get("crop", {})
-        self._pre_crop_backup = copy.deepcopy(cur_crop) if isinstance(cur_crop, dict) else {}
+        cur_crop = self._normalize_crop(self.current_params.get("crop"))
+        self._pre_crop_backup = copy.deepcopy(cur_crop)
         self.canvas.start_crop_mode(cur_crop)
         if hasattr(self, 'crop_sidebar'):
             self.crop_sidebar.sync_from_overlay(self.canvas.crop_overlay.get_crop_dict())
@@ -11134,8 +11183,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._update_stock_mode_ui()
             self._sync_canvas_params()
             self._update_all_sliders_from_params()
-            if hasattr(self, "crop_sidebar") and self.crop_sidebar:
-                self.crop_sidebar.sync_from_overlay(dict(self.current_params.get("crop") or {}))
+            # 裁切是逐张状态，不是全局状态：这里必须显式装载本张的裁切（没有就装载整幅），
+            # 否则画布 uniform 和遮罩控件都会留着上一张的矩形与比例。
+            self._apply_photo_crop_state(photo)
 
             # 6. Apply print mode, film & paper LUT in a single unified, instant pass
             eff_paper = self.current_paper_stock if self.current_print_mode == "optical" else "none"

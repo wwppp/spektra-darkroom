@@ -2350,7 +2350,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.is_crop_editing = True
         self._pre_crop_zoom = getattr(self, "zoom", 1.0)
         self._pre_crop_pan = (getattr(self, "pan_x", 0.0), getattr(self, "pan_y", 0.0))
-        cur_crop = dict(crop_dict or self.params.get("crop", {}))
+        # NOTE: an empty dict means "this photo has no crop" and must NOT fall back to
+        # self.params -- that used to resurrect the previous photo's rectangle here, which is
+        # exactly how a leftover crop got applied (and then saved) to an untouched photo.
+        cur_crop = dict(crop_dict) if isinstance(crop_dict, dict) else dict(self.params.get("crop") or {})
         self.params["crop"] = cur_crop
         # Inset image so rotated bounding box and crop handles are not clipped by viewport edges
         self.zoom = self._get_crop_fit_zoom()
@@ -2359,6 +2362,20 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.zoomChanged.emit(self.get_actual_zoom_ratio())
         self.update()
         self.crop_overlay.start_crop_session(cur_crop)
+
+    def set_crop_state(self, crop_dict=None):
+        """Adopt a photo's crop without entering crop mode.
+
+        Called on every photo switch.  Both the uniform source (``self.params['crop']``) and
+        the overlay widget are re-seeded, so nothing from the previous photo can survive.
+        """
+        crop = dict(crop_dict) if isinstance(crop_dict, dict) else {}
+        self.is_crop_editing = False
+        self.params["crop"] = crop
+        overlay = getattr(self, "crop_overlay", None)
+        if overlay is not None:
+            overlay.set_crop_state(crop)
+        self.update()
 
     def exit_crop_mode(self):
         self.is_crop_editing = False

@@ -382,11 +382,14 @@ class CropOverlayWidget(QWidget):
         self.update()
         self.cropChanged.emit(self.get_crop_dict())
 
-    def start_crop_session(self, initial_crop=None):
-        """Enter crop mode with existing or default crop parameters."""
-        self.setGeometry(self.canvas.rect())
+    def _load_crop_fields(self, crop_dict):
+        """Write a crop dict into the overlay's fields (no show, no signals).
 
-        crop_dict = initial_crop or {}
+        Shared by ``start_crop_session`` and ``set_crop_state`` so the two cannot drift:
+        a photo that never touched the crop tool must land on the full frame with the
+        "original" ratio, *not* on whatever the previous photo left in these fields.
+        """
+        crop_dict = crop_dict if isinstance(crop_dict, dict) else {}
         if crop_dict.get("enabled"):
             self.crop_x = float(crop_dict.get("x", 0.0))
             self.crop_y = float(crop_dict.get("y", 0.0))
@@ -413,6 +416,12 @@ class CropOverlayWidget(QWidget):
             self.flip_h = False
             self.flip_v = False
             self.aspect_ratio_mode = str(crop_dict.get("aspect_ratio", "original"))
+            if "custom_ratio" in crop_dict and isinstance(crop_dict["custom_ratio"], (list, tuple)) and len(crop_dict["custom_ratio"]) == 2:
+                try:
+                    self.custom_ratio_w = float(crop_dict["custom_ratio"][0])
+                    self.custom_ratio_h = float(crop_dict["custom_ratio"][1])
+                except Exception:
+                    pass
 
         # Clamp initial rect
         self.crop_x = max(0.0, min(0.95, self.crop_x))
@@ -427,6 +436,25 @@ class CropOverlayWidget(QWidget):
         self._user_crop_w = self.crop_w
         self._user_crop_h = self.crop_h
 
+    def set_crop_state(self, crop_dict=None):
+        """Load a photo's crop without entering the crop tool (hidden overlay).
+
+        Switching photos must call this.  The overlay keeps its own fields, so leaving
+        them alone carries the previous photo's rectangle / aspect ratio over -- the
+        panel then shows "16:9" on a photo that was never cropped, and the next apply
+        writes that rectangle into *this* photo's sidecar.
+        """
+        self._load_crop_fields(crop_dict or {})
+        self._initial_crop = self.get_crop_dict()
+        self._crop_undo_stack = [self._capture_snapshot()]
+        self._crop_redo_stack = []
+        self.update()
+
+    def start_crop_session(self, initial_crop=None):
+        """Enter crop mode with existing or default crop parameters."""
+        self.setGeometry(self.canvas.rect())
+
+        self._load_crop_fields(initial_crop or {})
         self._initial_crop = self.get_crop_dict()
         if abs(self.crop_angle) > 0.01:
             self._clamp_to_rotated_bounds()
