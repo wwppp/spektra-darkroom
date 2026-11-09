@@ -656,7 +656,7 @@ class BaseExportDialog(QDialog):
         self.chk_progressive = QCheckBox("渐进式")
         self.chk_progressive.setObjectName("chkProgressive")
         self.chk_progressive.setChecked(True)
-        self.chk_progressive.setToolTip("渐进式 JPEG 在网络加载时由模糊到清晰，文件体积略大")
+        self.chk_progressive.setToolTip("渐进式 JPEG 在下载过程中由模糊到清晰，文件体积略大")
         self.stack_format_opt2.addWidget(self.chk_progressive)
 
         # 1: TIFF empty placeholder

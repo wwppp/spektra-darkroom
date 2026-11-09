@@ -25,7 +25,7 @@ class CanvasRatingWidget(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(92, 22)
-        self.setToolTip("底片评级 (快捷键 1-5 评分，0 清除)")
+        self.setToolTip("底片评级（快捷键 1～5 评分，0 清除）")
         theme_manager.themeChanged.connect(lambda _: self.update())
 
     def sizeHint(self) -> QSize:

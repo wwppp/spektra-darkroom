@@ -668,11 +668,11 @@ class PreferencesDialog(QDialog):
                 continue
             self.combo_default_paper.addItem(item.get("name") or pid, pid)
         if self.combo_default_paper.count() == 0:
-            self.combo_default_paper.addItem("未加载相纸资源", None)
+            self.combo_default_paper.addItem("未载入相纸资源", None)
             self.combo_default_paper.setEnabled(False)
         self.combo_default_paper.setToolTip(
-            "新导入的负片、以及还没手动选过相纸的底片，默认用这张相纸印相"
-            "（缩略图同步）。已选过相纸的底片保持自己的选择。")
+            "新导入的负片与未手动选过相纸的底片默认用这张相纸（缩略图同步）；"
+            "已选过的保持原选择")
         r_dpaper.addWidget(self.combo_default_paper)
         r_dpaper.addStretch(1)
         l_dr.addLayout(r_dpaper)
@@ -717,12 +717,12 @@ class PreferencesDialog(QDialog):
         r_lens.addWidget(lbl_lens_info, 1)
 
         self.btn_import_acr = QPushButton("从 ACR 导入镜头库")
-        self.btn_import_acr.setToolTip("检测系统 Adobe Camera Raw 镜头库并克隆到本地用户库 (%APPDATA%/SpektraDarkroom/LensProfiles)")
+        self.btn_import_acr.setToolTip("从 Adobe Camera Raw 克隆镜头库到本地用户目录（%APPDATA%\\SpektraDarkroom\\LensProfiles）")
         self.btn_import_acr.clicked.connect(self._on_import_acr_clicked)
         r_lens.addWidget(self.btn_import_acr)
 
         self.btn_open_lens_dir = QPushButton("打开镜头库文件夹")
-        self.btn_open_lens_dir.setToolTip("在资源管理器中打开用户镜头配置存放目录")
+        self.btn_open_lens_dir.setToolTip("在资源管理器中打开镜头配置目录")
         self.btn_open_lens_dir.clicked.connect(self._on_open_lens_dir_clicked)
         r_lens.addWidget(self.btn_open_lens_dir)
         l_dr.addLayout(r_lens)

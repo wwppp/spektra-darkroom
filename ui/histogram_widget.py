@@ -136,11 +136,11 @@ class HistogramExifBar(QWidget):
     def set_exif_data(self, data: dict):
         if not data:
             self.lbl_shutter.setText("--")
-            self.lbl_shutter.setToolTip("快门速度: 未知")
+            self.lbl_shutter.setToolTip("快门速度：未知")
             self.lbl_iso.setText("ISO --")
-            self.lbl_iso.setToolTip("感光度: 未知")
+            self.lbl_iso.setToolTip("感光度：未知")
             self.lbl_aperture.setText("ƒ/--")
-            self.lbl_aperture.setToolTip("光圈: 未知")
+            self.lbl_aperture.setToolTip("光圈：未知")
             self.lbl_lens.setText("")
             return
 
@@ -171,13 +171,13 @@ class HistogramExifBar(QWidget):
             ap = f"ƒ/{cleaned_ap}" if cleaned_ap else "ƒ/--"
 
         self.lbl_shutter.setText(shutter)
-        self.lbl_shutter.setToolTip(f"快门速度: {shutter}")
+        self.lbl_shutter.setToolTip(f"快门速度：{shutter}")
 
         self.lbl_iso.setText(iso)
-        self.lbl_iso.setToolTip(f"感光度: {iso}")
+        self.lbl_iso.setToolTip(f"感光度：{iso}")
 
         self.lbl_aperture.setText(ap)
-        self.lbl_aperture.setToolTip(f"光圈: {ap}")
+        self.lbl_aperture.setToolTip(f"光圈：{ap}")
 
         # 4. Lens Model (镜头型号)
         raw_lens = str(data.get("lens_model") or "").strip()

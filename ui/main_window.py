@@ -1742,7 +1742,7 @@ class StatusSlotWidget(QWidget):
         self.btn_cancel_import = QPushButton("✕ 取消导入")
         self.btn_cancel_import.setVisible(False)
         self.btn_cancel_import.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_cancel_import.setToolTip("中断当前正在进行的底片批量导入流程")
+        self.btn_cancel_import.setToolTip("中断当前批量导入")
         l_status.addWidget(self.btn_cancel_import)
         self.apply_theme()
         theme_manager.themeChanged.connect(self.apply_theme)
@@ -3644,7 +3644,7 @@ class DarkroomMainWindow(QMainWindow):
         self.export_status_container.setObjectName("export_status_container")
         self.export_status_container.setVisible(False)
         self.export_status_container.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.export_status_container.setToolTip("点击查看扫描队列详情 (Ctrl+J)")
+        self.export_status_container.setToolTip("点击查看扫描队列详情（快捷键 Ctrl+J）")
         self.export_status_container.mousePressEvent = self._on_export_status_clicked
         export_layout = QHBoxLayout(self.export_status_container)
         export_layout.setContentsMargins(0, 0, 0, 0)
@@ -3706,7 +3706,7 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_crop.setIcon(get_icon("crop.png"))
         self.btn_crop.setIconSize(QSize(14, 14))
         self.btn_crop.setCheckable(True)
-        self.btn_crop.setToolTip("裁切与校平 (快捷键 C)")
+        self.btn_crop.setToolTip("裁切与校平（快捷键 C）")
         self.btn_crop.setStyleSheet(btn_style)
         self.btn_crop.clicked.connect(self.toggle_crop_mode)
         tb_layout.addWidget(self.btn_crop)
@@ -3726,7 +3726,7 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_split.setIcon(get_icon("compare.png"))
         self.btn_split.setIconSize(QSize(14, 14))
         self.btn_split.setCheckable(True)
-        self.btn_split.setToolTip("对比视图 (快捷键 \\): 点击切换分屏对比")
+        self.btn_split.setToolTip("对比视图（快捷键 \\）：点击切换分屏对比")
         self.btn_split.setStyleSheet(btn_style)
         self.btn_split.clicked.connect(self.toggle_split_view)
         tb_layout.addWidget(self.btn_split)
@@ -3736,7 +3736,7 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_fit.setIcon(get_icon("fit_window.png"))
         self.btn_fit.setIconSize(QSize(14, 14))
         self.btn_fit.setCheckable(True)
-        self.btn_fit.setToolTip("适应图像全貌 (Ctrl+0)")
+        self.btn_fit.setToolTip("适应图像全貌（快捷键 Ctrl+0）")
         self.btn_fit.setStyleSheet(btn_style)
         self.btn_fit.clicked.connect(self._on_btn_fit_clicked)
         tb_layout.addWidget(self.btn_fit)
@@ -3746,7 +3746,7 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_100.setIcon(get_icon("zoom_100.png"))
         self.btn_100.setIconSize(QSize(14, 14))
         self.btn_100.setCheckable(True)
-        self.btn_100.setToolTip("1:1 实际像素 (Ctrl+1)")
+        self.btn_100.setToolTip("1:1 实际像素（快捷键 Ctrl+1）")
         self.btn_100.setStyleSheet(btn_style)
         self.btn_100.clicked.connect(self._on_btn_100_clicked)
         tb_layout.addWidget(self.btn_100)
@@ -4124,7 +4124,7 @@ class DarkroomMainWindow(QMainWindow):
         # Compact "AU" chip in the exposure slider's header row (user request: the old
         # full-width row button was oversized on tablets).
         self.btn_auto_ev = QPushButton("AU")
-        self.btn_auto_ev.setToolTip("自动曝光 (AU)：按 18% 中灰与高光测光建议设置曝光（不改变其他参数）")
+        self.btn_auto_ev.setToolTip("自动曝光（AU）：按 18% 中灰测光建议设置曝光，不改动其他参数")
         self.btn_auto_ev.setFixedSize(30, 18)
         self.btn_auto_ev.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_auto_ev.setStyleSheet("""
@@ -4170,8 +4170,8 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_black_lift = AdobeScrubSlider(
             "黑场", -0.25, 0.25, 0.0, step=0.01, unit="", decimals=2,
-            tooltip="输出端黑场标定：向左扣除片基灰雾 / 黑电平、压实纯黑，向右抬高黑位呈现空气褪色感。"
-                    "作用在 LUT 之后的显示域，胶片与数码原片旁通模式下均生效",
+            tooltip="黑场标定：向左扣除片基灰雾、压实纯黑，向右抬高黑位。"
+                    "作用在 LUT 之后的显示域",
             has_center_detent=True
         )
         self.slider_black_lift.valueChanged.connect(lambda v: self._on_slider_live("black_lift", v))
@@ -4257,7 +4257,7 @@ class DarkroomMainWindow(QMainWindow):
         chk_layout.setContentsMargins(0, 2, 0, 2)
         self.chk_remove_ca = QCheckBox("删除色差")
         self.chk_remove_ca.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.chk_remove_ca.setToolTip("通过反向色差径向位移算法校正横向色差（紫边/绿边）\n"
+        self.chk_remove_ca.setToolTip("校正横向色差（紫边/绿边）。\n"
                                       "系数由画面自动测量（LCP 未提供色差模型时）")
         self.chk_remove_ca.toggled.connect(self._on_lens_remove_ca_toggled)
         chk_layout.addWidget(self.chk_remove_ca)
@@ -4297,8 +4297,8 @@ class DarkroomMainWindow(QMainWindow):
                 ("内置 (RAW 内)", "builtin"),
             ],
             default_val="auto",
-            tooltip="镜头校正配置文件设置来源：自动读取 EXIF、自定义手动选取，"
-                    "或使用 RAW 内嵌的校正表（索尼 ARW）"
+            tooltip="校正配置来源：自动读取 EXIF、手动选取，"
+                    "或使用 RAW 内嵌校正表（索尼 ARW）"
         )
         self.combo_lens_setup.valueChanged.connect(self._on_lens_setup_changed)
         profile_layout.addWidget(self.combo_lens_setup)
@@ -4336,7 +4336,7 @@ class DarkroomMainWindow(QMainWindow):
             "配置文件",
             [("无", ""), ("[+ 添加配置文件 (.lcp)...]", "__import_lcp__")],
             default_val="",
-            tooltip="匹配的标准镜头校正配置文件 (.lcp)"
+            tooltip="匹配的镜头校正配置文件（.lcp）"
         )
         self.combo_lens_profile.valueChanged.connect(self._on_lens_profile_changed)
         profile_layout.addWidget(self.combo_lens_profile)
@@ -4348,7 +4348,7 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_lens_distortion = AdobeScrubSlider(
             "扭曲度", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
             has_center_detent=True,
-            tooltip="配置文件几何畸变校正量 (0 为标准出厂值，向左减弱，向右增强)"
+            tooltip="畸变校正量（0 为配置文件原值，向左减弱，向右增强）"
         )
         self.slider_lens_distortion.valueChanged.connect(lambda v: self._on_lens_amount_changed("profile_distortion", v))
         self.slider_lens_distortion.sliderReleased.connect(self._on_slider_committed)
@@ -4357,7 +4357,7 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_lens_vignette = AdobeScrubSlider(
             "晕影", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
             has_center_detent=True,
-            tooltip="配置文件暗角光学补偿量 (0 为标准出厂值，负值加深暗角，正值增亮消除暗角)"
+            tooltip="暗角补偿量（0 为配置文件原值，负值加深，正值消除）"
         )
         self.slider_lens_vignette.valueChanged.connect(lambda v: self._on_lens_amount_changed("profile_vignette", v))
         self.slider_lens_vignette.sliderReleased.connect(self._on_slider_committed)
@@ -4399,7 +4399,7 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_manual_vignette_midpoint = AdobeScrubSlider(
             "中点", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
             has_center_detent=True,
-            tooltip="暗角羽化过渡中点：0 为标准中点，负值向中心收缩，正值向边缘扩展"
+            tooltip="暗角羽化中点：0 为标准，负值向中心收紧，正值向边缘扩散"
         )
         self.slider_manual_vignette_midpoint.valueChanged.connect(lambda v: self._on_lens_amount_changed("manual_vignette_midpoint", v))
         self.slider_manual_vignette_midpoint.sliderReleased.connect(self._on_slider_committed)
@@ -4429,7 +4429,7 @@ class DarkroomMainWindow(QMainWindow):
                 ("电影漫射", "cinebloom"),
             ],
             default_val="none",
-            tooltip="经典电影柔光滤镜仿真，在高光周围形成漫射晕开质感"
+            tooltip="电影柔光镜仿真：高光周围形成漫射晕开"
         )
         self.combo_diffusion.valueChanged.connect(lambda v: self._on_combo_changed("diffusion_family", v))
         self.sec_optics.addWidget(self.combo_diffusion)
@@ -4444,7 +4444,7 @@ class DarkroomMainWindow(QMainWindow):
                 ("2 档", 2.0),
             ],
             default_val=0.125,
-            tooltip="柔光镜散射密度挡位 (1/8 ~ 2 档)"
+            tooltip="柔光镜散射密度（1/8～2 档）"
         )
         self.combo_diff_strength.valueChanged.connect(lambda v: self._on_combo_changed("diffusion_strength", v))
         self.slider_diff_strength = self.combo_diff_strength  # Backward compatibility alias
@@ -4452,7 +4452,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_diff_warmth = AdobeScrubSlider(
             "光晕冷暖偏置", -1.5, 1.5, 0.0, step=0.05, unit="", decimals=2,
-            tooltip="柔光光晕波长能量再分配，正值偏复古暖金，负值偏清冷晨光",
+            tooltip="柔光光晕冷暖：正值偏暖金，负值偏冷青",
             track_gradient=[(0.0, QColor("#60a5fa")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#fb923c"))],
             has_center_detent=True
         )
@@ -4468,10 +4468,10 @@ class DarkroomMainWindow(QMainWindow):
         self.sidebar_layout.addWidget(self.sec_optics)
 
     DIR_UNAVAILABLE_TEXT = {
-        "bypass": "旁路模式下不可用",
-        "positive": "正片下不可用",
-        "bw": "黑白下不可用",
-        "no_data": "该胶卷档案无 DIR 数据",
+        "bypass": "当前为数码原片旁通模式，DIR 不可用",
+        "positive": "当前为反转正片，DIR 不可用",
+        "bw": "当前为黑白胶卷，DIR 不可用",
+        "no_data": "该胶卷档案未提供 DIR 数据",
     }
 
     def _init_chemistry_section(self):
@@ -4499,10 +4499,9 @@ class DarkroomMainWindow(QMainWindow):
         self.chk_push_under = QCheckBox("模拟欠曝（曝光随档位下调）")
         self.chk_push_under.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chk_push_under.setToolTip(
-            "勾选后，选 +N 档会同时把场景曝光下调 N EV，即完整的“欠曝 N 档再迫冲”。\n"
-            "注意显影只能补回一部分（实测 0.2–0.6 EV/档），所以画面仍会比标准冲洗更暗、\n"
-            "暗部更实、反差更大 —— 这正是迫冲的样子。\n"
-            "不勾选时只更换显影曲线，曝光不动。")
+            "勾选后，选 +N 档会同时把场景曝光下调 N EV，即完整的「欠曝 N 档再迫冲」。\n"
+            "显影只能补回一部分（0.2～0.6 EV/档），画面仍比标准冲洗更暗、反差更大。\n"
+            "不勾选时只更换显影曲线，曝光不动")
         self.chk_push_under.toggled.connect(self._on_push_underexpose_toggled)
         self.chk_push_under.setStyleSheet(get_standard_checkbox_style())
         self.sec_chemistry.addWidget(self.chk_push_under)
@@ -4519,7 +4518,7 @@ class DarkroomMainWindow(QMainWindow):
         # 所以三个滑块合并成一个「总量」，另两个键保留在参数里固定为 1.0（旧文件仍可读）。
         self.slider_dir_amount = AdobeScrubSlider(
             "DIR 总量", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="显影抑制剂的总体强度。中性灰不受影响，只改变有色彩差异处的密度分离。"
+            tooltip="显影抑制剂强度：中性灰不受影响，只改变有色彩差异处的密度分离"
         )
         self.slider_dir_amount.valueChanged.connect(lambda v: self._on_slider_live("dir_amount", v))
         self.slider_dir_amount.sliderReleased.connect(self._on_slider_committed)
@@ -4539,7 +4538,7 @@ class DarkroomMainWindow(QMainWindow):
             "相纸",
             paper_items,
             default_val=getattr(self, "current_paper_stock", "none"),
-            tooltip="印相相纸型号，决定染色层光谱响应与密度曲线。选“胶片直扫”则跳过印相，直接输出底片负像"
+            tooltip="相纸型号：决定染色层光谱响应与密度曲线。选「胶片直扫」则跳过印相，输出负像"
         )
         self.combo_paper.valueChanged.connect(self._on_paper_combo_changed)
         self.sec_enlarger.addWidget(self.combo_paper)
@@ -4555,14 +4554,14 @@ class DarkroomMainWindow(QMainWindow):
                 ("A 标准钨丝光源 (2856K)", "A"),
             ],
             default_val="TH-KG3",
-            tooltip="放大机投光光源光谱分布，影响相纸感光层综合响应"
+            tooltip="放大机光源：光谱分布决定相纸感光层响应"
         )
         self.combo_illuminant.valueChanged.connect(lambda v: self._on_combo_changed("enlarger_illuminant", v))
         self.sec_enlarger.addWidget(self.combo_illuminant)
 
         self.slider_magenta = AdobeScrubSlider(
             "品红 / 绿色", -35.0, 35.0, 0.0, step=0.5, unit="", decimals=1,
-            tooltip="放大机滤色镜品红 (M) 调节，左偏品红，右偏绿色",
+            tooltip="品红（M）：左偏品红，右偏绿",
             track_gradient=[(0.0, QColor("#f43f5e")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#10b981"))],
             has_center_detent=True
         )
@@ -4572,7 +4571,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_yellow = AdobeScrubSlider(
             "黄色 / 蓝色", -35.0, 35.0, 0.0, step=0.5, unit="", decimals=1,
-            tooltip="放大机滤色镜黄色 (Y) 调节，左偏黄色，右偏蓝色",
+            tooltip="黄色（Y）：左偏黄，右偏蓝",
             track_gradient=[(0.0, QColor("#eab308")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#38bdf8"))],
             has_center_detent=True
         )
@@ -4582,7 +4581,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_cyan = AdobeScrubSlider(
             "青色 / 红色", -35.0, 35.0, 0.0, step=0.5, unit="", decimals=1,
-            tooltip="放大机滤色镜青色 (C) 调节，左偏青色，右偏红色",
+            tooltip="青色（C）：左偏青，右偏红",
             track_gradient=[(0.0, QColor("#06b6d4")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#f87171"))],
             has_center_detent=True
         )
@@ -4595,8 +4594,8 @@ class DarkroomMainWindow(QMainWindow):
         # recipe into plain over-development), so it has to have the room to do that.
         self.slider_print_exp = AdobeScrubSlider(
             "相纸曝光", 0.25, 4.0, 1.0, step=0.02, unit="x", decimals=2,
-            tooltip="放大机相纸曝光时间，调节相纸整体显影浓度（0.25x ~ 4x，约 ±2 档）\n"
-                    "迫冲后要提亮画面，用这一档，不要拉场景曝光——那会取消欠曝",
+            tooltip="相纸曝光：整体显影浓度（0.25x～4x，约 ±2 档）。\n"
+                    "迫冲后提亮用这一档，不要动场景曝光，否则抵消欠曝",
             track_gradient=[(0.0, QColor("#14161d")), (1.0, QColor("#f1f5f9"))],
             has_center_detent=True
         )
@@ -4614,7 +4613,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_morph_gamma = AdobeScrubSlider(
             "显影形态反差", 0.70, 1.30, 1.0, step=0.02, unit="", decimals=2,
-            tooltip="相纸显影曲线斜率，决定画面反差。"
+            tooltip="相纸显影斜率：决定画面反差"
         )
         self.slider_morph_gamma.valueChanged.connect(lambda v: self._on_slider_live("morph_gamma", v))
         self.slider_morph_gamma.sliderReleased.connect(self._on_slider_committed)
@@ -4622,7 +4621,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_exhaustion = AdobeScrubSlider(
             "显影液疲劳度", 0.0, 1.00, 0.0, step=0.02, unit="", decimals=2,
-            tooltip="显影液疲劳对相纸肩部的轻微塑形。"
+            tooltip="显影液疲劳：对相纸肩部做轻微塑形"
         )
         self.slider_exhaustion.valueChanged.connect(lambda v: self._on_slider_live("developer_exhaustion", v))
         self.slider_exhaustion.sliderReleased.connect(self._on_slider_committed)
@@ -4648,7 +4647,7 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_halation_spatial_scale = AdobeScrubSlider(
             "光晕空间尺度", 0.1, 3.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="光晕物理扩散核空间尺度倍率"
+            tooltip="光晕扩散核的空间尺度倍率"
         )
         self.slider_halation_spatial_scale.valueChanged.connect(lambda v: self._on_slider_live("halation_spatial_scale", v))
         self.slider_halation_spatial_scale.sliderReleased.connect(self._on_slider_committed)
@@ -4656,10 +4655,8 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_scatter_amount = AdobeScrubSlider(
             "乳剂内散射强度", 0.0, 2.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="感光乳剂层内前向光散射强度 (Light Wrap)。\n"
-                    "散射核尺寸为引擎标定常量 (core/halation_model.py)：当前所有胶卷"
-                    "档案均未提供实测散射数据 (diffuseSigmaMM 覆盖 0/53)，"
-                    "三通道 core/tail 采用 2.2/2.0/1.6 + 9.3/9.7/9.1 μm 标定值"
+            tooltip="前向光散射（Light Wrap）强度。\n"
+                    "散射核尺寸取引擎标定值；现有胶卷档案均未提供实测散射数据"
         )
         self.slider_scatter_amount.valueChanged.connect(lambda v: self._on_slider_live("scatter_amount", v))
         self.slider_scatter_amount.sliderReleased.connect(self._on_slider_committed)
@@ -4668,8 +4665,8 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_boost_ev = AdobeScrubSlider(
             "高光能量重建", 0.0, 4.0, 0.0, step=0.05, unit=" EV", decimals=2,
             tooltip="把画面最亮像素再抬高 N 档后交给光晕/散射，重建被扫描截断的高光能量。\n"
-                    "保护点在中灰以上 4 档：常规曝光的照片整幅最大值达不到该点，"
-                    "此滑块将不起作用——需要强过曝或 +EV 曝光补偿后才生效"
+                    "保护点在中灰以上 4 档：常规曝光的底片整幅最大值达不到该点，滑块不生效；"
+                    "需强过曝或 +EV 曝光补偿后才生效"
         )
         self.slider_boost_ev.valueChanged.connect(lambda v: self._on_slider_live("boost_ev", v))
         self.slider_boost_ev.sliderReleased.connect(self._on_slider_committed)
@@ -4700,9 +4697,8 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_grain_strength = AdobeScrubSlider(
             "颗粒强度", 0.0, 3.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="颗粒强度倍率（σ 语义）：1.0 = gold200 标定参考，0 = 无颗粒，\n"
-                    "2.0 = 颗粒噪声幅度 ×2。内部按 Selwyn 反解写入粒子速率（grain = 0.4/倍率²）——\n"
-                    "速率越高颗粒越细密、观感越弱，所以倍率与速率是平方反比关系"
+            tooltip="颗粒强度：1.0 为 gold200 标定参考，0 无颗粒，2.0 噪声幅度加倍。\n"
+                    "速率与倍率平方反比，倍率越高颗粒越细密"
         )
         self.slider_grain_strength.valueChanged.connect(
             lambda v: self._on_slider_live("grain", round(0.4 / (v * v), 6) if v > 1e-3 else 0.0))
@@ -4711,8 +4707,8 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_grain_size = AdobeScrubSlider(
             "颗粒大小", 0.5, 2.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="颗粒空间尺度：放大/缩小整个颗粒图案（团簇尺寸随倍率变化，σ 不变）。\n"
-                    "1.0 = 档案标定几何；颗粒密度（噪声幅度）由「颗粒强度」控制"
+            tooltip="颗粒空间尺度：缩放整个颗粒图案，团簇随倍率变化。\n"
+                    "1.0 为档案标定几何；噪声幅度由「颗粒强度」控制"
         )
         self.slider_grain_size.valueChanged.connect(lambda v: self._on_slider_live("grain_size", v))
         self.slider_grain_size.sliderReleased.connect(self._on_slider_committed)
@@ -4720,8 +4716,8 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_grain_colour = AdobeScrubSlider(
             "彩色颗粒", 0.0, 1.0, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="彩色颗粒混合系数：1.0 = 档案标定（三染料云独立）。\n"
-                    "0 = 共用单一亮度颗粒（类似黑白）。与档案域值相乘；黑白胶卷此滑块无效"
+            tooltip="彩色颗粒混合：1.0 为档案标定（三染料云独立），0 为共用亮度颗粒（类似黑白）。\n"
+                    "黑白胶卷无效"
         )
         self.slider_grain_colour.valueChanged.connect(lambda v: self._on_slider_live("grain_colour", v))
         self.slider_grain_colour.sliderReleased.connect(self._on_slider_committed)
@@ -4811,7 +4807,7 @@ class DarkroomMainWindow(QMainWindow):
         # 当成「代码没生效」。这里给一个正经按钮，只删这两个目录，不做通配删除。
         self.act_rebuild_caches = QAction("重建渲染缓存...", self)
         self.act_rebuild_caches.setToolTip(
-            "删除 LUT 与颗粒瓦片缓存，下次渲染时重建。档案或印片滤色改过之后用。"
+            "删除 LUT 与颗粒瓦片缓存，下次渲染重建。改动档案或印片滤色后使用"
         )
         self.act_rebuild_caches.triggered.connect(self.rebuild_render_caches)
         file_menu.addAction(self.act_rebuild_caches)
@@ -5650,17 +5646,17 @@ class DarkroomMainWindow(QMainWindow):
         if state == "busy":
             self.export_spinner.start()
             self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
-            self.export_status_container.setToolTip("正在后台扫描，点击查看扫描队列 (Ctrl+J)")
+            self.export_status_container.setToolTip("正在后台扫描，点击查看扫描队列（快捷键 Ctrl+J）")
         elif state == "success":
             self.export_spinner.stop()
             self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
-            self.export_status_container.setToolTip("扫描完成，点击查看扫描队列 (Ctrl+J)")
+            self.export_status_container.setToolTip("扫描完成，点击查看扫描队列（快捷键 Ctrl+J）")
             # Permanent display on success as requested by user
             timeout_ms = 0
         elif state == "error":
             self.export_spinner.stop()
             self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #ef4444; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
-            self.export_status_container.setToolTip("扫描发生错误，点击查看扫描队列 (Ctrl+J)")
+            self.export_status_container.setToolTip("扫描出错，点击查看扫描队列（快捷键 Ctrl+J）")
             if timeout_ms <= 0:
                 timeout_ms = 6000
 
@@ -9099,13 +9095,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if hasattr(self, 'btn_split'):
             self.btn_split.setChecked(mode != 0)
             if mode == 0:
-                self.btn_split.setToolTip("对比视图 (快捷键 \\): 点击切换分屏对比")
+                self.btn_split.setToolTip("对比视图（快捷键 \\）：点击切换分屏对比")
             elif mode == 1:
-                self.btn_split.setToolTip("对比视图 (快捷键 \\): 拖动分屏对比中，再次点击切换为左右全局双屏对比")
+                self.btn_split.setToolTip("对比视图（快捷键 \\）：分屏对比中，再次点击切换为左右双屏")
             elif mode == 2:
-                self.btn_split.setToolTip("对比视图 (快捷键 \\): 左右全局双屏对比中，再次点击恢复编辑模式")
+                self.btn_split.setToolTip("对比视图（快捷键 \\）：左右双屏中，再次点击恢复编辑")
             elif mode == 3:
-                self.btn_split.setToolTip("对比视图: 正在查看原始图像 (松开恢复)")
+                self.btn_split.setToolTip("对比视图：正在查看原始图像（松开恢复）")
 
     def _on_compare_long_press_start(self):
         if not self._current_photo_path:
@@ -10125,13 +10121,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         """Returns (available: bool, reason: str) for the enlarger & paper development section."""
         film = getattr(self, "current_film_stock", "none")
         if film == "none":
-            return False, "数码原片旁通模式无需暗房放大与相纸显影环节"
+            return False, "当前为数码原片旁通模式，无需放大与相纸显影"
         if hasattr(self.engine, "is_positive_film") and self.engine.is_positive_film(film):
-            return False, "当前选用反转正片，无暗房放大机与相纸显影环节"
+            return False, "当前为反转正片，无放大机与相纸显影"
         paper = getattr(self, "current_paper_stock", "none")
         pmode = getattr(self, "current_print_mode", "optical")
         if paper == "none" or pmode == "scan":
-            return False, "当前为胶片直扫模式（未反相），无暗房放大机与相纸显影环节"
+            return False, "当前为胶片直扫（未反相），无放大机与相纸显影"
         return True, ""
 
     def _enlarger_available(self) -> bool:
@@ -10144,13 +10140,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         is_none = (getattr(self, "current_film_stock", "none") == "none")
         if is_none:
             available = False
-            hint = "当前处于数码原片旁通模式，无胶片成色剂抑制化学环节"
+            hint = "当前为数码原片旁通模式，无成色剂抑制化学"
         else:
             try:
                 available, reason = self.engine.dir_status(getattr(self, "current_film_stock", "none"))
             except Exception:
                 available, reason = True, ""
-            hint = "" if available else self.DIR_UNAVAILABLE_TEXT.get(reason, "当前胶卷下不可用")
+            hint = "" if available else self.DIR_UNAVAILABLE_TEXT.get(reason, "当前胶卷未提供 DIR 数据")
         for slider in (getattr(self, "slider_dir_amount", None),
                        getattr(self, "slider_dir_interlayer", None),
                        getattr(self, "slider_dir_samelayer", None)):
@@ -10259,7 +10255,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     (getattr(self, 'slider_exhaustion', None), "fotufilm 链不含显影衰竭")):
                 if slider is not None:
                     slider.setEnabled(False)
-                    slider.setToolTip(f"{reason}，切回 spektrafilm 原链才生效")
+                    slider.setToolTip(f"{reason}，切回 spektrafilm 链后生效")
                 for child in [w] + w.findChildren(QWidget):
                     child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not enlarger_available)
 
@@ -10272,7 +10268,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # 5. 物理光晕 (Halation) - Only available with real film media
         sec_halation = getattr(self, "sec_halation", None)
         hal_available = not is_none
-        hal_hint = "" if hal_available else "当前处于数码原片旁通模式，无胶片片基背反射物理光晕"
+        hal_hint = "" if hal_available else "当前为数码原片旁通模式，无片基背反射光晕"
         if sec_halation is not None and hasattr(sec_halation, "set_available"):
             sec_halation.set_available(hal_available, hal_hint)
             if not hal_available:
@@ -10293,7 +10289,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # 6. 银盐颗粒 (Grain) - 旁通态不可用；彩色滑块在黑白胶卷上无意义（档案强制共用银影）
         sec_grain = getattr(self, "sec_grain", None)
         grain_available = not is_none
-        grain_hint = "" if grain_available else "数码原片旁通模式无银盐乳剂，无颗粒"
+        grain_hint = "" if grain_available else "当前为数码原片旁通模式，无银盐乳剂与颗粒"
         try:
             is_bw_film = (not is_none) and bool(self.engine.is_bw_stock(self.current_film_stock))
         except Exception:
@@ -10373,16 +10369,16 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if hasattr(self, 'combo_diff_strength') and self.combo_diff_strength is not None:
             self.combo_diff_strength.setEnabled(not is_diff_none)
             if is_diff_none:
-                self.combo_diff_strength.setToolTip("请先在上方选择柔光镜型号以启用挡位调节")
+                self.combo_diff_strength.setToolTip("选择柔光镜型号后可调节挡位")
             else:
-                self.combo_diff_strength.setToolTip(getattr(self.combo_diff_strength, "default_tooltip", "柔光镜散射密度挡位 (1/8 ~ 2 档)"))
+                self.combo_diff_strength.setToolTip(getattr(self.combo_diff_strength, "default_tooltip", "柔光镜散射密度（1/8～2 档）"))
 
         if hasattr(self, 'slider_diff_warmth') and self.slider_diff_warmth is not None:
             self.slider_diff_warmth.setEnabled(not is_diff_none)
             if is_diff_none:
-                self.slider_diff_warmth.setToolTip("请先在上方选择柔光镜型号以启用冷暖偏置调节")
+                self.slider_diff_warmth.setToolTip("选择柔光镜型号后可调节冷暖偏置")
             else:
-                self.slider_diff_warmth.setToolTip(getattr(self.slider_diff_warmth, "default_tooltip", "柔光光晕波长能量再分配，正值偏复古暖金，负值偏清冷晨光"))
+                self.slider_diff_warmth.setToolTip(getattr(self.slider_diff_warmth, "default_tooltip", "柔光光晕冷暖：正值偏暖金，负值偏冷青"))
 
     @staticmethod
     def _lens_frame_aspect(photo):
@@ -10925,7 +10921,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 if m_name == model:
                     prof_items.append((p_name, p_p))
             if prof_path and prof_path not in [p for _, p in prof_items]:
-                p_display = lens_cfg.get("profile_name") or "已加载配置文件"
+                p_display = lens_cfg.get("profile_name") or "已载入配置文件"
                 prof_items.append((p_display, prof_path))
             prof_items.append(("[+ 添加配置文件 (.lcp)...]", "__import_lcp__"))
             self.combo_lens_profile.set_items(prof_items, default_val=prof_path)

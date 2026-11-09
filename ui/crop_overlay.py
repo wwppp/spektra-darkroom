@@ -2250,7 +2250,7 @@ class CropSidebarWidget(QFrame):
 
         self.btn_swap_aspect = QPushButton()
         self.btn_swap_aspect.setFixedSize(26, 26)
-        self.btn_swap_aspect.setToolTip("调换长宽比 (快捷键 X)")
+        self.btn_swap_aspect.setToolTip("调换长宽比（快捷键 X）")
         self.btn_swap_aspect.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_swap_aspect.clicked.connect(self.overlay.flip_aspect_ratio)
         ratio_row.addWidget(self.btn_swap_aspect)
@@ -2271,7 +2271,7 @@ class CropSidebarWidget(QFrame):
         self.edit_ratio_w = QLineEdit("5")
         self.edit_ratio_w.setFixedHeight(24)
         self.edit_ratio_w.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.edit_ratio_w.setToolTip("宽度比 (例如 5、65、16 或 2.39)")
+        self.edit_ratio_w.setToolTip("宽度比（例如 5、65、16 或 2.39）")
 
         self.lbl_ratio_colon = QLabel(":")
         self.lbl_ratio_colon.setFixedWidth(8)
@@ -2280,7 +2280,7 @@ class CropSidebarWidget(QFrame):
         self.edit_ratio_h = QLineEdit("7")
         self.edit_ratio_h.setFixedHeight(24)
         self.edit_ratio_h.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.edit_ratio_h.setToolTip("高度比 (例如 7、24、9 或 1)")
+        self.edit_ratio_h.setToolTip("高度比（例如 7、24、9 或 1）")
 
         self.btn_apply_custom = QPushButton("应用")
         self.btn_apply_custom.setFixedSize(42, 24)
@@ -2346,7 +2346,7 @@ class CropSidebarWidget(QFrame):
         # Angle scrub slider
         self.slider_angle = AdobeScrubSlider(
             "角度", -45.0, 45.0, 0.0, step=0.1, unit="°", decimals=1,
-            tooltip="微调画面倾斜度 (-45° ~ +45°)，双击回零"
+            tooltip="微调画面倾斜度（-45°～+45°），双击回零"
         )
         self.slider_angle.valueChanged.connect(self._on_slider_angle_changed)
         self.slider_angle.sliderReleased.connect(self._on_angle_committed)
@@ -2366,7 +2366,7 @@ class CropSidebarWidget(QFrame):
 
         self.btn_apply = QPushButton("裁切")
         self.btn_apply.setFixedHeight(32)
-        self.btn_apply.setToolTip("套用裁切参数并返回暗房面板 (快捷键 Enter)")
+        self.btn_apply.setToolTip("套用裁切并返回暗房面板（快捷键 Enter）")
         self.btn_apply.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_apply.setStyleSheet("""
             QPushButton {
@@ -2390,7 +2390,7 @@ class CropSidebarWidget(QFrame):
 
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setFixedHeight(32)
-        self.btn_cancel.setToolTip("放弃裁切修改 (快捷键 Esc)")
+        self.btn_cancel.setToolTip("放弃裁切修改（快捷键 Esc）")
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel.clicked.connect(self.overlay.cancel_crop)
         btn_layout.addWidget(self.btn_cancel, 1)
