@@ -269,6 +269,35 @@ class RoundScrubSlider(QSlider):
         self._smooth_x = None
         self.update()
 
+    def _hit_knob(self, x):
+        return abs(float(x) - self._knob_cx()) <= self.KNOB_R + 5.0
+
+    def _update_hover_cursor(self, x=None):
+        """Open hand over the knob, left-right arrows over the groove.
+
+        The whole slider used to show the resize cursor, which read as "this thing is one
+        draggable bar" and hid the fact that the knob and the groove behave differently.
+        """
+        if not self.isEnabled():
+            return
+        if self._pressed:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor
+                           if self._drag_mode == 'knob' else Qt.CursorShape.SizeHorCursor)
+            return
+        if x is None:
+            x = self.mapFromGlobal(QCursor.pos()).x()
+        self.setCursor(Qt.CursorShape.OpenHandCursor if self._hit_knob(x)
+                       else Qt.CursorShape.SizeHorCursor)
+
+    def enterEvent(self, event):
+        self._update_hover_cursor()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if not self._pressed:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        super().leaveEvent(event)
+
     def _knob_cx(self):
         if self._smooth_x is not None:
             x_start, x_end, _ = self._track_span()
@@ -323,12 +352,12 @@ class RoundScrubSlider(QSlider):
         self._track_accum = 0.0
         # A press on the knob drags it; a press anywhere else on the groove scrubs relatively.
         # Nothing jumps to the click point any more, and a bare click changes nothing.
-        if abs(pos.x() - self._knob_cx()) <= self.KNOB_R + 5.0:
-            self._drag_mode = 'knob'
+        self._drag_mode = 'knob' if abs(pos.x() - self._knob_cx()) <= self.KNOB_R + 5.0 else 'track'
+        if self._drag_mode == 'knob':
             self._grab_offset = pos.x() - self._knob_cx()
         else:
-            self._drag_mode = 'track'
             self._grab_offset = 0.0
+        self._update_hover_cursor(pos.x())
         # Grab right away: without it the drag is lost the moment the pointer leaves this
         # 22px-tall row, which is exactly what read as "the knob sticks".
         try:
@@ -342,6 +371,7 @@ class RoundScrubSlider(QSlider):
             event.ignore()
             return
         if not self._pressed:
+            self._update_hover_cursor(event.position().x())
             super().mouseMoveEvent(event)
             return
         pos = event.position()
@@ -386,6 +416,7 @@ class RoundScrubSlider(QSlider):
             self._track_accum = 0.0
             self._release_grab()
             self.update()
+            self._update_hover_cursor()
             self.sliderReleased.emit()
             event.accept()
             return
@@ -701,7 +732,11 @@ class ParamScrubSlider(QWidget):
         val = self._slider_to_val(pos)
         self.current_val = val
         self._precise_val = float(val)
-        self._update_display(val, sync_precise=True)
+        # While the user is holding the knob, keep its continuous position instead of snapping
+        # it to the quantised step.  Clearing it here is what made a 1.8px step read as a
+        # stepped control; the number still updates in steps, the knob does not.
+        keep_continuous = bool(getattr(self.slider, "_pressed", False))
+        self._update_display(val, sync_precise=not keep_continuous)
         self.valueChanged.emit(val)
 
     def _on_slider_released(self):
@@ -845,9 +880,8 @@ class DarkroomComboItemDelegate(QStyledItemDelegate):
         txt_rect = QRect(r.x() + 10, r.y(), r.width() - 18, r.height())
         if is_selected:
             painter.setPen(QColor("#f59e0b") if is_dark else QColor("#d97706"))
-            font = painter.font()
-            font.setBold(True)
-            painter.setFont(font)
+            # Selected rows change colour only.  Bolding the active item made the popup
+            # reflow as the selection moved, and the same rule applied to every list in the app.
         elif is_hovered:
             painter.setPen(QColor("#ffffff") if is_dark else QColor("#0f172a"))
         else:

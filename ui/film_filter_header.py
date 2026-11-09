@@ -218,7 +218,7 @@ class FilmFilterHeader(QWidget):
                     background: rgba(245, 158, 11, 0.16);
                     color: #f59e0b;
                     border: 1px solid #f59e0b;
-                    font-weight: bold;
+                    font-weight: 500;
                 }
             """)
             if cat_id == "all":
@@ -296,7 +296,7 @@ class FilmFilterHeader(QWidget):
                     background: rgba(245, 158, 11, 0.16);
                     color: #f59e0b;
                     border: 1px solid #f59e0b;
-                    font-weight: bold;
+                    font-weight: 500;
                 }
             """
         else:
@@ -337,7 +337,7 @@ class FilmFilterHeader(QWidget):
                     background: rgba(245, 158, 11, 0.16);
                     color: #d97706;
                     border: 1px solid #f59e0b;
-                    font-weight: bold;
+                    font-weight: 500;
                 }
             """
         for btn in self.pills_dict.values():

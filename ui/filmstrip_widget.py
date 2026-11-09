@@ -1242,7 +1242,7 @@ class FilmstripWidget(QWidget):
                             border: 1px solid #f59e0b;
                             border-radius: 6px;
                             font-size: 10px;
-                            font-weight: bold;
+                            font-weight: 500;
                             padding: 0px;
                             margin: 0px;
                             outline: none;
@@ -1366,7 +1366,7 @@ class FilmstripWidget(QWidget):
                             border: 1px solid #d97706;
                             border-radius: 6px;
                             font-size: 10px;
-                            font-weight: bold;
+                            font-weight: 500;
                             padding: 0px;
                             margin: 0px;
                             outline: none;

@@ -1315,10 +1315,10 @@ class FilmGridCard(QFrame):
                     border-radius: 6px;
                 }}
                 QLabel#filmCardThumb {{ border: none; background: transparent; border-radius: 4px; }}
-                QLabel#filmCardName {{ border: none; background: transparent; color: #f59e0b; font-size: 9.5px; font-weight: bold; }}
+                QLabel#filmCardName {{ border: none; background: transparent; color: #f59e0b; font-size: 9.5px; font-weight: 500; }}
                 {tooltip_bubble_style}
             """)
-            self.lbl_name.setStyleSheet("QLabel#filmCardName { color: #f59e0b; font-size: 9.5px; font-weight: bold; border: none; background: transparent; }")
+            self.lbl_name.setStyleSheet("QLabel#filmCardName { color: #f59e0b; font-size: 9.5px; font-weight: 500; border: none; background: transparent; }")
         else:
             idle_bg = "#15161c" if is_dark else "#ffffff"
             idle_border = "#282a36" if is_dark else "#d8dce6"
