@@ -3037,8 +3037,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # black export; the tile renderer (with the 3-sigma overlap from
         # halation_model.halation_overlap_px) is the planned fix.
         if max(int(target_w), int(target_h)) > 16384:
-            message = (f"{target_w}x{target_h} 超出 GPU 16384 px 纹理上限，"
-                       f"已改用 CPU 导出（会明显变慢）")
+            message = (f"{target_w}×{target_h} 图像超出 GPU 纹理上限 16384 px，"
+                       f"已改用 CPU 导出（较慢，结果与画面一致）")
             print(f"[DarkroomGLCanvas] render_offscreen: {message}")
             self.gpuFallback.emit(message)
             return None

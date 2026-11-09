@@ -583,6 +583,10 @@ class BatchImportWorker(QThread):
 # would silently apply the old (corner-only) model.
 _AUTO_CA_KEYS = ("auto_ca_r", "auto_ca_b", "auto_ca_scale_r", "auto_ca_scale_b")
 
+# Status-line copy shared by several call sites (see docs/status-text-inventory.md §5).
+STATUS_IMPORTING = "正在导入底片（{cur}/{tot}）…"
+STATUS_LOSSY_SKIPPED = "已跳过 {n} 个有损压缩文件（JPG/WebP），仅支持 RAW 与无损图像"
+
 
 class CAEstimateWorker(QThread):
     """Measures lateral CA for the current frame off the GUI thread.
@@ -2070,7 +2074,7 @@ class DarkroomMainWindow(QMainWindow):
         # succeeds) but it changes the wait from seconds to minutes, and the console line was
         # invisible from inside the app.
         self.canvas.gpuFallback.connect(
-            lambda msg: self.statusBar().showMessage(f"{msg}（画面与 CPU 导出结果一致）", 10000))
+            lambda msg: self.set_app_status(msg, timeout_ms=6000))
         self.film_cards = {}
         self.paper_cards = {}
         self._current_session_path = None
@@ -2262,9 +2266,9 @@ class DarkroomMainWindow(QMainWindow):
         self.stack.setCurrentIndexAnimated(1, duration_ms=250)
         self.btn_title_export.setVisible(True)
         if session_name:
-            self.set_app_status(f"正在载入会话: {session_name}...", spinning=True, timeout_ms=0)
+            self.set_app_status(f"正在载入会话：{session_name}…", spinning=True, timeout_ms=0)
         else:
-            self.set_app_status("正在载入会话...", spinning=True, timeout_ms=0)
+            self.set_app_status("正在载入会话…", spinning=True, timeout_ms=0)
 
         # 2. Launch background worker
         worker = SessionRestoreWorker(
@@ -2296,7 +2300,7 @@ class DarkroomMainWindow(QMainWindow):
             if getattr(self, "_session_restore_worker", None) != worker:
                 return
             if getattr(self, "_is_importing", False):
-                self.set_app_status(f"正在载入会话 ({current}/{total} 张)...", spinning=True, timeout_ms=0)
+                self.set_app_status(f"正在载入会话（{current}/{total}）…", spinning=True, timeout_ms=0)
 
         def _on_restore_finished(all_photos, uncached_slots, final_target_path):
             if getattr(self, "_session_restore_worker", None) != worker:
@@ -2348,7 +2352,7 @@ class DarkroomMainWindow(QMainWindow):
                 self._import_lock_time = time.time()
                 if hasattr(self, "btn_cancel_import"):
                     self.btn_cancel_import.setVisible(True)
-                self.set_app_status(f"正在恢复底片库 (0/{len(uncached_slots)} 张)...", spinning=True, timeout_ms=0)
+                self.set_app_status(f"正在恢复底片库（0/{len(uncached_slots)}）…", spinning=True, timeout_ms=0)
                 self._slot_decode_worker = SlotDecodeWorker(uncached_slots, self.engine, parent=self)
                 self._slot_decode_worker.slotDecoded.connect(self._on_slot_photo_decoded)
                 self._slot_decode_worker.progress.connect(self._on_slot_decode_progress)
@@ -2362,11 +2366,11 @@ class DarkroomMainWindow(QMainWindow):
                     self.btn_cancel_import.setVisible(False)
                 if session_name:
                     if path_updated:
-                        self.set_app_status(f"会话已恢复 (底片路径已更新): {session_name} ({total_files} 张)", spinning=False, timeout_ms=3000)
+                        self.set_app_status(f"会话已恢复：{session_name}（{total_files} 张），底片路径已更新", spinning=False, timeout_ms=3000)
                     else:
-                        self.set_app_status(f"会话已恢复: {session_name} ({total_files} 张)", spinning=False, timeout_ms=2500)
+                        self.set_app_status(f"会话已恢复：{session_name}（{total_files} 张）", spinning=False, timeout_ms=2500)
                 else:
-                    self.set_app_status(f"底片库已就绪 ({total_files} 张)", spinning=False, timeout_ms=2500)
+                    self.set_app_status(f"底片库已就绪（{total_files} 张）", spinning=False, timeout_ms=2500)
 
         def _on_failed(err_msg):
             if getattr(self, "_session_restore_worker", None) != worker:
@@ -2377,7 +2381,7 @@ class DarkroomMainWindow(QMainWindow):
             self._is_importing = False
             if hasattr(self, "btn_cancel_import"):
                 self.btn_cancel_import.setVisible(False)
-            self.set_app_status(f"载入会话失败: {err_msg}", spinning=False, timeout_ms=3500)
+            self.set_app_status(f"载入会话失败：{err_msg}", spinning=False, timeout_ms=4000)
 
         worker.activePhotoReady.connect(_on_active_photo_ready)
         worker.progress.connect(_on_progress)
@@ -4093,7 +4097,7 @@ class DarkroomMainWindow(QMainWindow):
             except Exception:
                 pass
         if abs(ev) < 1e-4:
-            self.set_app_status("测光建议为 0 EV，无需调整", timeout_ms=2500)
+            self.set_app_status("测光建议 0 EV，无需调整", timeout_ms=2500)
             return
         ev = max(-3.0, min(3.0, ev))
         self.slider_ev.setValue(ev)
@@ -5267,7 +5271,7 @@ class DarkroomMainWindow(QMainWindow):
         count = len(selected_ids)
         if count > 1:
             self._is_multi_selecting = True
-            self.set_app_status(f"已选中 {count} 张底片", spinning=False, timeout_ms=0)
+            self.set_app_status(f"已选择 {count} 张底片", spinning=False, timeout_ms=0)
         else:
             if getattr(self, "_is_multi_selecting", False):
                 self._is_multi_selecting = False
@@ -5321,7 +5325,7 @@ class DarkroomMainWindow(QMainWindow):
                     photo["is_dirty"] = False
                 self.filmstrip.set_photo_dirty(self.active_photo_id, False)
             self._update_window_title()
-            self.set_app_status(f"已保存更改: {os.path.basename(self._current_photo_path)}", timeout_ms=4000)
+            self.set_app_status(f"已保存更改：{os.path.basename(self._current_photo_path)}", timeout_ms=4000)
 
     def _on_backslash_timeout(self):
         if getattr(self, "_backslash_pressed", False):
@@ -5556,14 +5560,15 @@ class DarkroomMainWindow(QMainWindow):
             else:
                 is_import_msg = any(text.startswith(prefix) for prefix in [
                     "正在导入", "导入底片", "正在恢复", "底片库", "会话底片库", "已导入", "已取消",
-                    "正在载入", "载入会话", "载入底片", "正在加载", "加载会话", "会话已恢复", "会话",
+                    "正在载入", "载入会话", "载入底片", "会话已恢复", "会话",
+                    "已跳过", "所选",
                     "正在保存会话"
                 ])
                 if not is_import_msg:
                     return
         # Lock status during multi-selection so photo click doesn't wipe selection count
         if getattr(self, "_is_multi_selecting", False) and not spinning:
-            if not text.startswith("已选中") and not text.startswith("已全选"):
+            if not text.startswith(("已选择", "已选中", "已全选")):
                 return
 
         if hasattr(self, "_status_timer"):
@@ -5697,7 +5702,7 @@ class DarkroomMainWindow(QMainWindow):
     def action_save_session(self):
         """Item 9 & 11: Saves current editing session (.sdss). Returns True if saved."""
         if not self.photos and not self._current_session_path:
-            self.set_app_status("底片库为空，无需保存会话", timeout_ms=2500)
+            self.set_app_status("底片库为空，无需保存", timeout_ms=3000)
             return False
 
         if not self._current_session_path or getattr(self, "_is_temp_session", False):
@@ -5708,7 +5713,7 @@ class DarkroomMainWindow(QMainWindow):
     def action_save_session_as(self):
         """Item 9 & 11: Prompts user to select a .sdss file path and saves session. Returns True if saved."""
         if not self.photos and not self._current_session_path:
-            self.set_app_status("底片库为空，无需保存会话", timeout_ms=2500)
+            self.set_app_status("底片库为空，无需保存", timeout_ms=3000)
             return False
 
         # Item 1: Suggest title session name rather than single image filename
@@ -5826,12 +5831,12 @@ class DarkroomMainWindow(QMainWindow):
             logger.warning(f"Error auto-saving temporary session: {e}")
 
     def _do_save_session(self, file_path):
-        self.set_app_status("正在保存会话...", spinning=True)
+        self.set_app_status("正在保存会话…", spinning=True)
         try:
             return self._write_session(file_path)
         except Exception as e:
             logger.error(f"Failed to save session {file_path}: {e}")
-            self.set_app_status(f"会话保存失败: {e}", timeout_ms=4000)
+            self.set_app_status(f"会话保存失败：{e}", timeout_ms=4000)
             return False
 
     def _write_session(self, file_path):
@@ -5914,7 +5919,7 @@ class DarkroomMainWindow(QMainWindow):
         ok = session_cache_manager.save_session_file(file_path, session_data)
         if ok:
             fn = os.path.basename(file_path)
-            self.set_app_status(f"会话已保存: {fn}", timeout_ms=3000)
+            self.set_app_status(f"会话已保存：{fn}", timeout_ms=3000)
             self._session_is_dirty = False
             self._is_temp_session = False
             self._update_window_title()
@@ -5923,7 +5928,7 @@ class DarkroomMainWindow(QMainWindow):
             self._update_recent_menu()
             return True
         else:
-            self.set_app_status("会话保存失败", timeout_ms=3000)
+            self.set_app_status("会话保存失败：未能写入会话文件", timeout_ms=4000)
             return False
 
     def _close_needs_prompt(self) -> bool:
@@ -6096,13 +6101,13 @@ class DarkroomMainWindow(QMainWindow):
 
     def _open_session_by_path(self, file_path):
         if not file_path or not os.path.exists(file_path):
-            self.set_app_status("会话文件不存在", timeout_ms=3000)
+            self.set_app_status("载入会话失败：会话文件不存在", timeout_ms=4000)
             return
 
-        self.set_app_status("正在加载会话...", spinning=True)
+        self.set_app_status("正在载入会话…", spinning=True)
         session_data = session_cache_manager.load_session_file(file_path)
         if not session_data or "photos" not in session_data:
-            self.set_app_status("会话文件损坏或无效", timeout_ms=3000)
+            self.set_app_status("载入会话失败：会话文件已损坏", timeout_ms=4000)
             return
 
         from core.path_utils import normalize_path
@@ -6236,7 +6241,7 @@ class DarkroomMainWindow(QMainWindow):
                 return
 
         if not resolved_files and photo_entries:
-            self.set_app_status("底片均丢失且未关联，无法载入会话", timeout_ms=3000)
+            self.set_app_status("载入会话失败：所有底片均已丢失且未关联", timeout_ms=4000)
             return
 
         # Cancel any active imports from previous session immediately
@@ -6320,7 +6325,7 @@ class DarkroomMainWindow(QMainWindow):
                 self.filmstrip.set_photos([], None)
                 self.btn_title_export.setVisible(False)
                 self.thumb_controller.reset_all_cards_to_color_pills(self.film_cards, self.paper_cards)
-                self.set_app_status(f"会话已恢复 (空工程): {fn}", timeout_ms=2500)
+                self.set_app_status(f"会话已恢复：{fn}（空工程）", timeout_ms=2500)
                 self._update_window_title()
 
     def action_quick_export(self, target_ids=None):
@@ -6507,14 +6512,14 @@ class DarkroomMainWindow(QMainWindow):
     def undo(self):
         if getattr(self.canvas, "is_crop_editing", False):
             if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay.undo():
-                self.set_app_status("已撤销裁切操作", timeout_ms=1500)
+                self.set_app_status("已撤销裁切", timeout_ms=2000)
             else:
-                self.set_app_status("已到最初裁切状态", timeout_ms=1500)
+                self.set_app_status("已回到最初的裁切状态", timeout_ms=2000)
             self._update_menu_actions_state()
             return
 
         if len(self._undo_stack) <= 1:
-            self.set_app_status("已到最初历史状态", timeout_ms=1500)
+            self.set_app_status("已回到最初的历史状态", timeout_ms=2000)
             return
 
         curr_state = self._undo_stack.pop()
@@ -6559,20 +6564,20 @@ class DarkroomMainWindow(QMainWindow):
         elif act == "auto_meter":
             self.set_app_status("已撤销基准测光", timeout_ms=2000)
         else:
-            self.set_app_status("已撤销", timeout_ms=1500)
+            self.set_app_status("已撤销", timeout_ms=2000)
         self._update_menu_actions_state()
 
     def redo(self):
         if getattr(self.canvas, "is_crop_editing", False):
             if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay.redo():
-                self.set_app_status("已重做裁切操作", timeout_ms=1500)
+                self.set_app_status("已重做裁切", timeout_ms=2000)
             else:
-                self.set_app_status("已到最新裁切状态", timeout_ms=1500)
+                self.set_app_status("已回到最新的裁切状态", timeout_ms=2000)
             self._update_menu_actions_state()
             return
 
         if not self._redo_stack:
-            self.set_app_status("已到最新历史状态", timeout_ms=1500)
+            self.set_app_status("已回到最新的历史状态", timeout_ms=2000)
             return
 
         nxt_state = self._redo_stack.pop()
@@ -6612,7 +6617,7 @@ class DarkroomMainWindow(QMainWindow):
         elif act == "auto_meter":
             self.set_app_status("已重做基准测光", timeout_ms=2000)
         else:
-            self.set_app_status("已重做", timeout_ms=1500)
+            self.set_app_status("已重做", timeout_ms=2000)
         self._update_menu_actions_state()
 
     def _is_photo_edited(self, photo_entry=None) -> bool:
@@ -6767,7 +6772,7 @@ class DarkroomMainWindow(QMainWindow):
 
         target_p = next((p for p in self.photos if p and p.get("id") == target_id), None)
         if not target_p or not self._is_photo_edited(target_p):
-            self.set_app_status("当前底片为原生底片（未做任何暗房修改），无暗房配方可复制", timeout_ms=2500)
+            self.set_app_status("当前底片为原生底片，没有可复制的暗房配方", timeout_ms=2500)
             return
 
         exif = target_p.get("meta") or target_p.get("exif") or {}
@@ -6818,7 +6823,7 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'filmstrip'):
             self.filmstrip.set_can_paste(True)
         film_desc = "数码原生" if film == "none" else f"胶卷 ({film})"
-        self.set_app_status(f"已复制暗房配方 [{film_desc}]", timeout_ms=2000)
+        self.set_app_status(f"已复制暗房配方：{film_desc}", timeout_ms=2500)
         self._update_menu_actions_state()
 
     def action_paste_params(self):
@@ -6828,7 +6833,7 @@ class DarkroomMainWindow(QMainWindow):
 
         copied = getattr(self, '_copied_darkroom_profile', None)
         if not copied or not copied.get("is_edited"):
-            self.set_app_status("剪贴板中无有效暗房配方可粘贴", timeout_ms=2500)
+            self.set_app_status("剪贴板中没有可用的暗房配方", timeout_ms=2500)
             return
 
         copied_film = copied["film"]
@@ -7066,7 +7071,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         }
         self._push_raw_state(post_state)
 
-        self.set_app_status(f"已应用暗房配方至 {affected_count} 张底片", timeout_ms=2500)
+        self.set_app_status(f"已应用暗房配方：{affected_count} 张底片", timeout_ms=3000)
 
     def _apply_history_state(self, state):
         if not state:
@@ -7888,7 +7893,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.canvas.params[k] = self.current_params[k]
         self._apply_lut(lut_3d)
         dur = (time.time() - t0) * 1000.0
-        self.set_app_status(f"LUT 烘焙完成 ({dur:.0f}ms)", timeout_ms=2000)
+        self.set_app_status(f"LUT 烘焙完成（{dur:.0f} ms）", timeout_ms=2000)
 
     def _commit_lut_preview(self):
         """Finish a DIR / morph drag.
@@ -7945,7 +7950,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.canvas.update_params(exposure_ev=ev_val)
         self._on_slider_committed(action="auto_meter")
         base_ev = float(photo.get("base_ev", 0.0))
-        self.set_app_status(f"基准测光: 18% 中灰 (基准 {base_ev:+.2f} EV)", timeout_ms=2500)
+        self.set_app_status(f"基准测光：18% 中灰（基准 {base_ev:+.2f} EV）", timeout_ms=2500)
 
     def _get_track_defaults(self):
         def_temp = getattr(self.slider_temp, "default_val", 5500.0) if hasattr(self, 'slider_temp') else 5500.0
@@ -8161,7 +8166,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if getattr(self.canvas, "is_crop_editing", False):
             if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
                 self.canvas.crop_overlay.reset_crop()
-                self.set_app_status("已重置裁切", timeout_ms=1500)
+                self.set_app_status("已重置裁切", timeout_ms=2000)
             return
 
         defaults = self._get_track_defaults()
@@ -8202,7 +8207,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if getattr(self.canvas, "is_crop_editing", False):
             if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
                 self.canvas.crop_overlay.reset_to_initial_state()
-                self.set_app_status("已恢复至打开时裁切状态", timeout_ms=1500)
+                self.set_app_status("已恢复至打开时的裁切状态", timeout_ms=2000)
         else:
             self.reset_to_open_state()
 
@@ -8269,7 +8274,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.filmstrip.set_photo_dirty(self.active_photo_id, False)
             self.filmstrip.set_photo_crop(self.active_photo_id, False)
 
-        self.set_app_status("已恢复至原始底片状态", timeout_ms=1500)
+        self.set_app_status("已恢复至原始底片状态", timeout_ms=2000)
 
     def _push_speed_gain(self, stops):
         """EV the pushed curve actually gives back on this stock (0 when unknown)."""
@@ -8844,7 +8849,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._default_paper_timer.stop()
             n = getattr(self, "_default_paper_refreshed", 0)
             if n:
-                self.set_app_status(f"默认相纸已更新，{n} 张未选相纸的照片已重刷", timeout_ms=3000)
+                self.set_app_status(f"默认相纸已更新，{n} 张底片已更新", timeout_ms=3000)
 
     def _photo_effective_paper(self, photo):
         """给某张照片算它实际该用的相纸（见 _effective_paper_for_photo + 显式标记）。"""
@@ -8963,7 +8968,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.push_undo_state()
             self._save_current_photo_sdc()
             film_desc = "无" if stock_id == "none" else f"{stock_id}"
-            self.set_app_status(f"胶卷: {film_desc}", timeout_ms=2500)
+            self.set_app_status(f"胶卷：{film_desc}", timeout_ms=2500)
 
     def on_switch_print_mode(self, mode, push_undo=True):
         if mode not in ("optical", "scan"):
@@ -8974,7 +8979,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if (mode == "optical" and mode != getattr(self, "current_print_mode", "optical")
                 and hasattr(self.engine, "is_positive_film")
                 and self.engine.is_positive_film(getattr(self, "current_film_stock", "none"))):
-            self.set_app_status("反转片直接看片，不经过相纸印相", timeout_ms=2500)
+            self.set_app_status("反转片直接查看，不经过相纸印相", timeout_ms=2500)
             return
         if push_undo and mode != getattr(self, "current_print_mode", "optical"):
             self._mark_current_photo_dirty()
@@ -9011,7 +9016,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.push_undo_state()
             self._save_current_photo_sdc()
             mode_name = "相纸印相" if mode == "optical" else "胶片直扫"
-            self.set_app_status(f"模式: {mode_name}", timeout_ms=2500)
+            self.set_app_status(f"印相模式：{mode_name}", timeout_ms=2500)
 
     def on_switch_paper(self, stock_id, push_undo=True):
         if hasattr(self, "_hover_timer"):
@@ -9030,7 +9035,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 card.set_active(sid == stock_id)
             if hasattr(self, "combo_paper"):
                 self.combo_paper.set_value(stock_id)
-            self.set_app_status("反转底片无需相纸放大，当前选择已保留给负片", timeout_ms=2500)
+            self.set_app_status("反转片不使用相纸，当前选择已保留给负片", timeout_ms=2500)
             return
 
         prev_paper = self.current_paper_stock
@@ -9079,7 +9084,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.push_undo_state()
             self._save_current_photo_sdc()
             mode_desc = "胶片直扫" if stock_id == "none" else f"{stock_id}"
-            self.set_app_status(f"相纸: {mode_desc}", timeout_ms=2500)
+            self.set_app_status(f"相纸：{mode_desc}", timeout_ms=2500)
 
     def _on_paper_combo_changed(self, paper_id):
         """右侧“相纸”下拉框：与旧卡片墙走同一条切换路径。"""
@@ -9107,7 +9112,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
         self._saved_view_mode_before_long_press = self.canvas.params.get("view_mode", 0)
         self.set_view_mode(3)
-        self.set_app_status("原片对比 (松开恢复)", timeout_ms=0)
+        self.set_app_status("原片对比（松开恢复）", timeout_ms=0)
 
     def _on_compare_long_press_end(self):
         if hasattr(self, "_saved_view_mode_before_long_press"):
@@ -9197,14 +9202,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._import_files_list(files)
             if skipped_lossy:
                 self.set_app_status(
-                    f"已静默跳过 {skipped_lossy} 个有损压缩文件（JPG/WebP），仅支持 RAW 与无损位图",
+                    STATUS_LOSSY_SKIPPED.format(n=skipped_lossy),
                     timeout_ms=4000,
                 )
         else:
             # Silent by policy: no dialog for rejected formats, only a status-bar note.
             self.set_app_status(
-                f"该文件夹内 {skipped_lossy} 个文件均为有损压缩（JPG/WebP），未导入" if skipped_lossy
-                else "所选文件夹中未找到受支持的图像文件",
+                f"所选文件夹内 {skipped_lossy} 个文件均为有损压缩（JPG/WebP），未导入" if skipped_lossy
+                else "所选文件夹内未找到受支持的图像文件",
                 timeout_ms=4000,
             )
 
@@ -9231,7 +9236,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     dropped_lossy += 1
             if dropped_lossy:
                 self.set_app_status(
-                    f"已静默忽略 {dropped_lossy} 个有损压缩文件（JPG/WebP），仅支持 RAW 与无损位图",
+                    STATUS_LOSSY_SKIPPED.format(n=dropped_lossy),
                     timeout_ms=4000,
                 )
             file_paths = importable
@@ -9264,11 +9269,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if dup_names:
             if not new_paths:
                 logger.info(f"All {len(dup_names)} selected files are already in library")
-                self.set_app_status(f"所选的 {len(dup_names)} 个底片已在底片库中，无需重复导入", timeout_ms=3000)
+                self.set_app_status(f"所选 {len(dup_names)} 张底片已在底片库中，无需重复导入", timeout_ms=3000)
                 return
             else:
                 logger.info(f"Skipping {len(dup_names)} duplicate files already in library")
-                self.set_app_status(f"已自动跳过 {len(dup_names)} 个重复底片，正在导入新底片...", timeout_ms=3000)
+                self.set_app_status(f"已跳过 {len(dup_names)} 张重复底片，正在导入新底片…", timeout_ms=3000)
 
         if not new_paths:
             return
@@ -9311,7 +9316,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
             cur = getattr(self, "_import_session_completed", 0)
             tot = self._import_session_target_total
-            self.set_app_status(f"正在导入底片 ({cur}/{tot})...", spinning=True, timeout_ms=0)
+            self.set_app_status(STATUS_IMPORTING.format(cur=cur, tot=tot), spinning=True, timeout_ms=0)
             logger.info(f"Import queue: appended {len(new_paths)} files, pending queue size: {len(self._pending_import_queue)}, target total: {tot}")
 
             if not active_worker_running:
@@ -9327,7 +9332,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._import_session_target_total = len(new_paths)
         self._last_import_status_time = 0.0
 
-        self.set_app_status(f"正在导入底片 (0/{self._import_session_target_total})...", spinning=True, timeout_ms=0)
+        self.set_app_status(STATUS_IMPORTING.format(cur=0, tot=self._import_session_target_total), spinning=True, timeout_ms=0)
 
         # Asynchronous streaming import worker
         start_idx = max(getattr(self, "_photo_id_counter", 0), len(self.photos))
@@ -9517,7 +9522,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if not getattr(self, "_import_session_target_total", 0) and total_count:
             self._import_session_target_total = total_count
         tot = max(getattr(self, "_import_session_target_total", 0), cur)
-        status_text = f"正在导入底片 ({cur}/{tot})..."
+        status_text = STATUS_IMPORTING.format(cur=cur, tot=tot)
 
         import time
         now = time.time()
@@ -9538,7 +9543,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if getattr(self, "_is_importing", False):
             cur = getattr(self, "_import_session_completed", len(self.photos))
             tot = max(getattr(self, "_import_session_target_total", cur), cur)
-            self.set_app_status(f"正在导入底片 ({cur}/{tot})...", spinning=True, timeout_ms=0)
+            self.set_app_status(STATUS_IMPORTING.format(cur=cur, tot=tot), spinning=True, timeout_ms=0)
 
     def _flush_import_filmstrip_buffer(self):
         buf = getattr(self, "_import_filmstrip_buffer", None)
@@ -9587,7 +9592,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.on_switch_photo(target_entry["id"])
 
         completed_count = getattr(self, "_import_session_completed", len(self.photos))
-        self.set_app_status(f"底片库导入完成 (共 {completed_count} 张)", spinning=False, timeout_ms=3000)
+        self.set_app_status(f"已导入 {completed_count} 张底片", spinning=False, timeout_ms=3000)
 
         # Real-time session state save & cache maintenance
         try:
@@ -9753,7 +9758,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
     def _on_slot_decode_progress(self, curr, total):
         if getattr(self, "_is_importing", False):
-            self.set_app_status(f"正在恢复底片库 ({curr}/{total} 张)...", spinning=True, timeout_ms=0)
+            self.set_app_status(f"正在恢复底片库（{curr}/{total}）…", spinning=True, timeout_ms=0)
 
     def _on_all_slots_decoded(self):
         if getattr(self, "_slot_decode_worker", None):
@@ -9773,9 +9778,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.btn_cancel_import.setVisible(False)
         sess_name = os.path.basename(self._current_session_path) if getattr(self, "_current_session_path", None) else ""
         if sess_name:
-            self.set_app_status(f"会话底片库已就绪 ({len(self.photos)} 张): {sess_name}", spinning=False, timeout_ms=3000)
+            self.set_app_status(f"会话已恢复：{sess_name}（{len(self.photos)} 张）", spinning=False, timeout_ms=3000)
         else:
-            self.set_app_status(f"底片库已就绪 ({len(self.photos)} 张)", spinning=False, timeout_ms=3000)
+            self.set_app_status(f"底片库已就绪（{len(self.photos)} 张）", spinning=False, timeout_ms=2500)
         try:
             session_cache_manager.prune_cache_if_needed()
         except Exception:
@@ -10003,9 +10008,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         cnt = len(photo_ids)
         stars_str = "★" * clean_r + "☆" * (5 - clean_r)
         if clean_r > 0:
-            msg = f"已评为 {stars_str} {clean_r} 星 ({cnt} 张底片)" if cnt > 1 else f"底片已评为 {stars_str} {clean_r} 星"
+            msg = f"已评为 {stars_str}（{cnt} 张底片）" if cnt > 1 else f"已评为 {stars_str}"
         else:
-            msg = f"已清除评级 ({cnt} 张底片)" if cnt > 1 else "底片已清除评级"
+            msg = f"已清除评级（{cnt} 张底片）" if cnt > 1 else "已清除评级"
         self.set_app_status(msg, timeout_ms=3000)
 
     def action_set_active_rating(self, rating: int):
@@ -10821,8 +10826,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._save_current_photo_sdc()
         self.push_undo_state()
 
-        if hasattr(self, "statusBar") and self.statusBar():
-            self.statusBar().showMessage(f"已成功导入镜头配置文件：{prof_display}", 4000)
+        self.set_app_status(f"已导入镜头配置文件：{prof_display}", timeout_ms=4000)
 
     def _on_lens_amount_changed(self, key, val):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
@@ -11218,7 +11222,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     else:
                         # Asynchronous load so that the spinner rotates smoothly at 30 FPS without freezing
                         if not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False):
-                            self.set_app_status(f"解析 RAW: {fn}...", spinning=True, timeout_ms=0)
+                            self.set_app_status(f"正在解析 RAW：{fn}…", spinning=True, timeout_ms=0)
 
                         # Priority 2: Visual seamless placeholder in Direct sRGB Bypass mode (u_is_bypass = 2)
                         # Immediately present the bottom filmstrip or cached thumbnail with 0ms response,
@@ -11256,7 +11260,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 m_h = photo.get("height") or (photo.get("meta", {}).get("height") if isinstance(photo.get("meta"), dict) else None)
                 self.canvas.set_image(photo["float_img"], master_width=m_w, master_height=m_h, photo_id=photo_id)
                 if not getattr(self, "_is_multi_selecting", False):
-                    self.set_app_status(f"底片已就绪: {fn}", spinning=False, timeout_ms=2000)
+                    self.set_app_status(f"底片已载入：{fn}", spinning=False, timeout_ms=2000)
 
             self._manage_photo_memory_lru(photo_id)
 
@@ -11412,7 +11416,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
     def _on_single_photo_loaded(self, photo_id, photo_path, res):
         if not res or not res.get("success"):
             if self.active_photo_id == photo_id:
-                self.set_app_status("底片解析失败", spinning=False, timeout_ms=3000)
+                self.set_app_status(
+                    f"底片载入失败：{os.path.basename(photo_path)}", spinning=False, timeout_ms=4000)
             return
 
         float_img = res.get("float_img")
@@ -11422,7 +11427,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             float_img = session_cache_manager.get_photo_preview(photo_path)
         if float_img is None:
             if self.active_photo_id == photo_id:
-                self.set_app_status("底片解析失败", spinning=False, timeout_ms=3000)
+                self.set_app_status(
+                    f"底片载入失败：{os.path.basename(photo_path)}（无可用的预览数据）",
+                    spinning=False, timeout_ms=4000)
             return
 
 
@@ -11537,7 +11544,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 logger.error(f"Error updating GUI for loaded photo {photo_id}: {e}")
             finally:
                 if not getattr(self, "_is_multi_selecting", False):
-                    self.set_app_status(f"底片已就绪: {fn}", spinning=False, timeout_ms=2000)
+                    self.set_app_status(f"底片已载入：{fn}", spinning=False, timeout_ms=2000)
 
     def _update_card_live_thumbnails(self, thumb_data, do_films=True, do_papers=True):
         if thumb_data is None:
@@ -11791,7 +11798,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
 
         recycled_ok = send_to_recycle_bin(files_to_recycle)
         if not recycled_ok:
-            self.set_app_status("删除失败：无法将文件移至回收站", timeout_ms=3000)
+            self.set_app_status("删除失败：无法移入回收站", timeout_ms=3000)
             return
 
         from core import session_cache_manager
@@ -11825,7 +11832,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         if not self._undo_stack and self.active_photo_id and getattr(self, "_active_photo_baseline_state", None):
             self._undo_stack = [self._active_photo_baseline_state]
         self._update_menu_actions_state()
-        self.set_app_status(f"已将 {count} 个底片文件移至回收站", timeout_ms=3000)
+        self.set_app_status(f"已将 {count} 个文件移入回收站", timeout_ms=3000)
 
     def action_clear_sdc_active(self):
         """Action handler for menu bar: Delete SDC sidecar recipe and revert photo(s) to pristine RAW."""
@@ -12011,9 +12018,9 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         self._save_auto_temp_session()
 
         if active_cleared and len(id_set) == 1:
-            self.set_app_status("已清除暗房配置并重置为原生底片", timeout_ms=3000)
+            self.set_app_status("已清除暗房配置，恢复为原生底片", timeout_ms=3000)
         else:
-            self.set_app_status(f"已清除 {len(id_set)} 项底片配置并重置为原生底片", timeout_ms=3000)
+            self.set_app_status(f"已清除 {len(id_set)} 张底片的暗房配置，恢复为原生底片", timeout_ms=3000)
 
     def action_clear_active_crop(self):
         """Clear crop on the currently active photo or selected photo(s)."""
@@ -12221,8 +12228,8 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         self._push_raw_state(post_state)
 
         count = len(target_photos)
-        msg = "已清除裁切" if count == 1 else f"已清除 {count} 项底片裁切"
-        self.set_app_status(msg, timeout_ms=1500)
+        msg = "已清除裁切" if count == 1 else f"已清除 {count} 张底片的裁切"
+        self.set_app_status(msg, timeout_ms=2000)
 
     def action_clear_photos(self, push_undo=True):
         """Completely flush bottom filmstrip, engine session, and canvas without exiting to start screen."""
@@ -12520,7 +12527,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             allow_overwrite=bool(cfg.get("overwrite", True)))
         if out_path != _requested_path:
             self.set_app_status(
-                f"为避免覆盖原始底片或重名文件，已另存为 {os.path.basename(out_path)}", timeout_ms=4000)
+                f"已另存为 {os.path.basename(out_path)}，未覆盖原始底片", timeout_ms=4000)
 
         pix = None
         thumb_arr = self._current_photo_thumb if is_active else (curr_p or {}).get("thumbnail_rgb")
@@ -12842,7 +12849,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                             m_h = photo.get("height") or (photo.get("meta", {}).get("height") if isinstance(photo.get("meta"), dict) else None)
                             self.canvas.set_image(photo["float_img"], master_width=m_w, master_height=m_h, reset_zoom=False)
                             self._update_photo_info_display()
-                            self.set_app_status("已按新首选项重新加载底片全尺寸纹理", timeout_ms=3000)
+                            self.set_app_status("已按首选项重新载入全尺寸纹理", timeout_ms=3000)
             if hasattr(self, 'canvas'):
                 self.canvas.update()
 
