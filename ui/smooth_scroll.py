@@ -3,12 +3,89 @@ Provides silky smooth kinetic momentum scrolling (natural friction decay) and su
 """
 
 import time
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QRectF, QTimer, QEvent
+from PySide6.QtCore import (Qt, QAbstractAnimation, QVariantAnimation, QEasingCurve,
+                            QRectF, QTimer, QEvent)
 from PySide6.QtGui import QPainter, QColor, QLinearGradient
 from PySide6.QtWidgets import QScrollArea, QWidget
 
 from ui.theme_manager import theme_manager
 from ui.touch_scroll import install_touch_scroll
+
+
+class _PixelSettleAnimation(QVariantAnimation):
+    """Scroll-bar motion that does not stall for the last pixel.
+
+    ``QPropertyAnimation`` on ``QScrollBar.value`` animates an **integer**, and every ease-out
+    curve ends with zero velocity.  Together they mean the remaining half pixel is rounded away
+    for the last third of the run: the bar sits perfectly still and then hops the final pixel --
+    measured as 110 ms of stillness followed by one 1px step on a 280 ms settle, which is exactly
+    the "one pixel twitch right before it stops" reported for every panel.
+
+    Driving a *float* through ``round()`` fixes the arithmetic but not the cause: the curve has
+    no speed left to spend.  So the curve keeps a small linear component, sized per run so the
+    last frame still travels about one pixel::
+
+        f(t) = (1 - v) * (1 - (1 - t) ** power) + v * t
+
+    ``v = END_PX_PER_MS * duration / distance`` clamps the terminal speed to ~1 px per 60 Hz
+    frame no matter how long the step is, so the settle decelerates all the way down and then
+    simply stops, instead of freezing and twitching.
+    """
+
+    END_PX_PER_MS = 1.0 / 16.7     # fastest terminal crawl we can show: one pixel per frame
+
+    def __init__(self, bar, parent=None):
+        super().__init__(parent)
+        self._bar = bar
+        self._pos = 0.0
+        self._mute = False
+        self.setEasingCurve(QEasingCurve.Type.Linear)
+        self.valueChanged.connect(self._apply)
+
+    # -- public ---------------------------------------------------------
+    @property
+    def pos(self) -> float:
+        """Where the bar is, including the fraction the scrollbar itself cannot hold."""
+        return self._pos
+
+    def move_to(self, start: float, target: float, duration: int, power: int = 4) -> None:
+        start = float(start)
+        target = float(target)
+        # Rewriting the key values makes QVariantAnimation emit valueChanged for the *old* time
+        # against the new keys (and stop() emits one for the old keys).  Those blips are not
+        # positions the animation ever plays: they read as a 40px jump backwards for one frame,
+        # so they must not reach the scrollbar.
+        self._mute = True
+        try:
+            self.stop()
+            if abs(target - start) < 0.75:
+                self._pos = target
+                self._bar.setValue(int(round(target)))
+                return
+            dist = abs(target - start)
+            linear = min(0.5, self.END_PX_PER_MS * duration / dist)
+            keys = []
+            frames = max(2, int(round(duration / 16.7)))
+            for i in range(frames + 1):
+                t = i / frames
+                f = (1.0 - linear) * (1.0 - (1.0 - t) ** power) + linear * t
+                keys.append((t, start + (target - start) * f))
+            self.setKeyValues(keys)
+            self.setDuration(int(duration))
+            self._pos = start
+            self._bar.setValue(int(round(start)))
+        finally:
+            self._mute = False
+        self.start()
+
+    def _apply(self, value) -> None:
+        # Only a running animation produces real positions.  `stop()` and `setKeyValues()` each
+        # leave a queued update that arrives a moment later, already stopped, computed from a
+        # half-built key table -- writing that would jerk the bar backwards for one frame.
+        if self._mute or self.state() != QAbstractAnimation.State.Running:
+            return
+        self._pos = float(value)
+        self._bar.setValue(int(round(self._pos)))
 
 
 class SmoothScrollArea(QScrollArea):
@@ -35,9 +112,9 @@ class SmoothScrollArea(QScrollArea):
         self._last_wheel_time = 0.0
 
         sb0 = self.horizontalScrollBar() if self.is_horizontal else self.verticalScrollBar()
-        self._anim = QPropertyAnimation(sb0, b"value", self)
-        self._anim.setDuration(220)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Both drivers write the bar in whole pixels from a float position (see
+        # _PixelSettleAnimation: an integer-valued animation freezes for the last pixel).
+        self._anim = _PixelSettleAnimation(sb0, self)
         self._anim.finished.connect(self._on_anim_finished)
 
         # Wheel scrolling is a retargetable eased animation, not a velocity integrator.
@@ -45,10 +122,10 @@ class SmoothScrollArea(QScrollArea):
         # the notches arrive.  Aiming at a target with OutQuart instead gives the iOS feel --
         # a quick start and a long, gentle settle -- and extra notches just push the target
         # further out while the running animation retargets from wherever it is.
-        self._wheel_anim = QPropertyAnimation(sb0, b"value", self)
-        self._wheel_anim.setEasingCurve(QEasingCurve.Type.OutQuart)
+        self._wheel_anim = _PixelSettleAnimation(sb0, self)
         self._wheel_anim.finished.connect(self._on_anim_finished)
         self._wheel_target = 0
+        self._wheel_power = 4
 
         # Connect scrollbar signals to maintain sync with manual interactions
         v_bar = self.verticalScrollBar()
@@ -84,7 +161,7 @@ class SmoothScrollArea(QScrollArea):
         if obj == self.viewport():
             if event.type() == QEvent.Type.MouseButtonPress:
                 self._stop_physics()
-                if self._anim.state() == QPropertyAnimation.State.Running:
+                if self._anim.state() == QAbstractAnimation.State.Running:
                     self._anim.stop()
             elif event.type() == QEvent.Type.Wheel:
                 self.wheelEvent(event)
@@ -235,23 +312,29 @@ class SmoothScrollArea(QScrollArea):
             self._sync_overlay()
 
     def _sync_overlay(self):
-        if getattr(self, '_overlay', None) is not None:
+        overlay = getattr(self, '_overlay', None)
+        if overlay is None:
+            return
+        # This runs on every scrollbar tick.  Re-setting the geometry and re-raising the overlay
+        # (and the scrollbar) sixty times a second during a settle made the edge fade flicker and
+        # cost a relayout per frame -- the last few pixels of a wheel animation looked like the
+        # panel twitched.  Only touch the stacking when the viewport actually changed size.
+        target = self.rect() if self.is_horizontal else self.viewport().rect()
+        if getattr(self, "_overlay_geo", None) != target:
+            self._overlay_geo = target
+            overlay.setGeometry(target)
             if self.is_horizontal:
-                self._overlay.setGeometry(self.rect())
-                self._overlay.raise_()
+                overlay.raise_()
                 hbar = self.horizontalScrollBar()
                 if hbar:
                     hbar.raise_()
             else:
-                vp = self.viewport()
-                if vp:
-                    self._overlay.setGeometry(vp.rect())
-                    self._overlay.raise_()
-            self._overlay.update()
+                overlay.raise_()
+        overlay.update()
 
     def _is_animating(self) -> bool:
-        return (self._anim.state() == QPropertyAnimation.State.Running
-                or self._wheel_anim.state() == QPropertyAnimation.State.Running)
+        return (self._anim.state() == QAbstractAnimation.State.Running
+                or self._wheel_anim.state() == QAbstractAnimation.State.Running)
 
     def _on_scroll_value_changed(self, val):
         # While one of our own animations drives the bar the value change is not user input:
@@ -323,29 +406,38 @@ class SmoothScrollArea(QScrollArea):
             return
 
         # Retarget from where the previous notch was heading, so a burst of notches stacks
-        # instead of restarting from the current pixel every time.
-        if self._wheel_anim.state() == QPropertyAnimation.State.Running:
+        # instead of restarting from the current pixel every time.  Starting from the animation's
+        # own float position (not the rounded bar value) keeps a retarget from looking like a
+        # one-pixel jump.
+        running = self._wheel_anim.state() == QAbstractAnimation.State.Running
+        if running:
             base = float(self._wheel_target)
+            start_pos = self._wheel_anim.pos
         else:
             base = current_sb_val
+            start_pos = current_sb_val
 
         self._anim.stop()
         target = max(min_val, min(max_val, base + ticks * self._step_size))
-        self._wheel_target = int(round(target))
+        new_target = int(round(target))
+        # Already on the way to exactly this position: restarting would drop the velocity back to
+        # zero and re-accelerate, so a burst of notches arrived as a stutter instead of one long
+        # settle.  This is also the case that produced the "twitch" right before the bottom.
+        if running and new_target == self._wheel_target:
+            event.accept()
+            return
+        self._wheel_target = new_target
 
-        dist = abs(self._wheel_target - current_sb_val)
+        dist = abs(self._wheel_target - start_pos)
         if dist <= 0:
             event.accept()
             return
         # Longer for a bigger step, but never a snap: one 76px notch lands at ~310ms and the
         # OutQuart tail keeps the last few pixels crawling in.
         duration = int(min(620, max(220, 160 + dist * 2.0)))
-        self._wheel_anim.stop()
-        self._wheel_anim.setDuration(duration)
-        self._wheel_anim.setStartValue(current_sb_val)
-        self._wheel_anim.setEndValue(float(self._wheel_target))
-        self._wheel_anim.start()
-        self._current_pos = current_sb_val
+        self._wheel_anim.move_to(start_pos, float(self._wheel_target), duration,
+                                 power=self._wheel_power)
+        self._current_pos = start_pos
         event.accept()
 
     def scroll_to(self, target_value: int, animate: bool = True):
@@ -357,7 +449,7 @@ class SmoothScrollArea(QScrollArea):
         self._stop_physics()
 
         if not animate:
-            if self._anim.state() == QPropertyAnimation.State.Running:
+            if self._anim.state() == QAbstractAnimation.State.Running:
                 self._anim.stop()
             self._current_pos = float(target)
             self._is_internal_scroll = True
@@ -371,11 +463,7 @@ class SmoothScrollArea(QScrollArea):
             return
 
         self._current_pos = float(current_val)
-        self._anim.stop()
-        self._anim.setTargetObject(sb)
-        self._anim.setStartValue(current_val)
-        self._anim.setEndValue(target)
-        self._anim.start()
+        self._anim.move_to(float(current_val), float(target), 220, power=3)
 
     def _on_anim_finished(self):
         sb = self.horizontalScrollBar() if self.is_horizontal else self.verticalScrollBar()

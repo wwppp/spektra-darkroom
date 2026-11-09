@@ -259,7 +259,8 @@ def setup_solid_combobox(combo):
     from PySide6.QtWidgets import QListView
     from PySide6.QtCore import Qt, QPoint, QRect, QVariantAnimation, QEasingCurve
     from PySide6.QtGui import QGuiApplication
-    from ui.adobe_scrub_slider import DarkroomComboListView, DarkroomComboItemDelegate, DarkroomComboBox
+    from ui.adobe_scrub_slider import (DarkroomComboListView, DarkroomComboItemDelegate,
+                                       DarkroomComboBox, prepare_popup_transparency)
 
     if not isinstance(combo.view(), DarkroomComboListView):
         view = DarkroomComboListView()
@@ -276,7 +277,9 @@ def setup_solid_combobox(combo):
                 # panel's DarkroomComboBox flags exactly.
                 cont.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
                                    | Qt.WindowType.NoDropShadowWindowHint)
-                cont.setAutoFillBackground(False)
+                # Same as DarkroomComboBox: set translucency before the native window is
+                # created, so no square corner sits outside the round card.
+                prepare_popup_transparency(cont)
         combo.setCursor(Qt.CursorShape.PointingHandCursor)
         combo.wheelEvent = lambda ev: ev.ignore()
 
@@ -456,6 +459,9 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
     ring_off = _icon("chk_ring_dis_dark.png" if is_dark else "chk_ring_dis_light.png")
     disc = _icon("chk_disc_amber.png")
     disc_off = _icon("chk_disc_dis_dark.png" if is_dark else "chk_disc_dis_light.png")
+    # Keep the indicator box an EVEN number of pixels.  At 13px the ring centre lands on a
+    # whole pixel while the 11px label's ink box centres on a half pixel, so the ring reads
+    # half a pixel low; 14px puts both on the same half-pixel and they line up exactly.
     from ui.theme_manager import theme_manager
     tt_ss = theme_manager.widget_tooltip_stylesheet()
 
@@ -476,8 +482,8 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 outline: none;
             }}
             QCheckBox::indicator {{
-                width: 13px;
-                height: 13px;
+                width: 14px;
+                height: 14px;
                 border: none;
                 background: transparent;
                 outline: none;
@@ -514,8 +520,8 @@ def get_standard_checkbox_style(is_dark: bool = None) -> str:
                 outline: none;
             }}
             QCheckBox::indicator {{
-                width: 13px;
-                height: 13px;
+                width: 14px;
+                height: 14px;
                 border: none;
                 background: transparent;
                 outline: none;

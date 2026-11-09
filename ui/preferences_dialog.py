@@ -29,8 +29,13 @@ class PreferencesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("首选项")
-        self.setFixedSize(520, 460)
+        # 480, not 460: the 暗房与工作流 tab gained the 负片默认相纸 row and was 20px over
+        # the old height, which silently squeezed the bottom rows together.
+        self.setFixedSize(520, 480)
         self.setModal(True)
+        # 相纸清单来自引擎；保存后要用主窗口把"没选过相纸"的照片重刷一遍。
+        self._engine = getattr(parent, "engine", None)
+        self._parent_window = parent
 
         is_dark = theme_manager.is_dark()
         self.setWindowIcon(get_icon("dlg_prefs.png", is_dark=is_dark))
@@ -643,6 +648,35 @@ class PreferencesDialog(QDialog):
         r_fmt.addStretch(1)
         l_dr.addLayout(r_fmt)
 
+        # 负片默认相纸：新照片、"没选过相纸"的底片（含缩略图）都落到这张纸上。
+        # 已经手动选过相纸的底片不受影响。
+        r_dpaper = QHBoxLayout()
+        lbl_dpaper = QLabel("负片默认相纸:")
+        lbl_dpaper.setFixedWidth(100)
+        r_dpaper.addWidget(lbl_dpaper)
+        self.combo_default_paper = QComboBox()
+        self.combo_default_paper.setFixedWidth(180)
+        setup_solid_combobox(self.combo_default_paper)
+        papers = []
+        try:
+            papers = list(self._engine.get_paper_stocks()) if self._engine is not None else []
+        except Exception:
+            papers = []
+        for item in papers:
+            pid = str(item.get("id") or "")
+            if not pid or pid in ("none", "screen"):
+                continue
+            self.combo_default_paper.addItem(item.get("name") or pid, pid)
+        if self.combo_default_paper.count() == 0:
+            self.combo_default_paper.addItem("未加载相纸资源", None)
+            self.combo_default_paper.setEnabled(False)
+        self.combo_default_paper.setToolTip(
+            "新导入的负片、以及还没手动选过相纸的底片，默认用这张相纸印相"
+            "（缩略图同步）。已选过相纸的底片保持自己的选择。")
+        r_dpaper.addWidget(self.combo_default_paper)
+        r_dpaper.addStretch(1)
+        l_dr.addLayout(r_dpaper)
+
         self.chk_restore_last_files = QCheckBox("启动时打开上次工程")
         self.chk_restore_last_files.setChecked(True)
         l_dr.addWidget(self.chk_restore_last_files)
@@ -831,6 +865,12 @@ class PreferencesDialog(QDialog):
             if abs(self.combo_default_fmt.itemData(i) - def_fmt) < 1.0:
                 self.combo_default_fmt.setCurrentIndex(i)
                 break
+
+        def_paper = prefs.get("default_negative_paper", "kodak_supra_endura")
+        idx_dp = self.combo_default_paper.findData(def_paper)
+        if idx_dp < 0 and self.combo_default_paper.count():
+            idx_dp = 0
+        self.combo_default_paper.setCurrentIndex(idx_dp if idx_dp >= 0 else 0)
 
         max_gb = float(prefs.get("session_cache_max_gb", 2.0))
         idx_max = -1
@@ -1084,6 +1124,10 @@ class PreferencesDialog(QDialog):
         prefs["restore_last_files"] = restore_val
         prefs["restore_window_state"] = self.chk_restore_geo.isChecked()
         prefs["default_film_format"] = float(self.combo_default_fmt.currentData())
+        old_default_paper = prefs.get("default_negative_paper", "kodak_supra_endura")
+        new_default_paper = self.combo_default_paper.currentData()
+        if new_default_paper:
+            prefs["default_negative_paper"] = new_default_paper
         prefs["session_cache_max_gb"] = float(self.combo_cache_max_size.currentData())
         prefs["session_cache_clean_interval_days"] = int(self.combo_clean_interval.currentData())
 
@@ -1101,5 +1145,12 @@ class PreferencesDialog(QDialog):
         ui_scale.set_font_scale(font_key)
 
         config_manager.save_config(cfg)
+        # 默认相纸变了：让主窗口重刷那些"没选过相纸"的底片（缩略图 + 当前照片的 LUT）。
+        if new_default_paper and new_default_paper != old_default_paper:
+            try:
+                if self._parent_window is not None and hasattr(self._parent_window, "on_default_negative_paper_changed"):
+                    self._parent_window.on_default_negative_paper_changed()
+            except Exception:
+                pass
         self.accept()
 

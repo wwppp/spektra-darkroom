@@ -1979,7 +1979,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
         _override = self.params.get("grain_px_um_override")   # diagnostic: pin the pitch
         if _override:
             _px_um = float(_override)
-        self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params, u_1fv=u_1fv)
+        # Only in 印相 mode.  A 直扫 frame has no print cube of its own and has always been drawn
+        # through whatever bundle was staged -- that is the shipping behaviour for scan, and
+        # switching it to the LUT path changes the picture visibly.  The mismatch bug that needed
+        # this guard only ever showed up on the 印相 side.
+        _expect = None if str(self.params.get("print_mode", "optical")).lower() == "scan" \
+            else self._grain_key_for(self.params)
+        self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, self.params, u_1fv=u_1fv,
+                               expect_key=_expect)
         self._ffchain.bind(self.shader_program,
                            dir_total=float(self.params.get("dir_amount", 1.0)))
 
@@ -2834,6 +2841,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def mousePressEvent(self, event):
         btn = event.button()
         if btn == Qt.MouseButton.LeftButton:
+            # A zoom/fit animation writes pan_x/pan_y on every tick.  If the user grabs the image
+            # while one is still running, the two fight: the drag adds a delta and the next tick
+            # overwrites it, which reads as the picture shivering under the cursor.  Taking the
+            # press means the animation loses.
+            if self._zoom_anim.state() == QVariantAnimation.State.Running:
+                self._zoom_anim.stop()
             # Check if clicking on split divider within visible image bounds
             if self._is_hovering_split_line(event.position()):
                 self._is_split_dragging = True

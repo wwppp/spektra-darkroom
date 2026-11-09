@@ -657,6 +657,44 @@ def get_photo_cache(file_path: str, load_preview: bool = False) -> dict | None:
         return None
 
 
+def _is_valid_preview_array(arr) -> bool:
+    """Structural check for a cached viewport preview.
+
+    The preview goes straight from this cache into the GPU texture upload path, so a
+    truncated / foreign / wrong-scale array is not caught anywhere downstream: the canvas
+    renders uniform coloured noise instead of the photo.  (Seen in the field: a corrupt
+    .npy cache made the grain look like "big colour blocks".)
+
+    Only checks that a genuine preview always passes are enforced.  The engine produces
+    ``raw_preview`` as float32 ``[H, W, 3]`` in ``[0, 1]`` (see app_core.py), so a 0-255
+    array is by definition stale or wrong-scale rather than a valid dark frame.
+    """
+    if not isinstance(arr, np.ndarray):
+        return False
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        return False
+    if arr.shape[0] < 16 or arr.shape[1] < 16:
+        return False
+    if arr.dtype.kind not in "fiu":
+        return False
+    try:
+        if not np.isfinite(arr).all():
+            return False
+        lo = float(arr.min())
+        hi = float(arr.max())
+    except (TypeError, ValueError):
+        return False
+    return lo >= -0.05 and hi <= 1.5
+
+
+def _discard_bad_preview(preview_path: str, reason: str) -> None:
+    logger.warning(f"Discarding corrupt preview cache {preview_path}: {reason}")
+    try:
+        os.remove(preview_path)
+    except Exception:
+        pass
+
+
 def get_photo_preview(file_path: str) -> np.ndarray | None:
     """Loads only the viewport float preview array (float32) from cache."""
     if not file_path:
@@ -674,14 +712,23 @@ def get_photo_preview(file_path: str) -> np.ndarray | None:
 
     try:
         arr16 = np.load(preview_path, allow_pickle=False)
-        try:
-            os.utime(preview_path, None)
-        except Exception:
-            pass
-        return arr16.astype(np.float32)
     except Exception as e:
-        logger.warning(f"Failed to load preview cache for {file_path}: {e}")
+        _discard_bad_preview(preview_path, f"unreadable ({e})")
         return None
+
+    if not _is_valid_preview_array(arr16):
+        _discard_bad_preview(
+            preview_path,
+            f"invalid payload shape={getattr(arr16, 'shape', None)} "
+            f"dtype={getattr(arr16, 'dtype', None)}",
+        )
+        return None
+
+    try:
+        os.utime(preview_path, None)
+    except Exception:
+        pass
+    return arr16.astype(np.float32)
 
 
 def save_photo_preview(file_path: str, preview_array: np.ndarray) -> bool:

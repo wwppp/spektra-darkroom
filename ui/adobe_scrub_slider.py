@@ -220,9 +220,6 @@ class RoundScrubSlider(QSlider):
     # edge lines up with the label above it (it used to be inset by r+2, which read as
     # "everything is indented by 11px and nothing is flush").
     KNOB_R = 6.5
-    # Fraction of a full-track sweep per pixel when dragging the groove instead of the knob:
-    # roughly a quarter speed, so it reads as fine adjustment rather than a scrub race.
-    TRACK_RATE = 0.30
 
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
@@ -233,16 +230,13 @@ class RoundScrubSlider(QSlider):
         self._intent = None            # None | 'h' | 'v'
         self._drag_mode = None         # None | 'knob' | 'track'
         self._grab_offset = 0.0
-        self._last_drag_x = None
-        self._track_accum = 0.0
         self.track_gradient = None
         self.has_center_detent = False
         self._hover_knob = False
         self.setFixedHeight(18)
-        self.setCursor(Qt.CursorShape.SizeHorCursor)
-        # Without mouse tracking a widget only receives move events while a button is held, so
-        # the cursor/knob-hover feedback below could never fire -- the arrow over the knob was
-        # simply never set, and the row stayed on the resize cursor everywhere.
+        # No resize cursor here: the horizontal-arrows cursor belongs to the parameter title
+        # (ScrubLabel), where dragging is a relative scrub.  The groove only follows the
+        # pointer, so it keeps the plain arrow and the knob gets the index finger.
         self.setMouseTracking(True)
         theme_manager.themeChanged.connect(lambda _: self.update())
 
@@ -295,25 +289,31 @@ class RoundScrubSlider(QSlider):
         return abs(float(x) - self._knob_cx()) <= self.KNOB_R + 5.0
 
     def _update_hover_cursor(self, x=None):
-        """Arrow over the knob, left-right arrows over the groove.
+        """Index finger over the knob, plain arrow over the groove.
 
-        The knob used to show a hand, which is a big shape that sits on top of the very pixel
-        you are trying to line the knob up with -- for a 7px knob that reads as imprecise.  The
-        groove keeps the resize cursor because there the drag is relative.  The knob itself
-        lights up amber when the pointer is on it, so the arrow still has a visible "you can
-        grab this" cue.
+        The knob is a 6.5px dot, so the pointing cursor is the clearest "grab this dot" cue.
+        The groove keeps the default arrow: the resize cursor is reserved for the parameter
+        title, where a horizontal drag means something different (a relative scrub).
         """
         if not self.isEnabled():
+            # Disabled rows must not keep a stale finger/spare cursor from before the toggle.
+            self.unsetCursor()
+            self._set_hover_knob(False)
             return
         if self._pressed:
-            self.setCursor(Qt.CursorShape.ArrowCursor
-                           if self._drag_mode == 'knob' else Qt.CursorShape.SizeHorCursor)
+            if self._drag_mode == 'knob':
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.unsetCursor()
             self._set_hover_knob(False)
             return
         if x is None:
             x = self.mapFromGlobal(QCursor.pos()).x()
         on_knob = self._hit_knob(x)
-        self.setCursor(Qt.CursorShape.ArrowCursor if on_knob else Qt.CursorShape.SizeHorCursor)
+        if on_knob:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.unsetCursor()
         self._set_hover_knob(on_knob)
 
     def _set_hover_knob(self, on):
@@ -327,7 +327,7 @@ class RoundScrubSlider(QSlider):
 
     def leaveEvent(self, event):
         if not self._pressed:
-            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            self.unsetCursor()
         self._set_hover_knob(False)
         super().leaveEvent(event)
 
@@ -343,32 +343,13 @@ class RoundScrubSlider(QSlider):
         return x_start + frac * span
 
     def _nudge_from_drag(self, mouse_x):
-        """Relative scrub used when the press landed on the groove instead of the knob.
+        """Kept only so old call sites stay harmless; the groove now seeks absolutely.
 
-        Same feel as dragging the parameter title: slow, proportional, and it never jumps the
-        value to wherever the pointer happens to be.
+        Fine control belongs to the parameter title (ScrubLabel), which scrubs at a fraction
+        of a step per pixel.  Dragging the groove follows the pointer instead, and a tap
+        commits the tapped value.
         """
-        if self._last_drag_x is None:
-            self._last_drag_x = float(mouse_x)
-            return
-        delta = float(mouse_x) - self._last_drag_x
-        self._last_drag_x = float(mouse_x)
-        total = self.maximum() - self.minimum()
-        if delta == 0.0 or total <= 0:
-            return
-        _, _, span = self._track_span()
-        self._track_accum += delta * (total / span) * self.TRACK_RATE
-        steps = int(self._track_accum)
-        if steps == 0:
-            return
-        self._track_accum -= steps
-        new_val = max(self.minimum(), min(self.maximum(), self.value() + steps))
-        if new_val != self.value():
-            self.setValue(new_val)
-            x_start, x_end, sp = self._track_span()
-            frac = (new_val - self.minimum()) / float(max(1, self.maximum() - self.minimum()))
-            self._smooth_x = x_start + frac * sp
-        self.update()
+        self._update_from_mouse_x(mouse_x)
 
     def mousePressEvent(self, event):
         if not self.isEnabled():
@@ -381,10 +362,10 @@ class RoundScrubSlider(QSlider):
         self._pressed = True
         self._press_pos = pos
         self._intent = None
-        self._last_drag_x = None
-        self._track_accum = 0.0
-        # A press on the knob drags it; a press anywhere else on the groove scrubs relatively.
-        # Nothing jumps to the click point any more, and a bare click changes nothing.
+        # Knob and groove both seek absolutely (that is the feel users asked for back): the
+        # press itself still changes nothing, the knob follows the pointer once the gesture
+        # proves horizontal, and a clean tap on the groove commits the tapped value on
+        # release.  Finer control lives on the parameter title, which scrubs relatively.
         self._drag_mode = 'knob' if abs(pos.x() - self._knob_cx()) <= self.KNOB_R + 5.0 else 'track'
         if self._drag_mode == 'knob':
             self._grab_offset = pos.x() - self._knob_cx()
@@ -425,12 +406,9 @@ class RoundScrubSlider(QSlider):
                 return
             self._intent = 'h'
         if self._intent == 'h':
-            if self._drag_mode == 'knob':
-                if self._smooth_x is None:
-                    self._smooth_x = self._knob_cx()
-                self._update_from_mouse_x(pos.x() - self._grab_offset)
-            else:
-                self._nudge_from_drag(pos.x())
+            if self._drag_mode == 'knob' and self._smooth_x is None:
+                self._smooth_x = self._knob_cx()
+            self._update_from_mouse_x(pos.x() - self._grab_offset)
         event.accept()
 
     def _release_grab(self):
@@ -441,12 +419,14 @@ class RoundScrubSlider(QSlider):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            # A clean tap (never proved horizontal) commits the tapped value.  Pressing alone
+            # still changes nothing, so the value only moves when the click is released.
+            if self._pressed and self._intent is None:
+                self._update_from_mouse_x(event.position().x())
             self._pressed = False
             self._intent = None
             self._press_pos = None
             self._smooth_x = None
-            self._last_drag_x = None
-            self._track_accum = 0.0
             self._release_grab()
             self.update()
             self._update_hover_cursor()
@@ -540,19 +520,14 @@ class RoundScrubSlider(QSlider):
             painter.drawLine(QPointF(mid_x, cy - 2.5), QPointF(mid_x, cy + 2.5))
             painter.setPen(Qt.PenStyle.NoPen)
 
-        # 3. Vector circular knob.  The halo only appears when the pointer is actually on the
-        # knob -- lighting the whole row amber said "this slider is hovered", not "you can grab
-        # this dot", which is the cue that was missing.
+        # 3. Vector circular knob.  Hover changes only the dot's own fill and border -- no
+        # translucent halo, which read as a second, blurry knob sitting behind the real one.
         if self._pressed:
             knob_color = QColor(217, 119, 6)   # deep amber
             border_pen = QPen(QColor(245, 158, 11), 1.5)
         elif self._hover_knob:
             knob_color = QColor(245, 158, 11)  # bright amber
             border_pen = QPen(QColor(255, 255, 255), 1.5)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(245, 158, 11, 45 if is_dark else 38))
-            halo = r + 4.0
-            painter.drawEllipse(QPointF(knob_cx, cy), halo, halo)
         else:
             knob_color = QColor(228, 230, 238) if is_dark else QColor(255, 255, 255)
             border_pen = QPen(QColor(30, 32, 38) if is_dark else QColor(148, 163, 184), 1.2)
@@ -996,35 +971,64 @@ POPUP_RADIUS = 5.0
 POPUP_GAP = 5
 
 
+def prepare_popup_transparency(container):
+    """Make the corners outside the list view's radius *really* transparent.
+
+    An opaque top-level Popup always has square corners.  Leaving those pixels unpainted
+    gives four black wedges; filling them with the card colour (the previous fix) just
+    trades the black wedges for white square corners outside the round card, which is
+    blindingly obvious on a dark page.  Translucency is the only thing that removes the
+    square corner entirely.
+
+    Qt creates the native popup window on the first showPopup(), so this must run while the
+    container still exists but has not been shown.  Setting the attribute afterwards has no
+    effect on the already-created opaque backing store.
+    """
+    if container is None:
+        return
+    container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    container.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+    container.setAutoFillBackground(False)
+
+
 def style_popup_view(view):
     """Flat popup styling: one 1px rounded border, nothing behind it.
 
-    The previous attempt drew a translucent shell around the view (shadow, panel, inset
-    margins).  Qt's popup container is a QFrame with its own background, and its translucent
-    backing store is not fully cleared during the opening animation -- which is where the
-    extra semi-transparent frame and the stacked hairlines underneath came from.  No shell,
-    no translucency, no mask: the list view itself is the card, and the delegate clips the
-    rows to its corner radius.
+    No shell, no inset, no painted shadow, no mask and no fill on the container: the list
+    view itself is the card, and the delegate clips the rows that touch its top/bottom
+    edge.  The container is translucent so nothing square exists outside the radius.
     """
     if view is None:
         return
     is_dark = theme_manager.is_dark()
     bg = "#181920" if is_dark else "#ffffff"
     border = "#3a3f4e" if is_dark else "#b9c3d3"
-    handle = "rgba(255,255,255,0.18)" if is_dark else "rgba(15,23,42,0.20)"
+    # Same scrollbar language as the main page (main_window.py / smooth_scroll.py):
+    # 6px handle, three states, 3px radius.  The bar is 10px wide and the handle carries a
+    # 4px right margin, so it keeps its 6px width while sitting clear of the popup's 1px
+    # border and its rounded corners.  The margin must go on ::handle, not on the bar:
+    # the bar's own margin is not painted, and on a translucent popup that would expose
+    # whatever is behind the card instead of a clean card-coloured gap.
+    handle = "#3f4350" if is_dark else "#94a3b8"
+    hover = "#cbd5e1" if is_dark else "#64748b"
     try:
-        # autoFillBackground would paint a square palette rectangle over the rounded QSS
-        # background, which is what left a hard right angle at the top of the card.
         view.setAutoFillBackground(False)
         view.viewport().setAutoFillBackground(False)
         view.setStyleSheet(
             "QListView { background: %s; border: 1px solid %s; border-radius: %gpx; }"
             "QListView::item { background: transparent; }"
-            "QScrollBar:vertical { background: transparent; width: 7px; margin: 0px; }"
-            "QScrollBar::handle:vertical { background: %s; border-radius: 3px; min-height: 24px; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
-            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
-            % (bg, border, POPUP_RADIUS, handle))
+            "QScrollBar:vertical { background: %s; width: 10px; margin: 0px; border: none; }"
+            "QScrollBar::handle:vertical { background: %s; min-height: 24px; "
+            "border-radius: 3px; border: none; margin: 4px 4px 4px 0px; }"
+            "QScrollBar::handle:vertical:hover { background: %s; border-radius: 3px; "
+            "margin: 4px 4px 4px 0px; }"
+            "QScrollBar::handle:vertical:pressed { background: #f59e0b; border-radius: 3px; "
+            "margin: 4px 4px 4px 0px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical "
+            "{ height: 0px; width: 0px; background: none; border: none; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical "
+            "{ background: none; border: none; }"
+            % (bg, border, POPUP_RADIUS, bg, handle, hover))
         container = view.window()
         if container is not None and container is not view:
             from PySide6.QtWidgets import QFrame
@@ -1032,7 +1036,8 @@ def style_popup_view(view):
             container.setFrameShape(QFrame.Shape.NoFrame)
             container.setLineWidth(0)
             container.setMidLineWidth(0)
-            container.setAutoFillBackground(False)
+            # Defensive re-apply: some Qt versions create a fresh container on showPopup().
+            prepare_popup_transparency(container)
             # Scoped by id so this does not cascade into the list or its scrollbar.
             container.setStyleSheet("#drComboPopup { background: transparent; border: none; }")
     except RuntimeError:
@@ -1144,7 +1149,9 @@ class DarkroomComboBox(QComboBox):
                 # read as a second frame; the 1px rounded border does the job instead.
                 container.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
                                         | Qt.WindowType.NoDropShadowWindowHint)
-                container.setAutoFillBackground(False)
+                # Before the native window exists: otherwise the opaque backing store leaves
+                # square (black or white) corners outside the list view's radius.
+                prepare_popup_transparency(container)
                 container.setWindowOpacity(0.0)
         self.wheelEvent = lambda ev: ev.ignore()
         self.setCursor(Qt.CursorShape.PointingHandCursor)

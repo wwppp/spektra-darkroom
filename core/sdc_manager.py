@@ -150,7 +150,8 @@ def save_sdc(
     params: dict,
     thumbnail_rgb: np.ndarray = None,
     print_mode: str = None,
-    rating: int = None
+    rating: int = None,
+    paper_explicit: bool = None
 ) -> bool:
     """Save sidecar editing configuration next to the image file, optionally caching thumbnail.
     Note: Star ratings belong exclusively to session files (.sdss) and are never written to .sdc sidecars.
@@ -181,6 +182,11 @@ def save_sdc(
             "params": {k: v for k, v in (params or {}).items() if k != "base_ev"},
             "saved_at": datetime.now().isoformat()
         }
+
+        # 相纸是用户选的还是自动补的默认值。空 paper_profile 不区分这两者，而首选项换默认
+        # 相纸时只有"没选过"的照片才该跟着变，所以这个标记必须落到盘上。
+        if paper_explicit is not None:
+            data["paper_explicit"] = bool(paper_explicit)
 
         # Embed compact JPEG thumbnail (~2KB) so any machine/session opens with instant graded preview
         if thumbnail_rgb is not None and isinstance(thumbnail_rgb, np.ndarray) and thumbnail_rgb.size > 0:

@@ -686,7 +686,8 @@ class SessionRestoreWorker(QThread):
     restoreFinished = Signal(list, list, str)  # all_photos, uncached_slots, target_path
     failed = Signal(str)
 
-    def __init__(self, existing_files, active_file=None, thumb_controller=None, engine=None, is_params_modified_fn=None, ratings_map=None, parent=None):
+    def __init__(self, existing_files, active_file=None, thumb_controller=None, engine=None,
+                 is_params_modified_fn=None, ratings_map=None, default_paper=None, parent=None):
         super().__init__(parent)
         self.existing_files = list(existing_files or [])
         self.active_file = active_file
@@ -694,6 +695,9 @@ class SessionRestoreWorker(QThread):
         self.engine = engine
         self.is_params_modified_fn = is_params_modified_fn
         self.ratings_map = dict(ratings_map or {})
+        # 首选项里的负片默认相纸；负片且 .sdc 没记相纸的缩略图用它，避免整条胶卷条
+        # 都是橙色负像（works on a copy so the worker does not read config from a thread）
+        self.default_paper = default_paper or "none"
         self._stopped = False
 
     def stop(self):
@@ -747,20 +751,43 @@ class SessionRestoreWorker(QThread):
                 pass
 
         th_rgb = None
-        if sdc:
+        # 负片但 .sdc 没记相纸（旧数据 / 直扫遗留）：缩略图按首选项的默认相纸渲染。
+        # 内嵌缩略图是那张"直扫橙片"，这里必须跳过它重新 grade，否则整条胶卷条还是橙色。
+        render_paper = paper_profile
+        implicit_paper = False
+        explicit_paper = bool(sdc and sdc.get("paper_explicit"))
+        if (film_profile not in ("none", "", None)
+                and paper_profile in ("", "none", None)
+                and not explicit_paper
+                and self.default_paper not in ("none", "", None)):
+            try:
+                is_pos = bool(self.engine and self.engine.is_positive_film(film_profile))
+            except Exception:
+                is_pos = False
+            if not is_pos:
+                render_paper = self.default_paper
+                implicit_paper = True
+
+        if sdc and not implicit_paper:
             sdc_th = sdc.get("thumbnail_rgb")
             if session_cache_manager.is_valid_thumbnail(sdc_th):
                 th_rgb = sdc_th
                 graded_th = sdc_th
             elif raw_th is not None:
-                if self.thumb_controller and (film_profile != "none" or paper_profile != "none" or (params and abs(params.get("exposure_ev", 0.0)) > 0.001)):
+                if self.thumb_controller and (film_profile != "none" or render_paper != "none" or (params and abs(params.get("exposure_ev", 0.0)) > 0.001)):
                     try:
-                        graded_th = self.thumb_controller.grade_thumbnail_fast(raw_th, film_profile, paper_profile, params)
+                        graded_th = self.thumb_controller.grade_thumbnail_fast(raw_th, film_profile, render_paper, params)
                     except Exception:
                         graded_th = raw_th
                     th_rgb = graded_th
                 else:
                     th_rgb = raw_th
+        elif implicit_paper and raw_th is not None and self.thumb_controller:
+            try:
+                graded_th = self.thumb_controller.grade_thumbnail_fast(raw_th, film_profile, render_paper, params)
+            except Exception:
+                graded_th = raw_th
+            th_rgb = graded_th
         else:
             th_rgb = raw_th
             graded_th = None
@@ -1943,6 +1970,7 @@ class DarkroomMainWindow(QMainWindow):
 
     # 负片默认落在放大印相上，用 Kodak Supra Endura（用户指定）。原来切到负片时相纸停在
     # "none"/胶片直扫，右栏一片空白，第一次手动选相纸反而像没反应。
+    # 首选项里的"负片默认相纸"会覆盖它，这只在配置缺失或 id 失效时兜底。
     DEFAULT_NEGATIVE_PAPER = "kodak_supra_endura"
 
     def __init__(self, engine, initial_session=None, initial_files=None):
@@ -2245,6 +2273,7 @@ class DarkroomMainWindow(QMainWindow):
             engine=self.engine,
             is_params_modified_fn=self._is_params_modified,
             ratings_map=ratings_map,
+            default_paper=self._default_negative_paper(),
             parent=self
         )
         self._session_restore_worker = worker
@@ -4210,7 +4239,7 @@ class DarkroomMainWindow(QMainWindow):
         profile_layout.addLayout(chk_prof_layout)
 
         self.combo_lens_setup = ComboBoxRow(
-            "设置",
+            "来源",
             [
                 ("默认 (自动读取 EXIF)", "auto"),
                 ("自定", "custom"),
@@ -4235,7 +4264,7 @@ class DarkroomMainWindow(QMainWindow):
         make_items = [("无", "")] + [(m, m) for m in makes]
 
         self.combo_lens_make = ComboBoxRow(
-            "品牌",
+            "制造商",
             make_items,
             default_val="",
             tooltip="镜头制造商品牌"
@@ -4244,7 +4273,7 @@ class DarkroomMainWindow(QMainWindow):
         profile_layout.addWidget(self.combo_lens_make)
 
         self.combo_lens_model = ComboBoxRow(
-            "机型",
+            "型号",
             [("无", "")],
             default_val="",
             tooltip="具体镜头型号"
@@ -4342,7 +4371,7 @@ class DarkroomMainWindow(QMainWindow):
         self.combo_diffusion = ComboBoxRow(
             "柔光镜型号",
             [
-                ("无柔光滤镜", "none"),
+                ("无", "none"),
                 ("黑柔", "black_pro_mist"),
                 ("白柔", "pro_mist"),
                 ("微光", "glimmerglass"),
@@ -5117,7 +5146,10 @@ class DarkroomMainWindow(QMainWindow):
             if photo:
                 photo["is_dirty"] = True
                 photo["film_profile"] = self.current_film_stock
-                photo["paper_profile"] = self.current_paper_stock
+                # 自动套上的默认相纸不写成实值（见 _save_current_photo_sdc），否则编辑一下
+                # 就把这张照片变成"已选过相纸"，首选项改默认纸时它不再跟随。
+                photo["paper_profile"] = (
+                    self.current_paper_stock if self._photo_paper_is_explicit(photo) else "")
                 photo["params"] = dict(self.current_params)
             if not was_dirty:
                 self.filmstrip.set_photo_dirty(self.active_photo_id, True)
@@ -7700,16 +7732,21 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 if cur_thumb is None:
                     cur_thumb = curr_p.get("thumbnail_rgb")
                 self.current_params["print_mode"] = getattr(self, "current_print_mode", "optical")
+                # 没选过相纸的照片不把默认纸写进 .sdc：写了就等于"选过"，之后在首选项
+                # 换默认相纸时这张照片就不跟了。空串是 .sdc 里表示"未选择"的既有写法。
+                paper_for_sdc = (self.current_paper_stock
+                                 if self._photo_paper_is_explicit(curr_p) else "")
                 sdc_manager.save_sdc(
                     self._current_photo_path,
                     self.current_film_stock,
-                    self.current_paper_stock,
+                    paper_for_sdc,
                     self.current_params,
                     thumbnail_rgb=cur_thumb,
-                    print_mode=getattr(self, "current_print_mode", "optical")
+                    print_mode=getattr(self, "current_print_mode", "optical"),
+                    paper_explicit=self._photo_paper_is_explicit(curr_p)
                 )
                 curr_p["film_profile"] = self.current_film_stock
-                curr_p["paper_profile"] = self.current_paper_stock
+                curr_p["paper_profile"] = paper_for_sdc
                 curr_p["print_mode"] = getattr(self, "current_print_mode", "optical")
                 curr_p["params"] = dict(self.current_params)
                 curr_p["crop"] = dict(self.current_params.get("crop", {}))
@@ -8547,6 +8584,136 @@ aspect_ratio=self._lens_frame_aspect(photo),
         else:
             self._refresh_card_previews()
 
+    def _default_negative_paper(self):
+        """首选项里的"负片默认相纸"。
+
+        配置里可能是旧 id、被删掉的相纸或空串，任何一种都退回类常量，免得新建照片落到
+        "none"（直扫）这种面板全空的状态。每次读配置而不是缓存：首选项改完要立刻生效。
+        """
+        fallback = self.DEFAULT_NEGATIVE_PAPER
+        try:
+            from core import config_manager
+            pid = config_manager.get_preference("default_negative_paper", fallback)
+        except Exception:
+            return fallback
+        if not pid or pid in ("none", "", "screen"):
+            return fallback
+        try:
+            ids = {str(item.get("id")) for item in self.engine.get_paper_stocks()}
+        except Exception:
+            ids = set()
+        return pid if (not ids or pid in ids) else fallback
+
+    @staticmethod
+    def _photo_paper_is_explicit(photo):
+        """这张照片的相纸是用户主动选的，还是只是"没记录"。
+
+        ``paper_explicit`` 是内存里的标记，由 on_switch_paper 这类用户动作写入；从 .sdc
+        恢复的照片没有该键，此时看 paper_profile 是否为空 —— .sdc 会把"没选过"写成空串，
+        所以空串 / "none" / 缺键都算没选过，这类照片跟随首选项里的默认相纸。
+        """
+        if not photo:
+            return False
+        flag = photo.get("paper_explicit")
+        if flag is not None:
+            return bool(flag)
+        paper = photo.get("paper_profile")
+        return bool(paper) and str(paper) not in ("none", "")
+
+    def _effective_paper_for_photo(self, film, paper):
+        """照片没有相纸记录时该用哪张纸。
+
+        只有"负片 + 相纸未记录"才落到默认相纸；旁通（film=none）、反转片（引擎固定介质）
+        和用户已经选过的相纸都原样返回，绝不覆盖。UI 的相纸下拉本身没有"无"选项，所以
+        负片的 paper=none 只可能来自旧数据/直扫遗留，不是用户的选择。
+        """
+        film = str(film or "none")
+        paper = str(paper or "none")
+        if film == "none" or paper not in ("", "none"):
+            return paper
+        try:
+            if self.engine.is_positive_film(film):
+                return paper
+        except Exception:
+            pass
+        return self._default_negative_paper()
+
+    def on_default_negative_paper_changed(self):
+        """首选项换了"负片默认相纸"：只重刷没选过相纸的负片，选过的原样保留。
+
+        每张缩略图要烘一次 17³ LUT（几十毫秒），几十张就是几秒，所以排队交给定时器分批
+        处理，保存完首选项立刻能返回。当前照片同步重贴 LUT，画布与缩略图保持一致。
+        """
+        new_paper = self._default_negative_paper()
+        queue = []
+        for photo in getattr(self, "photos", []):
+            if not photo or self._photo_paper_is_explicit(photo):
+                continue
+            film = photo.get("film_profile", "none")
+            if film in ("none", "", None):
+                continue
+            try:
+                if self.engine.is_positive_film(film):
+                    continue
+            except Exception:
+                pass
+            queue.append(photo)
+
+        self._default_paper_queue = queue
+        self._default_paper_value = new_paper
+        self._default_paper_refreshed = 0
+        if not hasattr(self, "_default_paper_timer"):
+            self._default_paper_timer = QTimer(self)
+            self._default_paper_timer.setInterval(0)
+            self._default_paper_timer.timeout.connect(self._drain_default_paper_queue)
+        if queue and not self._default_paper_timer.isActive():
+            self._default_paper_timer.start()
+
+        active = next((p for p in getattr(self, "photos", [])
+                       if p and p.get("id") == self.active_photo_id), None)
+        if (active is not None and not self._photo_paper_is_explicit(active)
+                and self.current_film_stock not in ("none", "", None)):
+            try:
+                is_pos = self.engine.is_positive_film(self.current_film_stock)
+            except Exception:
+                is_pos = False
+            if not is_pos:
+                self.on_switch_paper(new_paper, push_undo=False)
+
+    def _drain_default_paper_queue(self):
+        """分批重刷 on_default_negative_paper_changed 排下的缩略图（每 tick 4 张）。"""
+        queue = getattr(self, "_default_paper_queue", None) or []
+        new_paper = getattr(self, "_default_paper_value", self._default_negative_paper())
+        done = 0
+        while queue and done < 4:
+            photo = queue.pop(0)
+            done += 1
+            raw = self.thumb_controller.get_raw_thumbnail(photo)
+            if raw is None or getattr(raw, "size", 0) == 0:
+                continue
+            try:
+                graded = self.thumb_controller.grade_thumbnail_fast(
+                    raw, photo.get("film_profile", "none"), new_paper, photo.get("params") or {})
+                self.thumb_controller.update_graded_thumbnail(photo, graded, self.filmstrip)
+                self._default_paper_refreshed = getattr(self, "_default_paper_refreshed", 0) + 1
+            except Exception:
+                continue
+        if not queue:
+            self._default_paper_timer.stop()
+            n = getattr(self, "_default_paper_refreshed", 0)
+            if n:
+                self.set_app_status(f"默认相纸已更新，{n} 张未选相纸的照片已重刷", timeout_ms=3000)
+
+    def _photo_effective_paper(self, photo):
+        """给某张照片算它实际该用的相纸（见 _effective_paper_for_photo + 显式标记）。"""
+        if not photo:
+            return "none"
+        if self._photo_paper_is_explicit(photo):
+            # 用户选过（包括主动选了"胶片直扫"= paper 空）：原样，绝不套默认。
+            return str(photo.get("paper_profile") or "none")
+        return self._effective_paper_for_photo(photo.get("film_profile") or "none",
+                                               photo.get("paper_profile") or "none")
+
     def on_switch_film(self, stock_id, push_undo=True):
         # Retired push stocks arrive here from old sessions and dropped folders: "Portra 800 Push 1"
         # is Portra 800 developed +1 now, so the id is rewritten before anything touches the LUT.
@@ -8567,11 +8734,19 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.current_film_stock = stock_id
         self._update_push_ui_state()
 
-        # Selecting "none" film (Bypass / original raw) or positive reversal slide film locks paper to "none" (scan / bypass)
+        # Selecting "none" film (Bypass / original raw) locks paper to "none" (scan / bypass).
         is_pos = self.engine.is_positive_film(stock_id) if hasattr(self.engine, 'is_positive_film') else False
-        # 锁死与撤销无关：之前这里带 `and push_undo`，走 undo/会话恢复那条路时反转片会带着
-        # 上一次的相纸进来，下拉框显示成一张纸、而渲染其实没用它，状态和画面对不上。
-        if stock_id == "none" or is_pos:
+        # Bypass (no film medium at all) still collapses paper and print mode: there is nothing
+        # left that could be printed.
+        #
+        # A reversal slide is *not* the same case.  The paper choice belongs to the negative the
+        # user was working on, and wiping it here meant 负片 → 正片 → 负片 lost the paper and
+        # asked for it a second time; the panel also showed 直扫 while the paper cards sat
+        # behind it, which is the desync.  The engine already ignores paper for positives
+        # (`eff_paper` collapses to `screen`, measured bit-identical LUT and grain table with
+        # paper=none/scan), so the state is simply carried and the paper controls are greyed out
+        # by _update_stock_mode_ui.  The enlarger parameters are carried for the same reason.
+        if stock_id == "none":
             self.current_paper_stock = "none"
             self.current_print_mode = "scan"
             self.current_params["print_mode"] = "scan"
@@ -8585,17 +8760,18 @@ aspect_ratio=self._lens_frame_aspect(photo),
             for pid, card in self.paper_cards.items():
                 card.set_active(pid == "none")
             self._update_all_sliders_from_params()
-        elif stock_id != "none":
+        elif not is_pos:
             # A negative always prints through paper.  Leaving it at 胶片直扫 made the panel
             # open with no paper selected, which then read as "the first pick did nothing".
             if getattr(self, "current_paper_stock", "none") in (None, "", "none"):
-                self.current_paper_stock = self.DEFAULT_NEGATIVE_PAPER
+                default_paper = self._default_negative_paper()
+                self.current_paper_stock = default_paper
                 self.current_print_mode = "optical"
                 self.current_params["print_mode"] = "optical"
                 if hasattr(self, "combo_paper"):
-                    self.combo_paper.set_value(self.DEFAULT_NEGATIVE_PAPER)
+                    self.combo_paper.set_value(default_paper)
                 for pid, card in self.paper_cards.items():
-                    card.set_active(pid == self.DEFAULT_NEGATIVE_PAPER)
+                    card.set_active(pid == default_paper)
 
         for sid, card in self.film_cards.items():
             card.set_active(sid == stock_id)
@@ -8605,13 +8781,18 @@ aspect_ratio=self._lens_frame_aspect(photo),
             photo = next((p for p in self.photos if p and p.get("path") == self._current_photo_path), None)
             if photo:
                 photo["film_profile"] = stock_id
-                if stock_id == "none" or is_pos:
+                if stock_id == "none":
                     photo["paper_profile"] = "none"
                     photo["print_mode"] = "scan"
                 else:
-                    # The default paper (or whatever the user had) is part of the photo state,
-                    # otherwise reopening it would fall back to 胶片直扫.
-                    photo["paper_profile"] = self.current_paper_stock
+                    # The paper (or whatever the user had) is part of the photo state, otherwise
+                    # reopening it would fall back to 胶片直扫.  For a reversal slide this keeps
+                    # the negative's paper choice intact for when the user switches back.
+                    # 自动套上的默认纸不写实值：写作空串，这张照片仍算"没选过相纸"，
+                    # 首选项换默认纸时会跟着变（.sdc 的空串就是"未选择"）。
+                    photo["paper_profile"] = (
+                        self.current_paper_stock
+                        if self._photo_paper_is_explicit(photo) else "")
                     photo["print_mode"] = self.current_print_mode
                 if stock_id == "none":
                     photo["graded_thumbnail_rgb"] = None
@@ -8624,6 +8805,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.canvas.update_params(paper_profile=self.current_paper_stock, print_mode=self.current_print_mode)
         hal_preset = self.engine.get_film_halation_preset(stock_id) if hasattr(self.engine, 'get_film_halation_preset') else None
         self.canvas.update_params(film_stock=stock_id, _halation_preset=hal_preset)
+        # The LUT above was applied while canvas.params still held the previous paper/mode, so the
+        # bundle staged alongside it belongs to that bake.  The preview now refuses a mismatched
+        # bundle instead of painting it, but restaging here means the grain comes back on this
+        # frame rather than on the next switch.  Only in 印相 mode: 直扫 has no print cube and
+        # its density table is not interchangeable with the LUT, so scan keeps the LUT path.
+        if self.current_print_mode == "optical":
+            self.canvas.set_grain_bundle(self._grain_bundle_for_current())
         self._schedule_histogram_update()
         if self._current_photo_path:
             self._update_active_thumbnails()
@@ -8639,9 +8827,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if mode not in ("optical", "scan"):
             mode = "optical"
         # 反转片只有"直接看片"一条路：相纸印相在物理上不存在（引擎里它的介质永远是
-        # Digital Reference），所以模式也一起锁死，别让 UI 停在一个渲染不出来的状态上。
-        if mode == "optical" and hasattr(self.engine, "is_positive_film") \
-                and self.engine.is_positive_film(getattr(self, "current_film_stock", "none")):
+        # Digital Reference）。但"当前已经是 optical"要放行 —— 撤销/会话恢复会用当前模式
+        # 重放这一路来重新贴 LUT，拦住它等于让反转片的画面停在上一张。
+        if (mode == "optical" and mode != getattr(self, "current_print_mode", "optical")
+                and hasattr(self.engine, "is_positive_film")
+                and self.engine.is_positive_film(getattr(self, "current_film_stock", "none"))):
             self.set_app_status("反转片直接看片，不经过相纸印相", timeout_ms=2500)
             return
         if push_undo and mode != getattr(self, "current_print_mode", "optical"):
@@ -8655,11 +8845,21 @@ aspect_ratio=self._lens_frame_aspect(photo),
             photo = next((p for p in self.photos if p and p.get("path") == self._current_photo_path), None)
             if photo:
                 photo["print_mode"] = mode
+                if mode == "scan":
+                    # 用户主动选了"胶片直扫"：这张片就不该再被默认相纸接管，标记成已选择。
+                    photo["paper_explicit"] = True
 
         lut_params = dict(self.current_params)
         lut_params["print_mode"] = mode
         lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
         self._apply_lut(lut_3d)
+        # This path never told the canvas which mode it is in, so 相纸印相 / 胶片直扫 could keep
+        # painting the previous one.  Params go in after the bake (matching the paper and film
+        # switches, where the bundle is chosen from the params still on screen), then the bundle
+        # is restaged so the grain matches the frame instead of being dropped by the guard.
+        self.canvas.update_params(print_mode=mode)
+        if mode == "optical":
+            self.canvas.set_grain_bundle(self._grain_bundle_for_current())
         self._schedule_histogram_update()
         if push_undo and self._current_photo_path:
             self._update_active_thumbnails()
@@ -8681,9 +8881,17 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         is_pos = self.engine.is_positive_film(self.current_film_stock) if hasattr(self.engine, 'is_positive_film') else False
         if is_pos and stock_id != "none":
-            self.set_app_status("反转底片无需相纸放大", timeout_ms=2500)
+            # 反转片不经过相纸，但"选中的是哪张纸"还是要显示出来（撤销/会话恢复会带着它
+            # 走这条路）。只同步显示，不重烘 LUT —— 反转片的介质由引擎固定，与纸无关。
+            self.current_paper_stock = stock_id
+            for sid, card in getattr(self, "paper_cards", {}).items():
+                card.set_active(sid == stock_id)
+            if hasattr(self, "combo_paper"):
+                self.combo_paper.set_value(stock_id)
+            self.set_app_status("反转底片无需相纸放大，当前选择已保留给负片", timeout_ms=2500)
             return
 
+        prev_paper = self.current_paper_stock
         if push_undo and stock_id != self.current_paper_stock:
             self._mark_current_photo_dirty()
         self.current_paper_stock = stock_id
@@ -8706,12 +8914,19 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if photo:
                 photo["paper_profile"] = stock_id
                 photo["print_mode"] = self.current_print_mode
+                # 只有真的换过纸才算"用户选过"：这个标记让首选项改默认相纸时，已经选过
+                # 相纸的底片不被覆盖，而没选过的继续跟随默认值。
+                if stock_id != prev_paper:
+                    photo["paper_explicit"] = True
 
         lut_params = dict(self.current_params)
         lut_params["print_mode"] = self.current_print_mode
         lut_3d = self.engine.get_3d_lut(self.current_film_stock, self.current_paper_stock, lut_size=33, params_dict=lut_params)
         self._apply_lut(lut_3d)
         self.canvas.update_params(paper_profile=stock_id, print_mode=self.current_print_mode)
+        # Restage the grain for the bake that is actually on screen (see on_switch_film).
+        if self.current_print_mode == "optical":
+            self.canvas.set_grain_bundle(self._grain_bundle_for_current())
         self._schedule_histogram_update()
         if push_undo and self._current_photo_path:
             self._update_active_thumbnails()
@@ -9042,11 +9257,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 is_edited = bool(s_p.get("is_edited", False))
                 photo_entry["is_dirty"] = is_dirty
                 photo_entry["is_edited"] = is_edited
-                if (is_edited or photo_entry["film_profile"] != "none" or photo_entry["paper_profile"] != "none") and raw_th is not None:
+                if (is_edited or photo_entry["film_profile"] != "none") and raw_th is not None:
                     graded = self.thumb_controller.grade_thumbnail_fast(
                         raw_th,
                         photo_entry["film_profile"],
-                        photo_entry["paper_profile"],
+                        self._photo_effective_paper(photo_entry),
                         photo_entry["params"]
                     )
                     photo_entry["graded_thumbnail_rgb"] = graded
@@ -9067,14 +9282,20 @@ aspect_ratio=self._lens_frame_aspect(photo),
                         photo_entry["crop"] = dict(photo_entry["params"]["crop"])
                     photo_entry["is_dirty"] = True
                     photo_entry["is_edited"] = True
-                    if sdc.get("thumbnail_rgb") is not None:
+                    # 负片 + .sdc 没记相纸：内嵌缩略图那张是直扫橙片，跳过它按默认相纸重渲。
+                    th_paper = (photo_entry["paper_profile"] or "none")
+                    if not sdc.get("paper_explicit"):
+                        th_paper = self._effective_paper_for_photo(
+                            photo_entry["film_profile"], photo_entry["paper_profile"])
+                    wants_regrade = (th_paper != (photo_entry["paper_profile"] or "none"))
+                    if sdc.get("thumbnail_rgb") is not None and not wants_regrade:
                         photo_entry["graded_thumbnail_rgb"] = sdc["thumbnail_rgb"]
                         photo_entry["thumbnail_rgb"] = sdc["thumbnail_rgb"]
                     elif raw_th is not None:
                         graded = self.thumb_controller.grade_thumbnail_fast(
                             raw_th,
                             photo_entry["film_profile"],
-                            photo_entry["paper_profile"],
+                            th_paper,
                             photo_entry["params"]
                         )
                         photo_entry["graded_thumbnail_rgb"] = graded
@@ -9332,11 +9553,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # Preserve graded thumbnail if already provided by SDC, otherwise grade decoded thumbnail if photo has edits
         if photo.get("thumbnail_rgb") is None:
             p_params = photo.get("params") or {}
-            if photo.get("film_profile", "none") != "none" or photo.get("paper_profile", "none") != "none" or abs(p_params.get("exposure_ev", 0.0)) > 0.001:
+            th_film = photo.get("film_profile", "none")
+            # 没选过相纸的负片用首选项的默认相纸出缩略图，否则这里是橙色负像。
+            th_paper = self._photo_effective_paper(photo)
+            if th_film != "none" or th_paper != "none" or abs(p_params.get("exposure_ev", 0.0)) > 0.001:
                 graded = self.grade_thumbnail_fast(
                     raw_th,
-                    photo.get("film_profile", "none"),
-                    photo.get("paper_profile", "none"),
+                    th_film,
+                    th_paper,
                     photo.get("params", {})
                 )
                 photo["graded_thumbnail_rgb"] = graded
@@ -9954,7 +10178,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
             for child in [colour_slider] + colour_slider.findChildren(QWidget):
                 child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not colour_ok)
 
-        # Left panel paper cards: lock and dim when in bypass or positive reversal film
+        # Left panel paper cards: lock and dim when in bypass or positive reversal film.
+        # On a reversal slide every paper is inert (the medium is Digital Reference), so all of
+        # them are disabled -- including the outline of "which one is still selected", which
+        # stays visible because the choice is kept for the next negative.
         if hasattr(self, 'paper_cards') and self.paper_cards:
             for pid, card in self.paper_cards.items():
                 if is_none:
@@ -9964,11 +10191,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     else:
                         card.setToolTip(getattr(card, "original_tooltip", ""))
                 elif is_pos:
-                    card.setEnabled(pid == "none")
-                    if pid != "none":
-                        card.setToolTip("反转正片无需相纸放大环节")
-                    else:
-                        card.setToolTip(getattr(card, "original_tooltip", ""))
+                    card.setEnabled(False)
+                    card.setToolTip("反转正片不经过相纸；当前选择保留，切回负片时继续使用")
                 else:
                     card.setEnabled(True)
                     card.setToolTip(getattr(card, "original_tooltip", ""))
@@ -9978,9 +10202,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # 右侧相纸下拉框跟随当前状态（切换底片/撤销/相纸变更都走这里）
         combo_paper = getattr(self, "combo_paper", None)
         if combo_paper is not None:
-            # 保险：反转片与旁通态只允许"胶片直扫"。撤销、会话恢复、旧 .sdc 都可能把一张
-            # 纸带进来，这里统一归位，免得下拉显示一张其实没参与成像的相纸。
-            if (is_pos or is_none) and getattr(self, "current_paper_stock", "none") != "none":
+            # 只有旁通态需要归位：那里连胶卷都没有，留下的纸没有任何意义。反转正片不一样 ——
+            # 相纸选择属于下面那张负片，保留它并在下拉里显示为不可用（置灰），切回负片
+            # 就能直接用，不必再选一次。渲染侧本来就忽略反转片的相纸（eff_paper -> screen）。
+            if is_none and getattr(self, "current_paper_stock", "none") != "none":
                 self.current_paper_stock = "none"
                 if hasattr(self, "canvas"):
                     self.canvas.update_params(paper_profile="none")
@@ -9989,7 +10214,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
             combo_paper.setEnabled(paper_ok)
             combo_paper.setToolTip(
                 getattr(combo_paper, "default_tooltip", "") if paper_ok
-                else ("反转正片无需相纸放大" if is_pos else "数码原片旁通模式无相纸印相环节")
+                else ("反转正片不经过相纸；当前选择保留，切回负片时继续使用" if is_pos
+                      else "数码原片旁通模式无相纸印相环节")
             )
 
     def _update_diffusion_ui_state(self):
@@ -10187,7 +10413,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         try:
             from core.sdc_manager import save_sdc
             save_sdc(photo["path"], photo.get("film_profile", self.current_film_stock),
-                     photo.get("paper_profile", self.current_paper_stock), params,
+                     photo.get("paper_profile") or "", params,
                      thumbnail_rgb=photo.get("thumbnail_rgb"),
                      print_mode=photo.get("print_mode", self.current_print_mode))
         except Exception as e:
@@ -10782,6 +11008,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
                         base_dict["boost_ev"] = loaded_params["halation_boost"]
                     self.current_film_stock = sdc.get("film_profile") or "none"
                     self.current_paper_stock = sdc.get("paper_profile") or "none"
+                    if "paper_explicit" in sdc:
+                        photo["paper_explicit"] = bool(sdc.get("paper_explicit"))
                     self.current_print_mode = sdc.get("print_mode") or loaded_params.get("print_mode", "optical")
                     base_dict["print_mode"] = self.current_print_mode
                     if "color_temp" not in loaded_params or (loaded_params.get("color_temp") == 5500.0 and base_temp != 5500.0 and not loaded_params.get("custom_wb")):
@@ -10806,6 +11034,19 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     self.current_params.clear()
                     self.current_params.update(defaults)
                     self._photo_is_dirty = False
+
+            # 负片但相纸没记录（旧 .sdc、直扫遗留、旁通退回）：直接落到首选项的默认相纸，
+            # 否则画面和缩略图都是橙色负像，而面板显示"胶片直扫"。用户选过的相纸不动，
+            # 也不写回 photo：这张照片仍算"没选过"，首选项换纸时它会跟着变。
+            eff_paper = self._photo_effective_paper(photo)
+            if eff_paper != self.current_paper_stock:
+                self.current_paper_stock = eff_paper
+                self.current_print_mode = "optical"
+                self.current_params["print_mode"] = "optical"
+                # 记成"自动值"而不是"用户选的"：面板/缩略图会写回 photo，没有这个标记的话
+                # 下次就变成"选过相纸"，首选项再改默认纸这张照片就不跟了。
+                if photo is not None and not self._photo_paper_is_explicit(photo):
+                    photo["paper_explicit"] = False
 
             self.filmstrip.set_photo_dirty(photo_id, self._photo_is_dirty)
             self._update_window_title()
@@ -10935,9 +11176,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 th_display = photo.get("graded_thumbnail_rgb")
                 raw_thumb = self.thumb_controller.get_raw_thumbnail(photo)
                 if th_display is None and raw_thumb is not None:
-                    if self.current_film_stock != "none" or self.current_paper_stock != "none":
+                    th_paper = self._effective_paper_for_photo(self.current_film_stock, self.current_paper_stock)
+                    if self.current_film_stock != "none" or th_paper != "none":
                         th_display = self.thumb_controller.grade_thumbnail_fast(
-                            raw_thumb, self.current_film_stock, self.current_paper_stock, self.current_params
+                            raw_thumb, self.current_film_stock, th_paper, self.current_params
                         )
                     else:
                         th_display = raw_thumb
@@ -11064,7 +11306,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     graded_th = self.thumb_controller.grade_thumbnail_fast(
                         new_thumb,
                         target_photo.get("film_profile", "none"),
-                        target_photo.get("paper_profile", "none"),
+                        self._photo_effective_paper(target_photo),
                         target_photo.get("params") or self.current_params
                     )
                     self.thumb_controller.update_graded_thumbnail(target_photo, graded_th, self.filmstrip)
@@ -12557,13 +12799,16 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             if self._photo_is_dirty and self._current_photo_path:
                 curr_p = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
                 cur_thumb = curr_p.get("thumbnail_rgb") if curr_p else None
+                paper_val = (self.current_paper_stock
+                             if (curr_p is not None and self._photo_paper_is_explicit(curr_p)) else "")
                 sdc_manager.save_sdc(
                     self._current_photo_path,
                     self.current_film_stock,
-                    self.current_paper_stock,
+                    paper_val,
                     self.current_params,
                     thumbnail_rgb=cur_thumb,
-                    print_mode=getattr(self, "current_print_mode", "optical")
+                    print_mode=getattr(self, "current_print_mode", "optical"),
+                    paper_explicit=(curr_p is not None and self._photo_paper_is_explicit(curr_p))
                 )
                 self._photo_is_dirty = False
             for p in self.photos:
