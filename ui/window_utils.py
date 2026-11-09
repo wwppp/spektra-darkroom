@@ -147,7 +147,8 @@ def apply_dark_titlebar(widget: QWidget, is_dark: bool = None):
         pass
 
 
-def show_dark_message_box(parent, title: str, text: str, icon=None, buttons=None):
+def show_dark_message_box(parent, title: str, text: str, icon=None, buttons=None,
+                          default_button=None):
     """Universal themed QMessageBox with native titlebar and amber hover/pressed effects."""
     from PySide6.QtWidgets import QMessageBox
     from PySide6.QtGui import QIcon
@@ -169,6 +170,8 @@ def show_dark_message_box(parent, title: str, text: str, icon=None, buttons=None
         mb.setIcon(QMessageBox.Icon.Information)
     if buttons is not None:
         mb.setStandardButtons(buttons)
+    if default_button is not None:
+        mb.setDefaultButton(default_button)
 
     if is_dark:
         mb.setStyleSheet("""

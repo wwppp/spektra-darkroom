@@ -976,7 +976,7 @@ class PreferencesDialog(QDialog):
         try:
             os.startfile(d)
         except Exception as e:
-            show_dark_message_box("打开文件夹失败", f"无法打开目录:\n{d}\n{e}", parent=self)
+            show_dark_message_box(self, "打开文件夹失败", f"无法打开目录:\n{d}\n{e}")
 
     def _on_change_cache_dir_clicked(self):
         from PySide6.QtWidgets import QFileDialog

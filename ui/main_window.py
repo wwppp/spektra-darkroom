@@ -98,7 +98,8 @@ if sys.platform == "win32":
             ("lppos", ctypes.c_void_p)
         ]
 
-from ui.window_utils import apply_dark_titlebar, get_darkroom_menu_style, get_icon, get_standard_checkbox_style
+from ui.window_utils import (apply_dark_titlebar, get_darkroom_menu_style, get_icon,
+                             get_standard_checkbox_style, show_dark_message_box)
 from ui.smooth_scroll import SmoothScrollArea
 from ui.preferences_dialog import PreferencesDialog
 from ui.about_dialog import AboutDialog
@@ -2766,25 +2767,36 @@ class DarkroomMainWindow(QMainWindow):
         valid_exts = IMPORTABLE_IMAGE_EXTENSIONS
         sdss_files = []
         img_files = []
+        rejected_files = []
+        empty_dirs = []
 
         for url in event.mimeData().urls():
             if url.isLocalFile():
                 local_path = url.toLocalFile()
                 if os.path.exists(local_path):
                     if os.path.isdir(local_path):
+                        usable = 0
                         for root, _, fnames in os.walk(local_path):
                             for f in fnames:
                                 ext = os.path.splitext(f)[1].lower()
                                 if ext == ".sdss":
                                     sdss_files.append(os.path.join(root, f))
+                                    usable += 1
                                 elif ext in valid_exts:
                                     img_files.append(os.path.join(root, f))
+                                    usable += 1
+                        if not usable:
+                            empty_dirs.append(local_path)
                     else:
                         ext = os.path.splitext(local_path)[1].lower()
                         if ext == ".sdss":
                             sdss_files.append(local_path)
                         elif ext in valid_exts:
                             img_files.append(local_path)
+                        else:
+                            rejected_files.append(local_path)
+                else:
+                    rejected_files.append(local_path)
 
         if sdss_files:
             event.acceptProposedAction()
@@ -2803,6 +2815,41 @@ class DarkroomMainWindow(QMainWindow):
             self._import_files_list(img_files)
         else:
             event.ignore()
+            self._report_unsupported_drop(rejected_files, empty_dirs)
+
+    def _unsupported_drop_message(self, rejected_files, empty_dirs) -> str:
+        lines = []
+        if rejected_files:
+            shown = rejected_files[:6]
+            lines.extend(f"  {os.path.basename(p)}" for p in shown)
+            if len(rejected_files) > len(shown):
+                lines.append(f"  …另有 {len(rejected_files) - len(shown)} 个文件")
+        if empty_dirs:
+            for d in empty_dirs[:2]:
+                lines.append(f"  文件夹「{os.path.basename(d) or d}」里没有可导入的文件")
+            if len(empty_dirs) > 2:
+                lines.append(f"  …另有 {len(empty_dirs) - 2} 个空文件夹")
+        return ("暗房只接受相机 RAW 与无损位图（PNG / TIFF）。\n"
+                "JPG / WebP 在压缩时已经丢掉高光与暗部，无法在这里还原，所以不提供导入。\n\n"
+                + ("未导入：\n" + "\n".join(lines) if lines else "拖入的内容里没有可导入的文件。"))
+
+    def _report_unsupported_drop(self, rejected_files, empty_dirs):
+        """Tell the user why a drop did nothing.
+
+        Lossy containers (JPG/WebP) are refused on purpose and previously vanished without a
+        word -- dropping a JPEG looked like the app had simply ignored the gesture.
+        """
+        from ui.confirm_dialog import show_darkroom_info
+
+        show_darkroom_info(
+            self,
+            "不支持的文件",
+            "这些文件无法导入",
+            self._unsupported_drop_message(rejected_files, empty_dirs),
+            ok_text="知道了",
+            badge_symbol="!",
+            width=470,
+        )
 
     def _update_root_style(self, is_max):
         is_dark = theme_manager.is_dark()
@@ -5310,7 +5357,9 @@ class DarkroomMainWindow(QMainWindow):
                 if isinstance(w, input_types):
                     return True
                 # The editable part of a combo box reports its own viewport as focus widget.
-                parent = w.parentWidget()
+                # QWindow (a native dialog's focus object) has no parentWidget -- asking it
+                # raised AttributeError inside the event filter on every key press.
+                parent = w.parentWidget() if isinstance(w, QWidget) else None
                 return parent is not None and isinstance(parent, input_types)
 
             if _is_input_widget(watched) or _is_input_widget(focus_w):
@@ -5877,23 +5926,66 @@ class DarkroomMainWindow(QMainWindow):
             self.set_app_status("会话保存失败", timeout_ms=3000)
             return False
 
+    def _close_needs_prompt(self) -> bool:
+        """True when closing/leaving would throw away unsaved session work."""
+        if not getattr(self, "_session_is_dirty", False):
+            return False
+        if not (self.photos or self._current_session_path):
+            return False
+        if getattr(self, "_suppress_close_confirm", False):
+            return False
+        if bool(os.environ.get("FAST_TEST")) or os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return False
+        return True
+
     def _prompt_save_if_session_dirty(self) -> bool:
         """Prompt user to save if current session has unsaved modifications.
         Returns True if safe to proceed (clean, saved, or discarded), False if user cancelled.
         """
-        is_suppressed = getattr(self, '_suppress_close_confirm', False) or bool(os.environ.get("FAST_TEST")) or os.environ.get("QT_QPA_PLATFORM") == "offscreen"
-        if getattr(self, '_session_is_dirty', False) and (self.photos or self._current_session_path) and not is_suppressed:
-            sess_name = os.path.basename(self._current_session_path) if self._current_session_path else "未命名会话"
-            dialog = UnsavedSessionDialog(sess_name, self)
-            res = dialog.exec()
-            if res == UnsavedSessionDialog.CANCEL:
+        if not self._close_needs_prompt():
+            return True
+        sess_name = os.path.basename(self._current_session_path) if self._current_session_path else "未命名会话"
+        dialog = UnsavedSessionDialog(sess_name, self)
+        res = dialog.exec()
+        if res == UnsavedSessionDialog.CANCEL:
+            return False
+        elif res == UnsavedSessionDialog.SAVE:
+            # 只有真的写成功了才算"已保存"。用户可能在 Windows 的"另存为"里点取消
+            # （action_save_session 返回 False），这种情况必须当成取消关闭，不能因为
+            # 别处顺手清掉了 dirty 标志就把会话连同窗口一起丢掉。
+            if not self.action_save_session():
                 return False
-            elif res == UnsavedSessionDialog.SAVE:
-                self.action_save_session()
-                if getattr(self, '_session_is_dirty', False):
-                    return False
-            # elif res == UnsavedSessionDialog.DISCARD: proceed
+            if getattr(self, "_session_is_dirty", False):
+                return False
+        # elif res == UnsavedSessionDialog.DISCARD: proceed
         return True
+
+    def _run_close_prompt(self):
+        """Ask the unsaved-session question outside the WM_CLOSE call stack, then close."""
+        caption_was_enabled = _FRAME_MODE != "clean"
+        if caption_was_enabled:
+            self._set_native_caption(False)
+        try:
+            proceed = self._prompt_save_if_session_dirty()
+        finally:
+            self._close_prompt_running = False
+
+        if not proceed:
+            if caption_was_enabled:
+                self._set_native_caption(True)
+            # 取消保存之后窗口可能已经被系统停用（原生保存对话框关掉时主窗口不再有焦点）。
+            # 显式拉回前台，否则看起来就像"应用被关掉了"，下一次启动还找不到这次的工作。
+            if not self.isVisible():
+                self.show()
+            self.raise_()
+            self.activateWindow()
+            return
+
+        self._close_approved = True
+        try:
+            self.close()
+        finally:
+            self._close_approved = False
 
     def action_close_session(self):
         """Item 4: Closes the current session, prompts if dirty, and returns cleanly to welcome page."""
@@ -7947,13 +8039,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         Two directories, nothing else: LUT tables (``.npy``) and laid film tiles.  No wildcards on
         user data -- if a path does not look like the cache it is skipped and reported.
         """
-        from PySide6.QtWidgets import QMessageBox
+        from ui.confirm_dialog import show_darkroom_confirm, show_darkroom_info
         try:
             from core.path_utils import get_user_lut_cache_dir, get_user_cache_dir
             lut_dir = str(get_user_lut_cache_dir())
             grain_dir = str(os.path.join(str(get_user_cache_dir()), "film_grain"))
         except Exception as exc:                       # noqa: BLE001
-            QMessageBox.warning(self, "重建渲染缓存", f"找不到缓存目录：{exc}")
+            show_darkroom_info(self, "重建渲染缓存", "找不到缓存目录", str(exc), badge_symbol="!")
             return
 
         sizes = {}
@@ -7967,11 +8059,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
         total_mb = sum(sizes.values()) / (1024 * 1024)
         detail = "\n".join(f"  {os.path.basename(p)}: {s / 1024 / 1024:.1f} MB"
                            for p, s in sizes.items())
-        if QMessageBox.question(
-                self, "重建渲染缓存",
+        if not show_darkroom_confirm(
+                self, "重建渲染缓存", "删除并重建渲染缓存",
                 f"将删除以下缓存（{total_mb:.0f} MB）：\n{detail}\n\n"
-                "下次渲染会重新烘焙，第一次会慢一些。继续？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                "下次渲染会重新烘焙，第一次会慢一些。",
+                confirm_text="删除并重建", cancel_text="取消",
+                badge_symbol="!", is_danger=True):
             return
 
         removed, failed = 0, []
@@ -8000,7 +8093,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         message = f"已删除 {removed} 个缓存文件。"
         if failed:
             message += "\n以下文件删不掉（可能被占用）：\n" + "\n".join(failed[:8])
-        QMessageBox.information(self, "重建渲染缓存", message)
+        show_darkroom_info(self, "重建渲染缓存", "缓存已重建", message, badge_symbol="✓")
 
     def reset_track(self, track_name):
         is_none = (getattr(self, "current_film_stock", "none") == "none")
@@ -12649,61 +12742,22 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         else:
             self._set_export_status(f"已将 {enqueued_count} 张底片加入扫描队列", state="busy")
 
-    def _create_dark_message_box(self, title, text, icon=QMessageBox.Icon.Information):
-        mb = QMessageBox(self)
-        dlg_icon_path = os.path.join(get_resource_dir(), "icons", "dlg_info.png")
-        if os.path.exists(dlg_icon_path):
-            mb.setWindowIcon(QIcon(dlg_icon_path))
-        else:
-            mb.setWindowIcon(self.windowIcon())
-        mb.setWindowTitle(title)
-        mb.setText(text)
-        mb.setIcon(icon)
-        mb.setStyleSheet("""
-            QMessageBox {
-                background: #14151a;
-                color: #e2e8f0;
-            }
-            QLabel {
-                color: #e2e8f0;
-                font-size: 12px;
-            }
-            QPushButton {
-                background: #20222b;
-                color: #e2e8f0;
-                border: 1px solid #333647;
-                border-radius: 4px;
-                padding: 5px 16px;
-                font-size: 12px;
-                min-width: 60px;
-            }
-            QPushButton:hover {
-                background: #2a2d3a;
-                border-color: #f59e0b;
-                color: #f59e0b;
-            }
-            QPushButton:pressed {
-                background: #14151a;
-                color: #d97706;
-                border-color: #d97706;
-            }
-        """)
-        apply_dark_titlebar(mb)
-        return mb
-
     def _show_info_dialog(self, title, text):
-        mb = self._create_dark_message_box(title, text, QMessageBox.Icon.Information)
-        mb.exec()
+        show_dark_message_box(self, title, text, QMessageBox.Icon.Information,
+                              QMessageBox.StandardButton.Ok)
 
     def _show_warning_dialog(self, title, text):
-        mb = self._create_dark_message_box(title, text, QMessageBox.Icon.Warning)
-        mb.exec()
+        show_dark_message_box(self, title, text, QMessageBox.Icon.Warning,
+                              QMessageBox.StandardButton.Ok)
 
     def _show_question_dialog(self, title, text):
-        mb = self._create_dark_message_box(title, text, QMessageBox.Icon.Question)
-        mb.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        mb.setDefaultButton(QMessageBox.StandardButton.No)
-        return mb.exec() == QMessageBox.StandardButton.Yes
+        # 统一走 window_utils 那套按主题切换的消息框：这里原来写死深色，浅色主题下
+        # 导出/导入的提示是深色卡片，跟应用对不上。
+        res = show_dark_message_box(
+            self, title, text, QMessageBox.Icon.Question,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return res == QMessageBox.StandardButton.Yes
 
     def _on_film_blank_context_menu(self, pos):
         sender = self.sender()
@@ -12814,6 +12868,23 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
 
     def closeEvent(self, event):
         _frame_log("closeEvent enter")
+        approved = getattr(self, "_close_approved", False)
+        if not approved:
+            # 未保存的会话必须在提问之后才真正关闭，而提问里会弹 Windows 原生"另存为"。
+            # 在 WM_CLOSE 的同步调用栈里开这种模态原生窗口，Windows 的对话框消息循环会
+            # 重入关闭流程：用户在对话框里点取消后事件链被吞掉，窗口反而被销毁（会话和
+            # 进程一起没了）。所以这里先 ignore，下一轮事件循环再问；问过了才 close。
+            if getattr(self, "_close_prompt_running", False):
+                event.ignore()
+                return
+            if self._close_needs_prompt():
+                # 标记在排队前就置上：连点关闭按钮时第二次 closeEvent 只会被忽略，
+                # 不会排出第二个提问。
+                self._close_prompt_running = True
+                event.ignore()
+                QTimer.singleShot(0, self._run_close_prompt)
+                return
+
         # Drop the caption for the whole closing sequence (prompt included). Window teardown is
         # when Windows repaints the frame; without the style bit there is nothing to paint, so
         # the classic title bar cannot flash while the save prompt / .sdc writes / worker
@@ -12821,13 +12892,6 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         caption_was_enabled = _FRAME_MODE != "clean"
         if caption_was_enabled:
             self._set_native_caption(False)
-
-        # Prompt user to save if current session has unsaved modifications
-        if not self._prompt_save_if_session_dirty():
-            if caption_was_enabled:
-                self._set_native_caption(True)
-            event.ignore()
-            return
 
         # Capture the closing state and hide IMMEDIATELY. Every step below (.sdc writes for each
         # dirty photo including thumbnails, worker teardown with 1 s waits, config/session
