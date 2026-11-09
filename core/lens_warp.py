@@ -259,6 +259,13 @@ def lens_remap_maps(w: int, h: int, eff, channel: str = "g"):
         scale_ca += np.multiply(r4_ca, np.float32(c1))
         scale_ca += np.multiply(r6_ca, np.float32(c2))
         scale_ca += np.float32(1.0 + ca_const)
+        # Fade the shift out over the last few pixels of the frame.  At the border the R and B
+        # samples clamp to opposite sides of the edge texel, so the outermost column came out
+        # as a saturated rim of its own -- a fringe that belongs to the resampler, not the lens.
+        edge_x = (np.float32(0.5) - np.abs(su)) * np.float32(w)
+        edge_y = (np.float32(0.5) - np.abs(sv)) * np.float32(h)
+        fade = np.clip(np.minimum(edge_x, edge_y) / np.float32(3.0), 0.0, 1.0)
+        scale_ca = np.float32(1.0) + (scale_ca - np.float32(1.0)) * fade
         su *= scale_ca
         sv *= scale_ca
         su += np.float32(0.5)

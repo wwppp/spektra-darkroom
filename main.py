@@ -228,6 +228,16 @@ def main():
     app.setApplicationName(get_app_title())
     startup_log("QApplication created")
 
+    # Interface font size (小/中/大) rewrites the font-size declarations at the moment a
+    # stylesheet reaches Qt, so it has to be installed before the first widget is built.
+    try:
+        from ui import ui_scale
+        startup_log(f"ui_scale installed: {ui_scale.install()}")
+        from ui.theme_manager import theme_manager
+        theme_manager._apply_app_palette()      # re-apply so the app sheet is scaled too
+    except Exception as exc:                    # noqa: BLE001 - never block startup
+        startup_log(f"ui_scale failed: {exc}")
+
     # A finger on a card makes Qt invent a mouse press, which selects the card before the finger
     # has moved far enough to tell a tap from a drag.  The pan filter replays the tap itself, so
     # the invented clicks inside a scrolling area are dropped.

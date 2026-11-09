@@ -202,7 +202,7 @@ class RoundScrubSlider(QSlider):
     # Knob diameter ~= the 11px label text, and the groove starts at x=0 so the track's left
     # edge lines up with the label above it (it used to be inset by r+2, which read as
     # "everything is indented by 11px and nothing is flush").
-    KNOB_R = 3.5
+    KNOB_R = 6.5
     # Fraction of a full-track sweep per pixel when dragging the groove instead of the knob:
     # roughly a quarter speed, so it reads as fine adjustment rather than a scrub race.
     TRACK_RATE = 0.30
@@ -273,20 +273,21 @@ class RoundScrubSlider(QSlider):
         return abs(float(x) - self._knob_cx()) <= self.KNOB_R + 5.0
 
     def _update_hover_cursor(self, x=None):
-        """Open hand over the knob, left-right arrows over the groove.
+        """Arrow over the knob, left-right arrows over the groove.
 
-        The whole slider used to show the resize cursor, which read as "this thing is one
-        draggable bar" and hid the fact that the knob and the groove behave differently.
+        The knob used to show a hand, which is a big shape that sits on top of the very pixel
+        you are trying to line the knob up with -- for a 7px knob that reads as imprecise.  The
+        groove keeps the resize cursor because there the drag is relative.
         """
         if not self.isEnabled():
             return
         if self._pressed:
-            self.setCursor(Qt.CursorShape.ClosedHandCursor
+            self.setCursor(Qt.CursorShape.ArrowCursor
                            if self._drag_mode == 'knob' else Qt.CursorShape.SizeHorCursor)
             return
         if x is None:
             x = self.mapFromGlobal(QCursor.pos()).x()
-        self.setCursor(Qt.CursorShape.OpenHandCursor if self._hit_knob(x)
+        self.setCursor(Qt.CursorShape.ArrowCursor if self._hit_knob(x)
                        else Qt.CursorShape.SizeHorCursor)
 
     def enterEvent(self, event):
@@ -611,6 +612,15 @@ class ParamScrubSlider(QWidget):
         self.apply_theme()
         theme_manager.themeChanged.connect(self.apply_theme)
 
+        # The numeric box is sized from the text it will hold, so it has to be re-measured
+        # whenever the interface font size preference changes.
+        self._resize_value_edit()
+        try:
+            from ui import ui_scale
+            ui_scale.bus.changed.connect(self._resize_value_edit)
+        except Exception:
+            pass
+
     def add_header_widget(self, w, stretch=0):
         """Mount an extra control in the header row, right *after* the scrub title.
 
@@ -714,17 +724,34 @@ class ParamScrubSlider(QWidget):
         self.slider.setValue(self._val_to_slider(val))
         
         # Format text with +/- and unit
-        prefix = "+" if (val > 0 and self.min_val < 0) else ""
-        if self.decimals == 0:
-            formatted = f"{prefix}{int(val)}{self.unit}"
-        else:
-            formatted = f"{prefix}{val:.{self.decimals}f}{self.unit}"
-        self.value_edit.setText(formatted)
+        self.value_edit.setText(self._format_value(val))
 
         self._is_updating = False
         self.slider.update()
         self.value_edit.update()
         self.update()
+
+    def _format_value(self, val):
+        prefix = "+" if (val > 0 and self.min_val < 0) else ""
+        if self.decimals == 0:
+            return f"{prefix}{int(val)}{self.unit}"
+        return f"{prefix}{val:.{self.decimals}f}{self.unit}"
+
+    def _resize_value_edit(self, *_):
+        """Size the numeric box from the widest string it will ever hold.
+
+        The box used to be a fixed 52px, which clipped "0.60 EV" and "5350 K" as soon as the
+        interface font went up a step.  Measuring the extremes keeps it stable (no jitter as
+        the value changes) and lets it follow the font-size preference.
+        """
+        try:
+            self.value_edit.ensurePolished()
+            fm = self.value_edit.fontMetrics()
+            widest = max(fm.horizontalAdvance(self._format_value(v))
+                         for v in (self.min_val, self.max_val, self.default_val, 0.0))
+            self.value_edit.setFixedWidth(int(widest + 16))
+        except Exception:
+            pass
 
     def _on_slider_changed(self, pos):
         if self._is_updating:
@@ -1020,7 +1047,10 @@ class DarkroomComboBox(QComboBox):
         if hasattr(self.combo_view, "window"):
             container = self.combo_view.window()
             if container:
-                container.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+                # No NoDropShadowWindowHint: Qt adds CS_DROPSHADOW to popup windows unless it
+                # is asked not to, and that native shadow is what gives the dropdown its lift
+                # off the panel underneath.  The rounded mask is applied separately.
+                container.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
                 container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
                 container.setAutoFillBackground(True)
                 container.setWindowOpacity(0.0)

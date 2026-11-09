@@ -794,8 +794,14 @@ void main() {
                         + u_lens_ca_r.x * r2_ca + u_lens_ca_r.y * r4_ca + u_lens_ca_r.z * r6_ca;
         float scale_b = 1.0 + u_lens_ca_scale_b
                         + u_lens_ca_b.x * r2_ca + u_lens_ca_b.y * r4_ca + u_lens_ca_b.z * r6_ca;
-        vec2 uv_r = clamp(0.5 + lp_ca * scale_r, half_texel, vec2(1.0) - half_texel);
-        vec2 uv_b = clamp(0.5 + lp_ca * scale_b, half_texel, vec2(1.0) - half_texel);
+        // Fade the shift out over the last few pixels of the frame.  Right at the border the R
+        // and B samples clamp to opposite sides of the edge texel, so the outermost column came
+        // out as a saturated 1px rim of its own -- a colour fringe that was ours, not the lens's.
+        float ca_edge_px = min(min(sample_uv.x, 1.0 - sample_uv.x) * tex_dim.x,
+                               min(sample_uv.y, 1.0 - sample_uv.y) * tex_dim.y);
+        float ca_fade = clamp(ca_edge_px / 3.0, 0.0, 1.0);
+        vec2 uv_r = clamp(0.5 + lp_ca * (1.0 + (scale_r - 1.0) * ca_fade), half_texel, vec2(1.0) - half_texel);
+        vec2 uv_b = clamp(0.5 + lp_ca * (1.0 + (scale_b - 1.0) * ca_fade), half_texel, vec2(1.0) - half_texel);
         orig_rgb.r = textureGrad(u_image, uv_r, d_sample_dx, d_sample_dy).r;
         orig_rgb.b = textureGrad(u_image, uv_b, d_sample_dx, d_sample_dy).b;
     }

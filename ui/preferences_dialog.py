@@ -20,6 +20,7 @@ from ui.confirm_dialog import show_darkroom_confirm, show_darkroom_info
 from core.path_utils import get_resource_dir, get_icon_path
 from ui.window_utils import apply_dark_titlebar, show_dark_message_box, get_icon, setup_solid_combobox, get_standard_checkbox_style
 from ui.theme_manager import theme_manager
+from ui import ui_scale
 from core import config_manager
 from core import session_cache_manager
 
@@ -612,6 +613,21 @@ class PreferencesDialog(QDialog):
         r_theme.addStretch(1)
         l_dr.addLayout(r_theme)
 
+        # 界面字体大小：全局缩放，只放大字号，不动间距与控件尺寸
+        r_font = QHBoxLayout()
+        lbl_font = QLabel("字体大小:")
+        lbl_font.setFixedWidth(100)
+        r_font.addWidget(lbl_font)
+        self.combo_font_size = QComboBox()
+        self.combo_font_size.setFixedWidth(180)
+        setup_solid_combobox(self.combo_font_size)
+        for _key in ("small", "medium", "large"):
+            self.combo_font_size.addItem(ui_scale.LABELS[_key], _key)
+        self.combo_font_size.setToolTip("界面文字大小（只影响字号，不改变控件与间距）")
+        r_font.addWidget(self.combo_font_size)
+        r_font.addStretch(1)
+        l_dr.addLayout(r_font)
+
         r_fmt = QHBoxLayout()
         lbl_fmt = QLabel("默认画幅:")
         lbl_fmt.setFixedWidth(100)
@@ -838,6 +854,9 @@ class PreferencesDialog(QDialog):
         theme_mode = config_manager.get_preference("ui_theme", "system")
         idx_th = self.combo_ui_theme.findData(theme_mode)
         self.combo_ui_theme.setCurrentIndex(idx_th if idx_th >= 0 else 2)
+
+        idx_fs = self.combo_font_size.findData(ui_scale.current_key())
+        self.combo_font_size.setCurrentIndex(idx_fs if idx_fs >= 0 else 0)
 
         self.btn_clean_cache.setEnabled(True)
         self.btn_clean_cache.setText("清理")
@@ -1076,6 +1095,10 @@ class PreferencesDialog(QDialog):
         prefs["ui_theme"] = th_mode
         config_manager.set_preference("ui_theme", th_mode)
         theme_manager.set_theme_mode(th_mode)
+
+        font_key = self.combo_font_size.currentData() or ui_scale.DEFAULT_KEY
+        prefs["ui_font_size"] = font_key
+        ui_scale.set_font_scale(font_key)
 
         config_manager.save_config(cfg)
         self.accept()
