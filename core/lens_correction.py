@@ -56,6 +56,13 @@ class LensCalibrationEntry:
     # profile's own r = R/f space; compute_effective_lens_params renormalises them.
     ca_r_coeffs: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     ca_b_coeffs: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # PerspectiveModel's own normalisation: FocalLengthX is the focal length in units of the
+    # *sensor width*, and ImageWidth/ImageLength give the frame it was fitted on. Together
+    # they place the image corner at a radius the coefficients are meaningful at, which is
+    # not always what SensorFormatFactor claims -- see _corner_radius_for().
+    focal_length_x: float = 0.0
+    image_width: float = 0.0
+    image_height: float = 0.0
 
 
 @dataclass
@@ -308,6 +315,9 @@ class LCPParser:
                 fy = _parse_float_safe(data.get("FocalLengthY")) or fx
                 cx = _parse_float_safe(data.get("ImageXCenter")) or 0.5
                 cy = _parse_float_safe(data.get("ImageYCenter")) or 0.5
+                model_fx = _parse_float_safe(data.get("FocalLengthX")) or 0.0
+                model_w = _parse_float_safe(data.get("ImageWidth")) or 0.0
+                model_h = _parse_float_safe(data.get("ImageLength")) or 0.0
 
                 if abs(k1) > 1e-6 or abs(k2) > 1e-6 or abs(k3) > 1e-6 or vig_coeffs or piecewise \
                         or any(abs(v) > 1e-6 for v in ca_models.get("ChromaticRedGreenModel", ())) \
@@ -327,6 +337,9 @@ class LCPParser:
                         vignette_piecewise=piecewise,
                         ca_r_coeffs=ca_models.get("ChromaticRedGreenModel", (0.0, 0.0, 0.0)),
                         ca_b_coeffs=ca_models.get("ChromaticBlueGreenModel", (0.0, 0.0, 0.0)),
+                        focal_length_x=model_fx,
+                        image_width=model_w,
+                        image_height=model_h,
                     ))
 
             if not calibrations and calib_nodes:
@@ -1157,6 +1170,88 @@ def _coeff_triplet(raw) -> Tuple[float, float, float]:
     return (0.0, 0.0, 0.0)
 
 
+FULL_FRAME_CORNER_MM = 21.633333  # sqrt(18^2 + 12^2): half the 35 mm frame diagonal
+_FOLD_SAMPLES = 64
+
+
+def _map_folds(k1: float, k2: float, k3: float) -> bool:
+    """True when ``r -> r * (1 + k1 r^2 + k2 r^4 + k3 r^6)`` stops increasing on r in [0, 1].
+
+    The coefficients here are already scaled to corner-normalised radius, so r = 1 is the
+    image corner. A lens cannot fold the frame over itself: once this mapping turns back,
+    the outer part of the picture is sampled from *inside* an already-used radius and the
+    frame collapses into a ball with mirrored bands. That is not a look any profile in the
+    world is asking for -- it means the coefficients are being evaluated outside the radius
+    they were fitted for.
+    """
+    prev = 0.0
+    for i in range(1, _FOLD_SAMPLES + 1):
+        r = i / _FOLD_SAMPLES
+        u = r * r
+        g = r * (1.0 + k1 * u + k2 * u * u + k3 * u * u * u)
+        if not (g > prev):
+            return True
+        prev = g
+    return False
+
+
+def _fit_corner_radius(calib: LensCalibrationEntry) -> Optional[float]:
+    """Corner radius the profile's *own* PerspectiveModel was fitted against.
+
+    Adobe stores FocalLengthX as the focal length measured in sensor widths, so with an
+    ImageWidth/ImageLength pair the image corner sits at ``0.5*sqrt(1+(h/w)^2) / fx`` in the
+    model's r space. Returns None when the profile does not state either field.
+    """
+    fx = float(getattr(calib, "focal_length_x", 0.0) or 0.0)
+    if fx <= 0.0:
+        return None
+    w = float(getattr(calib, "image_width", 0.0) or 0.0)
+    h = float(getattr(calib, "image_height", 0.0) or 0.0)
+    aspect = (h / w) if (w > 0 and h > 0) else 0.75  # 4:3 is what Adobe ships for phones
+    return 0.5 * math.sqrt(1.0 + aspect * aspect) / fx
+
+
+def _corner_radius_for(calib: LensCalibrationEntry, effective_fl: float, crop_factor: float) -> float:
+    """Radius, in the profile's r = R/f space, of the image corner -- chosen so the map is sane.
+
+    The nominal value is ``21.633 / (crop * f)``. That is right whenever the profile's
+    SensorFormatFactor agrees with the camera that shot the frame, and it is what every
+    profile was verified with. It is wrong, though, for profiles Adobe filed under a sensor
+    they do not belong to: the iPhone XS Max 6 mm f/2.4 entry claims 5.5 (i.e. a 1/2.55"
+    sensor, the *wide* camera's) while FocalLengthX implies 8.7 -- the same 1/3.4" sensor as
+    the iPhone X and 7 Plus tele entries. Trusting 5.5 pushed the corner to r = 0.66, well
+    past the radius the polynomial was fitted for, and the map folded: the frame collapsed
+    into the ball with black ovals that a user reported as "严重扭曲" on 2026-11-09.
+
+    So: keep the nominal radius unless it folds. When it does, fall back to the radius implied
+    by the profile's own FocalLengthX, and as a last resort shrink the radius until the map
+    is single-valued. For every profile whose nominal radius is already sane -- the vast
+    majority of the Adobe library -- this returns exactly the value it always did.
+    """
+    nominal = FULL_FRAME_CORNER_MM / max(1e-6, crop_factor * effective_fl)
+    if not _map_folds(calib.k1 * nominal ** 2, calib.k2 * nominal ** 4, calib.k3 * nominal ** 6):
+        return nominal
+
+    fit_r = _fit_corner_radius(calib)
+    if fit_r and fit_r > 0:
+        if not _map_folds(calib.k1 * fit_r ** 2, calib.k2 * fit_r ** 4, calib.k3 * fit_r ** 6):
+            logger.info(
+                "Lens profile %s: corner radius %.3f folds the frame; using the profile's own "
+                "fit radius %.3f instead.", getattr(calib, "focal_length", "?"), nominal, fit_r)
+            return fit_r
+
+    lo, hi = 0.0, nominal
+    for _ in range(24):
+        mid = 0.5 * (lo + hi)
+        if _map_folds(calib.k1 * mid ** 2, calib.k2 * mid ** 4, calib.k3 * mid ** 6):
+            hi = mid
+        else:
+            lo = mid
+    logger.warning("Lens profile k=(%.4f,%.4f,%.4f) folds at r=%.3f; clamped to r=%.3f.",
+                   calib.k1, calib.k2, calib.k3, nominal, lo)
+    return lo
+
+
 def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] = None,
                                   aperture: Optional[float] = None,
                                   aspect_ratio: float = 0.6667,
@@ -1286,7 +1381,7 @@ def compute_effective_lens_params(lens_cfg: dict, focal_length: Optional[float] 
                     if not eff_fl or eff_fl <= 0:
                         eff_fl = 50.0
                     crop_factor = float(prof.sensor_format_factor) if (prof.sensor_format_factor and prof.sensor_format_factor > 0) else 1.0
-                    r_corner = 21.633333 / (crop_factor * eff_fl)
+                    r_corner = _corner_radius_for(calib_dist, eff_fl, crop_factor)
 
                     k1 = calib_dist.k1 * (r_corner ** 2) * dist_scale
                     k2 = calib_dist.k2 * (r_corner ** 4) * dist_scale
