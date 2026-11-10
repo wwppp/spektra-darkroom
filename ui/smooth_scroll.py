@@ -1,8 +1,9 @@
 """smooth_scroll.py - Universal smooth scrolling with edge indicators.
 
 Wheel motion is driven by ``WheelFollower``: each notch moves a *target* position and one
-shared velocity servo carries the bar there, so speed is continuous across notches instead
-of restarting per notch.  See the class docstring for the measurements behind that.
+shared exponential glide carries the bar there -- full speed on the first frame, then a
+long slow tail -- so speed is continuous across notches instead of restarting per notch.
+See the class docstring for the measurements behind that.
 """
 
 import math
@@ -92,40 +93,42 @@ class _PixelSettleAnimation(QVariantAnimation):
 
 
 class WheelFollower(QObject):
-    """Carry a scrollbar to the wheel's target with continuous velocity.
+    """Carry a scrollbar to the wheel's target as an exponential glide.
 
-    The previous driver restarted an OutQuart ease from the current pixel on every
-    notch.  OutQuart leaves its start at four times the average slope, so a 76 px notch
-    opened with a 15 px lurch in a single frame and decayed from there; a second notch
-    mid-flight restarted that lurch, and a burst read as a sawtooth (measured: 11, 9, 8,
-    13, 8, 9, 8, 14 px per frame at 110 ms spacing).  Only the position was continuous,
-    never the speed -- which is what "one pulse, one twitch" describes.
+    Wanted shape: full speed within one frame, then a long, slow bleed to a stop.
 
-    This is a velocity servo instead of a replayed curve.  The wheel adds to a *target*
-    and the speed chases ``sqrt(2 * ACCEL * distance)`` -- the profile that can still
-    brake to a stop exactly at the target -- with the speed itself rate-limited.  So:
+    The three earlier drivers all failed at the *start*, because each derived its speed
+    from a position curve instead of setting it:
 
-    * five notches still travel five steps however fast they arrive, unlike a momentum
-      integrator whose reach depends on cadence;
-    * a retarget changes the *acceleration*, never the speed, so there is no seam: a
-      burst ramps up monotonically and then holds, rather than pulsing per notch;
-    * arrival is exact and the last fraction of a pixel is snapped, so there is no
-      constant-speed crawl at the end (the old driver spent ~150 ms at 1 px per frame)
-      and nothing to rebound.
+    * an OutQuart ease restarted per notch opened with a 4x-average lurch and read as a
+      sawtooth under a burst (11, 9, 8, 13, 8, 9, 8, 14 px per frame at 110 ms spacing);
+    * a critically damped spring pumped at the notch rhythm (6..13 px/frame ripple);
+    * a ``sqrt(2 * ACCEL * distance)`` speed servo had no seam but was acceleration
+      limited, and one 76 px notch needs only 160 ms at 6000 px/s^2 -- so the *whole*
+      flight was spent accelerating: the first frame moved 0.2 px, half the distance went
+      in the last two frames.  Smooth arithmetic, but it reads as "nothing, nothing, then
+      it jumps", which is exactly the sluggish start this replaces.
 
-    A critically damped spring was tried first: also seamless, but a second-order system
-    driven at the notch rhythm pumps, which put a 6..13 px/frame ripple back into a
-    110 ms burst.  The servo does not resonate because its speed target is a function of
-    distance, not of history.
+    So the speed is *read* from the distance and applied immediately, ``v = d / TAU``,
+    with no acceleration limit and no braking curve:
+
+    * one notch is at ~8.7 px/frame in the very first frame (measured: 8.7 px of the 76 px
+      step lands in frame one, against 0.2 px for the accel-limited servo), and ``add()``
+      advances that first frame before returning, so the paint caused by the wheel event
+      already shows the motion;
+    * the tail is the same 140 ms time constant decaying: 50 % of the way at 100 ms, 90 %
+      at 333 ms, still creeping at 500 ms, snapped shut only inside the last sub-pixel;
+    * distance still sums, so five notches travel five steps whatever the cadence, and a
+      faster/larger wheel delta simply means a longer distance ahead -- which *is* the
+      speed, so force maps to speed with no extra knob;
+    * the approach is monotone, so nothing overshoots and nothing rebounds.
     """
 
-    ACCEL = 6000.0        # px/s^2, and also the braking rate
-    V_MAX = 2000.0        # px/s ceiling, so a violent spin cannot turn into a teleport
+    TAU = 0.14            # s, the decay time constant of ``v = d / TAU``
+    V_MAX = 2400.0        # px/s ceiling, so a violent spin cannot turn into a teleport
     SUBSTEP_S = 0.008     # integration step; keeps the profile stable if a frame is long
     FRAME_MS = 8          # twice the display rate, so a frame never sees a stale position
-    MARGIN_PX = 0.02      # keep sqrt() off zero; the landing rule below does the real work
-    SNAP_PX = 0.7
-    SNAP_V = 90.0         # px/s
+    SNAP_PX = 0.75        # sub-pixel: at this distance the bar has already rounded still
 
     finished = Signal()
 
@@ -167,7 +170,8 @@ class WheelFollower(QObject):
         hi = float(self._bar.maximum())
         if hi <= lo:
             return
-        if not self._timer.isActive():
+        first_event = not self._timer.isActive()
+        if first_event:
             # Start from wherever the bar actually is: the user may have dragged it, or a
             # previous flight may have been interrupted.
             self._pos = float(self._bar.value())
@@ -176,12 +180,26 @@ class WheelFollower(QObject):
             self._clock.start()
             self._timer.start()
         self._target = max(lo, min(hi, self._target + delta))
+        # Spend the time already waited, synchronously.  The wheel event and the repaint it
+        # triggers are the same frame, so waiting for the first timer tick would show a
+        # still bar on the frame the user acted on -- that 8 ms of nothing is half of what
+        # "the initial response lags" measures.  The time is *claimed*, not invented: the
+        # next step (timer or wheel) only gets what has really elapsed since this one, so a
+        # rapid high-resolution wheel cannot out-run the clock.
+        self._advance(self._claim_time(first_event))
 
     # -- internals ------------------------------------------------------
-    def _tick(self) -> None:
-        dt = (self._clock.restart() / 1000.0) if self._clock.isValid() else self.FRAME_MS / 1000.0
-        dt = min(0.05, max(1e-4, dt))
+    def _claim_time(self, first_event: bool = False) -> float:
+        """Seconds of real time since the previous step (one frame at the start of a flight)."""
+        if first_event or not self._clock.isValid():
+            return self.FRAME_MS / 1000.0
+        return min(0.05, self._clock.restart() / 1000.0)
 
+    def _tick(self) -> None:
+        self._advance(self._claim_time())
+
+    def _advance(self, dt: float) -> bool:
+        """Move for ``dt`` seconds.  Returns True while there is motion left."""
         lo = float(self._bar.minimum())
         hi = float(self._bar.maximum())
         # The range can collapse under a flight -- a panel section folds, a dropdown is
@@ -192,25 +210,25 @@ class WheelFollower(QObject):
 
         steps = max(1, int(math.ceil(dt / self.SUBSTEP_S)))
         h = dt / steps
-        lim = self.ACCEL * h
+        rate = 1.0 / self.TAU
         for _ in range(steps):
             d = self._target - self._pos
             if d == 0.0:
                 self._vel = 0.0
                 break
-            # Land exactly instead of coasting past: the braking curve converges on the
-            # target from above, and without this the last substep would step over it.
-            if self._vel * d > 0.0 and abs(self._vel * h) >= abs(d):
+            v = d * rate
+            if v > self.V_MAX:
+                v = self.V_MAX
+            elif v < -self.V_MAX:
+                v = -self.V_MAX
+            # Only reachable once the exponential has flattened out; it stops the last
+            # float crumbs from spinning the timer forever.
+            if abs(v * h) >= abs(d):
                 self._pos = self._target
                 self._vel = 0.0
                 break
-            v_des = min(self.V_MAX,
-                        math.sqrt(2.0 * self.ACCEL
-                                  * max(0.0, abs(d) - self.MARGIN_PX)))
-            v_des = math.copysign(v_des, d)
-            dv = v_des - self._vel
-            self._vel += lim if dv > lim else (-lim if dv < -lim else dv)
-            self._pos += self._vel * h
+            self._vel = v
+            self._pos += v * h
 
         if self._pos <= lo:
             self._pos = lo
@@ -219,22 +237,23 @@ class WheelFollower(QObject):
             self._pos = hi
             self._vel = 0.0
 
-        if abs(self._target - self._pos) < self.SNAP_PX and abs(self._vel) < self.SNAP_V:
+        if abs(self._target - self._pos) < self.SNAP_PX:
             self._pos = self._target
             self._vel = 0.0
             self._timer.stop()
             self._bar.setValue(int(round(self._pos)))
             self.finished.emit()
-            return
+            return False
 
         self._bar.setValue(int(round(self._pos)))
+        return True
 
 
 class SmoothScrollArea(QScrollArea):
     """QScrollArea with wheel motion carried by a ``WheelFollower`` and edge fades.
 
     The wheel is not handled per notch any more: each notch moves a target, and one
-    shared servo (`WheelFollower`) animates the bar toward it, interrupts on click or
+    shared ``WheelFollower`` glide animates the bar toward it, interrupts on click or
     scrollbar grab, and keeps the fade overlay in sync.  ``scroll_to`` keeps its own
     settle animation for programmatic jumps, where the distance is already known.
     """
@@ -260,8 +279,8 @@ class SmoothScrollArea(QScrollArea):
         self._anim = _PixelSettleAnimation(sb0, self)
         self._anim.finished.connect(self._on_anim_finished)
 
-        # The wheel drives a target position through a spring rather than a replayed
-        # ease-out curve; the class docstring has the measurements behind that.
+        # The wheel drives a target position through an exponential glide rather than a
+        # replayed ease-out curve; the class docstring has the measurements behind that.
         self._wheel = WheelFollower(sb0, self)
         self._wheel.finished.connect(self._on_anim_finished)
 
@@ -499,7 +518,7 @@ class SmoothScrollArea(QScrollArea):
         self._sync_overlay()
 
     def wheelEvent(self, event):
-        """Add the notch to the wheel target; the spring carries the bar there."""
+        """Add the notch to the wheel target; the glide carries the bar there."""
         # Cancel any delayed filmstrip or layout alignment timers up the parent hierarchy
         p = self.parent()
         while p is not None:
@@ -535,7 +554,7 @@ class SmoothScrollArea(QScrollArea):
         ticks = -(delta / 120.0)
 
         # The target is a running sum, so a notch is never lost to a clamp: at the edge the
-        # difference is simply zero and the spring has nothing to do.
+        # difference is simply zero and the glide has nothing to do.
         self._anim.stop()
         self._wheel.add(ticks * self._step_size)
         self._current_pos = self._wheel.pos
