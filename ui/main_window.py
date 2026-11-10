@@ -122,6 +122,13 @@ from ui.spinner_widget import SpinnerWidget
 from ui.histogram_widget import HistogramWidget, HistogramExifBar
 from ui.fading_stacked_widget import FadingStackedWidget
 from ui.theme_manager import theme_manager
+from ui.tooltip import block_tooltips_under
+
+
+# 参数面板的悬停提示统一关掉：滑块的长说明、以及「为什么这个参数现在不可用」的原因，
+# 都会变成气泡压在参数本身上面，拖动时还反复弹出。文案本身保留在控件里（可用性刷新
+# 仍在写 getattr(w, "default_tooltip") 那一套），只是不再显示，随时可以改回 True。
+PARAM_TOOLTIPS_ENABLED = False
 
 
 # Opt-in window-frame diagnostics: set SPEKTRA_FRAME_DEBUG=1 to log every non-client message and
@@ -3851,6 +3858,11 @@ class DarkroomMainWindow(QMainWindow):
         self.crop_sidebar = CropSidebarWidget(self.canvas.crop_overlay, self)
         self.sidebar_stack.addWidget(self.crop_sidebar)
         sb_outer_layout.addWidget(self.sidebar_stack, 1)
+
+        # 见模块顶 PARAM_TOOLTIPS_ENABLED：整棵参数面板（含裁切面板）的气泡静音。
+        if not PARAM_TOOLTIPS_ENABLED:
+            block_tooltips_under(self.sidebar_content)
+            block_tooltips_under(self.crop_sidebar)
 
         if hasattr(self.canvas, 'crop_overlay'):
             self.canvas.crop_overlay.cropApplied.connect(self._on_crop_applied)

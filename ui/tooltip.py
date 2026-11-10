@@ -22,6 +22,32 @@ _PAD_X = 10
 _PAD_Y = 7
 _RADIUS = 6
 
+# Set on a container to silence every tip inside it. Kept as a Qt property rather than a
+# Python attribute so it survives the widget being reparented into a layout, and so the
+# lookup below can walk a plain parentWidget() chain without holding any references.
+_BLOCKED_PROPERTY = "spektraTooltipBlocked"
+
+
+def block_tooltips_under(widget):
+    """Swallow every hover tip inside ``widget``'s subtree.
+
+    Only a flag is set, no text is erased: widgets added to the panel later are covered
+    too, because the filter walks up from whichever widget the pointer is over.
+    """
+    widget.setProperty(_BLOCKED_PROPERTY, True)
+
+
+def tooltips_blocked_under(widget) -> bool:
+    """True when ``widget`` or one of its ancestors is inside a silenced panel."""
+    if not isinstance(widget, QWidget):
+        return False          # QAction and friends have no parent chain to walk
+    curr = widget
+    while curr is not None:
+        if bool(curr.property(_BLOCKED_PROPERTY)):
+            return True
+        curr = curr.parentWidget()
+    return False
+
 
 class TooltipBubble(QWidget):
     """Frameless, click-through card that paints one tooltip message."""
@@ -111,6 +137,12 @@ class TooltipController(QObject):
                     return True
 
                 widget = obj if isinstance(obj, QWidget) else None
+                if widget is not None and tooltips_blocked_under(widget):
+                    # Silenced panel: consume the event so neither our bubble nor Qt's
+                    # QTipLabel gets a chance to show.
+                    self.hide_bubble()
+                    return True
+
                 text = widget.toolTip() if widget is not None else ""
                 if text:
                     self._show(text, event.globalPos())
