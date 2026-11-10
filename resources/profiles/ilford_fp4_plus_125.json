@@ -13372,9 +13372,42 @@
                         0.000586
                     ]
                 ],
-                "profile": null,
+                "profile": {
+                    "angularExponent": [
+                        2.38,
+                        2.38,
+                        2.38
+                    ],
+                    "bounceRetention": [
+                        0.6296,
+                        0.6296,
+                        0.6296
+                    ],
+                    "diffuseShare": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "diffuseSigmaMM": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "roundTripOpticalDepth": [
+                        3.6099,
+                        3.6099,
+                        3.6099
+                    ]
+                },
+                "profile_source": "estimated",
                 "base_thickness_mm": 0.13,
-                "refractive_index": 1.48
+                "refractive_index": 1.48,
+                "record_refractive_indices": [
+                    1.474,
+                    1.48,
+                    1.489
+                ],
+                "native_format": "35mm"
             },
             "couplers": {
                 "coupler_diffusion_mm": 0,

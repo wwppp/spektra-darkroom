@@ -9123,9 +9123,42 @@
                         3e-06
                     ]
                 ],
-                "profile": null,
+                "profile": {
+                    "angularExponent": [
+                        2.84,
+                        2.84,
+                        2.84
+                    ],
+                    "bounceRetention": [
+                        0.3022,
+                        0.2617,
+                        0.6079
+                    ],
+                    "diffuseShare": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "diffuseSigmaMM": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "roundTripOpticalDepth": [
+                        3.7951,
+                        5.2544,
+                        8.6674
+                    ]
+                },
+                "profile_source": "estimated",
                 "base_thickness_mm": 0.13,
-                "refractive_index": 1.48
+                "refractive_index": 1.48,
+                "record_refractive_indices": [
+                    1.474,
+                    1.48,
+                    1.489
+                ],
+                "native_format": "35mm"
             },
             "couplers": {
                 "coupler_diffusion_mm": 0,

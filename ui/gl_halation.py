@@ -366,16 +366,18 @@ uniform sampler2D u_b1;       // bounce 2
 uniform sampler2D u_b2;       // bounce 3
 uniform vec3 u_gain;
 uniform int u_e_shaped;       // 1 when u_raw already holds shaped radiance
-uniform vec3 u_decay;         // normalised bounce weights
+uniform vec3 u_decay0;        // bounce 1 weight, per record (R, G, B)
+uniform vec3 u_decay1;        // bounce 2
+uniform vec3 u_decay2;        // bounce 3
 uniform vec3 u_a_tot;         // strength * physical multiplier, per channel
 uniform float u_amount;
 """ + _HS_GLSL + """
 void main() {
     vec3 e = texture(u_raw, v_uv).rgb;
     if (u_e_shaped == 0) e = shape_radiance(e * u_gain);
-    vec3 blur = texture(u_b0, v_uv).rgb * u_decay.x
-              + texture(u_b1, v_uv).rgb * u_decay.y
-              + texture(u_b2, v_uv).rgb * u_decay.z;
+    vec3 blur = texture(u_b0, v_uv).rgb * u_decay0
+              + texture(u_b1, v_uv).rgb * u_decay1
+              + texture(u_b2, v_uv).rgb * u_decay2;
     vec3 a = u_a_tot * u_amount;
     fragColor = vec4((e + a * blur) / (vec3(1.0) + a), 1.0);
 }
@@ -1097,8 +1099,18 @@ class GLHalationChain:
         self._u3f(self._comp, "u_gain", *g3c)
         self._u1f(self._comp, "u_highlights", hs[0])
         self._u1f(self._comp, "u_shadows", hs[1])
-        d = [float(v) for v in (list(decay) + [0.0, 0.0, 0.0])[:3]]
-        self._u3f(self._comp, "u_decay", *d)
+        # Each bounce carries its own per-record weight: the records differ in how much
+        # light survives a round trip, and that difference is the colour of the halo.
+        rows = []
+        for row in list(decay)[:3]:
+            if isinstance(row, (list, tuple)):
+                rows.append([float(v) for v in (list(row) + [0.0, 0.0, 0.0])[:3]])
+            else:
+                rows.append([float(row)] * 3)
+        while len(rows) < 3:
+            rows.append([0.0, 0.0, 0.0])
+        for i, row in enumerate(rows):
+            self._u3f(self._comp, f"u_decay{i}", *row)
         a = [float(v) for v in (list(a_tot) + [0.0, 0.0, 0.0])[:3]]
         self._u3f(self._comp, "u_a_tot", *a)
         self._u1f(self._comp, "u_amount", amount)

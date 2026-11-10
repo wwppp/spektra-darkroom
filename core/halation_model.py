@@ -13,7 +13,11 @@ Physics (see docs/halation-rework-plan.md §4.1):
 
     boost:    y = x + max_raw * k * (exp(a*dx) - a*dx - 1),  dx = (x - x0)/max_raw
     scatter:  E' = (1-s)*E + s*[(1-w)*G(sigma_c)*E + w*G(sigma_t)*E]
-    halation: E'' = (E' + a_tot * sum_k decay_k * G(sigma_h*sqrt(k)) * E') / (1 + a_tot)
+    halation: E'' = (E' + a_tot * sum_k decay[k] * G(sigma_h*sqrt(k)) * E') / (1 + a_tot)
+
+``decay[k]`` is per bounce *and* per record, and ``sigma_h`` likewise -- the two records
+disagree by up to 4.5x on how much light survives a round trip (CineStill 800T), and that
+asymmetry is the red halo. A single scalar weight per bounce would erase it.
 
 The exponential scatter tail is approximated by a Gaussian on purpose: a recursive
 exponential filter cannot be expressed as a separable convolution pass, so it would
@@ -83,7 +87,8 @@ class HalationParams:
     scatter_core_um: tuple[float, float, float]
     scatter_tail_um: tuple[float, float, float]
     scatter_tail_weight: tuple[float, float, float]
-    bounce_decay: tuple[float, ...]
+    # One row per bounce, each row (R, G, B), normalised per record.
+    bounce_decay: tuple[tuple[float, float, float], ...]
     n_bounces: int
     boost_range: float
     protect_ev: float
@@ -102,7 +107,13 @@ class HalationParams:
                     "scatter_tail_weight", "bounce_decay", "boost_range", "protect_ev"):
             val = getattr(self, key)
             src = self.sources.get(key, "?")
-            shown = val if isinstance(val, (int, float)) else tuple(round(float(v), 5) for v in val)
+            if isinstance(val, (int, float)):
+                shown = val
+            elif val and isinstance(val[0], (list, tuple)):
+                # Per-bounce weights: one "R,G,B" group per bounce.
+                shown = "  ".join(",".join(f"{float(x):.4f}" for x in row) for row in val)
+            else:
+                shown = tuple(round(float(v), 5) for v in val)
             lines.append(f"  {key:20s} {str(shown):44s} [{src}]")
         return "\n".join(lines)
 
@@ -192,9 +203,16 @@ def resolve_halation_params(film_stock: str,
     # silently ignored.
     look_scale = 1.0
     for holder in (block, phys if isinstance(phys, Mapping) else None):
-        if isinstance(holder, Mapping) and holder.get("halationLookScale") is not None:
+        if not isinstance(holder, Mapping):
+            continue
+        # The converter writes `look_scale`; `halationLookScale` is the raw fotufilm name.
+        # This used to read only the camel-case key, so the value it was given never landed.
+        raw_scale = holder.get("look_scale")
+        if raw_scale is None:
+            raw_scale = holder.get("halationLookScale")
+        if raw_scale is not None:
             try:
-                look_scale = max(float(holder["halationLookScale"]), 0.0)
+                look_scale = max(float(raw_scale), 0.0)
             except (TypeError, ValueError):
                 look_scale = 1.0
             break
@@ -235,11 +253,16 @@ def resolve_halation_params(film_stock: str,
         sigma_src = SOURCE_DERIVED
     try:
         sigma_scalar = _sigma_from_geometry(float(thickness_mm), float(n_index))
-        # Per-channel spread follows the same 0.4 % refractive-index band the
-        # existing preset uses; retained so the R/B asymmetry does not vanish.
+        # Per-record indices when the profile carries them (acetate 1.474/1.480/1.489,
+        # ESTAR 1.635/1.643/1.657); otherwise the 0.4 % band that used to stand in for them.
+        record_indices = block.get("record_refractive_indices")
         n_base = float(n_index)
-        sigmas = [_sigma_from_geometry(float(thickness_mm), n_base * k)
-                  for k in (0.996, 1.0, 1.006)]
+        if (isinstance(record_indices, (list, tuple)) and len(record_indices) == 3
+                and all(isinstance(v, (int, float)) and v > 1.0 for v in record_indices)):
+            sigmas = [_sigma_from_geometry(float(thickness_mm), float(v)) for v in record_indices]
+        else:
+            sigmas = [_sigma_from_geometry(float(thickness_mm), n_base * k)
+                      for k in (0.996, 1.0, 1.006)]
         sigma_h_um = (float(sigmas[0]), float(sigmas[1]), float(sigmas[2]))
         if not all(math.isfinite(v) and v > 0 for v in sigma_h_um):
             raise ValueError("non-positive sigma")
@@ -298,27 +321,34 @@ def _engine_strength_for(antihalation: str) -> tuple[float, float, float]:
     return (0.0055, 0.0001, 0.0)
 
 
-def _decay_from_retention(retention: Any) -> tuple[float, ...]:
-    """Normalise bounce retention into decay weights.
+def _decay_from_retention(retention: Any) -> tuple[tuple[float, float, float], ...]:
+    """Bounce weights, per bounce and per record, from a per-record retention triple.
 
-    ``bounceRetention`` is the fraction of light retained per round trip, given as one
-    entry per bounce (Cinestill: ``[0.283, 0.1375, 0.0651]``, whose R:G:B asymmetry is
-    the physical origin of the red halo). The entries are already the per-bounce
-    weights, so they only need normalising -- not collapsing into a geometric series,
-    which would discard exactly the information the profile took the trouble to record.
+    ``bounceRetention`` is *one survival fraction per record* (R, G, B), not one per
+    bounce: fotufilm weights bounce ``m`` by ``pow(retention[record], m - 1)``. CineStill
+    800T ships ``[0.283, 0.1375, 0.0651]`` -- blue keeps a quarter of what red keeps per
+    trip, which is exactly where its red halo comes from. Reading that triple as three
+    consecutive bounce weights (what this used to do) inverts the shape completely: bounce
+    one would get the *least* weight on the no-antihalation stocks and the *most* on
+    CineStill, i.e. backwards in both directions.
+
+    Returns ``n_bounces`` rows of (R, G, B), normalised per record so the total returned
+    light stays the strength's.
     """
-    if retention is not None:
+    ratios: list[float] = [0.5, 0.5, 0.5]
+    if isinstance(retention, (list, tuple)) and len(retention) >= 3:
         try:
-            vals = [float(v) for v in retention]
+            ratios = [min(max(float(v), 0.0), 1.0) for v in retention[:3]]
         except (TypeError, ValueError):
-            vals = []
-        if len(vals) >= DEFAULT_N_BOUNCES and all(v > 0 for v in vals[:DEFAULT_N_BOUNCES]):
-            weights = vals[:DEFAULT_N_BOUNCES]
-            total = sum(weights)
-            return tuple(float(w / total) for w in weights)
-    weights = [0.5 ** k for k in range(DEFAULT_N_BOUNCES)]
-    total = sum(weights)
-    return tuple(float(w / total) for w in weights)
+            ratios = [0.5, 0.5, 0.5]
+    totals = [sum(r ** k for k in range(DEFAULT_N_BOUNCES)) for r in ratios]
+    rows = []
+    for k in range(DEFAULT_N_BOUNCES):
+        rows.append(tuple(
+            (ratios[c] ** k) / totals[c] if totals[c] > 1e-12
+            else 1.0 / DEFAULT_N_BOUNCES
+            for c in range(3)))
+    return tuple(rows)
 
 
 def halation_overlap_px(params: HalationParams, pixel_size_um: float,
@@ -418,13 +448,14 @@ def _gauss_decimated(img: np.ndarray, sigma_px: float, ds: int) -> np.ndarray:
 
 
 def _multi_bounce_blur(work: np.ndarray, sigma_px: Sequence[Sequence[float]],
-                       decay: Sequence[float], ds: int) -> np.ndarray:
+                       decay: Sequence[Sequence[float]], ds: int) -> np.ndarray:
     """Weighted sum of ``N`` Gaussians per channel, on one shared decimated grid.
 
-    Decimating once per channel instead of once per (channel, bounce) is what makes
-    this affordable: at 24 MP a single full-resolution resample costs ~120 ms, and the
-    naive nesting was paying for 18 of them per frame. Here it is 3 down + 3 up, with
-    all bounce layers accumulating inside the small grid where blur is cheap.
+    ``decay`` carries a (R, G, B) weight per bounce. Decimating once per channel instead of
+    once per (channel, bounce) is what makes this affordable: at 24 MP a single
+    full-resolution resample costs ~120 ms, and the naive nesting was paying for 18 of them
+    per frame. Here it is 3 down + 3 up, with all bounce layers accumulating inside the
+    small grid where blur is cheap.
     """
     import cv2
     h, w = work.shape[:2]
@@ -433,17 +464,18 @@ def _multi_bounce_blur(work: np.ndarray, sigma_px: Sequence[Sequence[float]],
         sh, sw = max(2, h // ds), max(2, w // ds)
     for c in range(3):
         sigmas = [row[c] for row in sigma_px]
+        weights = [float(row[c]) for row in decay]
         if ds > 1:
             small = cv2.resize(work[..., c], (sw, sh), interpolation=cv2.INTER_AREA)
             acc = np.zeros_like(small)
-            for sigma, w_k in zip(sigmas, decay):
+            for sigma, w_k in zip(sigmas, weights):
                 if w_k <= 1e-6 or sigma <= 0.01:
                     continue
                 acc += _gauss(small, sigma / ds) * w_k
             out[..., c] = cv2.resize(acc, (w, h), interpolation=cv2.INTER_LINEAR)
         else:
             acc = np.zeros_like(work[..., c])
-            for sigma, w_k in zip(sigmas, decay):
+            for sigma, w_k in zip(sigmas, weights):
                 if w_k <= 1e-6 or sigma <= 0.01:
                     continue
                 acc += _gauss(work[..., c], sigma) * w_k
@@ -541,10 +573,11 @@ def _apply_legacy(work: np.ndarray, params: HalationParams, px: float, amount: f
     if amount <= 0.001 or not np.any(eff_strength > 0):
         return work
 
-    # The old preset carried a single scalar sigma, taken from the first radius.
+    # The old preset carried a single scalar sigma, taken from the first radius, and the
+    # legacy decay is the 0.5^k series -- identical on every record.
     sigma_h_px = (float(params.sigma_h_um[0]) * scale) / px
-    decay = np.array([0.5 ** (k - 1) for k in range(1, 4)], dtype=np.float32)
-    decay /= decay.sum()
+    decay = np.array([[0.5 ** (k - 1)] * 3 for k in range(1, 4)], dtype=np.float32)
+    decay /= decay.sum(axis=0, keepdims=True)
 
     hal_input = work
     if boost_ev > 0.001:
@@ -557,6 +590,6 @@ def _apply_legacy(work: np.ndarray, params: HalationParams, px: float, amount: f
         sigma_k = sigma_h_px * math.sqrt(k)
         ksize = int(sigma_k * 3.0) * 2 + 1
         ksize = min(ksize, 301)
-        hal_blur += cv2.GaussianBlur(hal_input, (ksize, ksize), sigma_k) * wk
+        hal_blur += cv2.GaussianBlur(hal_input, (ksize, ksize), sigma_k) * wk.reshape(1, 1, 3)
 
     return (work + eff_strength * hal_blur) / (1.0 + eff_strength)

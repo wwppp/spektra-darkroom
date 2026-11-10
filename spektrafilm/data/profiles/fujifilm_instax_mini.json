@@ -7068,8 +7068,15 @@
                 ],
                 "return_matrix": null,
                 "profile": null,
-                "base_thickness_mm": 0.13,
-                "refractive_index": 1.48
+                "profile_source": null,
+                "base_thickness_mm": 0.1,
+                "refractive_index": 1.64,
+                "record_refractive_indices": [
+                    1.635,
+                    1.643,
+                    1.657
+                ],
+                "native_format": "instaxmini"
             },
             "couplers": {
                 "coupler_diffusion_mm": 0,

@@ -7558,8 +7558,15 @@
                 ],
                 "return_matrix": null,
                 "profile": null,
+                "profile_source": null,
                 "base_thickness_mm": 0.13,
-                "refractive_index": 1.48
+                "refractive_index": 1.48,
+                "record_refractive_indices": [
+                    1.474,
+                    1.48,
+                    1.489
+                ],
+                "native_format": "35mm"
             },
             "couplers": {
                 "coupler_diffusion_mm": 0.009,
