@@ -768,7 +768,20 @@ void main() {
     vec2 tex_dim = max(vec2(1.0), vec2(textureSize(u_image, 0)));
     vec2 half_texel = 0.5 / tex_dim;
     if (u_crop_enabled == 1 && u_is_crop_editing == 1) {
-        if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+        // Crop editing keeps the fragments *outside* the photo quad alive (a rotated image has
+        // content there), so the letterbox test cannot run on the quad in img_uv space -- it
+        // runs here, on the sampled coordinate.  With lens correction on, that coordinate is
+        // the output of a radial polynomial that is only fitted for r <= 1: past the fitted
+        // radius it can fold back into [0, 1] and paint a ring of smeared picture around the
+        // photo (the "sphere" that used to surround a corrected image in crop mode).  So test
+        // the pre-warp coordinate too -- that one is bounded by the crop/rotation geometry
+        // alone, so it answers "is this fragment part of the photo" without ever letting the
+        // polynomial leave its domain.
+        bool outside_warped = (sample_uv.x < 0.0 || sample_uv.x > 1.0 ||
+                               sample_uv.y < 0.0 || sample_uv.y > 1.0);
+        bool outside_geometry = (pre_dist_uv.x < 0.0 || pre_dist_uv.x > 1.0 ||
+                                 pre_dist_uv.y < 0.0 || pre_dist_uv.y > 1.0);
+        if (outside_warped || outside_geometry) {
             fragColor = vec4(u_bg_color, 1.0);
             return;
         }
@@ -1397,6 +1410,88 @@ class _ZoomGlide(QObject):
         return c.zoom != before
 
 
+class _ViewGlide(QObject):
+    """Zoom/pan transition with a *fixed* target, on the wheel's own curve.
+
+    ``_ZoomGlide`` integrates distance per frame because its target keeps moving under the
+    wheel.  A mode change (entering or leaving the crop workspace) knows where it is going, so
+    the same curve is evaluated in closed form: ``f(t) = 1 - exp(-t / GLIDE_TAU)``.  Zoom is
+    interpolated in log space (it is multiplicative), pan linearly.
+
+    The visible result is the one the wheel has: a big first step -- the frame the mode flips
+    already moves ~11 % of the distance -- and then the same 140 ms tail, instead of the
+    instant snap the crop mode used to do (and instead of the 180 ms OutCubic, which leaves at
+    zero speed, i.e. the "sluggish start" the wheel was fixed for).
+    """
+
+    SNAP = 1e-3            # fraction of the distance still left when it is declared done
+
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self._canvas = canvas
+        self._clock = QElapsedTimer()
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(GLIDE_FRAME_MS)
+        self._timer.timeout.connect(self._tick)
+        self._z0 = self._z1 = 1.0
+        self._p0 = (0.0, 0.0)
+        self._p1 = (0.0, 0.0)
+
+    def is_running(self) -> bool:
+        return self._timer.isActive()
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def start(self, zoom: float, pan=(0.0, 0.0)) -> None:
+        c = self._canvas
+        self._z0 = max(1e-6, float(getattr(c, "zoom", 1.0)))
+        self._z1 = max(1e-6, float(zoom))
+        self._p0 = (float(getattr(c, "pan_x", 0.0)), float(getattr(c, "pan_y", 0.0)))
+        self._p1 = (float(pan[0]), float(pan[1]))
+        if (abs(math.log(self._z1 / self._z0)) < 1e-5
+                and abs(self._p1[0] - self._p0[0]) < 1e-5
+                and abs(self._p1[1] - self._p0[1]) < 1e-5):
+            self._timer.stop()
+            return
+        self._clock.start()
+        self._timer.start()
+        # Spend the frame the mode changed on, exactly like WheelFollower: the repaint that
+        # event triggers must already show motion, or the transition reads as "nothing, then
+        # a jump".
+        self._apply_at(GLIDE_FRAME_MS / 1000.0)
+
+    # -- internals ------------------------------------------------------
+    def _tick(self) -> None:
+        self._apply_at(self._clock.elapsed() / 1000.0)
+
+    def _apply_at(self, elapsed: float) -> None:
+        """Place the view at ``f(elapsed)`` of the way.
+
+        The position is a function of *elapsed* time, not of the last frame's duration: feeding
+        the per-frame dt in here made every frame jump to f(dt) of the total distance, so a
+        long frame lurched and a short one fell back -- measured as a zoom that jittered
+        between 0.92 and 0.996 and never landed.
+        """
+        c = self._canvas
+        f = 1.0 - math.exp(-max(0.0, elapsed) / GLIDE_TAU)
+        done = f >= 1.0 - self.SNAP
+        if done:
+            f = 1.0
+        c.zoom = self._z0 * math.exp(math.log(self._z1 / self._z0) * f)
+        c.clamp_zoom()
+        c.pan_x = self._p0[0] + (self._p1[0] - self._p0[0]) * f
+        c.pan_y = self._p0[1] + (self._p1[1] - self._p0[1]) * f
+        if c.params.get("view_mode") == 1:
+            c._clamp_split_to_image()
+            c._update_badges()
+        c.zoomChanged.emit(c.get_actual_zoom_ratio())
+        c.update()
+        if done:
+            self._timer.stop()
+
+
 class DarkroomGLCanvas(QOpenGLWidget):
     """Hardware-accelerated OpenGL viewport:
     - 60+ FPS real-time GLSL rendering of 3D LUT, Exposure, Enlarger CMY, Halation, Grain
@@ -1634,6 +1729,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         # Wheel zoom rides the same glide curve as wheel scrolling (see _ZoomGlide).
         self._zoom_glide = _ZoomGlide(self)
+        # Crop enter/exit glides on that same curve with a fixed target (see _ViewGlide).
+        self._view_glide = _ViewGlide(self)
 
         # GL objects
         self.shader_program = None
@@ -2470,6 +2567,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if not self._has_image:
             return
         self._zoom_glide.stop()
+        self._zoom_anim.stop()
         self.is_crop_editing = True
         self._pre_crop_zoom = getattr(self, "zoom", 1.0)
         self._pre_crop_pan = (getattr(self, "pan_x", 0.0), getattr(self, "pan_y", 0.0))
@@ -2478,10 +2576,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # exactly how a leftover crop got applied (and then saved) to an untouched photo.
         cur_crop = dict(crop_dict) if isinstance(crop_dict, dict) else dict(self.params.get("crop") or {})
         self.params["crop"] = cur_crop
-        # Inset image so rotated bounding box and crop handles are not clipped by viewport edges
-        self.zoom = self._get_crop_fit_zoom()
-        self.pan_x = 0.0
-        self.pan_y = 0.0
+        # Inset the picture so the rotated bounding box and the crop handles are not clipped
+        # by the viewport edges.  Glided rather than snapped: the geometry (full image vs
+        # cropped rect) changes in the same instant, so an instant zoom on top of it read as a
+        # jump cut.
+        self._view_glide.start(self._get_crop_fit_zoom())
         self.zoomChanged.emit(self.get_actual_zoom_ratio())
         self.update()
         self.crop_overlay.start_crop_session(cur_crop)
@@ -2493,8 +2592,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
         the overlay widget are re-seeded, so nothing from the previous photo can survive.
         """
         crop = dict(crop_dict) if isinstance(crop_dict, dict) else {}
+        was_editing = getattr(self, "is_crop_editing", False)
         self.is_crop_editing = False
         self.params["crop"] = crop
+        if was_editing:
+            # Leaving crop editing drops the 10 % inset that crop mode applies; without this
+            # the next photo inherited it and never fitted the window again (measured: the
+            # zoom stayed at 0.90 with crop mode already off).
+            self._zoom_glide.stop()
+            self._zoom_anim.stop()
+            self._view_glide.start(1.0, (0.0, 0.0))
         overlay = getattr(self, "crop_overlay", None)
         if overlay is not None:
             overlay.set_crop_state(crop)
@@ -2502,11 +2609,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def exit_crop_mode(self):
         self._zoom_glide.stop()
+        # A pending fit animation holds the *crop* zoom as its target: left running it writes
+        # 0.90 back over the value exit just restored, which is how a switched-to photo came
+        # back shrunk with crop mode already closed.
+        self._zoom_anim.stop()
         self.is_crop_editing = False
         self.crop_overlay.hide()
-        self.zoom = 1.0
-        self.pan_x = 0.0
-        self.pan_y = 0.0
+        self._view_glide.start(1.0, (0.0, 0.0))
         self.zoomChanged.emit(self.get_actual_zoom_ratio())
         self.update()
 
@@ -2659,6 +2768,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # A wheel glide writes zoom and pan on every tick; letting both run means each one
         # undoes the other's last frame, which reads as the picture shivering.
         self._zoom_glide.stop()
+        self._view_glide.stop()
         self._zoom_anim.stop()
         self._start_zoom = self.zoom
         self._target_zoom = float(target_zoom)
@@ -2675,6 +2785,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if animate:
             self.animate_to(target_z, 0.0, 0.0)
         else:
+            self._zoom_glide.stop()
+            self._view_glide.stop()
+            self._zoom_anim.stop()
             self.zoom = target_z
             self.pan_x = 0.0
             self.pan_y = 0.0
@@ -2890,10 +3003,28 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         menu.exec(event.globalPos())
 
+    def update(self, *args):
+        """Repaint the GL viewport *and* the crop overlay drawn on top of it.
+
+        The crop frame is a child widget: it computes its rectangle from the canvas geometry
+        (``get_image_bounds_norm``) every time it paints, but only paints when it is itself
+        invalidated.  Nothing invalidated it, so as soon as the zoom became a per-frame glide
+        the picture moved on every tick while the frame stayed where it was last painted --
+        measured as *zero* overlay repaints over a whole wheel glide, i.e. "the crop box does
+        not follow the image".  Every zoom and pan already funnels through ``update()``, so
+        this is the one place that keeps the two in lockstep.
+        """
+        super().update(*args)
+        overlay = getattr(self, "crop_overlay", None)
+        if overlay is not None and overlay.isVisible():
+            overlay.update()
+
     def _zoom_at(self, factor: float, ax: float, ay: float):
         """Zoom by ``factor`` anchored at widget coordinates (ax, ay). Shared by
         the wheel handler and the two-finger pinch path so the anchor math cannot
         drift between them."""
+        # The user took over: a crop-mode transition must not keep writing zoom/pan.
+        self._view_glide.stop()
         max_zoom = self.max_zoom()
 
         old_zoom = self.zoom
@@ -3006,8 +3137,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # press means the animation loses.
             if self._zoom_anim.state() == QVariantAnimation.State.Running:
                 self._zoom_anim.stop()
-            # Same for the wheel glide: it owns zoom *and* pan until it lands.
+            # Same for the wheel glide and the crop-mode transition: both own zoom *and*
+            # pan until they land.
             self._zoom_glide.stop()
+            self._view_glide.stop()
             # Check if clicking on split divider within visible image bounds
             if self._is_hovering_split_line(event.position()):
                 self._is_split_dragging = True

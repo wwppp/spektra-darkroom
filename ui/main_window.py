@@ -131,6 +131,11 @@ from ui.tooltip import block_tooltips_under
 PARAM_TOOLTIPS_ENABLED = False
 
 
+# 关闭窗口时在屏幕上多停的这一下（毫秒）。保存/销毁本来几百毫秒内就做完了，窗口在同一
+# 毫秒里隐藏，看起来"秒响应"；这个停留让关闭有一个可感知的过程（用户要求 0.5–1 s）。
+CLOSE_DWELL_MS = 700
+
+
 # Opt-in window-frame diagnostics: set SPEKTRA_FRAME_DEBUG=1 to log every non-client message and
 # window-state transition to %TEMP%\spektra_frame.log. Used to pin down the classic-titlebar
 # flash if it ever comes back.
@@ -6128,6 +6133,8 @@ class DarkroomMainWindow(QMainWindow):
                 self.show()
             self.raise_()
             self.activateWindow()
+            # The next close attempt must dwell again; this one never completed.
+            self._close_dwell_done = False
             return
 
         self._close_approved = True
@@ -13051,6 +13058,14 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         # Native DWM minimize animation
         super().showMinimized()
 
+    def _close_after_dwell(self):
+        """Finish a close that closeEvent held on screen for CLOSE_DWELL_MS."""
+        self._close_approved = True
+        try:
+            self.close()
+        finally:
+            self._close_approved = False
+
     def closeEvent(self, event):
         _frame_log("closeEvent enter")
         approved = getattr(self, "_close_approved", False)
@@ -13069,6 +13084,21 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 event.ignore()
                 QTimer.singleShot(0, self._run_close_prompt)
                 return
+
+        # Hold the window on screen for a beat before it vanishes. Nothing below is slow --
+        # teardown hides the window in the same millisecond it starts -- so a close used to be
+        # instantaneous in a way that reads as "it did not even try to save"; a 0.7 s dwell is
+        # the price of the app looking like it shut down deliberately (asked for explicitly).
+        # The dwell runs before the caption drop so the frame is still a normal window while it
+        # waits; only the final close() reaches the teardown below.
+        if not getattr(self, "_close_dwell_done", False):
+            self._close_dwell_done = True
+            event.ignore()
+            # Not a bare ``self.close``: the prompt path clears ``_close_approved`` in a
+            # ``finally`` around its own close(), so a deferred close would come back here with
+            # the flag down and pop the same save dialog a second time.
+            QTimer.singleShot(CLOSE_DWELL_MS, self._close_after_dwell)
+            return
 
         # Drop the caption for the whole closing sequence (prompt included). Window teardown is
         # when Windows repaints the frame; without the style bit there is nothing to paint, so
