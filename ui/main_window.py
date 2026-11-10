@@ -1973,10 +1973,9 @@ class DarkroomMainWindow(QMainWindow):
     # 逻辑全部保留（控件、参数、push 档案都在），P4 落地后把这里改回 True 即可。
     PUSH_UI_ENABLED = False
 
-    # 负片默认落在放大印相上，用 Kodak Supra Endura（用户指定）。原来切到负片时相纸停在
-    # "none"/胶片直扫，右栏一片空白，第一次手动选相纸反而像没反应。
-    # 首选项里的"负片默认相纸"会覆盖它，这只在配置缺失或 id 失效时兜底。
-    DEFAULT_NEGATIVE_PAPER = "kodak_supra_endura"
+    # 负片默认落在哪张纸上，完全跟首选项的"负片默认相纸"走（用户 2026-11-10 指定出厂值为
+    # "胶片直扫"：新底片先看未反相的原始负像）。这里只是配置缺失或 id 失效时的兜底。
+    DEFAULT_NEGATIVE_PAPER = "none"
 
     def __init__(self, engine, initial_session=None, initial_files=None):
         super().__init__()
@@ -8730,8 +8729,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
     def _default_negative_paper(self):
         """首选项里的"负片默认相纸"。
 
-        配置里可能是旧 id、被删掉的相纸或空串，任何一种都退回类常量，免得新建照片落到
-        "none"（直扫）这种面板全空的状态。每次读配置而不是缓存：首选项改完要立刻生效。
+        "none" 是合法值（胶片直扫，不印相），出厂默认就是它。配置里可能是旧 id、被删掉的
+        相纸或空串，这几种退回类常量，免得新建照片落到一个不存在的纸 id 上。每次读配置而
+        不是缓存：首选项改完要立刻生效。
         """
         fallback = self.DEFAULT_NEGATIVE_PAPER
         try:
@@ -8739,7 +8739,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             pid = config_manager.get_preference("default_negative_paper", fallback)
         except Exception:
             return fallback
-        if not pid or pid in ("none", "", "screen"):
+        if pid == "none":
+            return "none"
+        if not pid or pid in ("", "screen"):
             return fallback
         try:
             ids = {str(item.get("id")) for item in self.engine.get_paper_stocks()}
@@ -8823,6 +8825,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if not is_pos:
                 self.on_switch_paper(new_paper, push_undo=False)
 
+        # 左侧胶卷卡片是按"默认相纸"配对的，换纸后必须重排一次；否则要等切换分类/
+        # 换底片才刷新（用户看到的正是"设置默认相纸后缩略图还是橙色负片"）。
+        if hasattr(self, "_cards_debounce_timer"):
+            self._cards_debounce_timer.start(120)
+        else:
+            self._refresh_card_previews(film_only=True)
+
     def _drain_default_paper_queue(self):
         """分批重刷 on_default_negative_paper_changed 排下的缩略图（每 tick 4 张）。"""
         queue = getattr(self, "_default_paper_queue", None) or []
@@ -8904,13 +8913,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 card.set_active(pid == "none")
             self._update_all_sliders_from_params()
         elif not is_pos:
-            # A negative always prints through paper.  Leaving it at 胶片直扫 made the panel
-            # open with no paper selected, which then read as "the first pick did nothing".
+            # 负片选中时接上首选项的"负片默认相纸"。默认值可能是"胶片直扫"（none）——那就要
+            # 把印相模式一起摆到 scan，否则会出现"纸=直扫、模式=印相"的不一致状态，面板显示的
+            # 和实际烘出来的 LUT 不是一回事。
             if getattr(self, "current_paper_stock", "none") in (None, "", "none"):
                 default_paper = self._default_negative_paper()
                 self.current_paper_stock = default_paper
-                self.current_print_mode = "optical"
-                self.current_params["print_mode"] = "optical"
+                default_is_scan = str(default_paper or "none") in ("none", "")
+                self.current_print_mode = "scan" if default_is_scan else "optical"
+                self.current_params["print_mode"] = self.current_print_mode
                 if hasattr(self, "combo_paper"):
                     self.combo_paper.set_value(default_paper)
                 for pid, card in self.paper_cards.items():
@@ -10345,13 +10356,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # 右侧相纸下拉框跟随当前状态（切换底片/撤销/相纸变更都走这里）
         combo_paper = getattr(self, "combo_paper", None)
         if combo_paper is not None:
-            # 只有旁通态需要归位：那里连胶卷都没有，留下的纸没有任何意义。反转正片不一样 ——
-            # 相纸选择属于下面那张负片，保留它并在下拉里显示为不可用（置灰），切回负片
-            # 就能直接用，不必再选一次。渲染侧本来就忽略反转片的相纸（eff_paper -> screen）。
-            if is_none and getattr(self, "current_paper_stock", "none") != "none":
-                self.current_paper_stock = "none"
-                if hasattr(self, "canvas"):
-                    self.canvas.update_params(paper_profile="none")
+            # 旁通态不再把相纸改写成"直扫"：删掉 .sdc 之后相纸要留在首选项的默认纸上
+            # （用户指定），这里改写成 none 会立刻把它抹掉。旁通本来就不走印相（引擎对
+            # film=none 直接出旁通表），控制已置灰，保留选择只是让面板状态说得通。
+            # 反转正片同理：相纸选择属于下面那张负片，切回负片就能直接用。
             combo_paper.set_value(getattr(self, "current_paper_stock", "none"))
             paper_ok = not (is_pos or is_none)
             combo_paper.setEnabled(paper_ok)
@@ -11587,6 +11595,19 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         params["base_tint"] = getattr(self, "_active_base_tint", 1.0)
         params["print_mode"] = getattr(self, "current_print_mode", "optical")
 
+        # 胶卷卡片各自配一张纸来印。旁通（film=none）会把当前相纸强制成"直扫"，若照它
+        # 去配每一支卷，整片网格都是橙色负像 —— 即使首选项里明明选了默认相纸。只有用户
+        # 明确选了直扫（paper_explicit）才保留直扫预览。
+        preview_paper = self.current_paper_stock
+        if str(preview_paper or "none") in ("none", ""):
+            active = next((p for p in getattr(self, "photos", [])
+                           if p and p.get("id") == self.active_photo_id), None)
+            if active is None and self._current_photo_path:
+                active = next((p for p in self.photos
+                               if p and p.get("path") == self._current_photo_path), None)
+            if not self._photo_paper_is_explicit(active):
+                preview_paper = self._default_negative_paper()
+
         self.thumb_controller.trigger_candidate_card_previews(
             thumb_data,
             film_cards_dict,
@@ -11595,7 +11616,8 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             self.current_paper_stock,
             params,
             on_film_ready=self._on_film_thumb_ready,
-            on_paper_ready=self._on_paper_thumb_ready
+            on_paper_ready=self._on_paper_thumb_ready,
+            film_paper=preview_paper
         )
 
     def _refresh_card_previews(self, film_only=False, paper_only=False):
@@ -11908,6 +11930,11 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         }
         active_cleared = False
         post_photos = {}
+        # 清掉 .sdc 后胶卷回到"原生底片"，相纸不该跟着掉到"胶片直扫"：它跟首选项的负片
+        # 默认相纸走（用户指定）。film=none 走旁通表，相纸在这里不影响渲染，但面板状态和
+        # 接下来选胶卷时的落点都按这张纸来。
+        reset_paper = self._default_negative_paper()
+        reset_mode = "scan" if str(reset_paper or "none") in ("none", "") else "optical"
         for p in target_photos:
             pid = p["id"]
             p_path = p.get("path")
@@ -11915,8 +11942,6 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 sdc_manager.delete_sdc(p_path)
             p.pop("params", None)
             p["film_profile"] = "none"
-            p["paper_profile"] = "none"
-            p["print_mode"] = "scan"
             p["crop"] = dict(default_crop)
             p["is_dirty"] = False
             p["is_edited"] = False
@@ -11928,13 +11953,18 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 self.filmstrip.set_photo_dirty(pid, False)
                 self.filmstrip.set_photo_crop(pid, False)
 
+            # revert_photo_to_raw 会把相纸写成 "none"，这里再按首选项落一次。空串表示
+            # "没选过相纸"，以后改首选项这张照片还会跟着变。
+            p["paper_profile"] = ""
+            p["print_mode"] = reset_mode
+
             if pid == self.active_photo_id:
                 active_cleared = True
 
             post_photos[pid] = {
                 "film": "none",
-                "paper": "none",
-                "print_mode": "scan",
+                "paper": "",
+                "print_mode": reset_mode,
                 "params": {},
                 "is_dirty": False,
                 "is_edited": False,
@@ -11950,15 +11980,15 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
 
             self._photo_is_dirty = False
             self.current_film_stock = "none"
-            self.current_paper_stock = "none"
-            self.current_print_mode = "scan"
+            self.current_paper_stock = reset_paper
+            self.current_print_mode = reset_mode
 
             base_temp = float(getattr(self, "_active_base_temp", 5500.0))
             base_tint = float(getattr(self, "_active_base_tint", 1.0))
             defaults = self.get_default_params(base_temp, base_tint)
             self.current_params.clear()
             self.current_params.update(defaults)
-            self.current_params["print_mode"] = "scan"
+            self.current_params["print_mode"] = reset_mode
             self.current_params["crop"] = dict(default_crop)
             # Clearing the sidecar must not throw away the metering anchor: base_ev is derived
             # from the file, not a saved edit, and dropping it here silently shifted the
@@ -11970,8 +12000,8 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             if active_p:
                 active_p["params"] = None
                 active_p["film_profile"] = "none"
-                active_p["paper_profile"] = "none"
-                active_p["print_mode"] = "scan"
+                active_p["paper_profile"] = ""
+                active_p["print_mode"] = reset_mode
                 active_p["crop"] = dict(default_crop)
                 active_p["is_dirty"] = False
                 active_p["is_edited"] = False
@@ -11993,8 +12023,8 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             for sid, card in self.film_cards.items():
                 card.set_active(sid == "none")
             for sid, card in self.paper_cards.items():
-                card.set_active(sid == "none")
-                if sid != "none":
+                card.set_active(sid == reset_paper)
+                if sid != reset_paper:
                     card.set_thumbnail(None)
 
             self._update_active_thumbnails()

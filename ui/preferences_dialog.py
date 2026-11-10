@@ -657,6 +657,8 @@ class PreferencesDialog(QDialog):
         self.combo_default_paper = QComboBox()
         self.combo_default_paper.setFixedWidth(180)
         setup_solid_combobox(self.combo_default_paper)
+        # 底片直扫（不印相）也是合法默认值：新底片先看原始负像，这是出厂默认。
+        self.combo_default_paper.addItem("胶片直扫", "none")
         papers = []
         try:
             papers = list(self._engine.get_paper_stocks()) if self._engine is not None else []
@@ -672,7 +674,7 @@ class PreferencesDialog(QDialog):
             self.combo_default_paper.setEnabled(False)
         self.combo_default_paper.setToolTip(
             "新导入的负片与未手动选过相纸的底片默认用这张相纸（缩略图同步）；"
-            "已选过的保持原选择")
+            "选「胶片直扫」则先看未反相的负像")
         r_dpaper.addWidget(self.combo_default_paper)
         r_dpaper.addStretch(1)
         l_dr.addLayout(r_dpaper)
@@ -866,7 +868,7 @@ class PreferencesDialog(QDialog):
                 self.combo_default_fmt.setCurrentIndex(i)
                 break
 
-        def_paper = prefs.get("default_negative_paper", "kodak_supra_endura")
+        def_paper = prefs.get("default_negative_paper", "none")
         idx_dp = self.combo_default_paper.findData(def_paper)
         if idx_dp < 0 and self.combo_default_paper.count():
             idx_dp = 0
@@ -1124,7 +1126,7 @@ class PreferencesDialog(QDialog):
         prefs["restore_last_files"] = restore_val
         prefs["restore_window_state"] = self.chk_restore_geo.isChecked()
         prefs["default_film_format"] = float(self.combo_default_fmt.currentData())
-        old_default_paper = prefs.get("default_negative_paper", "kodak_supra_endura")
+        old_default_paper = prefs.get("default_negative_paper", "none")
         new_default_paper = self.combo_default_paper.currentData()
         if new_default_paper:
             prefs["default_negative_paper"] = new_default_paper

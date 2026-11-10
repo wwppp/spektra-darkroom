@@ -35,7 +35,7 @@ def apply_post_lut_adjustments_f32(img_f32: np.ndarray, params: dict, baked: dic
     is_pos = ("positive" in film) or ("reversal" in film) or ("e100" in film) or ("velvia" in film) or ("provia" in film)
     paper = str(params.get("paper_profile", params.get("paper_stock", ""))).lower()
     pmode = str(params.get("print_mode", "optical")).lower()
-    is_scan = (paper == "none" or pmode == "scan")
+    is_scan = (paper == "none" or paper == "digital_unmask" or pmode == "scan")
     if not is_pos and not is_scan:
         c_val = float(params.get("enlarger_cyan", 0.0))
         m_val = float(params.get("enlarger_magenta", 0.0))
@@ -63,7 +63,7 @@ class StockThumbnailWorker(QThread):
 
     def __init__(self, engine, linear_thumb, film_stocks, paper_stocks, current_film, current_paper,
                  do_films=True, do_papers=True, ev=0.0, highlights=0.0, shadows=0.0, base_ev=0.0,
-                 params_dict=None, parent=None):
+                 params_dict=None, parent=None, film_paper=None):
         super().__init__(parent)
         self.engine = engine
         # Store reference without deepcopying large arrays synchronously on GUI thread
@@ -83,6 +83,9 @@ class StockThumbnailWorker(QThread):
 
         self.current_film = current_film
         self.current_paper = current_paper
+        # 胶卷卡片用哪张纸来印。旁通（film=none）时当前相纸会被强制成直扫，若直接拿它
+        # 去配每一支卷，整片网格都是橙色负像。调用方按"选中这支卷实际会用的相纸"传入。
+        self.film_paper = str(film_paper or current_paper or "none")
         self.do_films = do_films
         self.do_papers = do_papers
         self.ev = float(ev)
@@ -162,8 +165,7 @@ class StockThumbnailWorker(QThread):
             except Exception as e:
                 logger.error(f"Error applying optical diffusion: {e}")
 
-        # Reference stocks to pair with when current stock is 'none' (bypass mode)
-        ref_paper = self.current_paper
+        # Reference film to pair with when current stock is 'none' (bypass mode)
         ref_film = self.current_film if self.current_film != "none" else "kodak_portra_400"
 
         if self._stopped:
@@ -185,11 +187,13 @@ class StockThumbnailWorker(QThread):
                         self.film_ready.emit(sid, pix)
                     else:
                         p_dict = dict(self.params_dict)
-                        if ref_paper == "none" and "print_mode" not in p_dict:
-                            p_dict["print_mode"] = "scan"
-                        lut = self.engine.get_3d_lut(sid, ref_paper, lut_size=17, params_dict=p_dict)
+                        # 印相模式跟着配对相纸走：有纸就印，纸是"直扫"才输出负像。
+                        # 之前只看 params 里的 print_mode，旁通状态下会把有纸的预览也烘成负像。
+                        p_dict["print_mode"] = (
+                            "scan" if self.film_paper in ("none", "") else "optical")
+                        lut = self.engine.get_3d_lut(sid, self.film_paper, lut_size=17, params_dict=p_dict)
                         graded_f32 = self.engine.apply_lut_to_linear(small_linear, lut, as_float=True)
-                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, self.params_dict, self.engine.get_lut_baked_params(lut))
+                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, p_dict, self.engine.get_lut_baked_params(lut))
                         graded_u8 = (np.clip(graded_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
                         gh, gw, gc = graded_u8.shape
                         qimg = QImage(graded_u8.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
@@ -221,9 +225,13 @@ class StockThumbnailWorker(QThread):
                         pix = QPixmap.fromImage(qimg)
                         self.paper_ready.emit(sid, pix)
                     else:
-                        lut = self.engine.get_3d_lut(ref_film, sid, lut_size=17, params_dict=self.params_dict)
+                        # 有纸就是印相：当前若停在"胶片直扫"，params 里的 print_mode 会把这张
+                        # 纸的预览也烘成扫描负像（base paper 直接落到 Ektacolor Edge）。
+                        p_dict = dict(self.params_dict)
+                        p_dict["print_mode"] = "optical"
+                        lut = self.engine.get_3d_lut(ref_film, sid, lut_size=17, params_dict=p_dict)
                         graded_f32 = self.engine.apply_lut_to_linear(small_linear, lut, as_float=True)
-                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, self.params_dict, self.engine.get_lut_baked_params(lut))
+                        graded_f32 = apply_post_lut_adjustments_f32(graded_f32, p_dict, self.engine.get_lut_baked_params(lut))
                         graded_u8 = (np.clip(graded_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
                         gh, gw, gc = graded_u8.shape
                         qimg = QImage(graded_u8.data, gw, gh, gw * gc, QImage.Format.Format_RGB888).copy()
@@ -562,7 +570,7 @@ class ThumbnailController(QObject):
 
     def trigger_candidate_card_previews(self, linear_thumb: np.ndarray, film_cards: dict, paper_cards: dict,
                                         current_film: str, current_paper: str, params: dict, base_ev: float = 0.0,
-                                        on_film_ready=None, on_paper_ready=None):
+                                        on_film_ready=None, on_paper_ready=None, film_paper=None):
         """Starts background worker generating candidate previews for unselected film & paper cards."""
         self.cancel_card_preview_worker()
         if linear_thumb is None or linear_thumb.size == 0:
@@ -582,7 +590,8 @@ class ThumbnailController(QObject):
             do_papers=bool(paper_cards),
             ev=ev, highlights=hl, shadows=sh, base_ev=eff_base_ev,
             params_dict=params,
-            parent=self
+            parent=self,
+            film_paper=film_paper
         )
         if on_film_ready:
             self._card_worker.film_ready.connect(on_film_ready)

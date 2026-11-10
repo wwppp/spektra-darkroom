@@ -52,6 +52,9 @@ DEFAULT_CONFIG = {
         "color_space": "sRGB",
         "preview_quality": "full",
         "auto_meter_on_import": False,
+        # 全新安装（还没有配置文件）时的负片默认相纸。用户指定："胶片直扫"，即新底片先
+        # 看未反相的原始负像，选过相纸之后才印相。
+        "default_negative_paper": "none",
         "session_cache_max_gb": 2.0,
         "session_cache_clean_interval_days": 7,
         "session_cache_last_clean_time": 0.0,
