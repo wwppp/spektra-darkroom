@@ -397,14 +397,15 @@ class HalationKernel:
     def matrix_for(self, amount: float = 1.0) -> tuple[tuple[float, float, float], ...]:
         """Route the mix for a user amount, exactly as ``halationScale`` does.
 
-        The engine multiplies the *returned fraction* before ``mix = s/(1+s)``, so
-        the share is not linear in the slider; the diagonal of this matrix is that
-        share per record and the off-diagonals split it across source records.
+        The engine multiplies the *returned fraction* and only then takes
+        ``mix = s/(1+s)``, so the share **saturates**: 64x a 3% return is a 66% share,
+        not 192%. The diagonal of the returned matrix is that share per record and the
+        off-diagonals split it across source records.
         """
         a = max(float(amount), 0.0)
         if abs(a - 1.0) <= 1e-9:
             return self.matrix
-        return _mix_matrix(tuple(v * a for v in self.returned), self.return_matrix)
+        return _mix_matrix(mix_of(tuple(v * a for v in self.returned)), self.return_matrix)
 
     def sigma_px(self, pixel_size_um: float) -> tuple[float, float, float]:
         px = max(float(pixel_size_um), 1e-6)

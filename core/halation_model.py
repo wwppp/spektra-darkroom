@@ -44,6 +44,37 @@ import numpy as np
 
 from .halation_kernel import HalationKernel, kernel_for
 
+# --- The amount track -------------------------------------------------------------
+# The engine draws `halationAmount` as Stops, not as a multiple: `HalationAmount.travel`
+# is `EditorControlUnit.offStops...6`, and `scale(fromStops:)` stores `exp2(stops)`. So
+# the slider is logarithmic about the stock's authored look, and 0 stops returns that
+# look bit for bit. The bottom stop means off (`scale` is 0 there) -- the engine keeps a
+# sliver of halo below it rather than claiming a precision the track does not have.
+#
+# Why it has to be stops and not a 0..3x multiple: the composite is
+# `mix = s/(1+s)` with `s = returned * scale`, so the share saturates. At CineStill's
+# authored 0.03 the share is 2.9% at 0 stops, 65.8% at +6 stops. A linear 1..3 track can
+# only reach 9% of that range, which is why maxed out it looked like a thin rim.
+HALATION_OFF_STOPS = -6.0
+HALATION_MAX_STOPS = 6.0
+
+
+def scale_from_stops(stops: float) -> float:
+    """The linear multiple the renderers take, from the drawn stops (off below -6)."""
+    value = float(stops)
+    if value <= HALATION_OFF_STOPS:
+        return 0.0
+    return 2.0 ** min(value, HALATION_MAX_STOPS)
+
+
+def stops_from_scale(scale: float) -> float:
+    """Inverse of :func:`scale_from_stops`, clamped to the drawn track."""
+    value = float(scale)
+    if value <= 0.0:
+        return HALATION_OFF_STOPS
+    return max(HALATION_OFF_STOPS, min(math.log2(value), HALATION_MAX_STOPS))
+
+
 # --- Engine calibration constants ------------------------------------------------
 # These are NOT profile data. Each one is marked "engine" in HalationParams.sources
 # so the UI can say "calibrated" instead of pretending it was measured.

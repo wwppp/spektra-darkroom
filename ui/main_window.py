@@ -54,6 +54,12 @@ from core.format_constants import (
 )
 from core.version import get_app_title, get_full_version_info
 from core.app_core import SpektraEngine
+from core.halation_model import (
+    HALATION_MAX_STOPS,
+    HALATION_OFF_STOPS,
+    scale_from_stops,
+    stops_from_scale,
+)
 from core import sdc_manager
 from core import config_manager
 
@@ -4644,13 +4650,24 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_halation = AccordionSection("物理光晕 (Halation)")
         self.sec_halation.resetClicked.connect(lambda: self.reset_track("halation"))
 
+        # The track is the engine's own: Stops about the stock's authored look, -6..+6,
+        # with the bottom stop meaning off. The stored parameter stays the linear
+        # multiple (`halation_amount`), so exports, the GPU chain and old sessions are
+        # untouched -- this row only changes what the number means to a photographer.
         self.slider_halation_amount = AdobeScrubSlider(
-            "光晕物理倍率", 0.0, 3.0, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="背反射返光比例倍率，等同引擎的 halationScale：\n"
-                    "缩放返回光占直射光的比例，不改变光环半径。\n"
-                    "半径由该卷的片基厚度与 profile 拟合给出，跨卷差别可达 5 倍"
+            "光晕档位", HALATION_OFF_STOPS, HALATION_MAX_STOPS, 0.0, step=0.05,
+            unit=" EV", decimals=2,
+            tooltip="相对该卷本征返光比例的档位（引擎的 halationAmount）。\n"
+                    "0 = 这支卷自己的标定值；上端 +6 档 = 64 倍，下端为关闭。\n"
+                    "光环亮度按返回光占直射光的比例 s/(1+s) 饱和：往右推是越来越厚，"
+                    "但不会无限亮；半径由片基厚度决定，不随档位变。\n"
+                    "去掉 remjet 的 CineStill 通常在 +2 ~ +4 档才接近实拍观感",
+            track_gradient=[(0.0, QColor("#111317")), (0.5, QColor("#5a6170")),
+                            (1.0, QColor("#ffb37a"))],
+            has_center_detent=True
         )
-        self.slider_halation_amount.valueChanged.connect(lambda v: self._on_slider_live("halation_amount", v))
+        self.slider_halation_amount.valueChanged.connect(
+            lambda v: self._on_slider_live("halation_amount", scale_from_stops(v)))
         self.slider_halation_amount.sliderReleased.connect(self._on_slider_committed)
         self.sec_halation.addWidget(self.slider_halation_amount)
 
@@ -8497,11 +8514,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'slider_morph_gamma'): self.slider_morph_gamma.set_value(p.get("morph_gamma", 1.0))
             if hasattr(self, 'slider_exhaustion'): self.slider_exhaustion.set_value(p.get("developer_exhaustion", 0.0))
 
-            if hasattr(self, 'slider_halation_amount'): self.slider_halation_amount.set_value(p.get("halation_amount", p.get("halation", 1.0)))
+            # The parameter is the linear multiple; this row draws stops (0 = the stock).
+            _hal_scale = p.get("halation_amount", p.get("halation", 1.0))
+            _hal_stops = stops_from_scale(_hal_scale)
+            if hasattr(self, 'slider_halation_amount'): self.slider_halation_amount.set_value(_hal_stops)
             if hasattr(self, 'slider_halation_spatial_scale'): self.slider_halation_spatial_scale.set_value(p.get("halation_spatial_scale", 1.0))
             if hasattr(self, 'slider_scatter_amount'): self.slider_scatter_amount.set_value(p.get("scatter_amount", 1.0))
             if hasattr(self, 'slider_boost_ev'): self.slider_boost_ev.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
-            if hasattr(self, 'slider_halation'): self.slider_halation.set_value(p.get("halation_amount", p.get("halation", 1.0)))
+            if hasattr(self, 'slider_halation'): self.slider_halation.set_value(_hal_stops)
             if hasattr(self, 'slider_halation_boost'): self.slider_halation_boost.set_value(p.get("boost_ev", p.get("halation_boost", 0.0)))
 
             # 银盐颗粒：强度滑块显示 σ 倍率，内部 grain = 0.4/σ²（Selwyn 反解；grain=0 → 无颗粒 → 滑块 0）
