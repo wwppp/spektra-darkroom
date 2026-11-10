@@ -7149,6 +7149,11 @@
             },
             "halation": {
                 "look_scale": 1,
+                "base_thickness_mm": 0.13,
+                "refractive_index": 1.48,
+                "native_format": "35mm",
+                "profile_source": "standard",
+                "record_refractive_indices": [1.474, 1.48, 1.489],
                 "strength": [
                     0.0055,
                     0.00010804,

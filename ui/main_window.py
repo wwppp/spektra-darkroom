@@ -1973,6 +1973,14 @@ class DarkroomMainWindow(QMainWindow):
     # 逻辑全部保留（控件、参数、push 档案都在），P4 落地后把这里改回 True 即可。
     PUSH_UI_ENABLED = False
 
+    # 「光晕空间尺度」不再提供 UI 入口。它当年存在，是因为所有卷共用一条几何推导出来的
+    # 168.5/238.3/292.2 µm 梯度 —— 想让 cinestill 的 425 µm 光环出现，只能用这个滑块去拉。
+    # 现在半径由每支卷自己的支撑层几何 + profile 拟合出来（core/halation_kernel.py），
+    # 引擎的设计也是"改强度不改半径"（`halationLookScale` 作用在返光比例上），再留一个
+    # 会把物理半径拉歪的旋钮只会制造"预览对、导出不对"。参数与 .sdc 字段全部保留，
+    # 但 halation 路径读取时强制为 1.0；要恢复入口把这里改回 True 并放开 canvas 的钳制。
+    HALATION_SPATIAL_UI_ENABLED = False
+
     # 负片默认落在哪张纸上，完全跟首选项的"负片默认相纸"走（用户 2026-11-10 指定出厂值为
     # "胶片直扫"：新底片先看未反相的原始负像）。这里只是配置缺失或 id 失效时的兜底。
     DEFAULT_NEGATIVE_PAPER = "none"
@@ -4638,12 +4646,15 @@ class DarkroomMainWindow(QMainWindow):
 
         self.slider_halation_amount = AdobeScrubSlider(
             "光晕物理倍率", 0.0, 3.0, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="背反射物理光晕倍率，按防光晕层实测系数缩放各通道振幅"
+            tooltip="背反射返光比例倍率，等同引擎的 halationScale：\n"
+                    "缩放返回光占直射光的比例，不改变光环半径。\n"
+                    "半径由该卷的片基厚度与 profile 拟合给出，跨卷差别可达 5 倍"
         )
         self.slider_halation_amount.valueChanged.connect(lambda v: self._on_slider_live("halation_amount", v))
         self.slider_halation_amount.sliderReleased.connect(self._on_slider_committed)
         self.sec_halation.addWidget(self.slider_halation_amount)
 
+        # 下线入口（见类顶 HALATION_SPATIAL_UI_ENABLED）：参数仍然存在，只是没人能改。
         self.slider_halation_spatial_scale = AdobeScrubSlider(
             "光晕空间尺度", 0.1, 3.0, 1.0, step=0.05, unit="x", decimals=2,
             tooltip="光晕扩散核的空间尺度倍率"
@@ -4651,6 +4662,8 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_halation_spatial_scale.valueChanged.connect(lambda v: self._on_slider_live("halation_spatial_scale", v))
         self.slider_halation_spatial_scale.sliderReleased.connect(self._on_slider_committed)
         self.sec_halation.addWidget(self.slider_halation_spatial_scale)
+        if not self.HALATION_SPATIAL_UI_ENABLED:
+            self.slider_halation_spatial_scale.setVisible(False)
 
         self.slider_scatter_amount = AdobeScrubSlider(
             "乳剂内散射强度", 0.0, 2.0, 1.0, step=0.05, unit="x", decimals=2,

@@ -361,25 +361,28 @@ _COMP_FRAG = """
 in vec2 v_uv;
 out vec4 fragColor;
 uniform sampler2D u_raw;      // full-res E: the negative, or the scattered radiance
-uniform sampler2D u_b0;       // bounce 1 (working grid)
-uniform sampler2D u_b1;       // bounce 2
-uniform sampler2D u_b2;       // bounce 3
+uniform sampler2D u_b0;       // scale 1 (working grid)
+uniform sampler2D u_b1;       // scale 2
+uniform sampler2D u_b2;       // scale 3
 uniform vec3 u_gain;
 uniform int u_e_shaped;       // 1 when u_raw already holds shaped radiance
-uniform vec3 u_decay0;        // bounce 1 weight, per record (R, G, B)
-uniform vec3 u_decay1;        // bounce 2
-uniform vec3 u_decay2;        // bounce 3
-uniform vec3 u_a_tot;         // strength * physical multiplier, per channel
-uniform float u_amount;
+uniform vec3 u_decay0;        // scale 1 weight, per record (R, G, B)
+uniform vec3 u_decay1;        // scale 2
+uniform vec3 u_decay2;        // scale 3
+// Receiver rows by source columns, each row summing to that receiver's mix share.
+// The diagonal is the plain per-record mix; the off-diagonals are the sheet's
+// spectral return matrix, i.e. light entering as one record and landing as another.
+uniform mat3 u_ret;
 """ + _HS_GLSL + """
 void main() {
     vec3 e = texture(u_raw, v_uv).rgb;
     if (u_e_shaped == 0) e = shape_radiance(e * u_gain);
+    // Each scale is one shared Gaussian; the per-record weights are what differ.
     vec3 blur = texture(u_b0, v_uv).rgb * u_decay0
               + texture(u_b1, v_uv).rgb * u_decay1
               + texture(u_b2, v_uv).rgb * u_decay2;
-    vec3 a = u_a_tot * u_amount;
-    fragColor = vec4((e + a * blur) / (vec3(1.0) + a), 1.0);
+    // out_c = e_c + sum_j M[c][j] * (blur_j - e_j), the engine's composite.
+    fragColor = vec4(e + u_ret * (blur - e), 1.0);
 }
 """
 
@@ -398,7 +401,7 @@ class GLHalationChain:
     #: doing more work than it needs to.
     TARGET_SIGMA_MIN = 2.0
     TARGET_SIGMA_MAX = 4.0
-    MAX_DECIMATION = 16
+    MAX_DECIMATION = 8
 
     def __init__(self):
         self._down = None
@@ -547,6 +550,18 @@ class GLHalationChain:
         loc = prog.uniformLocation(name)
         if loc != -1:
             GL.glUniform3f(loc, float(x), float(y), float(z))
+
+    @staticmethod
+    def _m3(prog, name, rows):
+        """3x3 uniform from row-major rows; GLSL wants the transpose (column-major)."""
+        loc = prog.uniformLocation(name)
+        if loc == -1:
+            return
+        flat = [0.0] * 9
+        for r in range(3):
+            for c in range(3):
+                flat[c * 3 + r] = float(rows[r][c])
+        GL.glUniformMatrix3fv(loc, 1, False, flat)
 
     def _draw(self, prog, fbo, w: int, h: int):
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, fbo)
@@ -777,33 +792,45 @@ class GLHalationChain:
 
     @staticmethod
     def decimation_for(max_sigma_px: float) -> int:
-        """Power-of-two factor that puts the widest bounce in TARGET_SIGMA band.
+        """Power-of-two factor, chosen exactly as the CPU chooses it.
 
-        The band is what keeps the blur cheap: with sigma on the working grid near 3 px the
-        kernel needs ~9 taps per axis, and the pass runs at 1/k^2 of the pixels. It is
-        deliberately not the same k the CPU uses (core.halation_model._pick_decimation aims
-        at 4 px). Measured 2026-10-30: aligning the two (GPU target 4 px) changed the
-        end-to-end PSNR by exactly 0.00 dB while costing 106 -> 156 ms at 24 MP, so the
-        residual between the renderers is kernel quadrature, not grid mismatch -- the
-        grids stay free to optimise for cost.
+        This used to pick its own grid (target ~3.5 px) on the reasoning that the
+        renderers' residual was kernel quadrature, not grid mismatch -- measured at
+        0.00 dB PSNR difference back when every stock shared one 168/238/292 um
+        ladder. That stopped holding once the sigmas became physical: VISION3's
+        widest scale is 46 px at 8.75 um/px, the old rule went to 1/16 while the CPU
+        stopped at 1/8, and the extra box prefilter widened the halo by 12 %.
+
+        So: same rule as ``core.halation_model._pick_decimation`` (floor of
+        log2(sigma/4), capped at 8). Identical working grids, identical prefilter,
+        identical radius. It costs the widest stocks a finer grid -- the blur pass is
+        still cheap relative to the rest of the frame.
         """
         if max_sigma_px <= GLHalationChain.TARGET_SIGMA_MAX:
             return 1
-        k = int(2 ** round(np.log2(max_sigma_px / 3.5)))
+        k = int(2 ** np.floor(np.log2(max(1.0, max_sigma_px / 4.0))))
         return max(1, min(GLHalationChain.MAX_DECIMATION, k))
 
     # ------------------------------------------------------------------ run
     def run(self, raw_tex: int, width: int, height: int, scene_gain,
-            sigma_px, decay, a_tot, amount: float, hs=(0.0, 0.0), scatter=None,
+            sigmas_px, weights, matrix, amount: float, hs=(0.0, 0.0), scatter=None,
             boost=None, diffusion=None):
         """Render halation over ``raw_tex`` and return the result texture id.
 
         raw_tex   -- full-resolution scene-linear negative (RGBA)
         scene_gain-- vec3 folded exposure + white balance, applied per sample
-        sigma_px  -- per-channel bounce-1 halo sigma in full-resolution pixels
-        decay     -- normalised bounce weights (3 values)
-        a_tot     -- per-channel strength, before the user's amount multiplier
-        amount    -- user's physical multiplier
+        sigmas_px -- the kernel's three shared Gaussian sigmas, in full-resolution px,
+                     ascending. Shared across records: the engine fits three scales and
+                     lets only the weights differ, and each scale owns one blur pass.
+        weights   -- ``[scale][record]`` mixture weights; each *record's* column sums
+                     to one, so every record's blurred light is a partition of unity.
+        matrix    -- ``[receiver][source]`` routing, rows summing to that receiver's
+                     returned share (``mix = s/(1+s)`` with the user amount already
+                     folded in). Its diagonal is the old per-record mix; the rest is the
+                     sheet's spectral return matrix.
+        amount    -- the user's multiplier, used only to gate whether to run at all (the
+                     matrix already carries its effect, because the engine scales the
+                     returned *fraction* before ``mix``, which is not linear).
         scatter   -- optional dict {"core": (r,g,b) px, "tail": (..), "w_tail": (..),
                      "amount": float}; when present the in-emulsion scatter is evaluated
                      here too, in the same order the CPU uses (scatter, then halation)
@@ -820,7 +847,7 @@ class GLHalationChain:
         self.last_did_scatter = False
         self.last_did_boost = False
         self.last_did_diffusion = False
-        want_hal = amount > 0.001 and max(sigma_px) > 0.01
+        want_hal = amount > 0.001 and max(sigmas_px) > 0.01
         want_scat = bool(scatter) and float(scatter.get("amount", 0.0)) > 0.001
         want_diff = diffusion is not None
         boost_ev = float(boost.get("ev", 0.0)) if boost else 0.0
@@ -875,10 +902,15 @@ class GLHalationChain:
 
         sw = max(1, width)
         sh = max(1, height)
-        max_sigma = float(max(sigma_px)) * float(np.sqrt(max(1, len(decay))))
+        max_sigma = float(max(sigmas_px))
         k = self.decimation_for(max_sigma)
-        if k <= 1 and not want_diff:
-            return None  # sigma already tiny; the tap path is equivalent and cheaper
+        # The old bail ("sigma already tiny; the tap path is equivalent and cheaper") no
+        # longer holds: the tap path draws a 0.5^k three-bounce ladder around a single
+        # sigma, and the kernel it would stand in for is a fitted three-scale mixture.
+        # Running at k = 1 costs six full-resolution passes, which at preview size is
+        # nothing next to being able to say preview and export draw the same halo.
+        if k <= 1 and not want_diff and not want_hal:
+            return None
 
         _chk("start")
         t_h, f_h = None, None
@@ -1066,7 +1098,9 @@ class GLHalationChain:
         # applied on, or the halo radius silently shrinks with the canvas.
         red = float(sw) / float(ww)
         for i in range(3):
-            sigma = float(sigma_px[i]) * float(np.sqrt(i + 1)) / red
+            # One shared sigma per scale. The engine's fit already spans the critical
+            # angle, so there is no sqrt(k) ladder here any more.
+            sigma = float(sigmas_px[i]) / red
             # horizontal: l0 -> h
             GL.glActiveTexture(GL.GL_TEXTURE0)
             GL.glBindTexture(GL.GL_TEXTURE_2D, t_l0)
@@ -1099,10 +1133,10 @@ class GLHalationChain:
         self._u3f(self._comp, "u_gain", *g3c)
         self._u1f(self._comp, "u_highlights", hs[0])
         self._u1f(self._comp, "u_shadows", hs[1])
-        # Each bounce carries its own per-record weight: the records differ in how much
-        # light survives a round trip, and that difference is the colour of the halo.
+        # One "R,G,B" weight triple per scale: the records differ in how much light
+        # survives a round trip, and that difference is the colour of the halo.
         rows = []
-        for row in list(decay)[:3]:
+        for row in list(weights)[:3]:
             if isinstance(row, (list, tuple)):
                 rows.append([float(v) for v in (list(row) + [0.0, 0.0, 0.0])[:3]])
             else:
@@ -1111,9 +1145,14 @@ class GLHalationChain:
             rows.append([0.0, 0.0, 0.0])
         for i, row in enumerate(rows):
             self._u3f(self._comp, f"u_decay{i}", *row)
-        a = [float(v) for v in (list(a_tot) + [0.0, 0.0, 0.0])[:3]]
-        self._u3f(self._comp, "u_a_tot", *a)
-        self._u1f(self._comp, "u_amount", amount)
+        ret = [[0.0] * 3 for _ in range(3)]
+        for r in range(3):
+            for c in range(3):
+                try:
+                    ret[r][c] = float(matrix[r][c])
+                except (IndexError, TypeError, ValueError):
+                    ret[r][c] = 0.0
+        self._m3(self._comp, "u_ret", ret)
         self._u1i(self._comp, "u_e_shaped", int(e_shaped))
         self._draw(self._comp, f_out, sw, sh)
         self._comp.release()

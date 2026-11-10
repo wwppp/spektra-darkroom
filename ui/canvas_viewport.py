@@ -12,6 +12,7 @@ from PySide6.QtOpenGL import (
 from core.path_utils import get_resource_dir
 from core import config_manager
 from core.darkroom_math import scene_gain
+from core.halation_model import SPATIAL_SCALE_ENABLED
 from OpenGL import GL
 
 
@@ -1819,7 +1820,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         sigma_um = float(hal_preset.get("sigma_h", 65.0))
 
         hal_amt = 0.0 if is_film_none else float(self.params.get("halation_amount", self.params.get("halation", 1.0)))
-        hal_scale = float(self.params.get("halation_spatial_scale", 1.0))
+        # Radius is physical (see halation_model.SPATIAL_SCALE_ENABLED); the knob is off.
+        hal_scale = float(self.params.get("halation_spatial_scale", 1.0)) if SPATIAL_SCALE_ENABLED else 1.0
         scatter_amt = 0.0 if is_film_none else float(self.params.get("scatter_amount", 1.0))
         boost_ev = 0.0 if is_film_none else float(self.params.get("boost_ev", self.params.get("halation_boost", 0.0)))
 
@@ -1896,7 +1898,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
                     fmt_mm = float(self.params.get("film_format_mm", 35.0))
                     um_px = (max(5.0, fmt_mm) * 1000.0) / float(max(tex_w, tex_h))
                     sc_live = max(0.2, float(hal_scale))
-                    sig_live = [float(v) * sc_live / um_px for v in hp_live.sigma_h_um]
+                    sig_live = [float(v) * sc_live / um_px for v in hp_live.kernel.sigmas_um]
                     scat_live = None
                     if scatter_amt > 0.001:
                         scat_live = {
@@ -1908,7 +1910,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
                             "eff": min(0.5, float(scatter_amt) * 0.06),
                             "amount": float(scatter_amt),
                         }
-                    if max(sig_live) * (3.0 ** 0.5) > 6.0 or scat_live:
+                    if max(sig_live) > 0.5 or scat_live:
                         if self._halation_chain is None:
                             from .gl_halation import GLHalationChain
                             self._halation_chain = GLHalationChain()
@@ -1920,8 +1922,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
                             self.params.get("base_tint", 1.0))
                         prepared_tex = self._halation_chain.run(
                             int(self._image_tex_id), tex_w, tex_h, _gain_live,
-                            sig_live, hp_live.bounce_decay, hp_live.strength,
-                            float(hal_amt) if max(sig_live) * (3.0 ** 0.5) > 6.0 else 0.0,
+                            sig_live, hp_live.bounce_decay,
+                            hp_live.kernel.matrix_for(float(hal_amt)),
+                            float(hal_amt) if max(sig_live) > 0.5 else 0.0,
                             hs=(float(self.params.get("highlights", 0.0)),
                                 float(self.params.get("shadows", 0.0))),
                             scatter=scat_live)
@@ -3352,13 +3355,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
                         hp = eng_off.get_halation_params(eff_params.get("film_stock", "none"))
                         fmt_mm = float(eff_params.get("film_format_mm", 35.0))
                         um_per_px = (max(5.0, fmt_mm) * 1000.0) / float(max(target_w, target_h))
-                        sc = max(0.2, float(hal_scale))
-                        sig_px = [float(s_) * sc / um_per_px for s_ in hp.sigma_h_um]
+                        sc = max(0.2, float(hal_scale)) if SPATIAL_SCALE_ENABLED else 1.0
+                        sig_px = [float(s_) * sc / um_per_px for s_ in hp.kernel.sigmas_um]
                         # The halation blur is only worth decimating past ~6 px; below that
                         # the tap path is equivalent. Scatter, on the other hand, is always
                         # worth doing here: the shader's version is an 8-tap ring at 4x the
                         # right radius, and it is what the CPU/GPU gap was made of.
-                        want_hal = max(sig_px) * (3.0 ** 0.5) > 6.0
+                        want_hal = max(sig_px) > 0.5
                         scat_arg = None
                         if scatter_amt > 0.001:
                             scat_arg = {
@@ -3398,7 +3401,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                                 eff_params.get("base_tint", 1.0))
                             prepared_tex = self._halation_chain.run(
                                 int(active_tex_id), int(target_w), int(target_h), _g,
-                                sig_px, hp.bounce_decay, hp.strength,
+                                sig_px, hp.bounce_decay,
+                                hp.kernel.matrix_for(float(hal_amt)),
                                 float(hal_amt) if want_hal else 0.0,
                                 hs=(float(eff_params.get("highlights", 0.0)),
                                     float(eff_params.get("shadows", 0.0))),

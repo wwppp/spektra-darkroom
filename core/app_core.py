@@ -2087,60 +2087,24 @@ class SpektraEngine:
         return True, ""
 
     def get_film_halation_preset(self, film_stock):
-        """Query official spektrafilm halation preset from film profile's (use, antihalation) tags."""
-        if not film_stock or film_stock == "none":
-            return {"sigma_h": 65.0, "strength": (0.015, 0.005, 0.0), "antihalation": "none", "use": "still"}
-        try:
-            prof = self._load_profile(film_stock)
-            use = getattr(prof.info, "use", "still") if prof and hasattr(prof, "info") else "still"
-            antihalation = getattr(prof.info, "antihalation", "strong") if prof and hasattr(prof, "info") else "strong"
+        """Tuple view of :meth:`get_halation_params`, for the shader's tap fallback.
 
-            # Check for physical film_base extension (Phase 4)
-            if prof and hasattr(prof, "data") and hasattr(prof.data, "physical_extensions"):
-                phys_ext = prof.data.physical_extensions or {}
-                if isinstance(phys_ext, dict):
-                    fb = phys_ext.get("halation") or phys_ext.get("film_base")
-                    if fb and isinstance(fb, dict):
-                        thickness_mm = float(fb.get("base_thickness_mm", fb.get("thickness_mm", 0.13)))
-                        thickness_um = thickness_mm * 1000.0
-                        indices = fb.get("record_refractive_indices")
-                        if not indices or len(indices) != 3:
-                            n_val = float(fb.get("refractive_index", 1.48))
-                            indices = [n_val * 0.996, n_val, n_val * 1.006]
-                        radii_um = [2.0 * thickness_um * np.tan(np.arcsin(1.0 / max(float(n), 1.01))) for n in indices]
-                        sigma_h = radii_um[0] / np.sqrt(2.0)
-                        
-                        if "strength" in fb and isinstance(fb["strength"], (list, tuple)):
-                            raw_st = np.array(fb["strength"], dtype=np.float64)
-                            if np.max(raw_st) > 0:
-                                strength = tuple(float(x) for x in raw_st)
-                            else:
-                                strength = (0.0055, 0.001, 0.0)
-                        else:
-                            ah = str(fb.get("antihalation", antihalation)).lower()
-                            if ah in ("no", "none"):
-                                strength = (0.28, 0.07, 0.015)
-                            elif ah == "weak":
-                                strength = (0.08, 0.02, 0.005)
-                            else:
-                                strength = (0.015, 0.003, 0.0)
-                        return {
-                            "sigma_h": float(sigma_h),
-                            "strength": strength,
-                            "antihalation": fb.get("antihalation", antihalation),
-                            "use": use
-                        }
-
-            from spektrafilm.runtime.params_builder import _HALATION_PRESETS
-            preset = _HALATION_PRESETS.get((use, antihalation), {'sigma_h': (65.0, 65.0, 65.0), 'strength': (0.015, 0.005, 0.0)})
-            return {
-                "sigma_h": float(preset['sigma_h'][0]),
-                "strength": tuple(float(x) for x in preset['strength']),
-                "antihalation": antihalation,
-                "use": use
-            }
-        except Exception:
-            return {"sigma_h": 65.0, "strength": (0.015, 0.005, 0.0), "antihalation": "strong", "use": "still"}
+        The viewport's inline halation block is a 16-tap stand-in used only when the
+        real chain cannot run (``ui/gl_halation.py`` failing, or a sigma small enough
+        that the tap path is equivalent). It needs one representative sigma and the
+        returned fractions; both come from the kernel now, so the fallback and the
+        chain cannot drift apart. ``sigma_h`` is the *anchor* (middle) scale -- the one
+        whose half-value radius matches the support's real edge response.
+        """
+        hp = self.get_halation_params(film_stock)
+        k = hp.kernel
+        return {
+            "sigma_h": float(k.sigmas_um[1]),
+            "sigmas_um": tuple(float(v) for v in k.sigmas_um),
+            "strength": tuple(float(v) for v in hp.strength),
+            "antihalation": hp.antihalation,
+            "use": hp.use,
+        }
 
     def get_halation_params(self, film_stock):
         """Resolved physical halation parameters, with provenance.

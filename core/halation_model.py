@@ -9,15 +9,23 @@ The point of this module is that neither of them owns a constant. Every number i
 either read from the film profile, derived from profile geometry, or an explicit
 engine calibration -- and it says which, in ``HalationParams.sources``.
 
-Physics (see docs/halation-rework-plan.md §4.1):
+Physics (see docs/halation-engine-port-plan.md):
 
     boost:    y = x + max_raw * k * (exp(a*dx) - a*dx - 1),  dx = (x - x0)/max_raw
     scatter:  E' = (1-s)*E + s*[(1-w)*G(sigma_c)*E + w*G(sigma_t)*E]
-    halation: E'' = (E' + a_tot * sum_k decay[k] * G(sigma_h*sqrt(k)) * E') / (1 + a_tot)
+    halation: out_c = E'_c + sum_j M[c][j] * (S_j - E'_j)
+              S_j = sum_k w[j][k] * G(sigma_k) * E'_j
 
-``decay[k]`` is per bounce *and* per record, and ``sigma_h`` likewise -- the two records
-disagree by up to 4.5x on how much light survives a round trip (CineStill 800T), and that
-asymmetry is the red halo. A single scalar weight per bounce would erase it.
+The three ``sigma_k`` are **shared across records** and come from
+``core/halation_kernel.py`` -- a fit of the support's real edge-spread, not a geometric
+rule of thumb. Only the weights ``w[j][k]`` differ per record, and that asymmetry is the
+halo's colour (CineStill's red halo; a neutral halo for a monochrome stock). ``M`` routes
+each receiver's share across the *source* records through the sheet's spectral return
+matrix, so the halo is not obliged to be the colour of the light that made it.
+
+``M``'s diagonal is ``mix = s/(1+s)`` with ``s = returned * amount``, which is why
+``(E + s*S)/(1+s)`` and ``E + mix*(S - E)`` are the same thing -- the engine writes the
+second, this module writes the second too now that the off-diagonal terms exist.
 
 The exponential scatter tail is approximated by a Gaussian on purpose: a recursive
 exponential filter cannot be expressed as a separable convolution pass, so it would
@@ -34,6 +42,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from .halation_kernel import HalationKernel, kernel_for
+
 # --- Engine calibration constants ------------------------------------------------
 # These are NOT profile data. Each one is marked "engine" in HalationParams.sources
 # so the UI can say "calibrated" instead of pretending it was measured.
@@ -47,13 +57,15 @@ SCATTER_TAIL_UM = (9.3, 9.7, 9.1)
 SCATTER_TAIL_WEIGHT = (0.78, 0.65, 0.67)
 
 # 35 mm base thickness is an industry standard, not a measurement of any one stock.
-# Used only when the profile omits it (20/53 stocks, including all the main ones).
+# Used only when the profile omits it. VISION3 / ETERNA / the other cine products sit
+# on ESTAR, which is thinner and has a much higher index, so they declare their own.
 FALLBACK_THICKNESS_MM = 0.13
 FALLBACK_REFRACTIVE_INDEX = 1.48
-FALLBACK_SIGMA_H_UM = 65.0
 
-# Bounce decay when the profile has no bounceRetention (51/53).
-DEFAULT_N_BOUNCES = 3
+#: Acetate safety base, the support under almost every roll film and cine negative.
+ACETATE_INDICES = (1.474, 1.480, 1.489)
+#: Kodak ESTAR (polyester): sheet film and the thin high-strength cine bases.
+ESTAR_INDICES = (1.635, 1.643, 1.657)
 
 # Highlight boost curve constants (spektrafilm params_schema defaults).
 DEFAULT_BOOST_RANGE = 0.3
@@ -62,6 +74,15 @@ BOOST_MIDGRAY = 0.184
 
 # Halation spatial scale is clamped so a 0 slider cannot produce a 0-width kernel.
 MIN_SPATIAL_SCALE = 0.2
+
+#: The halo radius is a physical quantity now -- it comes out of each stock's own
+#: support geometry and profile fit, and the engine's design is explicitly "changing
+#: the creative amount does not change the radius" (``halationLookScale`` scales the
+#: returned fraction, not the kernel). The old radius knob existed only to compensate
+#: for the single 168.5/238.3/292.2 um ladder every stock used to share, so it is off.
+#: Sessions that still carry a non-1.0 value are clamped rather than honoured: the
+#: value was fitted against a wrong radius and would now distort a right one.
+SPATIAL_SCALE_ENABLED = False
 
 SOURCE_PROFILE = "profile"
 SOURCE_DERIVED = "derived"
@@ -83,13 +104,11 @@ class HalationParams:
     """Resolved halation parameters plus where each number came from."""
 
     strength: tuple[float, float, float]
-    sigma_h_um: tuple[float, float, float]
+    #: The fitted kernel: three shared sigmas, per-record weights, and the routing matrix.
+    kernel: HalationKernel
     scatter_core_um: tuple[float, float, float]
     scatter_tail_um: tuple[float, float, float]
     scatter_tail_weight: tuple[float, float, float]
-    # One row per bounce, each row (R, G, B), normalised per record.
-    bounce_decay: tuple[tuple[float, float, float], ...]
-    n_bounces: int
     boost_range: float
     protect_ev: float
     use: str = "still"
@@ -99,19 +118,59 @@ class HalationParams:
     # Raw profile blocks, kept for diagnostics; never used for math.
     raw: dict[str, Any] = field(default_factory=dict)
 
+    # -- views of the kernel, for callers that think in the old vocabulary -------
+    @property
+    def sigma_h_um(self) -> tuple[float, float, float]:
+        """The three shared Gaussian sigmas, ascending."""
+        return self.kernel.sigmas_um
+
+    @property
+    def weights(self) -> tuple[tuple[float, float, float], ...]:
+        """``[record][scale]``; each row sums to one."""
+        return self.kernel.weights
+
+    @property
+    def bounce_decay(self) -> tuple[tuple[float, float, float], ...]:
+        """``[scale][record]`` -- the layout the blur accumulators want."""
+        w = self.kernel.weights
+        return tuple(tuple(w[c][k] for c in range(3)) for k in range(3))
+
+    @property
+    def n_bounces(self) -> int:
+        """Number of blur scales (always three: the engine fits three Gaussians)."""
+        return 3
+
     def source_table(self) -> str:
         """Human-readable provenance table, one line per parameter."""
+        k = self.kernel
         lines = [f"halation parameters for {self.film_stock or '<none>'} "
-                 f"(use={self.use}, antihalation={self.antihalation})"]
-        for key in ("strength", "sigma_h_um", "scatter_core_um", "scatter_tail_um",
-                    "scatter_tail_weight", "bounce_decay", "boost_range", "protect_ev"):
+                 f"(use={self.use}, antihalation={self.antihalation}, "
+                 f"kernel={k.source}, fit residual {k.residual:.4f})"]
+        rows = [
+            ("strength", tuple(round(float(v), 6) for v in self.strength),
+             self.sources.get("strength", "?")),
+            ("mix s/(1+s)", tuple(round(float(v), 6) for v in k.mix),
+             self.sources.get("mix", "?")),
+            ("sigma um", tuple(round(float(v), 1) for v in k.sigmas_um),
+             self.sources.get("sigma_h_um", "?")),
+            ("halo radius um", (round(k.critical_radius_um, 1),), SOURCE_DERIVED),
+        ]
+        for key, val, src in rows:
+            lines.append(f"  {key:20s} {str(val):44s} [{src}]")
+        for c in range(3):
+            row = ",".join(f"{float(v):.4f}" for v in k.weights[c])
+            lines.append(f"  {'weights ' + 'RGB'[c]:20s} {row:44s} "
+                         f"[{self.sources.get('weights', '?')}]")
+        for c in range(3):
+            row = ",".join(f"{float(v):.5f}" for v in k.matrix[c])
+            lines.append(f"  {'matrix ' + 'RGB'[c]:20s} {row:44s} "
+                         f"[{self.sources.get('matrix', '?')}]")
+        for key in ("scatter_core_um", "scatter_tail_um", "scatter_tail_weight",
+                    "boost_range", "protect_ev"):
             val = getattr(self, key)
             src = self.sources.get(key, "?")
             if isinstance(val, (int, float)):
-                shown = val
-            elif val and isinstance(val[0], (list, tuple)):
-                # Per-bounce weights: one "R,G,B" group per bounce.
-                shown = "  ".join(",".join(f"{float(x):.4f}" for x in row) for row in val)
+                shown = f"{val:.4f}"
             else:
                 shown = tuple(round(float(v), 5) for v in val)
             lines.append(f"  {key:20s} {str(shown):44s} [{src}]")
@@ -124,6 +183,9 @@ def _sigma_from_geometry(thickness_mm: float, n_index: float) -> float:
     Light refracts into the base at asin(1/n), travels the round trip through the
     base, and returns: the lateral radius is 2*d*tan(asin(1/n)). The halo is a disc,
     so the Gaussian that matches it takes sigma = radius/sqrt(2).
+
+    Kept for diagnostics only -- the sigma the renderers use is fitted from the
+    support's full edge-spread by ``core/halation_kernel.py``.
     """
     d_um = thickness_mm * 1000.0
     n = max(float(n_index), 1.01)
@@ -144,17 +206,21 @@ def resolve_halation_params(film_stock: str,
     raw: dict[str, Any] = {}
 
     if not film_stock or film_stock == "none" or profile_getter is None:
+        # Bypass: no stock, so no profile and no sheet matrix. The kernel still comes
+        # from the physical model -- a generic acetate support at the engine's own
+        # antihalation-free returned fractions -- rather than from a bare sigma.
+        strength = (0.015, 0.005, 0.0)
         sources.update({k: SOURCE_ENGINE for k in (
-            "strength", "sigma_h_um", "scatter_core_um", "scatter_tail_um",
-            "scatter_tail_weight", "bounce_decay", "boost_range", "protect_ev")})
+            "strength", "mix", "sigma_h_um", "weights", "matrix",
+            "scatter_core_um", "scatter_tail_um", "scatter_tail_weight",
+            "boost_range", "protect_ev")})
+        kernel = kernel_for(strength, FALLBACK_THICKNESS_MM, ACETATE_INDICES)
         return HalationParams(
-            strength=(0.015, 0.005, 0.0),
-            sigma_h_um=(FALLBACK_SIGMA_H_UM,) * 3,
+            strength=strength,
+            kernel=kernel,
             scatter_core_um=SCATTER_CORE_UM,
             scatter_tail_um=SCATTER_TAIL_UM,
             scatter_tail_weight=SCATTER_TAIL_WEIGHT,
-            bounce_decay=_decay_from_retention(None),
-            n_bounces=DEFAULT_N_BOUNCES,
             boost_range=DEFAULT_BOOST_RANGE,
             protect_ev=DEFAULT_PROTECT_EV,
             antihalation="none",
@@ -220,58 +286,77 @@ def resolve_halation_params(film_stock: str,
         strength = tuple(v * look_scale for v in strength)
         sources["strength"] = f"{sources['strength']}*lookScale{look_scale:g}"
 
-    # `halationReturnMatrix` is *distribution only*: the engine normalises each row and spreads
-    # that receiver's share across the source records, amplitude stays the strength's.  Its one
-    # qualitative case is a monochrome stock, where every row is uniform -- the returned light
-    # goes neutral whatever colour came in.  We cannot reproduce a general 3x3 without a
-    # cross-channel pass, but the monochrome case is exact and free: a uniform row is what a
-    # neutral triple already is.  Measured over the 39 stocks that ship a matrix: colour stocks
-    # move a median 5.9% of the halo across records (max 100% on one near-empty blue row of
-    # Aerocolor), monochrome stocks move 66.7% today and 0% after this line.
-    channel_model = ""
-    if info is not None:
-        channel_model = str(getattr(info, "channel_model", "") or "")
-    if not channel_model and isinstance(prof, Mapping):
-        channel_model = str((prof.get("info") or {}).get("channel_model", "") or "")
-    if channel_model == "bw":
-        mean_strength = sum(strength) / 3.0
-        strength = (mean_strength, mean_strength, mean_strength)
-        sources["strength"] = f"{sources['strength']} (neutralised: monochrome return matrix)"
+    # --- return matrix: distribution only -----------------------------------------------
+    # `halationReturnMatrix` spreads each receiver's share across the *source* records;
+    # amplitude stays the strength's. Its one qualitative case is a monochrome stock,
+    # where every row is uniform -- the returned light goes neutral whatever came in.
+    # Until now we could not reproduce a general 3x3 (there was no cross-channel pass) and
+    # faked the monochrome case by averaging the strength. Both renderers now composite
+    # through the matrix, so it is applied for real and the averaging hack is gone.
+    return_matrix = None
+    for holder in (block, phys if isinstance(phys, Mapping) else None):
+        candidate = holder.get("return_matrix") if isinstance(holder, Mapping) else None
+        if (isinstance(candidate, (list, tuple)) and len(candidate) == 3
+                and all(isinstance(r, (list, tuple)) and len(r) == 3 for r in candidate)):
+            return_matrix = candidate
+            break
+    sources["matrix"] = SOURCE_PROFILE if return_matrix is not None else SOURCE_ENGINE
 
-    # --- sigma_h: derived from geometry (thickness/refractive index) ---
-    # Three tiers, and the label says which one fired:
-    #   derived          -> both numbers came from the profile
-    #   derived(standard)-> geometry taken from a declared industry constant
-    #   engine           -> geometry unusable, fell back to the 65 um calibration
-    thickness_mm = block.get("base_thickness_mm", block.get("thickness_mm"))
-    n_index = block.get("refractive_index")
-    if thickness_mm is None or n_index is None:
-        thickness_mm = FALLBACK_THICKNESS_MM if thickness_mm is None else thickness_mm
-        n_index = FALLBACK_REFRACTIVE_INDEX if n_index is None else n_index
-        sigma_src = SOURCE_DERIVED + "(standard)"
-    else:
-        sigma_src = SOURCE_DERIVED
+    if return_matrix is None:
+        # Only the monochrome case needs help: white light developed in silver returns
+        # grey whatever colour went in, and a diagonal matrix cannot say that.
+        channel_model = ""
+        if info is not None:
+            channel_model = str(getattr(info, "channel_model", "") or "")
+        if not channel_model and isinstance(prof, Mapping):
+            channel_model = str((prof.get("info") or {}).get("channel_model", "") or "")
+        if channel_model == "bw":
+            mean_strength = sum(strength) / 3.0
+            strength = (mean_strength, mean_strength, mean_strength)
+            sources["strength"] = f"{sources['strength']} (neutralised: monochrome, no sheet matrix)"
+
+    # --- geometry: thickness and per-record refractive index ---------------------------
+    thickness_raw = block.get("base_thickness_mm", block.get("thickness_mm"))
     try:
-        sigma_scalar = _sigma_from_geometry(float(thickness_mm), float(n_index))
-        # Per-record indices when the profile carries them (acetate 1.474/1.480/1.489,
-        # ESTAR 1.635/1.643/1.657); otherwise the 0.4 % band that used to stand in for them.
-        record_indices = block.get("record_refractive_indices")
-        n_base = float(n_index)
-        if (isinstance(record_indices, (list, tuple)) and len(record_indices) == 3
-                and all(isinstance(v, (int, float)) and v > 1.0 for v in record_indices)):
-            sigmas = [_sigma_from_geometry(float(thickness_mm), float(v)) for v in record_indices]
-        else:
-            sigmas = [_sigma_from_geometry(float(thickness_mm), n_base * k)
-                      for k in (0.996, 1.0, 1.006)]
-        sigma_h_um = (float(sigmas[0]), float(sigmas[1]), float(sigmas[2]))
-        if not all(math.isfinite(v) and v > 0 for v in sigma_h_um):
-            raise ValueError("non-positive sigma")
+        thickness_mm = float(thickness_raw) if thickness_raw is not None else None
     except (TypeError, ValueError):
-        sigma_h_um = (FALLBACK_SIGMA_H_UM,) * 3
-        sigma_src = SOURCE_ENGINE
-    sources["sigma_h_um"] = sigma_src
+        thickness_mm = None
+    if thickness_mm is None or thickness_mm <= 0:
+        thickness_mm = FALLBACK_THICKNESS_MM
+        geom_src = SOURCE_DERIVED + "(standard)"
+    else:
+        geom_src = SOURCE_PROFILE
 
-    # --- scatter: no usable profile data (0/53), always engine ---
+    record_indices = block.get("record_refractive_indices")
+    if (isinstance(record_indices, (list, tuple)) and len(record_indices) == 3
+            and all(isinstance(v, (int, float)) and v > 1.0 for v in record_indices)):
+        indices = [float(v) for v in record_indices]
+    else:
+        n_index = block.get("refractive_index")
+        try:
+            n_base = float(n_index) if n_index is not None else None
+        except (TypeError, ValueError):
+            n_base = None
+        if n_base is not None and n_base > 1.0:
+            indices = [n_base] * 3
+        else:
+            # Acetate is the support under almost every roll film and cine negative.
+            indices = list(ACETATE_INDICES)
+            geom_src = SOURCE_DERIVED + "(standard)"
+
+    # --- haze: substrate scatter, convolved on top of the fit (0 mm is bit-identical) ---
+    try:
+        haze_mm = max(float(block.get("hazeMM") or 0.0), 0.0)
+    except (TypeError, ValueError):
+        haze_mm = 0.0
+
+    kernel = kernel_for(strength, thickness_mm, indices, sub or None,
+                        return_matrix, haze_mm)
+    sources["sigma_h_um"] = f"{kernel.source} kernel / {geom_src} geometry"
+    sources["weights"] = kernel.source
+    sources["mix"] = sources["strength"]
+
+    # --- scatter: no usable profile data (0/54), always engine ---
     core = sub.get("diffuseSigmaMM")
     if isinstance(core, (list, tuple)) and len(core) == 3 and any(float(v) > 0 for v in core):
         scatter_core = tuple(float(v) * 1000.0 for v in core)  # mm -> um
@@ -281,26 +366,15 @@ def resolve_halation_params(film_stock: str,
         sources["scatter_core_um"] = SOURCE_ENGINE
     sources["scatter_tail_um"] = SOURCE_ENGINE
     sources["scatter_tail_weight"] = SOURCE_ENGINE
-
-    # --- bounce decay: 2/53 carry it (Cinestill), rest use the 0.5^k law ---
-    retention = sub.get("bounceRetention")
-    if isinstance(retention, (list, tuple)) and len(retention) >= 1 and any(float(v) > 0 for v in retention):
-        bounce_decay = _decay_from_retention(retention)
-        sources["bounce_decay"] = SOURCE_PROFILE
-    else:
-        bounce_decay = _decay_from_retention(None)
-        sources["bounce_decay"] = SOURCE_ENGINE
     sources["boost_range"] = SOURCE_ENGINE
     sources["protect_ev"] = SOURCE_ENGINE
 
     return HalationParams(
         strength=strength,
-        sigma_h_um=sigma_h_um,
+        kernel=kernel,
         scatter_core_um=scatter_core,
         scatter_tail_um=SCATTER_TAIL_UM,
         scatter_tail_weight=SCATTER_TAIL_WEIGHT,
-        bounce_decay=bounce_decay,
-        n_bounces=DEFAULT_N_BOUNCES,
         boost_range=DEFAULT_BOOST_RANGE,
         protect_ev=DEFAULT_PROTECT_EV,
         use=use,
@@ -322,18 +396,12 @@ def _engine_strength_for(antihalation: str) -> tuple[float, float, float]:
 
 
 def _decay_from_retention(retention: Any) -> tuple[tuple[float, float, float], ...]:
-    """Bounce weights, per bounce and per record, from a per-record retention triple.
+    """RETIRED: kept only so old sessions/diagnostics that import it still resolve.
 
-    ``bounceRetention`` is *one survival fraction per record* (R, G, B), not one per
-    bounce: fotufilm weights bounce ``m`` by ``pow(retention[record], m - 1)``. CineStill
-    800T ships ``[0.283, 0.1375, 0.0651]`` -- blue keeps a quarter of what red keeps per
-    trip, which is exactly where its red halo comes from. Reading that triple as three
-    consecutive bounce weights (what this used to do) inverts the shape completely: bounce
-    one would get the *least* weight on the no-antihalation stocks and the *most* on
-    CineStill, i.e. backwards in both directions.
-
-    Returns ``n_bounces`` rows of (R, G, B), normalised per record so the total returned
-    light stays the strength's.
+    Bounce weights now come out of ``core/halation_kernel.py`` as a fitted
+    ``[record][scale]`` table; ``bounceRetention`` feeds that fit instead of becoming
+    a geometric series here. Reading that triple as three consecutive bounce weights
+    used to invert the shape -- see the git history of this module.
     """
     ratios: list[float] = [0.5, 0.5, 0.5]
     if isinstance(retention, (list, tuple)) and len(retention) >= 3:
@@ -341,12 +409,11 @@ def _decay_from_retention(retention: Any) -> tuple[tuple[float, float, float], .
             ratios = [min(max(float(v), 0.0), 1.0) for v in retention[:3]]
         except (TypeError, ValueError):
             ratios = [0.5, 0.5, 0.5]
-    totals = [sum(r ** k for k in range(DEFAULT_N_BOUNCES)) for r in ratios]
+    totals = [sum(r ** k for k in range(3)) for r in ratios]
     rows = []
-    for k in range(DEFAULT_N_BOUNCES):
+    for k in range(3):
         rows.append(tuple(
-            (ratios[c] ** k) / totals[c] if totals[c] > 1e-12
-            else 1.0 / DEFAULT_N_BOUNCES
+            (ratios[c] ** k) / totals[c] if totals[c] > 1e-12 else 1.0 / 3
             for c in range(3)))
     return tuple(rows)
 
@@ -355,12 +422,13 @@ def halation_overlap_px(params: HalationParams, pixel_size_um: float,
                         spatial_scale: float = 1.0, n_sigma: float = 3.0) -> int:
     """Kernel support in pixels, for tiled export overlap.
 
-    The widest kernel in the chain is the outermost halation bounce
-    (sigma_h * sqrt(n_bounces)) -- the scatter tail is narrower for every stock we
-    have. Tiles must overlap by this much or the halo breaks at the seam.
+    The widest kernel in the chain is the outermost of the three fitted scales
+    (``kernel.sigmas_um[2]``, which already spans the critical-angle shoulder); the
+    scatter tail is narrower for every stock we have. Tiles must overlap by this much
+    or the halo breaks at the seam.
     """
-    scale = max(MIN_SPATIAL_SCALE, float(spatial_scale))
-    sigma_um = max(params.sigma_h_um) * math.sqrt(max(1, params.n_bounces)) * scale
+    scale = max(MIN_SPATIAL_SCALE, float(spatial_scale)) if SPATIAL_SCALE_ENABLED else 1.0
+    sigma_um = max(params.kernel.sigmas_um) * scale
     sigma_px = sigma_um / max(1e-6, pixel_size_um)
     return int(math.ceil(n_sigma * sigma_px)) + 1
 
@@ -505,6 +573,8 @@ def apply_halation_np(linear: np.ndarray,
 
     amount = float(amount)
     scatter_amount = float(scatter_amount)
+    if not SPATIAL_SCALE_ENABLED:
+        spatial_scale = 1.0
     scale = max(MIN_SPATIAL_SCALE, float(spatial_scale)) if not legacy else max(0.2, float(spatial_scale))
     if amount <= 0.001 and scatter_amount <= 0.001:
         return linear
@@ -520,8 +590,6 @@ def apply_halation_np(linear: np.ndarray,
         m = float(max_raw) if max_raw is not None else float(work.max())
         work = _boost_highlights(work, boost_ev, m, params.boost_range, params.protect_ev)
 
-    eff = np.array(params.strength, dtype=np.float32) * amount
-
     # --- scatter: energy-preserving core + tail, per channel ---
     if scatter_amount > 0.001:
         eff_s = min(0.5, scatter_amount * 0.06)
@@ -536,25 +604,33 @@ def apply_halation_np(linear: np.ndarray,
             out[..., c] = (1.0 - eff_s) * work[..., c] + eff_s * blended
         work = out
 
-    # --- halation: multi-bounce additive sum, DC-normalised ---
-    if amount > 0.001 and np.any(eff > 0):
-        # Each bounce is a wide, low-frequency kernel, so the whole sum is evaluated on
-        # a decimated grid (see _gauss_decimated). The decimation is chosen once from
-        # the widest bounce so all three layers share the same working resolution --
-        # mixing grids between layers would make the sum's support jump.
-        sigmas_px = [[params.sigma_h_um[c] * math.sqrt(k) * scale / px
-                      for c in range(3)]
-                     for k in range(1, params.n_bounces + 1)]
-        ds = _pick_decimation(max(max(row) for row in sigmas_px)) if decimate else 1
-        hal_blur = _multi_bounce_blur(work, sigmas_px, params.bounce_decay, ds)
-        work = (work + eff * hal_blur) / (1.0 + eff)
+    # --- halation: three shared blur scales, per-record weights, routed by the sheet ---
+    # The engine's composite is ``out_c = E_c + sum_j M[c][j] * (S_j - E_j)`` where S_j is
+    # record j's own blur. When M is diagonal this is algebraically ``(E + s*S)/(1+s)`` --
+    # the form this module used to use -- so the only new thing is the off-diagonal part,
+    # which lets a red halo land partly in the green and blue records.
+    if amount > 0.001:
+        matrix = np.asarray(params.kernel.matrix_for(amount), dtype=np.float32)
+        if np.any(matrix):
+            # Sigmas are shared across records; only the weights differ per record.
+            sigmas_px = [[float(s) * scale / px] * 3 for s in params.kernel.sigmas_um]
+            weights = [[params.kernel.weights[c][k] for c in range(3)] for k in range(3)]
+            ds = _pick_decimation(max(row[0] for row in sigmas_px)) if decimate else 1
+            scattered = _multi_bounce_blur(work, sigmas_px, weights, ds)
+            delta = scattered - work
+            work = work + delta @ matrix.T
 
     return work.astype(linear.dtype, copy=False)
 
 
 def _apply_legacy(work: np.ndarray, params: HalationParams, px: float, amount: float,
                   scatter_amount: float, scale: float, boost_ev: float) -> np.ndarray:
-    """The pre-rework CPU path, reproduced exactly for regression pinning."""
+    """The pre-rework CPU path: single sigma, 0.5^k decay, brightness-keyed boost.
+
+    Kept so a shape change can be separated from a parameter change when comparing
+    renders. It no longer reproduces the old numbers bit-for-bit -- the sigma it reads
+    is now the kernel's first fitted scale, not the 168 um geometric ladder.
+    """
     import cv2
     eff_strength = np.array(params.strength, dtype=np.float32) * amount
 
