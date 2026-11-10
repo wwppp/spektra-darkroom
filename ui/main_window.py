@@ -134,8 +134,8 @@ PARAM_TOOLTIPS_ENABLED = False
 # 关闭窗口时在屏幕上多停的这一下（毫秒）。保存/销毁本来几百毫秒内就做完了，窗口在同一
 # 毫秒里隐藏，看起来"秒响应"；这个停留让关闭有一个可感知的过程。
 # 现在这一段是**真的占住 GUI 线程**（窗口不响应、指针转圈），所以时长按"看起来在处理"来定，
-# 不再按"动画"来定（用户 2026-11-10：再长点，让窗口无响应、指针变转圈）。
-CLOSE_DWELL_MS = 1400
+# 不再按"动画"来定（用户 2026-11-10：先要 0.5-1 s，加到 1.4 s 后又说"转圈稍微长了点"）。
+CLOSE_DWELL_MS = 1100
 
 
 # Opt-in window-frame diagnostics: set SPEKTRA_FRAME_DEBUG=1 to log every non-client message and
@@ -2907,8 +2907,7 @@ class DarkroomMainWindow(QMainWindow):
                 lines.append(f"  文件夹「{os.path.basename(d) or d}」里没有可导入的文件")
             if len(empty_dirs) > 2:
                 lines.append(f"  …另有 {len(empty_dirs) - 2} 个空文件夹")
-        return ("暗房只接受相机 RAW 与无损位图（PNG / TIFF）。\n"
-                "JPG / WebP 在压缩时已经丢掉高光与暗部，无法在这里还原，所以不提供导入。\n\n"
+        return ("暗房只接受相机 RAW 与无损位图（PNG / TIFF）。\n\n"
                 + ("未导入：\n" + "\n".join(lines) if lines else "拖入的内容里没有可导入的文件。"))
 
     def _report_unsupported_drop(self, rejected_files, empty_dirs):
