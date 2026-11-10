@@ -1417,6 +1417,11 @@ class FilmGridCard(QFrame):
 
 class CompactExifWidget(QWidget):
     """Item 7: High-density compact EXIF property grid with pinned header and anti-jitter margins."""
+
+    # Emitted whenever the rows (or their font) change height, so the pane holding this
+    # widget can re-pin its maximum to "exactly tall enough to show every row".
+    contentResized = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.key_labels = []
@@ -1529,16 +1534,83 @@ class CompactExifWidget(QWidget):
             for lbl in self.labels.values():
                 lbl.setStyleSheet(f"color: {val_color}; font-size: 10px; font-weight: 500;")
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Values wrap, so a width change changes how many rows are two lines tall. Re-report
+        # after the layout settles; the receiver ignores values it already applied, which is
+        # what stops this from looping.
+        if not getattr(self, "_resize_report_pending", False):
+            self._resize_report_pending = True
+            QTimer.singleShot(0, self._report_content_height)
+
+    def _report_content_height(self):
+        self._resize_report_pending = False
+        self.contentResized.emit()
+
+    def natural_height(self) -> int:
+        """Height that shows every row without scrolling and without dead space.
+
+        Measured with the live viewport width because values wrap: ``iPhone XS Max back
+        camera 4.25mm f/1.8`` takes two lines in a narrow column, so a constant row count
+        would clip it.
+        """
+        content = self.scroll_area.widget()
+        if content is None:
+            return 0
+        width = max(1, self.scroll_area.viewport().width())
+        grid = content.layout()
+        rows_h = -1
+        if grid is not None and grid.hasHeightForWidth():
+            rows_h = grid.heightForWidth(width)
+        if rows_h < 0:
+            rows_h = content.sizeHint().height()
+
+        chrome = 0
+        card_layout = self.card.layout()
+        if card_layout is not None:
+            margins = card_layout.contentsMargins()
+            chrome += margins.top() + margins.bottom() + card_layout.spacing()
+        chrome += self.lbl_title.sizeHint().height()
+        outer = self.layout()
+        if outer is not None:
+            margins = outer.contentsMargins()
+            chrome += margins.top() + margins.bottom()
+        return int(rows_h + chrome + 2)
+
     def set_exif_data(self, data):
         for k, lbl in self.labels.items():
             raw_val = data.get(k, "-")
             val = str(raw_val).strip() if raw_val is not None and str(raw_val).strip() != "" else "-"
             lbl.setText(val)
             lbl.setToolTip("")
+        self.contentResized.emit()
+
+
+# Splitter grab indicator: 2 px of brand amber instead of a 1 px theme-grey hairline. The
+# alpha stops keep the ends soft so a 2 px bar still reads as a hairline, not a hard rule.
+_SPLIT_INDICATOR_PX = 2
+_SPLIT_INDICATOR_STOPS = ((0.0, 0), (0.08, 190), (0.5, 255), (0.92, 190), (1.0, 0))
+
+
+def _restore_splitter_sizes(splitter, saved) -> bool:
+    """Apply stored pane sizes, but only when they still describe this splitter.
+
+    The left column once held three panes; it holds two now, and the old restore demanded
+    three, so the stored sizes were silently discarded and the default came back on every
+    launch. Matching against the live pane count keeps the check honest as panes come and go.
+    """
+    if not saved or not splitter:
+        return False
+    if len(saved) != splitter.count():
+        return False
+    if any(s <= 0 for s in saved):
+        return False
+    splitter.setSizes([int(s) for s in saved])
+    return True
 
 
 class FadingSplitterHandle(QSplitterHandle):
-    """Refined splitter handle with delicate theme-matched hairline fading at both ends."""
+    """Refined splitter handle with an amber grab bar that fades at both ends."""
     def __init__(self, orientation, parent):
         super().__init__(orientation, parent)
         self.setMouseTracking(True)
@@ -1569,48 +1641,35 @@ class FadingSplitterHandle(QSplitterHandle):
         if not self._hovered:
             return
 
+        # Brand amber, 2 px, hugging the pane it belongs to instead of floating in the middle
+        # of the gutter: a vertical handle draws on its trailing edge (against the pane to the
+        # right), a horizontal one on its bottom edge (against the pane below). The ends still
+        # fade out so it reads as a hairline rather than a hard rule.
+        accent = QColor(theme_manager.color("accent"))
         if self.orientation() == Qt.Orientation.Vertical:
             # Horizontal bar separating vertically stacked panes
-            cy = h // 2
-            start_x = 8
-            end_x = max(start_x + 24, w - 8)
-            grad = QLinearGradient(start_x, cy, end_x, cy)
-            if is_dark:
-                grad.setColorAt(0.0, QColor(248, 250, 252, 20))
-                grad.setColorAt(0.08, QColor(248, 250, 252, 180))
-                grad.setColorAt(0.5, QColor(255, 255, 255, 240))
-                grad.setColorAt(0.92, QColor(248, 250, 252, 180))
-                grad.setColorAt(1.0, QColor(248, 250, 252, 20))
-            else:
-                grad.setColorAt(0.0, QColor(51, 65, 85, 20))
-                grad.setColorAt(0.08, QColor(51, 65, 85, 180))
-                grad.setColorAt(0.5, QColor(15, 23, 42, 240))
-                grad.setColorAt(0.92, QColor(51, 65, 85, 180))
-                grad.setColorAt(1.0, QColor(51, 65, 85, 20))
+            y = max(0, h - _SPLIT_INDICATOR_PX)
+            start_x, end_x = 8, max(8 + 24, w - 8)
+            grad = QLinearGradient(start_x, 0, end_x, 0)
+            for stop, alpha in _SPLIT_INDICATOR_STOPS:
+                c = QColor(accent)
+                c.setAlpha(alpha)
+                grad.setColorAt(stop, c)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(grad)
-            painter.drawRect(start_x, cy, end_x - start_x, 1)
+            painter.drawRect(start_x, y, end_x - start_x, _SPLIT_INDICATOR_PX)
         else:
             # Vertical bar separating horizontally arranged panes
-            cx = w // 2
-            start_y = 8
-            end_y = max(start_y + 32, h - 8)
-            grad = QLinearGradient(cx, start_y, cx, end_y)
-            if is_dark:
-                grad.setColorAt(0.0, QColor(248, 250, 252, 20))
-                grad.setColorAt(0.08, QColor(248, 250, 252, 180))
-                grad.setColorAt(0.5, QColor(255, 255, 255, 240))
-                grad.setColorAt(0.92, QColor(248, 250, 252, 180))
-                grad.setColorAt(1.0, QColor(248, 250, 252, 20))
-            else:
-                grad.setColorAt(0.0, QColor(51, 65, 85, 20))
-                grad.setColorAt(0.08, QColor(51, 65, 85, 180))
-                grad.setColorAt(0.5, QColor(15, 23, 42, 240))
-                grad.setColorAt(0.92, QColor(51, 65, 85, 180))
-                grad.setColorAt(1.0, QColor(51, 65, 85, 20))
+            x = max(0, w - _SPLIT_INDICATOR_PX)
+            start_y, end_y = 8, max(8 + 32, h - 8)
+            grad = QLinearGradient(0, start_y, 0, end_y)
+            for stop, alpha in _SPLIT_INDICATOR_STOPS:
+                c = QColor(accent)
+                c.setAlpha(alpha)
+                grad.setColorAt(stop, c)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(grad)
-            painter.drawRect(cx, start_y, 1, end_y - start_y)
+            painter.drawRect(x, start_y, _SPLIT_INDICATOR_PX, end_y - start_y)
 
 
 class FadingSplitter(QSplitter):
@@ -2177,21 +2236,9 @@ class DarkroomMainWindow(QMainWindow):
                     if screen_geo.intersects(QRect(saved_x, saved_y, min(300, saved_w), min(200, saved_h))):
                         self.move(saved_x, saved_y)
 
-            # 2. Splitter proportions
-            if hasattr(self, "main_splitter") and "splitter_main" in win_cfg:
-                sm = win_cfg["splitter_main"]
-                if len(sm) == 3 and all(s > 0 for s in sm):
-                    self.main_splitter.setSizes(sm)
-
-            if hasattr(self, "left_splitter") and "splitter_left" in win_cfg:
-                sl = win_cfg["splitter_left"]
-                if len(sl) == 3 and all(s > 0 for s in sl):
-                    self.left_splitter.setSizes(sl)
-
-            if hasattr(self, "center_splitter") and "splitter_center" in win_cfg:
-                sc = win_cfg["splitter_center"]
-                if len(sc) == 2 and all(s > 0 for s in sc):
-                    self.center_splitter.setSizes(sc)
+            # 2. Splitter proportions are NOT restored here: none of the splitters exist yet
+            # (they are built further down __init__). _restore_splitter_layout() does it once
+            # the panes are live -- see its call at the end of the editor layout.
 
             # 3. Right accordion panels
             sections_expanded = ui_cfg.get("sections_expanded", {})
@@ -3605,6 +3652,13 @@ class DarkroomMainWindow(QMainWindow):
         self.exif_widget = CompactExifWidget()
         exif_layout.addWidget(self.exif_widget, 1)
 
+        # Keep the pane from being dragged taller than its content: below the last row there
+        # is nothing to show, only a card edge stretching into empty space. The cap follows
+        # the wrapped rows, so a long lens name still gets its second line.
+        self.exif_subwin = exif_subwin
+        self.exif_widget.contentResized.connect(self._sync_exif_max_height)
+        QTimer.singleShot(0, self._sync_exif_max_height)
+
         self.left_splitter.addWidget(exif_subwin)
 
         self.left_splitter.setStretchFactor(0, 4)
@@ -3883,22 +3937,75 @@ class DarkroomMainWindow(QMainWindow):
         self.stack.addWidget(self.editor_widget)
         self.stack.currentChanged.connect(self._on_stack_page_changed)
 
+        # _restore_saved_state() runs before any of the splitters exist, and the two default
+        # setSizes() calls above would clobber it anyway, so the stored layout has to be
+        # re-applied once the panes are live. The zero-delay shot lands after the first
+        # layout pass, when the panes finally have real widths to scale against.
+        self._restore_splitter_layout()
+        QTimer.singleShot(0, self._restore_splitter_layout)
+
+        # Persist on drag settle as well as on close: closeEvent already does it, but any exit
+        # that skips it (crash, task manager, power loss) brought the defaults back.
+        self._splitter_save_timer = QTimer(self)
+        self._splitter_save_timer.setSingleShot(True)
+        self._splitter_save_timer.setInterval(500)
+        self._splitter_save_timer.timeout.connect(self._persist_splitter_layout)
+        for _splitter in (self.main_splitter, self.left_splitter, self.center_splitter):
+            _splitter.splitterMoved.connect(self._schedule_splitter_save)
+
+    def _schedule_splitter_save(self, *_args):
+        timer = getattr(self, "_splitter_save_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _persist_splitter_layout(self):
+        """Write the pane sizes only, leaving geometry and maximise state untouched."""
+        if not hasattr(self, "main_splitter"):
+            return
+        stack = getattr(self, "stack", None)
+        if stack is not None and stack.currentIndex() != 1:
+            return                       # the import page has its own layout
+        if sum(self.main_splitter.sizes()) <= 500:
+            return                       # not laid out yet
+        try:
+            cfg = config_manager.load_config()
+            win = cfg.setdefault("window", {})
+            win["splitter_main"] = [int(s) for s in self.main_splitter.sizes()]
+            if hasattr(self, "left_splitter"):
+                win["splitter_left"] = [int(s) for s in self.left_splitter.sizes()]
+            if hasattr(self, "center_splitter"):
+                win["splitter_center"] = [int(s) for s in self.center_splitter.sizes()]
+            config_manager.save_config(cfg)
+        except Exception as exc:
+            logger.debug("splitter layout save failed: %s", exc)
+
+    def _restore_splitter_layout(self):
+        """Apply the stored pane sizes to whichever splitters already exist."""
+        win_cfg = config_manager.get_window_config() or {}
+        for attr, key in (("main_splitter", "splitter_main"),
+                          ("left_splitter", "splitter_left"),
+                          ("center_splitter", "splitter_center")):
+            splitter = getattr(self, attr, None)
+            if splitter is not None and key in win_cfg:
+                _restore_splitter_sizes(splitter, win_cfg[key])
+
+    def _sync_exif_max_height(self):
+        """Pin the EXIF pane to the height of its rows (see CompactExifWidget.natural_height)."""
+        if not hasattr(self, "exif_subwin") or not hasattr(self, "exif_widget"):
+            return
+        try:
+            target = self.exif_widget.natural_height()
+        except Exception:
+            return                      # mid-teardown, or fonts not resolved yet
+        if target <= 0:
+            return
+        if self.exif_subwin.maximumHeight() != target:
+            self.exif_subwin.setMaximumHeight(target)
+
     def _on_stack_page_changed(self, index):
         if index == 1:
             # Editor page activated: restore persisted splitter layout and reflow grids
-            win_cfg = config_manager.get_window_config()
-            if hasattr(self, "main_splitter") and "splitter_main" in win_cfg:
-                sm = win_cfg["splitter_main"]
-                if len(sm) == 3 and all(s > 0 for s in sm):
-                    self.main_splitter.setSizes(sm)
-            if hasattr(self, "left_splitter") and "splitter_left" in win_cfg:
-                sl = win_cfg["splitter_left"]
-                if len(sl) == 3 and all(s > 0 for s in sl):
-                    self.left_splitter.setSizes(sl)
-            if hasattr(self, "center_splitter") and "splitter_center" in win_cfg:
-                sc = win_cfg["splitter_center"]
-                if len(sc) == 2 and all(s > 0 for s in sc):
-                    self.center_splitter.setSizes(sc)
+            self._restore_splitter_layout()
             self.reflow_grids()
             QTimer.singleShot(0, self.reflow_grids)
             QTimer.singleShot(60, self.reflow_grids)

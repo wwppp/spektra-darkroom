@@ -59,7 +59,10 @@ class HistogramExifBar(QWidget):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(22)
+        # 16 px instead of 22: the 11 px row needs ~15 px, so the bar used to carry ~3.5 px of
+        # dead space above and below. Halving that padding pulls the histogram and the first
+        # parameter card roughly 3 px closer on each side without shrinking the text.
+        self.setFixedHeight(16)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._init_ui()
         self.apply_theme()
