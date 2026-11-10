@@ -30,8 +30,9 @@ class ScrubLabel(QLabel):
 
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
-        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._dragging = False
+        self._override_pushed = False  # the global cursor is pushed, so it must be popped once
         self._intent = None            # None | 'h' | 'v'
         self._press_global = None
         self._last_global_x = 0.0
@@ -98,10 +99,15 @@ class ScrubLabel(QLabel):
                 self._dragging = True
                 self._last_global_x = float(pos.x())
                 try:
-                    self.grabMouse(Qt.CursorShape.SizeHorCursor)
+                    # Plain grab: `grabMouse(cursor)` pushes a *second* application override
+                    # cursor on top of the one below, and the release only pops one -- measured:
+                    # an override was still installed after every scrub, so the whole app kept
+                    # that cursor until some unrelated dialog popped it.
+                    self.grabMouse()
                 except Exception:
                     pass
-                QApplication.setOverrideCursor(Qt.CursorShape.SizeHorCursor)
+                QApplication.setOverrideCursor(Qt.CursorShape.PointingHandCursor)
+                self._override_pushed = True
         if self._dragging:
             cur_global_pos = event.globalPosition()
             cur_x = float(cur_global_pos.x())
@@ -140,6 +146,16 @@ class ScrubLabel(QLabel):
         else:
             super().mouseMoveEvent(event)
 
+    def _pop_override_cursor(self):
+        """Balance the single global push, whatever path got us here."""
+        if not self._override_pushed:
+            return
+        self._override_pushed = False
+        try:
+            QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
+
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             if self._dragging:
@@ -148,10 +164,7 @@ class ScrubLabel(QLabel):
                     self.releaseMouse()
                 except Exception:
                     pass
-                try:
-                    QApplication.restoreOverrideCursor()
-                except Exception:
-                    pass
+                self._pop_override_cursor()
                 self.scrubFinished.emit()
             self._intent = None
             self._press_global = None
@@ -168,10 +181,7 @@ class ScrubLabel(QLabel):
                 self.releaseMouse()
             except Exception:
                 pass
-            try:
-                QApplication.restoreOverrideCursor()
-            except Exception:
-                pass
+        self._pop_override_cursor()
         super().hideEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -290,32 +300,24 @@ class RoundScrubSlider(QSlider):
         return abs(float(x) - self._knob_cx()) <= self.KNOB_R + 5.0
 
     def _update_hover_cursor(self, x=None):
-        """Index finger over the knob, plain arrow over the groove.
+        """A hand everywhere on the track: knob and groove both grab.
 
-        The knob is a 6.5px dot, so the pointing cursor is the clearest "grab this dot" cue.
-        The groove keeps the default arrow: the resize cursor is reserved for the parameter
-        title, where a horizontal drag means something different (a relative scrub).
+        The groove used to keep the default arrow, which said "nothing here" about the one
+        place a click seeks the value.  Every draggable surface in the app shows a hand
+        (canvas pan, parameter titles, sliders), so the slider does too.
         """
         if not self.isEnabled():
-            # Disabled rows must not keep a stale finger/spare cursor from before the toggle.
+            # Disabled rows must not keep a stale hand from before the toggle.
             self.unsetCursor()
             self._set_hover_knob(False)
             return
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         if self._pressed:
-            if self._drag_mode == 'knob':
-                self.setCursor(Qt.CursorShape.PointingHandCursor)
-            else:
-                self.unsetCursor()
             self._set_hover_knob(False)
             return
         if x is None:
             x = self.mapFromGlobal(QCursor.pos()).x()
-        on_knob = self._hit_knob(x)
-        if on_knob:
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-            self.unsetCursor()
-        self._set_hover_knob(on_knob)
+        self._set_hover_knob(self._hit_knob(x))
 
     def _set_hover_knob(self, on):
         if self._hover_knob != bool(on):

@@ -16,6 +16,13 @@ from ui.theme_manager import theme_manager
 from ui.touch_scroll import install_touch_scroll
 
 
+# The wheel curve, shared by everything a wheel drives (panel scroll, dropdown lists, and the
+# canvas zoom -- which runs the same arithmetic on log-zoom).  One source of truth on purpose:
+# two copies of "the feel" drift apart the first time either is tuned.
+GLIDE_TAU = 0.14          # s; speed is (distance to target) / TAU, no acceleration limit
+GLIDE_FRAME_MS = 8        # integration frame; twice the display rate
+
+
 class _PixelSettleAnimation(QVariantAnimation):
     """Scroll-bar motion that does not stall for the last pixel.
 
@@ -124,10 +131,10 @@ class WheelFollower(QObject):
     * the approach is monotone, so nothing overshoots and nothing rebounds.
     """
 
-    TAU = 0.14            # s, the decay time constant of ``v = d / TAU``
+    TAU = GLIDE_TAU        # s, the decay time constant of ``v = d / TAU``
     V_MAX = 2400.0        # px/s ceiling, so a violent spin cannot turn into a teleport
     SUBSTEP_S = 0.008     # integration step; keeps the profile stable if a frame is long
-    FRAME_MS = 8          # twice the display rate, so a frame never sees a stale position
+    FRAME_MS = GLIDE_FRAME_MS  # twice the display rate, so a frame never sees a stale position
     SNAP_PX = 0.75        # sub-pixel: at this distance the bar has already rounded still
 
     finished = Signal()

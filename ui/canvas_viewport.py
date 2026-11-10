@@ -1,9 +1,11 @@
 import os
 import math
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF, QTimer, QEvent
+from PySide6.QtCore import (Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF, QTimer,
+                            QEvent, QObject, QElapsedTimer)
 from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QActionGroup, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
 from PySide6.QtWidgets import QMenu, QLabel, QWidget, QPushButton, QVBoxLayout
+from ui.smooth_scroll import GLIDE_TAU, GLIDE_FRAME_MS
 from ui.window_utils import get_darkroom_menu_style, get_icon
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
@@ -1287,6 +1289,114 @@ def get_bg_color_circle_icon(key: str, is_dark: bool = True) -> QIcon:
     return QIcon(pm)
 
 
+class _ZoomGlide(QObject):
+    """Wheel zoom that follows the same curve as wheel scrolling.
+
+    Zoom is multiplicative, so the glide runs on *log* zoom: a notch adds
+    ``log(ZOOM_STEP)`` to a target, and the speed is ``distance / TAU`` with no acceleration
+    limit -- the identical arithmetic as ``WheelFollower``, sharing its ``GLIDE_TAU`` and
+    frame constants.  One notch therefore lands ~11 % of its zoom in the first frame and
+    then bleeds off with the same 140 ms tail, instead of the old instant 1.15x snap; a
+    fast spin accumulates target and zooms further, exactly like a fast scroll travels
+    further.
+
+    The step is applied through ``canvas._zoom_at``, so the anchor math (and the split-view
+    clamp that hangs off it) stays in one place, shared with the pinch path.
+    """
+
+    ZOOM_STEP = 1.15          # per notch, the old instantaneous factor
+    LOG_V_MAX = 3.0           # log-zoom per second ceiling (e^3 = 20x/s), the V_MAX analogue
+    END_LOG = 1e-4            # 0.01 %: anything closer is snapped rather than crawled
+
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self._canvas = canvas
+        self._anchor = (0.0, 0.0)
+        self._log = 0.0
+        self._target = 0.0
+        self._clock = QElapsedTimer()
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(GLIDE_FRAME_MS)
+        self._timer.timeout.connect(self._tick)
+
+    # -- public ---------------------------------------------------------
+    def is_running(self) -> bool:
+        return self._timer.isActive()
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def notch(self, notches: float, ax: float, ay: float) -> None:
+        """Push the zoom target by ``notches`` (positive = zoom in), anchored at (ax, ay)."""
+        if not notches:
+            return
+        self._anchor = (float(ax), float(ay))
+        if not self._timer.isActive():
+            self._log = math.log(max(1e-6, float(self._canvas.zoom)))
+            self._target = self._log
+            self._clock.start()
+            self._timer.start()
+        self._target += float(notches) * math.log(self.ZOOM_STEP)
+        # Spend the frame the wheel arrived on, like WheelFollower does: the picture must
+        # already be moving in the repaint this event triggers.
+        self._step(GLIDE_FRAME_MS / 1000.0)
+        self._clock.restart()
+
+    # -- internals ------------------------------------------------------
+    def _tick(self) -> None:
+        dt = (self._clock.restart() / 1000.0) if self._clock.isValid() else GLIDE_FRAME_MS / 1000.0
+        # A repaint can stall longer than a frame; the excess is *integrated*, not dropped.
+        # Dropping it was measured as a zoom that took 600 ms to reach 90 % of a 1.15x step
+        # while the arithmetic said 333 ms -- the glide was silently running in slow motion.
+        self._step(min(0.25, max(1e-4, dt)))
+
+    def _bounds(self):
+        lo = math.log(0.2)                       # the floor ``_zoom_at`` itself enforces
+        hi = math.log(max(0.2, float(self._canvas.max_zoom())))
+        return lo, hi
+
+    def _step(self, dt: float) -> None:
+        c = self._canvas
+        lo, hi = self._bounds()
+        # Re-clamped every step, not just when the notch arrives: the ceiling moves with the
+        # viewport, and a target left outside it would be chased forever (zoom is already
+        # pinned at the limit, so the distance never closes).
+        self._target = min(hi, max(lo, self._target))
+        if dt > 0.0:
+            substeps = max(1, int(math.ceil(dt / 0.008)))
+            h = dt / substeps
+            for _ in range(substeps):
+                moved = self._integrate(h)
+                if not moved:
+                    break
+        if abs(self._target - self._log) < self.END_LOG:
+            rest = self._target - self._log
+            if abs(rest) > 1e-12:
+                c._zoom_at(math.exp(rest), self._anchor[0], self._anchor[1])
+                self._log = math.log(max(1e-6, float(c.zoom)))
+            self._timer.stop()
+
+    def _integrate(self, h: float) -> bool:
+        """Advance one substep.  False when the glide has nothing left to do."""
+        c = self._canvas
+        d = self._target - self._log
+        if abs(d) < 1e-12:
+            return False
+        v = d / GLIDE_TAU
+        if v > self.LOG_V_MAX:
+            v = self.LOG_V_MAX
+        elif v < -self.LOG_V_MAX:
+            v = -self.LOG_V_MAX
+        step = d if abs(v * h) >= abs(d) else v * h
+        before = c.zoom
+        c._zoom_at(math.exp(step), self._anchor[0], self._anchor[1])
+        self._log = math.log(max(1e-6, float(c.zoom)))
+        # Pinned against a limit: `_zoom_at` refused to move, so stop rather than spin on a
+        # distance that can never close.
+        return c.zoom != before
+
+
 class DarkroomGLCanvas(QOpenGLWidget):
     """Hardware-accelerated OpenGL viewport:
     - 60+ FPS real-time GLSL rendering of 3D LUT, Exposure, Enlarger CMY, Halation, Grain
@@ -1521,6 +1631,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._target_pan_x = 0.0
         self._start_pan_y = 0.0
         self._target_pan_y = 0.0
+
+        # Wheel zoom rides the same glide curve as wheel scrolling (see _ZoomGlide).
+        self._zoom_glide = _ZoomGlide(self)
 
         # GL objects
         self.shader_program = None
@@ -2356,6 +2469,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def start_crop_mode(self, crop_dict=None):
         if not self._has_image:
             return
+        self._zoom_glide.stop()
         self.is_crop_editing = True
         self._pre_crop_zoom = getattr(self, "zoom", 1.0)
         self._pre_crop_pan = (getattr(self, "pan_x", 0.0), getattr(self, "pan_y", 0.0))
@@ -2387,6 +2501,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.update()
 
     def exit_crop_mode(self):
+        self._zoom_glide.stop()
         self.is_crop_editing = False
         self.crop_overlay.hide()
         self.zoom = 1.0
@@ -2541,6 +2656,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.update()
 
     def animate_to(self, target_zoom, target_pan_x=0.0, target_pan_y=0.0):
+        # A wheel glide writes zoom and pan on every tick; letting both run means each one
+        # undoes the other's last frame, which reads as the picture shivering.
+        self._zoom_glide.stop()
         self._zoom_anim.stop()
         self._start_zoom = self.zoom
         self._target_zoom = float(target_zoom)
@@ -2807,6 +2925,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         t = e.type()
         if t == QEvent.Type.TouchBegin:
             self.begin_interaction()
+            self._zoom_glide.stop()
             pts = e.touchPoints()
             self._touch_pan_active = len(pts) == 1
             self._touch_last_pos = pts[0].position() if pts else None
@@ -2864,8 +2983,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if delta == 0:
             return
 
-        factor = 1.15 if delta > 0 else 0.87
-        self._zoom_at(factor, event.position().x(), event.position().y())
+        # One notch adds log(1.15) to a zoom target and the glide carries the picture there:
+        # full speed on the first frame, long slow tail (the panel scroll curve).  A fast
+        # spin accumulates target, so it zooms further instead of just repeating 1.15x.
+        notches = delta / 120.0
+        self._zoom_glide.notch(notches, event.position().x(), event.position().y())
         event.accept()
 
     def _on_canvas_long_press_timeout(self):
@@ -2884,6 +3006,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # press means the animation loses.
             if self._zoom_anim.state() == QVariantAnimation.State.Running:
                 self._zoom_anim.stop()
+            # Same for the wheel glide: it owns zoom *and* pan until it lands.
+            self._zoom_glide.stop()
             # Check if clicking on split divider within visible image bounds
             if self._is_hovering_split_line(event.position()):
                 self._is_split_dragging = True
