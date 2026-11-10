@@ -5,7 +5,7 @@ from PySide6.QtCore import (Qt, Signal, QPointF, QRectF, QTimer,
                             QEvent, QObject, QElapsedTimer)
 from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QActionGroup, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
 from PySide6.QtWidgets import QMenu, QLabel, QWidget, QPushButton, QVBoxLayout
-from ui.smooth_scroll import GLIDE_TAU, GLIDE_FRAME_MS, GLIDE_MAX_FRAME_FRAC
+from ui.smooth_scroll import GLIDE_TAU, GLIDE_FRAME_MS
 from ui.window_utils import get_darkroom_menu_style, get_icon
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
@@ -19,6 +19,20 @@ from OpenGL import GL
 
 
 _DIFFUSION_FAMILIES = ("glimmerglass", "black_pro_mist", "pro_mist", "cinebloom")
+
+# The canvas runs its *own* glider instead of sharing the panel's tuning.  Same curve, half
+# the tail: a panel is read while it moves, so 140 ms of settle is free smoothness; the canvas
+# is *looked at*, and the same tail there is just lag ("拖尾太长").  One knob for every canvas
+# zoom -- wheel, double-click, fit, 1:1, crop enter/exit -- so they cannot drift apart.
+CANVAS_GLIDE_TAU = GLIDE_TAU * 0.5      # 70 ms
+
+# ...and its own share-per-frame cap, because at ~22 fps *that* is what sets the tail, not the
+# time constant: 8 % per painted frame at 60 fps, but 24 % of what is left per 45 ms frame puts
+# 99.9 % at 1.1 s -- measured, and what the "长拖尾" complaint is about.  Two thirds more per
+# frame halves it (t90 405 -> 225 ms, last frame 1125 -> 630 ms) and still lands in even steps,
+# which was the whole point of the cap.  Raising it further (0.50) buys another 130 ms and
+# starts to read as a jump on a corner double-click, so this is the stopping point.
+CANVAS_GLIDE_MAX_FRAME_FRAC = 0.40
 
 # How far past 1:1 the viewport may zoom, in multiples of the 100% scale.  200% is the
 # ceiling because the canvas draws a *preview* texture (1 texel ~= 3 master pixels): past
@@ -1307,11 +1321,11 @@ class _ZoomGlide(QObject):
 
     Zoom is multiplicative, so the glide runs on *log* zoom: a notch adds
     ``log(ZOOM_STEP)`` to a target, and the speed is ``distance / TAU`` with no acceleration
-    limit -- the identical arithmetic as ``WheelFollower``, sharing its ``GLIDE_TAU`` and
-    frame constants.  One notch therefore lands ~11 % of its zoom in the first frame and
-    then bleeds off with the same 140 ms tail, instead of the old instant 1.15x snap; a
-    fast spin accumulates target and zooms further, exactly like a fast scroll travels
-    further.
+    limit -- the identical arithmetic as ``WheelFollower``, on the canvas's own
+    ``CANVAS_GLIDE_TAU`` (half the panel's): the frame the wheel event lands on already moves
+    ~11 % of the step (``1 - exp(-8/70)``) and the rest bleeds off in a 70 ms tail, instead of
+    the old instant 1.15x snap; a fast spin accumulates target and zooms further, exactly like
+    a fast scroll travels further.
 
     The step is applied through ``canvas._zoom_at``, so the anchor math (and the split-view
     clamp that hangs off it) stays in one place, shared with the pinch path.
@@ -1381,8 +1395,9 @@ class _ZoomGlide(QObject):
             h = dt / substeps
             # One *frame* may not consume more of the distance than a 25 fps frame would.
             # The canvas repaints at ~20-25 fps, where the raw curve hands the first frame a
-            # quarter of the zoom -- a quarter jump, then a crawl.  See GLIDE_MAX_FRAME_FRAC.
-            budget = GLIDE_MAX_FRAME_FRAC * abs(self._target - self._log)
+            # quarter of the zoom -- a quarter jump, then a crawl.  See
+            # CANVAS_GLIDE_MAX_FRAME_FRAC.
+            budget = CANVAS_GLIDE_MAX_FRAME_FRAC * abs(self._target - self._log)
             for _ in range(substeps):
                 moved, spent = self._integrate(h, budget)
                 budget -= spent
@@ -1422,7 +1437,7 @@ class _ZoomGlide(QObject):
         d = self._target - self._log
         if abs(d) < 1e-12:
             return False, 0.0
-        v = d / GLIDE_TAU
+        v = d / CANVAS_GLIDE_TAU
         if v > self.LOG_V_MAX:
             v = self.LOG_V_MAX
         elif v < -self.LOG_V_MAX:
@@ -1445,11 +1460,12 @@ class _ViewGlide(QObject):
 
     ``_ZoomGlide`` integrates distance per frame because its target keeps moving under the
     wheel.  A mode change (entering or leaving the crop workspace) knows where it is going, so
-    the same curve is evaluated in closed form: ``f(t) = 1 - exp(-t / GLIDE_TAU)``.  Zoom is
-    interpolated in log space (it is multiplicative), pan linearly.
+    the same curve is evaluated in closed form: ``f(t) = 1 - exp(-t / CANVAS_GLIDE_TAU)``.
+    Zoom is interpolated in log space (it is multiplicative); pan is *not* interpolated on
+    ``f`` -- see ``_pan_at`` for why that made a corner double-click swing past the cursor.
 
     The visible result is the one the wheel has: a big first step -- the frame the mode flips
-    already moves ~11 % of the distance -- and then the same 140 ms tail, instead of the
+    already moves ~11 % of the distance -- and then the shortened tail, instead of the
     instant snap the crop mode used to do (and instead of the 180 ms OutCubic, which leaves at
     zero speed, i.e. the "sluggish start" the wheel was fixed for).
     """
@@ -1459,7 +1475,7 @@ class _ViewGlide(QObject):
     def __init__(self, canvas):
         super().__init__(canvas)
         self._canvas = canvas
-        self._f = 0.0          # progress, capped per frame by GLIDE_MAX_FRAME_FRAC
+        self._f = 0.0          # progress, capped per frame by CANVAS_GLIDE_MAX_FRAME_FRAC
         self._clock = QElapsedTimer()
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -1477,10 +1493,21 @@ class _ViewGlide(QObject):
 
     def start(self, zoom: float, pan=(0.0, 0.0)) -> None:
         c = self._canvas
+        z1 = max(1e-6, float(zoom))
+        p1 = (float(pan[0]), float(pan[1]))
+        # Already gliding to this very view: keep the clock running.  Re-arming resets the
+        # elapsed time, and the tail restarts from zero -- so a caller that re-issues the same
+        # target right after the mode change (``exit_crop_mode`` then ``fit_to_view``, both to
+        # 1.0 / pan 0) turned the exit glide into a stutter, and any longer gap into a stall.
+        if self._timer.isActive():
+            if (abs(math.log(z1 / self._z1)) < 1e-4
+                    and abs(p1[0] - self._p1[0]) < 1e-4
+                    and abs(p1[1] - self._p1[1]) < 1e-4):
+                return
         self._z0 = max(1e-6, float(getattr(c, "zoom", 1.0)))
-        self._z1 = max(1e-6, float(zoom))
+        self._z1 = z1
         self._p0 = (float(getattr(c, "pan_x", 0.0)), float(getattr(c, "pan_y", 0.0)))
-        self._p1 = (float(pan[0]), float(pan[1]))
+        self._p1 = p1
         if (abs(math.log(self._z1 / self._z0)) < 1e-5
                 and abs(self._p1[0] - self._p0[0]) < 1e-5
                 and abs(self._p1[1] - self._p0[1]) < 1e-5):
@@ -1507,12 +1534,12 @@ class _ViewGlide(QObject):
         between 0.92 and 0.996 and never landed.
         """
         c = self._canvas
-        f = 1.0 - math.exp(-max(0.0, elapsed) / GLIDE_TAU)
+        f = 1.0 - math.exp(-max(0.0, elapsed) / CANVAS_GLIDE_TAU)
         # A frame may not take more of what is left than a 25 fps frame would (the canvas
         # repaints at ~20-25 fps, where the raw curve would jump a quarter of the distance at
         # once).  Progress is kept so the cap is measured against the distance still to go.
         advance = f - self._f
-        cap = GLIDE_MAX_FRAME_FRAC * (1.0 - self._f)
+        cap = CANVAS_GLIDE_MAX_FRAME_FRAC * (1.0 - self._f)
         if advance > cap:
             advance = cap
         self._f += max(0.0, advance)
@@ -1523,8 +1550,11 @@ class _ViewGlide(QObject):
             self._f = 1.0
         c.zoom = self._z0 * math.exp(math.log(self._z1 / self._z0) * f)
         c.clamp_zoom()
-        c.pan_x = self._p0[0] + (self._p1[0] - self._p0[0]) * f
-        c.pan_y = self._p0[1] + (self._p1[1] - self._p0[1]) * f
+        gx = self._pan_at(f, float(c.zoom), self._p0[0], self._p1[0])
+        gy = self._pan_at(f, float(c.zoom), self._p0[1], self._p1[1])
+        if done:
+            gx, gy = self._p1
+        c.pan_x, c.pan_y = gx, gy
         if c.params.get("view_mode") == 1:
             c._clamp_split_to_image()
             c._update_badges()
@@ -1532,6 +1562,33 @@ class _ViewGlide(QObject):
         c.update()
         if done:
             self._timer.stop()
+
+    def _pan_at(self, f: float, zoom: float, pan0: float, pan1: float) -> float:
+        """Pan at progress ``f``, on the axis whose endpoints are ``pan0`` -> ``pan1``.
+
+        Pan must travel **linearly in zoom**, not in ``f``.  ``pan`` is a screen-space offset
+        and the screen position of a fixed image point is ``u * zoom + pan``; keeping that
+        point still therefore requires ``pan`` to move by a constant amount per unit of
+        *zoom*, which is exactly how ``_zoom_at`` steps it.
+
+        On ``f`` it is wrong, and visibly so.  Zoom runs on a log curve: at half the time a
+        3x zoom is already at 1.73x, while pan has only moved half its distance.  For the
+        first frames the picture is effectively still expanding about the *screen centre*
+        (pan has barely left its fitted value of 0), so content near a corner first slides
+        toward the middle -- then the pan finally catches up and drags it back to the
+        cursor.  That is the reported "双击角落，图像先往中间飞一下再上来".
+
+        With ``g = (zoom - zoom0) / (zoom1 - zoom0)`` the path is exactly the anchored one
+        the wheel and pinch use, and it degrades to a plain linear pan when the zoom does not
+        change (menu zoom in/out keeps its centre), so one formula covers every caller.
+        """
+        r = self._z1 / self._z0
+        if abs(r - 1.0) < 1e-6:                       # pure pan, no 0/0
+            g = f
+        else:
+            g = (zoom / self._z0 - 1.0) / (r - 1.0)
+        g = 0.0 if g < 0.0 else (1.0 if g > 1.0 else g)
+        return pan0 + (pan1 - pan0) * g
 
 
 class DarkroomGLCanvas(QOpenGLWidget):
@@ -2784,10 +2841,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def animate_to(self, target_zoom, target_pan_x=0.0, target_pan_y=0.0):
         """Glide to a fixed view (fit, 1:1, double-click, menu zoom).
 
-        One curve for everything that moves the canvas: this is the wheel's
-        ``1 - exp(-t / GLIDE_TAU)`` shape, so a double-click now opens with the same decisive
-        first step and lands with the same long tail, instead of the old OutCubic ramp that
-        spent its first third barely moving.
+        One curve for everything that moves the canvas, on the canvas's own
+        ``1 - exp(-t / CANVAS_GLIDE_TAU)`` shape: a decisive first step and a short tail,
+        instead of the old OutCubic ramp that spent its first third barely moving.
         """
         # A wheel glide writes zoom and pan on every tick; letting both run means each one
         # undoes the other's last frame, which reads as the picture shivering.

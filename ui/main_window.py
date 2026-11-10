@@ -8901,7 +8901,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.current_params["crop"] = crop_dict
         self._mark_current_photo_dirty()
         self.canvas.update_params(crop=crop_dict)
-        self.canvas.fit_to_view(animate=False)
+        # Animated, not snapped: ``_exit_crop_workspace`` already started the glide back to fit,
+        # and ``fit_to_view(animate=False)`` stops glides by design -- so the exit animation was
+        # cancelled on the line right after it started (reported as "退出裁切的缩放动画丢失").
+        self.canvas.fit_to_view(animate=True)
         self._save_current_photo_sdc()
         self.push_undo_state()
         if hasattr(self, "filmstrip") and self.active_photo_id:
@@ -8924,7 +8927,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if hasattr(self, 'canvas') and isinstance(self.canvas.params, dict):
             self.canvas.params["crop"] = copy.deepcopy(reverted_crop)
             self.canvas.update()
-        self.canvas.fit_to_view(animate=False)
+        # Animated for the same reason as ``_on_crop_applied``: the snap would cancel the glide
+        # that ``_exit_crop_workspace`` just started.
+        self.canvas.fit_to_view(animate=True)
         if hasattr(self, "filmstrip") and self.active_photo_id:
             self.filmstrip.set_photo_crop(self.active_photo_id, reverted_crop)
         self._update_active_thumbnails()
