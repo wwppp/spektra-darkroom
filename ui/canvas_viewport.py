@@ -1743,7 +1743,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         is_film_none = str(film_id).lower() in ("none", "")
         paper_id = self.params.get("paper_profile", getattr(self, "current_paper_stock", "none"))
         pmode = self.params.get("print_mode", getattr(self, "current_print_mode", "optical"))
-        is_scan = (paper_id == "none" or pmode == "scan")
+        is_scan = (paper_id == "none" or paper_id == "digital_unmask" or pmode == "scan")
         if is_pos or is_scan:
             u_3f("u_cmy", 0.0, 0.0, 0.0)
             u_1f("u_print_exposure", 1.0)

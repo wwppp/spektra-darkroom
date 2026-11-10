@@ -1282,6 +1282,34 @@ def save_encoded_image(rendered_data, output_path, params_dict):
 # matches the reference pipeline point-for-point (measured max delta 0.0 over 33 steps).
 PRINT_EXPOSURE_CALIBRATION = 1.0
 
+# 中性去色罩的三个常数。**都不是物理量，是对一张引擎基准图拟合出来的**：
+# 基准是 `scratch/_eng_screen.png`（gold200 / screen / reference-exposure）。
+# 换卷或换场景必须用 `scratch/_unmask_vs_engine.py` 复验。
+#
+# `_UNMASK_UNMIX`：染料解混矩阵。引擎的 `DensityUnmix(.paper)` 是按相纸三层灵敏度
+#   读的，我们的读法是 sRGB 通道（LUT 输出已经过显示编码），带通完全不同 ——
+#   照抄引擎那份矩阵会让整幅发紫（实测天空 R 高 +0.09）。
+#   这里用我们档案里的 `data/channel_density`（染料光谱）+ CIE 1931 CMF 投 sRGB 重算：
+#   A[ch][dye] = ∫ resp_ch·dye / ∫ resp_ch，取逆后按行和归一化（`scratch/_unmix_matrix_srgb.py`）。
+#   逐卷理论上不同（染料光谱不同），当前先用 gold200 的一份。
+# `_UNMASK_XGAIN`：read 的增益。从显示编码的负像反解出的密度范围比引擎的 read 窄，
+#   不放大到不了 toe（黑位浮在 0.13，引擎是 0）。
+#   2026-11-10 三卷扫描（`scratch/_unmask_xgain_sweep.py`，DSC02662）：
+#   gold_200 / portra_400 的最优在 1.4–1.5（MAE 0.027 / 0.026），c200 一路偏向下
+#   （1.2 时 0.045）。取 1.45 —— 前两卷各让 0.001，c200 从 0.059 降到 0.053。
+#   **按卷单独取最优只把三卷平均从 0.035 提到 0.033（6%）**，说明 c200 的残差
+#   不是这个常数造成的，别再往这儿调。
+# `_UNMASK_CHANNEL_GAIN`：通道增益。蓝通道在我们的链上系统性偏亮（平均差 +0.15），
+#   不压下去天空发紫。
+_UNMASK_XGAIN = 1.45
+_UNMASK_CHANNEL_GAIN = np.array([1.0, 1.0, 0.72])
+
+_UNMASK_UNMIX = np.array([
+    [1.3814513771, -0.3235948659, -0.0578565111],
+    [-0.0741048612, 1.1386336226, -0.0645287614],
+    [-0.0307970396, -0.0600623311, 1.0908593707],
+], dtype=np.float64)
+
 
 class SpektraEngine:
     def __init__(self, resources_dir=None):
@@ -1781,6 +1809,11 @@ class SpektraEngine:
                 "badge": "未反相",
                 "desc": "不经过相纸印相，直接输出底片本身的负像（橙色片基）。与上游 scan_film 一致，供自行反相/校色使用。"
             },
+            # 「中性去色罩」（`DIGITAL_UNMASK_PAPER`）的入口已下线（2026-11-10）：
+            # 效果不稳定 —— gold_200 / portra_400 对引擎 MAE 0.026 / 0.025，
+            # 但 c200 一类卷偏到 0.089（蓝通道 +0.074），逐卷不可控。
+            # 实现（`_postprocess_unmask_lut` + `_UNMASK_*`）保留未删，
+            # 恢复入口 = 在这里加回一个 id 为 `digital_unmask` 的条目。
             {
                 "id": "kodak_2383",
                 "name": "Kodak Vision 2383",
@@ -1887,6 +1920,10 @@ class SpektraEngine:
         exactly as it did at 0 stops.
         """
         stops = int(push_stops or 0)
+        # 没有放大机的介质就没有滤色片：直扫和中性去色罩都不印相，问它们要中性滤色片
+        # 只会让 solver 去加载一张不存在的档案（`digital_unmask.json`）。
+        if str(paper_stock or "").lower() in ("none", "", "screen", self.DIGITAL_UNMASK_PAPER):
+            return [0.0, 0.0, 0.0]
         key = (paper_stock, film_stock, stops)
         cache = getattr(self, "_neutral_push_cache", None)
         if cache is None:
@@ -2251,6 +2288,137 @@ class SpektraEngine:
         ).astype(np.float32)
         return np.clip(lut_out, 0.0, 1.0)
 
+    @staticmethod
+    def _postprocess_unmask_lut(lut_3d: np.ndarray, lattice=None,
+                                neutral_gain: float = 1.0) -> np.ndarray:
+        """中性去色罩：把底片的橙色片基归一成白，底片密度直接读成正像。
+
+        对应 fotufilm 的 ``PrintPaper.screen``（Digital Reference）走
+        ``DigitalReferenceStyle.referenceExposure``（`DigitalReferenceReceiver.swift`）：
+        负片不印相、不过相纸曲线，由一个固定接收器把片基以上的密度读成显示值。
+
+        Stage 1. 片基白平衡：逐通道除以片基（cube 里每通道最大值），橙色蒙版被除掉。
+        Stage 2. 染料解混：``dens @ _UNMASK_UNMIX.T``，把「逐通道读数」换回三条记录
+                 各自的染料量。矩阵按**我们的**读法（sRGB 通道）算，不是照抄引擎的
+                 paper bands —— 用错带通就是整幅发紫（见 `scratch/_unmix_matrix_srgb.py`）。
+        Stage 3. 固定接收曲线：``referenceCurve``(dMin 0.07 / γ 2.60 / toe −0.52±0.16 /
+                 shoulder 0.42±0.14)，三条记录共用；锚点是片子自己的 18% 密度。
+        Stage 4. 黑点补偿：``(10^-D − floor) / (1 − floor)``，``floor = 10^-(dMax − dMin)``，
+                 与引擎 `rgb()` 末尾一致。
+        Stage 5. 通道增益校准：我们的链蓝通道系统性偏亮（实测 B 比引擎高 0.15），
+                 压到 ``_UNMASK_CHANNEL_GAIN`` 才不发紫。**这一条是对着一张引擎基准图
+                 拟合的常数，不是物理量**，换卷/换场景要复验。
+
+        **已经删掉的东西**：上一版的 ``/1.5`` 缩放、写死的 0.744 锚点、以及「对角线平衡」
+        灰轴中性化 —— 后者把每通道读数压到 0.3–0.4 倍（`scratch/_unmask_xdiff.py` 反解
+        回归），饱和度和两端一起被抽干，天空变淡紫。
+
+        ``neutral_gain`` 是 0..1 的强度：0 = 不解混也不对齐中灰（近似直扫），1 = 全量。
+        """
+        size = lut_3d.shape[0]
+        lin = np.where(
+            lut_3d <= 0.04045,
+            lut_3d / 12.92,
+            ((np.maximum(lut_3d, 0.0) + 0.055) / 1.055) ** 2.4,
+        ).astype(np.float64)
+        # 片基是"能透过的最多光"，取 cube 里每通道的最大值。不用 `lin[0,0,0]`：
+        # 插值后的 cube 在个别节点上会略高于角点，那会让密度算出负值，反相后
+        # 高光直接冲白（实测 B 通道 p50 打到 0.97）。
+        base = np.max(lin.reshape(-1, 3), axis=0)
+        if np.any(base <= 1e-5):
+            return lut_3d
+
+        # 片基以上的光学密度。负片是负像，密度越大 = 场景越亮。
+        ratio = np.clip(lin / base, 1e-7, 1.0)
+        dens = -np.log10(ratio)
+
+        # 染料解混：把我们逐通道读到的密度换回三条记录各自的读数。
+        # 取自 fotufilm `DigitalReferenceReceiver.DensityUnmix(bands: .paper)` ——
+        # A[band][dye] = ∫ illum·paperSens·dye / ∫ illum·paperSens，
+        # 取逆后按行和归一化（等量曝光严格落在中性轴）。Kodak 负片染料的解析光谱
+        # + Ektacolor Edge 三层灵敏度离线算出（`scratch/_unmix_matrix.py`），
+        # 对所有负片是同一个常数矩阵。
+        dens = dens @ _UNMASK_UNMIX.T
+
+        # 场景 18% 的格点：lattice 是场景线性值，按 Rec.709 亮度找最近节点。
+        idx = size // 2
+        if lattice is not None:
+            luma = (0.2126 * lattice[..., 0] + 0.7152 * lattice[..., 1]
+                    + 0.0722 * lattice[..., 2])
+            diag = luma[np.arange(size), np.arange(size), np.arange(size)]
+            idx = int(np.argmin(np.abs(diag - 0.18)))
+        # 锚点用**片子自己**的 18% 密度（引擎的 `baseRead` 就是逐卷量的），
+        # 不是写死的 0.744 常数 —— 否则每支卷中灰落点都在飘。
+        d_mid = dens[idx, idx, idx].astype(np.float64)
+        # 逐通道把 18% 对齐（等量的"中性偏移"，等价于引擎里 0.744 锚点作用在三通道上）。
+        # 这一步只是把中灰摆正，不改动反差 —— 反差全由下面的固定曲线给。
+        sc = d_mid.mean() / np.maximum(d_mid, 1e-6)
+        dens = dens * (1.0 + neutral_gain * (sc - 1.0))
+        d_mid = d_mid * (1.0 + neutral_gain * (sc - 1.0))
+        dens = dens + neutral_gain * (d_mid.mean() - d_mid)
+        d_mid = float(d_mid.mean())
+
+        # 固定接收曲线，取自 fotufilm `DigitalReferenceReceiver.referenceCurve`
+        # （dMin 0.07 / gamma 2.60 / toe −0.52±0.16 / shoulder 0.42±0.14）。
+        # 它是一条对所有卷都一样的 H&D 曲线 —— 这正是「不套相纸」能成立的原因：
+        # 反差由这条共同的曲线给，而不是由某张纸的染料给。
+        #
+        # 不能只用 ``10^(D - anchor)``：那条纯指数在暗部没有 toe，实测黑位浮到
+        # 0.17 sRGB，整幅像蒙了层灰；亮部又没有 shoulder，一过中调就硬 clip。
+        _dmin, _gamma, _toe, _toew, _sh, _shw = 0.07, 2.60, -0.52, 0.16, 0.42, 0.14
+        _dmax = _dmin + _gamma * (_sh - _toe)
+
+        def _softplus(v):
+            return np.log1p(np.exp(-np.abs(v))) + np.maximum(v, 0.0)
+
+        def _curve_density(x):
+            return _dmin + _gamma * np.clip(
+                _toew * _softplus((x - _toe) / _toew)
+                - _shw * _softplus((x - _sh) / _shw),
+                0.0, _sh - _toe)
+
+        # 锚点 x0：曲线上「片基以上 0.744 D」这个点的 log 曝光。引擎的
+        # `anchorDensity = 0.744` 就是中灰在负片上的密度位置，10^-0.744 = 0.18。
+        # 二分求反函数（与 `CharacteristicCurve.logExposure(density:)` 同法）。
+        _target = _dmin + 0.744
+        if _target >= _dmax:
+            x0 = 0.0
+        else:
+            lo_b, hi_b = -12.0, 12.0
+            for _ in range(60):
+                mid_b = 0.5 * (lo_b + hi_b)
+                if _curve_density(mid_b) < _target:
+                    lo_b = mid_b
+                else:
+                    hi_b = mid_b
+            x0 = 0.5 * (lo_b + hi_b)
+
+        # x 是相对锚点的密度差，**1 D = 1 单位**（引擎的 read 就是这个量纲）。
+        # 上一版这里的 ``(0.744 - dens) / 1.5`` 是凑出来的缩放 + 写死的锚点，
+        # 会让不同卷的中灰落在不同位置（superia_200 偏亮到 0.87）。
+        x = x0 + _UNMASK_XGAIN * (d_mid - dens)
+        d_above = _curve_density(x) - _dmin
+        t = np.power(10.0, -d_above)
+
+        # 黑点补偿：曲线自己的地板当成纸黑，拉到显示黑（引擎 `rgb()` 末尾同式）。
+        floor = float(np.power(10.0, -(_dmax - _dmin)))
+        out_lin = np.clip((t - floor) / (1.0 - floor), 0.0, 1.0)
+        # 通道增益校准（对引擎 screen 实测拟合，见 scratch/_unmask_vs_engine.py）：
+        # 蓝通道在我们的链上系统性偏亮，不压下去天空会发紫。
+        out_lin = np.clip(out_lin * _UNMASK_CHANNEL_GAIN, 0.0, 1.0)
+
+        # 到这里就结束，与引擎 `DigitalReferenceReceiver.rgb()` 一致。
+        # **不再做对角线平衡**：它把每个通道重映射到同一条亮度曲线，实测把每通道的
+        # 读数压缩到 0.3–0.4 倍（`scratch/_unmask_xdiff.py` 反解回归），饱和度和两端
+        # 一起被抽干，天空变淡紫。中性化改由上面的解混矩阵 + 中灰对齐负责。
+
+        out = np.where(
+            out_lin <= 0.0031308,
+            out_lin * 12.92,
+            1.055 * (np.maximum(out_lin, 0.0) ** (1.0 / 2.4)) - 0.055,
+        )
+        return np.clip(out, 0.0, 1.0).astype(np.float32)
+
     def _record_lut_baked(self, lut_3d, baked):
         """Remember which chemistry values (DIR / paper morph) were baked into a generated LUT."""
         import weakref
@@ -2297,6 +2465,10 @@ class SpektraEngine:
             return "screen"
         if info is not None and getattr(info, "channel_model", None) == "bw":
             return "kodak_2383" if paper_stock == "none" else paper_stock
+        if paper_stock == self.DIGITAL_UNMASK_PAPER:
+            # 没有纸。返回 `none` 是有意的：`none` 不在 FFCHAIN_PAPERS 里，点式链因此
+            # 返回 None、回落到单表 —— 中性去色罩本来也没有（卷，纸）配对的表可找。
+            return "none"
         if print_mode == "scan":
             # A scanned negative has no sheet: the inversion is timed off Ektacolor Edge.
             return "kodak_ektacolor_edge"
@@ -2336,6 +2508,11 @@ class SpektraEngine:
     FFCHAIN_PAPERS = ("kodak_ektacolor_edge", "kodak_2383", "screen")
     # 盘缓存版本：改了 ffchain_point 的算术就要 +1，否则旧表会被继续读
     FFP_LUT_VERSION = "ffp1"
+
+    # 中性去色罩。不是一张真实相纸：底片不印相，只把橙色片基归一成白，
+    # 让底片密度直接读成正像。对应 fotufilm 的 PrintPaper.screen + referenceExposure。
+    # 它没有点式表，也不该有 —— 点式链的表是按（卷，纸）配对烘的，这张没有纸。
+    DIGITAL_UNMASK_PAPER = "digital_unmask"
 
     def _is_fotufilm_chain_stock(self, film_stock):
         """转换卷判别 + 有没有点式表。按 stock id 缓存，热路径上只查一次字典。"""
@@ -2731,20 +2908,30 @@ class SpektraEngine:
 
         if is_pos:
             # Positive slide film: inherently positive, no photographic print paper
+            is_unmask = False
+            print_prof = None
+            base_paper = "none"
+        elif paper_stock == self.DIGITAL_UNMASK_PAPER:
+            # 中性去色罩：与直扫同一个拓扑（底片 → 显示，不走放大机、不过相纸曲线），
+            # 区别只在烘完 cube 之后多一道去色罩（`_postprocess_unmask_lut`）。
+            is_unmask = True
             print_prof = None
             base_paper = "none"
         elif is_bw:
+            is_unmask = False
             # Monochrome negative film: print through neutral enlarger without color filtration
             opt_paper = "kodak_2383" if paper_stock == "none" else paper_stock
             print_prof = self._load_profile(opt_paper)
             base_paper = opt_paper
         elif print_mode == "scan":
+            is_unmask = False
             # 数字负片直出：等价于上游 io.scan_film=True —— 跳过印相，直接输出底片本身的
             # 橙色负像（无色罩反转、无相纸曲线）。这里没有相纸，print=None 让管线走
             # CMY_FILM -> RGB_OUT 的直扫拓扑。
             print_prof = None
             base_paper = "none"
         else:
+            is_unmask = False
             # Negative film in optical print mode: optical enlarger onto positive photographic paper
             opt_paper = "kodak_2383" if paper_stock == "none" else paper_stock
             print_prof = self._load_profile(opt_paper)
@@ -2753,7 +2940,7 @@ class SpektraEngine:
         dummy_print = print_prof if print_prof is not None else self._load_profile("kodak_2383")
         params = RuntimePhotoParams(film=film_prof, print=dummy_print)
         params.print = print_prof
-        params.io.scan_film = bool(is_pos or print_mode == "scan")
+        params.io.scan_film = bool(is_pos or print_mode == "scan" or is_unmask)
         params.settings.neutral_print_filters_from_database = False
 
         # CRITICAL: Enable lut_mode for deterministic, un-biased 3D LUT generation
@@ -2791,7 +2978,7 @@ class SpektraEngine:
             developer_exhaustion=dev_exh
         )
 
-        if print_mode == "scan":
+        if print_mode == "scan" or is_unmask:
             # A scanned negative has no enlarger: no filtration stage at all.
             base_filter = [0.0, 0.0, 0.0]
         else:
@@ -2891,7 +3078,7 @@ class SpektraEngine:
         # untouched: a smoothstep ramp means m id-grey does not move at all, and only the
         # highlights gain. This is a per-pixel transform, which is exactly why it can live
         # in the cube.
-        if wp_lift > 0.001:
+        if wp_lift > 0.001 and not is_unmask:
             peak = float(np.nanmax(lut_3d))
             wp_target = 0.975
             wp_lo = 0.45
@@ -2902,7 +3089,23 @@ class SpektraEngine:
                 print(f"[SpektraEngine] 白点抬升: 峰值 {peak:.3f} -> {float(np.nanmax(lut_3d)):.3f} "
                       f"(lo={wp_lo}, lift={wp_lift:g})")
 
-        if is_bw:
+        if is_unmask:
+            # 去色罩必须在白点抬升之后做：它要的是底片自己的片基亮度，
+            # 抬过白点之后片基就不是片基了。所以上面那段 skip 掉了。
+            strength = float(params_dict.get("unmask_neutral", 1.0))
+            lut_3d = self._postprocess_unmask_lut(lut_3d, lattice, strength)
+            # **不再叠 `_postprocess_positive_lut`**：引擎的 referenceExposure 在
+            # `DigitalReferenceReceiver.rgb()` 返回就结束 —— 没有第二条 S 曲线、
+            # 没有色度增益。多叠一层会把反差压平、天空推紫（2026-11-10 实测）。
+            if is_bw:
+                # 这条分支跳过了下面的 `elif is_bw`，黑白卷会带着解混残留的通道差
+                # （实测 T-MAX 中灰 R/B 差 0.11，肉眼是暖灰）。黑白必须严格中性。
+                luma = (0.2126 * lut_3d[..., 0] + 0.7152 * lut_3d[..., 1]
+                        + 0.0722 * lut_3d[..., 2])
+                lut_3d[..., 0] = luma
+                lut_3d[..., 1] = luma
+                lut_3d[..., 2] = luma
+        elif is_bw:
             # Enforce strictly neutral monochrome output (Rec.709 luminance)
             luma = 0.2126 * lut_3d[..., 0] + 0.7152 * lut_3d[..., 1] + 0.0722 * lut_3d[..., 2]
             lut_3d[..., 0] = luma
@@ -4549,7 +4752,8 @@ class SpektraEngine:
             is_pos = self.is_positive_film(film_stock)
             paper_prof = str(params_dict.get("paper_profile", params_dict.get("paper_stock", "none"))).lower()
             pmode = str(params_dict.get("print_mode", "optical")).lower()
-            is_scan = (paper_prof == "none" or pmode == "scan")
+            is_scan = (paper_prof == "none" or paper_prof == "digital_unmask"
+                       or pmode == "scan")
             if is_pos or is_scan:
                 c_val = 0.0
                 m_val = 0.0
