@@ -33,6 +33,8 @@ from PySide6.QtCore import (
     Qt, QPoint, QPointF, QSize, QRect, QRectF, Signal, QTimer, QEvent, QThread, QObject,
     QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 )
+if sys.platform == "win32":
+    from PySide6.QtCore import QAbstractNativeEventFilter
 from PySide6.QtGui import (
     QAction, QFont, QIcon, QKeySequence, QPainter, QColor, QPen, QBrush, QPixmap, QImage, QLinearGradient, QCursor
 )
@@ -152,6 +154,57 @@ _FRAME_LOG = os.path.join(os.environ.get("TEMP", "."), "spektra_frame.log")
 #   clean          - drop WS_CAPTION entirely: no caption can ever be drawn, but the DWM zoom
 #                    animation is gone too (it needs a frame).
 _FRAME_MODE = os.environ.get("SPEKTRA_FRAME_MODE", "anim").strip().lower()
+
+
+if sys.platform == "win32":
+    class _MaximizeScreenFilter(QAbstractNativeEventFilter):
+        """Maximize into the monitor the window is actually on.
+
+        The window is frameless, and for that case the maximize rectangle does *not* come
+        from "wherever the window happens to be": Qt answers ``WM_GETMINMAXINFO`` from the
+        platform window's screen, which for this window stays the primary monitor.  So
+        maximizing while the window sat on the second monitor teleported it across --
+        measured ``(2020,184,1200x760)`` -> ``(0,0,1920x1032)`` (the primary work area)
+        instead of ``(1920,124,1600x852)``.  The same jump happened even through a raw
+        ``ShowWindow(SW_MAXIMIZE)``, which is what pinned the cause on this message rather
+        than on ``showMaximized``.
+
+        Answering the message ourselves -- and returning True so Qt cannot overwrite the
+        values -- makes maximize use the work area of the monitor the window is on, which
+        is also what keeps the taskbar strip clear.
+        """
+        WM_GETMINMAXINFO = 0x0024
+        MONITOR_DEFAULTTONEAREST = 2
+
+        def __init__(self, window):
+            super().__init__()
+            self._window = window
+
+        def nativeEventFilter(self, event_type, message):
+            if event_type not in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+                return False, 0
+            try:
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message != self.WM_GETMINMAXINFO:
+                    return False, 0
+                hwnd = int(self._window.winId())
+                if int(msg.hWnd or 0) != hwnd:
+                    # Dialogs, menus and tooltips keep the default behaviour.
+                    return False, 0
+                monitor = ctypes.windll.user32.MonitorFromWindow(hwnd, self.MONITOR_DEFAULTTONEAREST)
+                info = MONITORINFO()
+                info.cbSize = ctypes.sizeof(MONITORINFO)
+                if not ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                    return False, 0
+                mon, work = info.rcMonitor, info.rcWork
+                mmi = MINMAXINFO.from_address(int(msg.lParam))
+                mmi.ptMaxPosition.x = work.left - mon.left
+                mmi.ptMaxPosition.y = work.top - mon.top
+                mmi.ptMaxSize.x = work.right - work.left
+                mmi.ptMaxSize.y = work.bottom - work.top
+                return True, 0
+            except Exception:
+                return False, 0
 
 
 def _frame_log(line):
@@ -2207,6 +2260,10 @@ class DarkroomMainWindow(QMainWindow):
         self._film_filter_debounce_timer.timeout.connect(lambda: self._refresh_card_previews(film_only=True))
 
         QApplication.instance().installEventFilter(self)
+        if sys.platform == "win32":
+            # Keeps maximize on the monitor the window is on; see _MaximizeScreenFilter.
+            self._maximize_screen_filter = _MaximizeScreenFilter(self)
+            QApplication.instance().installNativeEventFilter(self._maximize_screen_filter)
 
         self._init_ui()
         self.export_queue.status_changed.connect(self._on_export_queue_status_changed)
@@ -2237,7 +2294,12 @@ class DarkroomMainWindow(QMainWindow):
 
             self.resize(max(1024, saved_w), max(680, saved_h))
             if saved_x is not None and saved_y is not None:
-                screen = self.screen() or QApplication.primaryScreen()
+                # Ask which monitor the saved rect sits on instead of `self.screen()`: before
+                # the window is shown, `self.screen()` still reports the primary monitor, so a
+                # geometry saved on a second monitor was judged off-screen, silently dropped,
+                # and the window opened on the primary one.
+                probe = QPoint(int(saved_x) + min(300, saved_w) // 2, int(saved_y) + min(200, saved_h) // 2)
+                screen = QApplication.screenAt(probe) or QApplication.primaryScreen()
                 if screen:
                     screen_geo = screen.availableGeometry()
                     if screen_geo.intersects(QRect(saved_x, saved_y, min(300, saved_w), min(200, saved_h))):
@@ -2484,6 +2546,21 @@ class DarkroomMainWindow(QMainWindow):
             ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(int(self.winId()), byref(margins))
         except Exception:
             pass
+
+    def _release_native_filters(self):
+        """Drop the app-wide native message filter before teardown.
+
+        It is installed on the QApplication, so it would otherwise keep being called (for
+        every Windows message, for every window) while this window's HWND is halfway gone.
+        """
+        filter_ = getattr(self, "_maximize_screen_filter", None)
+        if filter_ is None:
+            return
+        try:
+            QApplication.instance().removeNativeEventFilter(filter_)
+        except Exception:
+            pass
+        self._maximize_screen_filter = None
 
     def _setup_native_window_frame(self):
         """Configure Win32 window styles, DWM client frame extension, and Aero Snap once on show."""
@@ -13190,6 +13267,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             self._close_is_maximized = self.isMaximized()
             self._close_geometry = self.geometry()
             self.hide()
+            self._release_native_filters()
             QApplication.processEvents()
             _frame_log("closeEvent hidden")
         except Exception:
