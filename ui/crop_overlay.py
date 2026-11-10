@@ -633,11 +633,7 @@ class CropOverlayWidget(QWidget):
         self._push_undo_snapshot()
 
     def cancel_crop(self):
-        self.canvas.pan_x = 0.0
-        self.canvas.pan_y = 0.0
-        self.canvas.zoom = 1.0
-        if hasattr(self.canvas, "zoomChanged"):
-            self.canvas.zoomChanged.emit(self.canvas.get_actual_zoom_ratio())
+        self._glide_back_to_fit()
         init_crop = getattr(self, "_initial_crop", {})
         self.crop_x = float(init_crop.get("x", 0.0))
         self.crop_y = float(init_crop.get("y", 0.0))
@@ -660,12 +656,27 @@ class CropOverlayWidget(QWidget):
         self.hide()
         self.cropCancelled.emit()
 
+    def _glide_back_to_fit(self):
+        """Give the canvas its view back through the *glide*, not by writing zoom/pan here.
+
+        This is the first thing that happens on the way out of the crop workspace, and writing
+        ``zoom = 1.0`` directly meant the exit transition had nothing left to animate: by the
+        time ``_exit_crop_workspace`` asked for a glide, start and target were the same value
+        (reported twice as "退出裁切还是没动画").  ``exit_crop_mode`` is idempotent -- the second
+        call from ``_exit_crop_workspace`` is ignored while the glide runs -- so neither path
+        depends on the other's ordering.
+        """
+        if hasattr(self.canvas, "exit_crop_mode"):
+            self.canvas.exit_crop_mode()
+        else:                                        # no glide available: keep the old snap
+            self.canvas.pan_x = 0.0
+            self.canvas.pan_y = 0.0
+            self.canvas.zoom = 1.0
+            if hasattr(self.canvas, "zoomChanged"):
+                self.canvas.zoomChanged.emit(self.canvas.get_actual_zoom_ratio())
+
     def apply_crop(self):
-        self.canvas.pan_x = 0.0
-        self.canvas.pan_y = 0.0
-        self.canvas.zoom = 1.0
-        if hasattr(self.canvas, "zoomChanged"):
-            self.canvas.zoomChanged.emit(self.canvas.get_actual_zoom_ratio())
+        self._glide_back_to_fit()
         self._crop_undo_stack = []
         self._crop_redo_stack = []
         self.hide()
