@@ -257,12 +257,16 @@ vec3 grain_field(vec3 density, vec2 image_px) {
     ivec2 px = ivec2(floor(image_px + 0.5));
     if (u_grain_taps < 2) return grain_apply(density, px);
     vec3 acc = vec3(0.0);
+    // Skip *zero* taps, not non-positive ones: the calibrated cascade carries a negative
+    // lobe at |dx| = 2 (the scanner's unsharp folded into it), and dropping it made the
+    // 1-D sum 1.0146 instead of 1 while every other size normalised to 1 -- so one size
+    // step sat 4 % brighter, an 0.12 EV kink on the first notch of the slider.
     for (int dy = -4; dy <= 4; dy++) {
         float wy = u_grain_kernel[dy + 4];
-        if (wy <= 0.0) continue;
+        if (wy == 0.0) continue;
         for (int dx = -4; dx <= 4; dx++) {
             float w = u_grain_kernel[dx + 4] * wy;
-            if (w <= 0.0) continue;
+            if (w == 0.0) continue;
             acc += grain_apply(density, px + ivec2(dx, dy)) * w;
         }
     }
@@ -487,9 +491,12 @@ class GLCubeGrain:
             else:
                 xs = np.arange(-4, 5) / grain_size
                 k9 = np.interp(xs, np.arange(-2, 3), base, left=0.0, right=0.0)
-                k9 = np.clip(k9, 0.0, None)
+                # The negative lobe at |dx| = 2 is the scanner's unsharp, not noise: clipping
+                # it away both broke the DC (see the shader's zero-skip note) and silently
+                # dropped the sharpening at every size but 1.0.  Normalising keeps DC = 1
+                # whatever the sampling, which is what makes the slider a pure size control.
                 total = float(k9.sum())
-                k9 = k9 / total if total > 1e-12 else np.concatenate([np.zeros(3), base, np.zeros(2)])[:9]
+                k9 = k9 / total if abs(total) > 1e-6 else np.concatenate([np.zeros(3), base, np.zeros(2)])[:9]
             self._kernel = base
             self._kernel9 = k9
             self._kernel_key = key

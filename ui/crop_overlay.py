@@ -375,6 +375,9 @@ class CropOverlayWidget(QWidget):
             self.canvas.pan_x = snap["pan_x"]
             self.canvas.pan_y = snap["pan_y"]
             self.canvas.zoom = snap.get("zoom", 1.0)
+            # A snapshot taken before the 200% ceiling existed can carry a larger zoom.
+            if hasattr(self.canvas, "clamp_zoom"):
+                self.canvas.clamp_zoom()
 
         if hasattr(self.canvas, "params") and isinstance(self.canvas.params, dict):
             self.canvas.params["crop"] = self.get_crop_dict()

@@ -18,6 +18,12 @@ from OpenGL import GL
 
 _DIFFUSION_FAMILIES = ("glimmerglass", "black_pro_mist", "pro_mist", "cinebloom")
 
+# How far past 1:1 the viewport may zoom, in multiples of the 100% scale.  200% is the
+# ceiling because the canvas draws a *preview* texture (1 texel ~= 3 master pixels): past
+# that the grain lattice's period exceeds ~6 screen pixels and a texel-aligned noise field
+# reads as a regular chequerboard instead of grain.  See the grain_field coordinate note.
+MAX_ZOOM_OVER_100 = 2.0
+
 # Truncation of the fitted exponential disc, in mean free paths. 8 keeps 99.95%
 # of a true 2D exponential; larger values compensate for collapsing each group's
 # multi-exponential PSF onto a single one.
@@ -2599,14 +2605,31 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.zoomChanged.emit(self.get_actual_zoom_ratio())
             self.update()
 
-    def zoom_in(self, animate=True):
+    def max_zoom(self) -> float:
+        """The ``self.zoom`` value that lands on MAX_ZOOM_OVER_100 (200%) right now.
+
+        Zoom is stored in widget-relative units, so the cap has to be re-derived from the
+        live widget size: `zoom_100` is the value that draws one master pixel per screen
+        pixel, and the ceiling is a fixed multiple of that.
+        """
         ref_w = float(getattr(self, "_master_width", 0) or self._image_width)
         ref_h = float(getattr(self, "_master_height", 0) or self._image_height)
         aspect = ref_w / float(max(1.0, ref_h)) if ref_w > 0 else 1.0
         screen_aspect = float(self.width()) / float(max(1.0, self.height())) if self.width() > 0 else 1.0
         base_w = self.height() * aspect if screen_aspect > aspect else self.width()
         zoom_100 = (ref_w / float(max(1.0, base_w))) if (ref_w > 0 and base_w > 0) else 1.0
-        max_zoom = max(24.0, zoom_100 * 4.0)
+        return max(1e-6, zoom_100 * MAX_ZOOM_OVER_100)
+
+    def clamp_zoom(self):
+        """Pull a zoom that is above the ceiling back down (restored snapshots escape it)."""
+        limit = self.max_zoom()
+        if self.zoom > limit:
+            self.zoom = limit
+            return True
+        return False
+
+    def zoom_in(self, animate=True):
+        max_zoom = self.max_zoom()
         new_zoom = min(max_zoom, self.zoom * 1.25)
         if animate:
             self.animate_to(new_zoom, self.pan_x, self.pan_y)
@@ -2753,13 +2776,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         """Zoom by ``factor`` anchored at widget coordinates (ax, ay). Shared by
         the wheel handler and the two-finger pinch path so the anchor math cannot
         drift between them."""
-        ref_w = float(getattr(self, "_master_width", 0) or self._image_width)
-        ref_h = float(getattr(self, "_master_height", 0) or self._image_height)
-        aspect = ref_w / float(max(1.0, ref_h)) if ref_w > 0 else 1.0
-        screen_aspect = float(self.width()) / float(max(1.0, self.height())) if self.width() > 0 else 1.0
-        base_w = self.height() * aspect if screen_aspect > aspect else self.width()
-        zoom_100 = (ref_w / float(max(1.0, base_w))) if (ref_w > 0 and base_w > 0) else 1.0
-        max_zoom = max(24.0, zoom_100 * 4.0)
+        max_zoom = self.max_zoom()
 
         old_zoom = self.zoom
         new_zoom = max(0.2, min(max_zoom, self.zoom * factor))
