@@ -132,8 +132,10 @@ PARAM_TOOLTIPS_ENABLED = False
 
 
 # 关闭窗口时在屏幕上多停的这一下（毫秒）。保存/销毁本来几百毫秒内就做完了，窗口在同一
-# 毫秒里隐藏，看起来"秒响应"；这个停留让关闭有一个可感知的过程（用户要求 0.5–1 s）。
-CLOSE_DWELL_MS = 700
+# 毫秒里隐藏，看起来"秒响应"；这个停留让关闭有一个可感知的过程。
+# 现在这一段是**真的占住 GUI 线程**（窗口不响应、指针转圈），所以时长按"看起来在处理"来定，
+# 不再按"动画"来定（用户 2026-11-10：再长点，让窗口无响应、指针变转圈）。
+CLOSE_DWELL_MS = 1400
 
 
 # Opt-in window-frame diagnostics: set SPEKTRA_FRAME_DEBUG=1 to log every non-client message and
@@ -8331,7 +8333,17 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 changed = True
                 self.current_params[k] = v
                 self.canvas.update_params(**{k: v})
+        # Even when every parameter is already at its default, a reset still has to put the
+        # paper back on the preference default -- that is the whole point of calling reset.
+        paper_moved = self._restore_preference_paper()
         if not changed:
+            if paper_moved:
+                # The paper decides which LUT is baked, so a reset that only moved the paper
+                # still has to rebake and refresh what shows the old one.
+                self._refresh_lut()
+                self._update_stock_mode_ui()
+                self._update_active_thumbnails()
+                self._refresh_card_previews()
             self._update_reset_buttons_state()
             return
         self._refresh_lut()
@@ -8362,6 +8374,32 @@ aspect_ratio=self._lens_frame_aspect(photo),
         else:
             self.reset_to_open_state()
 
+    def _restore_preference_paper(self):
+        """Re-seat a photo that never picked a paper on the preference default.
+
+        ``reset`` is supposed to return the *parameters* to their defaults and nothing else, so
+        a paper the user chose is left exactly where it is.  But a photo that never chose one
+        owes its paper to the preference -- and any path that lets it fall to "none" makes the
+        panel read 胶片直扫 and the render fall back to a flat scan, which is not a reset of
+        anything the user did.  Called from every reset entry point; returns True when it
+        actually changed the paper (the caller then has to rebake the LUT).
+        """
+        photo = None
+        if self.active_photo_id:
+            photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
+        if photo is not None and self._photo_paper_is_explicit(photo):
+            return
+        paper = self._default_negative_paper()
+        mode = "scan" if str(paper or "none") in ("none", "") else "optical"
+        if paper == self.current_paper_stock and mode == self.current_print_mode:
+            return False
+        self.current_paper_stock = paper
+        self.current_print_mode = mode
+        self.current_params["print_mode"] = mode
+        if hasattr(self.canvas, "update_params"):
+            self.canvas.update_params(paper_profile=paper, print_mode=mode)
+        return True
+
     def reset_to_open_state(self):
         """Fully restore photo to virgin unedited RAW state, completely wiping all parameters AND crop."""
         import copy
@@ -8384,10 +8422,17 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
             self.canvas.crop_overlay.reset_all_crop()
 
-        # Reset stocks to none (virgin bypass)
+        # The film goes back to bypass, but the *paper* lands on the preference default, not on
+        # "胶片直扫".  Writing "none" here made every reset look like it had also thrown the
+        # paper away, so the next film picked started from a blank sheet and the panel read
+        # 胶片直扫 even though a default paper is configured (asked for explicitly).  Same rule
+        # as the clear-.sdc path: bypass renders through its own table, the paper only decides
+        # where the panel sits and what the next stock selection inherits.
         self.current_film_stock = "none"
-        self.current_paper_stock = "none"
-        self.current_print_mode = "scan"
+        self.current_paper_stock = self._default_negative_paper()
+        self.current_print_mode = (
+            "scan" if str(self.current_paper_stock or "none") in ("none", "") else "optical")
+        self.current_params["print_mode"] = self.current_print_mode
 
         defaults = self._get_track_defaults()
         all_defs = {}
@@ -8416,7 +8461,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 photo["is_dirty"] = False
                 photo["is_edited"] = False
                 photo["film_profile"] = "none"
-                photo["paper_profile"] = "none"
+                # "" = "never picked", so this photo keeps following the preference default.
+                photo["paper_profile"] = ""
+                photo["paper_explicit"] = False
+                photo["print_mode"] = self.current_print_mode
                 photo["params"] = copy.deepcopy(self.current_params)
                 photo["crop"] = dict(default_crop)
                 p_path = photo.get("path", "")
@@ -13066,6 +13114,26 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         finally:
             self._close_approved = False
 
+    def _run_close_dwell(self):
+        """Look like the app is finishing work, then finish it.
+
+        A timer-driven wait left the window fully live: the user saw a normal, responsive
+        window for a beat and then it vanished.  What was asked for is the opposite -- a window
+        that has stopped responding, with the system's spinner over it -- so this blocks the GUI
+        thread on purpose.  One round trip first, because the cursor change and the last repaint
+        have to reach the screen *before* the block, or the whole dwell happens off-camera.
+        """
+        app = QApplication.instance()
+        if app is not None:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            app.processEvents()
+        try:
+            time.sleep(CLOSE_DWELL_MS / 1000.0)
+        finally:
+            if app is not None:
+                QApplication.restoreOverrideCursor()
+            self._close_after_dwell()
+
     def closeEvent(self, event):
         _frame_log("closeEvent enter")
         approved = getattr(self, "_close_approved", False)
@@ -13097,7 +13165,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             # Not a bare ``self.close``: the prompt path clears ``_close_approved`` in a
             # ``finally`` around its own close(), so a deferred close would come back here with
             # the flag down and pop the same save dialog a second time.
-            QTimer.singleShot(CLOSE_DWELL_MS, self._close_after_dwell)
+            QTimer.singleShot(0, self._run_close_dwell)
             return
 
         # Drop the caption for the whole closing sequence (prompt included). Window teardown is

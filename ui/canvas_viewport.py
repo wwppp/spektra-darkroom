@@ -1,11 +1,11 @@
 import os
 import math
 import numpy as np
-from PySide6.QtCore import (Qt, Signal, QPointF, QVariantAnimation, QEasingCurve, QRectF, QTimer,
+from PySide6.QtCore import (Qt, Signal, QPointF, QRectF, QTimer,
                             QEvent, QObject, QElapsedTimer)
 from PySide6.QtGui import QCursor, QColor, QOpenGLContext, QAction, QActionGroup, QKeySequence, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
 from PySide6.QtWidgets import QMenu, QLabel, QWidget, QPushButton, QVBoxLayout
-from ui.smooth_scroll import GLIDE_TAU, GLIDE_FRAME_MS
+from ui.smooth_scroll import GLIDE_TAU, GLIDE_FRAME_MS, GLIDE_MAX_FRAME_FRAC
 from ui.window_utils import get_darkroom_menu_style, get_icon
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
@@ -1319,7 +1319,7 @@ class _ZoomGlide(QObject):
 
     ZOOM_STEP = 1.15          # per notch, the old instantaneous factor
     LOG_V_MAX = 3.0           # log-zoom per second ceiling (e^3 = 20x/s), the V_MAX analogue
-    END_LOG = 1e-4            # 0.01 %: anything closer is snapped rather than crawled
+    END_LOG = 1e-4            # absolute floor; ``_end_log`` above it is the real threshold
 
     def __init__(self, canvas):
         super().__init__(canvas)
@@ -1379,35 +1379,65 @@ class _ZoomGlide(QObject):
         if dt > 0.0:
             substeps = max(1, int(math.ceil(dt / 0.008)))
             h = dt / substeps
+            # One *frame* may not consume more of the distance than a 25 fps frame would.
+            # The canvas repaints at ~20-25 fps, where the raw curve hands the first frame a
+            # quarter of the zoom -- a quarter jump, then a crawl.  See GLIDE_MAX_FRAME_FRAC.
+            budget = GLIDE_MAX_FRAME_FRAC * abs(self._target - self._log)
             for _ in range(substeps):
-                moved = self._integrate(h)
-                if not moved:
+                moved, spent = self._integrate(h, budget)
+                budget -= spent
+                if not moved or budget <= 0.0:
                     break
-        if abs(self._target - self._log) < self.END_LOG:
+        if abs(self._target - self._log) < self._end_log():
             rest = self._target - self._log
             if abs(rest) > 1e-12:
                 c._zoom_at(math.exp(rest), self._anchor[0], self._anchor[1])
                 self._log = math.log(max(1e-6, float(c.zoom)))
             self._timer.stop()
 
-    def _integrate(self, h: float) -> bool:
-        """Advance one substep.  False when the glide has nothing left to do."""
+    def _end_log(self) -> float:
+        """Return the remaining log-zoom that is no longer worth animating.
+
+        The tail used to run until 0.01 % was left, which on a 450 px wide picture is 0.05 px:
+        hundreds of milliseconds of frames whose only visible effect is the image edges
+        rounding to a different pixel -- a picture that sits still and shivers.  A step that
+        moves the picture by less than one pixel is not motion, so that is where the glide
+        ends (and the last sub-pixel is snapped, invisibly).
+        """
+        c = self._canvas
+        try:
+            left, right, _top, _bottom = c.get_image_bounds_norm()
+            width_px = max(1.0, (float(right) - float(left)) * float(c.width()))
+        except Exception:                                   # noqa: BLE001 - never break a paint
+            width_px = 400.0
+        return max(self.END_LOG, min(2e-2, 1.0 / width_px))
+
+    def _integrate(self, h: float, budget: float):
+        """Advance one substep by at most ``budget`` log-zoom.
+
+        Returns ``(moved, spent)``; ``moved`` is False when there is nothing left to do, and
+        the caller subtracts ``spent`` from the frame's remaining budget.
+        """
         c = self._canvas
         d = self._target - self._log
         if abs(d) < 1e-12:
-            return False
+            return False, 0.0
         v = d / GLIDE_TAU
         if v > self.LOG_V_MAX:
             v = self.LOG_V_MAX
         elif v < -self.LOG_V_MAX:
             v = -self.LOG_V_MAX
         step = d if abs(v * h) >= abs(d) else v * h
+        if abs(step) > budget:
+            step = math.copysign(max(0.0, budget), step)
+        if step == 0.0:
+            return False, 0.0
         before = c.zoom
         c._zoom_at(math.exp(step), self._anchor[0], self._anchor[1])
         self._log = math.log(max(1e-6, float(c.zoom)))
         # Pinned against a limit: `_zoom_at` refused to move, so stop rather than spin on a
         # distance that can never close.
-        return c.zoom != before
+        return c.zoom != before, abs(step)
 
 
 class _ViewGlide(QObject):
@@ -1429,6 +1459,7 @@ class _ViewGlide(QObject):
     def __init__(self, canvas):
         super().__init__(canvas)
         self._canvas = canvas
+        self._f = 0.0          # progress, capped per frame by GLIDE_MAX_FRAME_FRAC
         self._clock = QElapsedTimer()
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -1455,6 +1486,7 @@ class _ViewGlide(QObject):
                 and abs(self._p1[1] - self._p0[1]) < 1e-5):
             self._timer.stop()
             return
+        self._f = 0.0
         self._clock.start()
         self._timer.start()
         # Spend the frame the mode changed on, exactly like WheelFollower: the repaint that
@@ -1476,9 +1508,19 @@ class _ViewGlide(QObject):
         """
         c = self._canvas
         f = 1.0 - math.exp(-max(0.0, elapsed) / GLIDE_TAU)
+        # A frame may not take more of what is left than a 25 fps frame would (the canvas
+        # repaints at ~20-25 fps, where the raw curve would jump a quarter of the distance at
+        # once).  Progress is kept so the cap is measured against the distance still to go.
+        advance = f - self._f
+        cap = GLIDE_MAX_FRAME_FRAC * (1.0 - self._f)
+        if advance > cap:
+            advance = cap
+        self._f += max(0.0, advance)
+        f = self._f
         done = f >= 1.0 - self.SNAP
         if done:
             f = 1.0
+            self._f = 1.0
         c.zoom = self._z0 * math.exp(math.log(self._z1 / self._z0) * f)
         c.clamp_zoom()
         c.pan_x = self._p0[0] + (self._p1[0] - self._p0[0]) * f
@@ -1715,21 +1757,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
         empty_layout.addWidget(btn_empty_import, 0, Qt.AlignmentFlag.AlignCenter)
         self.empty_overlay.hide()
 
-        # Item 17: Smooth Animation for zoom and centering
-        self._zoom_anim = QVariantAnimation(self)
-        self._zoom_anim.setDuration(180)
-        self._zoom_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._zoom_anim.valueChanged.connect(self._on_anim_step)
-        self._start_zoom = 1.0
-        self._target_zoom = 1.0
-        self._start_pan_x = 0.0
-        self._target_pan_x = 0.0
-        self._start_pan_y = 0.0
-        self._target_pan_y = 0.0
-
         # Wheel zoom rides the same glide curve as wheel scrolling (see _ZoomGlide).
         self._zoom_glide = _ZoomGlide(self)
-        # Crop enter/exit glides on that same curve with a fixed target (see _ViewGlide).
+        # Every fixed-target view change -- crop enter/exit, fit, 1:1, the double-click
+        # toggle, menu zoom -- glides on that same curve (see _ViewGlide).  It replaced an
+        # 180 ms OutCubic QVariantAnimation, which leaves at zero speed and therefore reads as
+        # a sluggish start next to the wheel.
         self._view_glide = _ViewGlide(self)
 
         # GL objects
@@ -2567,7 +2600,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if not self._has_image:
             return
         self._zoom_glide.stop()
-        self._zoom_anim.stop()
+        self._view_glide.stop()
         self.is_crop_editing = True
         self._pre_crop_zoom = getattr(self, "zoom", 1.0)
         self._pre_crop_pan = (getattr(self, "pan_x", 0.0), getattr(self, "pan_y", 0.0))
@@ -2600,7 +2633,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # the next photo inherited it and never fitted the window again (measured: the
             # zoom stayed at 0.90 with crop mode already off).
             self._zoom_glide.stop()
-            self._zoom_anim.stop()
             self._view_glide.start(1.0, (0.0, 0.0))
         overlay = getattr(self, "crop_overlay", None)
         if overlay is not None:
@@ -2609,10 +2641,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def exit_crop_mode(self):
         self._zoom_glide.stop()
-        # A pending fit animation holds the *crop* zoom as its target: left running it writes
-        # 0.90 back over the value exit just restored, which is how a switched-to photo came
-        # back shrunk with crop mode already closed.
-        self._zoom_anim.stop()
         self.is_crop_editing = False
         self.crop_overlay.hide()
         self._view_glide.start(1.0, (0.0, 0.0))
@@ -2753,32 +2781,18 @@ class DarkroomGLCanvas(QOpenGLWidget):
             return 1.0
         return self.zoom / zoom_100
 
-    def _on_anim_step(self, val):
-        t = float(val)
-        self.zoom = self._start_zoom + (self._target_zoom - self._start_zoom) * t
-        self.pan_x = self._start_pan_x + (self._target_pan_x - self._start_pan_x) * t
-        self.pan_y = self._start_pan_y + (self._target_pan_y - self._start_pan_y) * t
-        if self.params.get("view_mode") == 1:
-            self._clamp_split_to_image()
-            self._update_badges()
-        self.zoomChanged.emit(self.get_actual_zoom_ratio())
-        self.update()
-
     def animate_to(self, target_zoom, target_pan_x=0.0, target_pan_y=0.0):
+        """Glide to a fixed view (fit, 1:1, double-click, menu zoom).
+
+        One curve for everything that moves the canvas: this is the wheel's
+        ``1 - exp(-t / GLIDE_TAU)`` shape, so a double-click now opens with the same decisive
+        first step and lands with the same long tail, instead of the old OutCubic ramp that
+        spent its first third barely moving.
+        """
         # A wheel glide writes zoom and pan on every tick; letting both run means each one
         # undoes the other's last frame, which reads as the picture shivering.
         self._zoom_glide.stop()
-        self._view_glide.stop()
-        self._zoom_anim.stop()
-        self._start_zoom = self.zoom
-        self._target_zoom = float(target_zoom)
-        self._start_pan_x = self.pan_x
-        self._target_pan_x = float(target_pan_x)
-        self._start_pan_y = self.pan_y
-        self._target_pan_y = float(target_pan_y)
-        self._zoom_anim.setStartValue(0.0)
-        self._zoom_anim.setEndValue(1.0)
-        self._zoom_anim.start()
+        self._view_glide.start(float(target_zoom), (float(target_pan_x), float(target_pan_y)))
 
     def fit_to_view(self, animate=True):
         target_z = self._get_crop_fit_zoom() if getattr(self, "is_crop_editing", False) else 1.0
@@ -2787,7 +2801,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
         else:
             self._zoom_glide.stop()
             self._view_glide.stop()
-            self._zoom_anim.stop()
             self.zoom = target_z
             self.pan_x = 0.0
             self.pan_y = 0.0
@@ -3131,14 +3144,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def mousePressEvent(self, event):
         btn = event.button()
         if btn == Qt.MouseButton.LeftButton:
-            # A zoom/fit animation writes pan_x/pan_y on every tick.  If the user grabs the image
-            # while one is still running, the two fight: the drag adds a delta and the next tick
-            # overwrites it, which reads as the picture shivering under the cursor.  Taking the
-            # press means the animation loses.
-            if self._zoom_anim.state() == QVariantAnimation.State.Running:
-                self._zoom_anim.stop()
-            # Same for the wheel glide and the crop-mode transition: both own zoom *and*
-            # pan until they land.
+            # A wheel glide or a view glide (fit / 1:1 / crop transition) writes pan_x/pan_y on
+            # every tick.  If the user grabs the image while one is still running, the two fight:
+            # the drag adds a delta and the next tick overwrites it, which reads as the picture
+            # shivering under the cursor.  Taking the press means the animation loses.
             self._zoom_glide.stop()
             self._view_glide.stop()
             # Check if clicking on split divider within visible image bounds

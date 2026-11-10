@@ -22,6 +22,19 @@ from ui.touch_scroll import install_touch_scroll
 GLIDE_TAU = 0.14          # s; speed is (distance to target) / TAU, no acceleration limit
 GLIDE_FRAME_MS = 8        # integration frame; twice the display rate
 
+# The largest share of the *remaining* distance a single painted frame may consume.
+#
+# The curve is time-based, so the share per frame is set by the frame rate: 11 % at 60 fps,
+# 26 % at 25 fps.  The panel scroll repaints at 125 fps and looks continuous; the canvas only
+# manages ~22 fps (each repaint costs 35-60 ms inside Qt's OpenGL-widget composite -- our own
+# shader is 1.5 ms of that, measured), and there the same curve hands the first frame a quarter
+# of the zoom in one 44 ms step and then a crawl: the "twitch" reported for wheel zoom.
+#
+# 0.24 is one 25 fps frame's share: a surface painting at 25 fps or better is untouched, and a
+# slower one gets even steps instead of a front-loaded jump.  It costs time -- a notch reaches
+# 90 % at ~0.5 s instead of ~0.33 s -- because frames are the only unit the surface gives us.
+GLIDE_MAX_FRAME_FRAC = 0.24
+
 
 class _PixelSettleAnimation(QVariantAnimation):
     """Scroll-bar motion that does not stall for the last pixel.
