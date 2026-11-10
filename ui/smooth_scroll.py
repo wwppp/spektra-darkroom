@@ -1,10 +1,13 @@
-"""smooth_scroll.py - Universal smooth easing scroll area with physics-based momentum and edge indicators
-Provides silky smooth kinetic momentum scrolling (natural friction decay) and subtle overscroll edge cues.
+"""smooth_scroll.py - Universal smooth scrolling with edge indicators.
+
+Wheel motion is driven by ``WheelFollower``: each notch moves a *target* position and one
+shared velocity servo carries the bar there, so speed is continuous across notches instead
+of restarting per notch.  See the class docstring for the measurements behind that.
 """
 
-import time
-from PySide6.QtCore import (Qt, QAbstractAnimation, QVariantAnimation, QEasingCurve,
-                            QRectF, QTimer, QEvent)
+import math
+from PySide6.QtCore import (Qt, QAbstractAnimation, QEasingCurve, QElapsedTimer, QObject,
+                            QRectF, QTimer, QEvent, QVariantAnimation, Signal)
 from PySide6.QtGui import QPainter, QColor, QLinearGradient
 from PySide6.QtWidgets import QScrollArea, QWidget
 
@@ -88,12 +91,152 @@ class _PixelSettleAnimation(QVariantAnimation):
         self._bar.setValue(int(round(self._pos)))
 
 
+class WheelFollower(QObject):
+    """Carry a scrollbar to the wheel's target with continuous velocity.
+
+    The previous driver restarted an OutQuart ease from the current pixel on every
+    notch.  OutQuart leaves its start at four times the average slope, so a 76 px notch
+    opened with a 15 px lurch in a single frame and decayed from there; a second notch
+    mid-flight restarted that lurch, and a burst read as a sawtooth (measured: 11, 9, 8,
+    13, 8, 9, 8, 14 px per frame at 110 ms spacing).  Only the position was continuous,
+    never the speed -- which is what "one pulse, one twitch" describes.
+
+    This is a velocity servo instead of a replayed curve.  The wheel adds to a *target*
+    and the speed chases ``sqrt(2 * ACCEL * distance)`` -- the profile that can still
+    brake to a stop exactly at the target -- with the speed itself rate-limited.  So:
+
+    * five notches still travel five steps however fast they arrive, unlike a momentum
+      integrator whose reach depends on cadence;
+    * a retarget changes the *acceleration*, never the speed, so there is no seam: a
+      burst ramps up monotonically and then holds, rather than pulsing per notch;
+    * arrival is exact and the last fraction of a pixel is snapped, so there is no
+      constant-speed crawl at the end (the old driver spent ~150 ms at 1 px per frame)
+      and nothing to rebound.
+
+    A critically damped spring was tried first: also seamless, but a second-order system
+    driven at the notch rhythm pumps, which put a 6..13 px/frame ripple back into a
+    110 ms burst.  The servo does not resonate because its speed target is a function of
+    distance, not of history.
+    """
+
+    ACCEL = 6000.0        # px/s^2, and also the braking rate
+    V_MAX = 2000.0        # px/s ceiling, so a violent spin cannot turn into a teleport
+    SUBSTEP_S = 0.008     # integration step; keeps the profile stable if a frame is long
+    FRAME_MS = 8          # twice the display rate, so a frame never sees a stale position
+    MARGIN_PX = 0.02      # keep sqrt() off zero; the landing rule below does the real work
+    SNAP_PX = 0.7
+    SNAP_V = 90.0         # px/s
+
+    finished = Signal()
+
+    def __init__(self, bar, parent=None):
+        super().__init__(parent)
+        self._bar = bar
+        self._pos = float(bar.value())
+        self._vel = 0.0
+        self._target = float(bar.value())
+        self._clock = QElapsedTimer()
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(self.FRAME_MS)
+        self._timer.timeout.connect(self._tick)
+
+    # -- public ---------------------------------------------------------
+    @property
+    def pos(self) -> float:
+        return self._pos
+
+    @property
+    def speed(self) -> float:
+        """Current speed in px/s (diagnostics)."""
+        return self._vel
+
+    def is_running(self) -> bool:
+        return self._timer.isActive()
+
+    def reset(self, value=None) -> None:
+        """Forget any motion and adopt ``value`` (or the bar's current value)."""
+        self._timer.stop()
+        self._vel = 0.0
+        self._pos = float(self._bar.value() if value is None else value)
+        self._target = self._pos
+
+    def add(self, delta: float) -> None:
+        """Push the target by ``delta`` px.  Repeated calls accumulate."""
+        lo = float(self._bar.minimum())
+        hi = float(self._bar.maximum())
+        if hi <= lo:
+            return
+        if not self._timer.isActive():
+            # Start from wherever the bar actually is: the user may have dragged it, or a
+            # previous flight may have been interrupted.
+            self._pos = float(self._bar.value())
+            self._vel = 0.0
+            self._target = self._pos
+            self._clock.start()
+            self._timer.start()
+        self._target = max(lo, min(hi, self._target + delta))
+
+    # -- internals ------------------------------------------------------
+    def _tick(self) -> None:
+        dt = (self._clock.restart() / 1000.0) if self._clock.isValid() else self.FRAME_MS / 1000.0
+        dt = min(0.05, max(1e-4, dt))
+
+        lo = float(self._bar.minimum())
+        hi = float(self._bar.maximum())
+        # The range can collapse under a flight -- a panel section folds, a dropdown is
+        # repopulated, a stock swap resizes the sidebar.  Re-clamping the target keeps the
+        # follower from chasing a position that no longer exists (it would sit at the
+        # clamp with the snap test never coming true, i.e. spin forever).
+        self._target = max(lo, min(hi, self._target))
+
+        steps = max(1, int(math.ceil(dt / self.SUBSTEP_S)))
+        h = dt / steps
+        lim = self.ACCEL * h
+        for _ in range(steps):
+            d = self._target - self._pos
+            if d == 0.0:
+                self._vel = 0.0
+                break
+            # Land exactly instead of coasting past: the braking curve converges on the
+            # target from above, and without this the last substep would step over it.
+            if self._vel * d > 0.0 and abs(self._vel * h) >= abs(d):
+                self._pos = self._target
+                self._vel = 0.0
+                break
+            v_des = min(self.V_MAX,
+                        math.sqrt(2.0 * self.ACCEL
+                                  * max(0.0, abs(d) - self.MARGIN_PX)))
+            v_des = math.copysign(v_des, d)
+            dv = v_des - self._vel
+            self._vel += lim if dv > lim else (-lim if dv < -lim else dv)
+            self._pos += self._vel * h
+
+        if self._pos <= lo:
+            self._pos = lo
+            self._vel = 0.0
+        elif self._pos >= hi:
+            self._pos = hi
+            self._vel = 0.0
+
+        if abs(self._target - self._pos) < self.SNAP_PX and abs(self._vel) < self.SNAP_V:
+            self._pos = self._target
+            self._vel = 0.0
+            self._timer.stop()
+            self._bar.setValue(int(round(self._pos)))
+            self.finished.emit()
+            return
+
+        self._bar.setValue(int(round(self._pos)))
+
+
 class SmoothScrollArea(QScrollArea):
-    """QScrollArea enhanced with:
-    1. Physics-based smooth momentum scrolling with natural inertia decay (惯性滑动收尾).
-    2. Adaptive velocity calibration to prevent vertical lists from scrolling too fast.
-    3. Seamless interruption on opposite-direction scroll, viewport click, or manual scrollbar grab.
-    4. Subtle top/bottom or left/right edge fade indicators showing scroll limits.
+    """QScrollArea with wheel motion carried by a ``WheelFollower`` and edge fades.
+
+    The wheel is not handled per notch any more: each notch moves a target, and one
+    shared servo (`WheelFollower`) animates the bar toward it, interrupts on click or
+    scrollbar grab, and keeps the fade overlay in sync.  ``scroll_to`` keeps its own
+    settle animation for programmatic jumps, where the distance is already known.
     """
     def __init__(self, parent=None, is_horizontal=False, enable_edge_fade=None):
         super().__init__(parent)
@@ -117,15 +260,10 @@ class SmoothScrollArea(QScrollArea):
         self._anim = _PixelSettleAnimation(sb0, self)
         self._anim.finished.connect(self._on_anim_finished)
 
-        # Wheel scrolling is a retargetable eased animation, not a velocity integrator.
-        # Exponential friction decay has a near-linear tail and its reach depends on how fast
-        # the notches arrive.  Aiming at a target with OutQuart instead gives the iOS feel --
-        # a quick start and a long, gentle settle -- and extra notches just push the target
-        # further out while the running animation retargets from wherever it is.
-        self._wheel_anim = _PixelSettleAnimation(sb0, self)
-        self._wheel_anim.finished.connect(self._on_anim_finished)
-        self._wheel_target = 0
-        self._wheel_power = 4
+        # The wheel drives a target position through a spring rather than a replayed
+        # ease-out curve; the class docstring has the measurements behind that.
+        self._wheel = WheelFollower(sb0, self)
+        self._wheel.finished.connect(self._on_anim_finished)
 
         # Connect scrollbar signals to maintain sync with manual interactions
         v_bar = self.verticalScrollBar()
@@ -334,7 +472,7 @@ class SmoothScrollArea(QScrollArea):
 
     def _is_animating(self) -> bool:
         return (self._anim.state() == QAbstractAnimation.State.Running
-                or self._wheel_anim.state() == QAbstractAnimation.State.Running)
+                or self._wheel.is_running())
 
     def _on_scroll_value_changed(self, val):
         # While one of our own animations drives the bar the value change is not user input:
@@ -346,10 +484,10 @@ class SmoothScrollArea(QScrollArea):
         self._sync_overlay()
 
     def _stop_physics(self):
-        """Stop any in-flight scroll motion (wheel easing or programmatic animation)."""
+        """Stop any in-flight scroll motion (wheel follow or programmatic animation)."""
         self._velocity = 0.0
-        if getattr(self, "_wheel_anim", None) is not None:
-            self._wheel_anim.stop()
+        if getattr(self, "_wheel", None) is not None:
+            self._wheel.reset()
         if getattr(self, "_anim", None) is not None:
             self._anim.stop()
 
@@ -361,7 +499,7 @@ class SmoothScrollArea(QScrollArea):
         self._sync_overlay()
 
     def wheelEvent(self, event):
-        """Move the scrollbar with a retargetable eased animation (iOS-style settle)."""
+        """Add the notch to the wheel target; the spring carries the bar there."""
         # Cancel any delayed filmstrip or layout alignment timers up the parent hierarchy
         p = self.parent()
         while p is not None:
@@ -392,52 +530,15 @@ class SmoothScrollArea(QScrollArea):
             super().wheelEvent(event)
             return
 
-        min_val = float(sb.minimum())
-        max_val = float(sb.maximum())
-        current_sb_val = float(sb.value())
-
         # delta > 0 is scroll up / left (decrease position)
         # delta < 0 is scroll down / right (increase position)
         ticks = -(delta / 120.0)
 
-        # If already at edge and trying to push beyond, ignore
-        if (current_sb_val <= min_val and ticks < 0) or (current_sb_val >= max_val and ticks > 0):
-            event.accept()
-            return
-
-        # Retarget from where the previous notch was heading, so a burst of notches stacks
-        # instead of restarting from the current pixel every time.  Starting from the animation's
-        # own float position (not the rounded bar value) keeps a retarget from looking like a
-        # one-pixel jump.
-        running = self._wheel_anim.state() == QAbstractAnimation.State.Running
-        if running:
-            base = float(self._wheel_target)
-            start_pos = self._wheel_anim.pos
-        else:
-            base = current_sb_val
-            start_pos = current_sb_val
-
+        # The target is a running sum, so a notch is never lost to a clamp: at the edge the
+        # difference is simply zero and the spring has nothing to do.
         self._anim.stop()
-        target = max(min_val, min(max_val, base + ticks * self._step_size))
-        new_target = int(round(target))
-        # Already on the way to exactly this position: restarting would drop the velocity back to
-        # zero and re-accelerate, so a burst of notches arrived as a stutter instead of one long
-        # settle.  This is also the case that produced the "twitch" right before the bottom.
-        if running and new_target == self._wheel_target:
-            event.accept()
-            return
-        self._wheel_target = new_target
-
-        dist = abs(self._wheel_target - start_pos)
-        if dist <= 0:
-            event.accept()
-            return
-        # Longer for a bigger step, but never a snap: one 76px notch lands at ~310ms and the
-        # OutQuart tail keeps the last few pixels crawling in.
-        duration = int(min(620, max(220, 160 + dist * 2.0)))
-        self._wheel_anim.move_to(start_pos, float(self._wheel_target), duration,
-                                 power=self._wheel_power)
-        self._current_pos = start_pos
+        self._wheel.add(ticks * self._step_size)
+        self._current_pos = self._wheel.pos
         event.accept()
 
     def scroll_to(self, target_value: int, animate: bool = True):

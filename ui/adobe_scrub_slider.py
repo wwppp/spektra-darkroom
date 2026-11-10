@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 
 from core.path_utils import get_icon_path
 from ui.theme_manager import theme_manager
+from ui.smooth_scroll import WheelFollower
 
 
 class ScrubLabel(QLabel):
@@ -1057,12 +1058,10 @@ class DarkroomComboListView(QListView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._scroll_anim = QVariantAnimation(self)
-        # OutQuart + a longer duration: same iOS-like settle as the scroll panels, so a wheel
-        # notch in a dropdown does not just stop dead at the end of its travel.
-        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutQuart)
-        self._scroll_anim.valueChanged.connect(self._on_scroll_anim_step)
-        self._target_scroll = 0
+        # Same follower as the scroll panels: a retargeted OutQuart per notch read as a
+        # sawtooth in the panels, and a dropdown list suffers from it twice over because
+        # its rows are only 24 px tall.
+        self._scroll = WheelFollower(self.verticalScrollBar(), self)
         self.delegate = None
 
     def viewportEvent(self, event):
@@ -1075,9 +1074,6 @@ class DarkroomComboListView(QListView):
             return True
         return super().event(event)
 
-    def _on_scroll_anim_step(self, val):
-        self.verticalScrollBar().setValue(int(val))
-
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
         if not delta:
@@ -1086,22 +1082,7 @@ class DarkroomComboListView(QListView):
         if sb.maximum() <= 0:
             event.ignore()
             return
-        step = -int((delta / 120.0) * 72)
-        if self._scroll_anim.state() == QVariantAnimation.State.Running:
-            base = self._target_scroll
-        else:
-            base = sb.value()
-        target = max(0, min(sb.maximum(), base + step))
-        self._target_scroll = target
-        curr = sb.value()
-        dist = abs(target - curr)
-        if dist > 0:
-            duration = min(620, max(220, int(160 + dist * 2.0)))
-            self._scroll_anim.stop()
-            self._scroll_anim.setDuration(duration)
-            self._scroll_anim.setStartValue(curr)
-            self._scroll_anim.setEndValue(target)
-            self._scroll_anim.start()
+        self._scroll.add(-(delta / 120.0) * 72.0)
         event.accept()
 
     def mouseMoveEvent(self, event):
