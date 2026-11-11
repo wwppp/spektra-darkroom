@@ -41,7 +41,6 @@ added_hidden = [
     'core.darkroom_math',
     'core.lens_correction',
     'core.colorspace',
-    'core.film_grain',
     'core.version',
     'ui',
     'ui.about_dialog',
@@ -106,6 +105,68 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+# ---------------------------------------------------------------------------
+# Dead weight
+# ---------------------------------------------------------------------------
+# ``collect_all('colour')`` copies the whole wheel into the bundle and a few
+# PyInstaller hooks drag in things the app can never reach.  They are dropped
+# here, at analysis time, rather than deleted from dist/ afterwards, so a plain
+# ``pyinstaller SpektraDarkroom.spec`` stays reproducible.
+#
+# Entries in a TOC are (destination_name, source_path, typecode), so matching on
+# element 0 is matching on the path inside the bundle.
+PRUNE_PREFIXES = (
+    # 74 MB coverage HTML report that ships inside the colour-science wheel.
+    'colour/htmlcov',
+    # ~0.3 MB of documented example scripts; nothing imports them.
+    'colour/examples',
+    # 6 MB of Qt's own translation catalogs; the UI carries its own strings and
+    # never constructs a QTranslator.
+    'PySide6/translations',
+    # AVIF codec. Pillow's Image.init() skips plugins that fail to import, and
+    # nothing in the app reads or writes AVIF.
+    'PIL/_avif',
+)
+PRUNE_FILES = (
+    # 29 MB FFmpeg backend for cv2.VideoCapture/VideoWriter; the app has no video
+    # I/O at all, only imread/imwrite.
+    'cv2/opencv_videoio_ffmpeg500_64.dll',
+)
+
+
+def _is_dead_weight(path):
+    if path in PRUNE_FILES:
+        return True
+    return any(path == p or path.startswith(p + '/') for p in PRUNE_PREFIXES)
+
+
+def _prune_toc(toc, label):
+    kept = []
+    dropped = []
+    for entry in toc:
+        dest = str(entry[0]).replace('\\', '/')
+        # Extension modules are stored under their dotted module name ('PIL._avif'),
+        # data and libraries under their real path ('colour/htmlcov').  Test the path
+        # form of both so one rule covers either.
+        if _is_dead_weight(dest) or _is_dead_weight(dest.replace('.', '/')):
+            dropped.append(entry)
+        else:
+            kept.append(entry)
+    if dropped:
+        total = 0
+        for entry in dropped:
+            try:
+                src = entry[1]
+                total += os.path.getsize(src) if os.path.isfile(src) else 0
+            except OSError:
+                pass
+        print('[prune] %s: %d entries, %.1f MB' % (label, len(dropped), total / 2 ** 20))
+    return kept
+
+
+a.datas = _prune_toc(a.datas, 'datas')
+a.binaries = _prune_toc(a.binaries, 'binaries')
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
