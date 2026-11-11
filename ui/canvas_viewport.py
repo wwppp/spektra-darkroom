@@ -561,12 +561,21 @@ vec3 develop_negative(vec3 linear_rgb, vec2 image_px) {
     }
 
     // 8. Bidirectional Black Point calibration (white-point preserving: >0 lifts shadows/fades, <0 subtracts base fog/deepens blacks)
+    vec3 pre_lift_rgb = film_rgb;
     if (u_black_lift > 0.0001) {
         film_rgb = vec3(u_black_lift) + film_rgb * (1.0 - u_black_lift);
     } else if (u_black_lift < -0.0001) {
         float c_blk = min(0.95, -u_black_lift);
         film_rgb = max(vec3(0.0), (film_rgb - vec3(c_blk)) / (1.0 - c_blk));
     }
+
+    // 9. Scanner read-out noise (experimental).  Last in the chain on purpose: the noise is
+    // added *after* the paper curve and the black-point calibration, in code space, because a
+    // pushed scan's grain is read noise amplified by the scanner gain -- not emulsion grain.
+    // Default 0 short-circuits inside the function, so every existing render is unchanged.
+    // See ui/gl_grain.py for the sRGB-slope weighting and the 9-tap spatial kernel.
+    //
+    film_rgb = scan_noise_field(image_px, film_rgb, pre_lift_rgb);
     return clamp(film_rgb, 0.0, 1.0);
 }
 
@@ -1698,6 +1707,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             "grain": 0.4,
             "grain_size": 1.0,
             "grain_colour": 1.0,
+            "scan_noise": 0.0,
             "split_x": 0.5,
             "view_mode": 0   # 0: single, 1: split
         }
@@ -2051,6 +2061,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         paper_id = self.params.get("paper_profile", getattr(self, "current_paper_stock", "none"))
         pmode = self.params.get("print_mode", getattr(self, "current_print_mode", "optical"))
         is_scan = (paper_id == "none" or paper_id == "digital_unmask" or pmode == "scan")
+        u_1f("u_scan_noise", max(0.0, float(self.params.get("scan_noise", 0.0))))
         if is_pos or is_scan:
             u_3f("u_cmy", 0.0, 0.0, 0.0)
             u_1f("u_print_exposure", 1.0)
@@ -3560,6 +3571,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             paper_id_off = eff_params.get("paper_profile", getattr(self, "current_paper_stock", "none"))
             pmode_off = eff_params.get("print_mode", getattr(self, "current_print_mode", "optical"))
             is_scan_off = (paper_id_off == "none" or pmode_off == "scan")
+            # Same uniform on the offscreen/GPU-export path: it has its own upload block and
+            # reads eff_params, so a new shader uniform must be set here too or the exported
+            # file would come back without the noise the preview shows.
+            u_1f("u_scan_noise", max(0.0, float(eff_params.get("scan_noise", 0.0))))
             if is_pos_off or is_scan_off:
                 u_3f("u_cmy", 0.0, 0.0, 0.0)
                 u_1f("u_print_exposure", 1.0)

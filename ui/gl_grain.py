@@ -65,6 +65,7 @@ uniform float     u_grain_px_um;      // film pitch of *this* render, in microme
 uniform float     u_grain_strength;   // editorial multiplier on the particle rate (1 = reference)
 uniform float     u_grain_size;       // editorial multiplier on the particle area (1 = reference)
 uniform float     u_grain_colour;     // 1 = independent dye clouds, 0 = shared luminance grain
+uniform float     u_scan_noise;       // scanner read-out noise, 0 = off (experimental)
 uniform int       u_grain_seed;
 uniform int       u_grain_taps;       // 1 = off for the spatial blur, 9 = 3x3 gaussian
 uniform int       u_grain_probe;      // diagnostic: paint the density delta instead of the print
@@ -271,6 +272,77 @@ vec3 grain_field(vec3 density, vec2 image_px) {
         }
     }
     return acc;
+}
+
+// --- scanner read-out noise (experimental, 2026-11-11) -------------------------------------
+// A *second*, signal-independent noise source.  The emulsion grain above lives in the
+// net-density domain and its sigma vanishes in the shadows (Poisson sqrt(D) times the
+// density-law toe, then flattened by the paper's Dmax shoulder).  A pushed lab scan is dirty
+// in the shadows because the sensor's read noise is amplified along with the weak signal --
+// not because the film grew grain there.  So this layer deliberately does NOT read the layer
+// table or `layer.a`: sigma is constant, and the only brightness dependence comes from the
+// sRGB transfer below.
+//
+// Spatial structure and the luma/chroma mix are borrowed from the emulsion stage so the two
+// layers read as one grain: same 9-tap dye-cloud/USM kernel, same counter-based hash (with a
+// decorrelated seed), same `own/shared` mix driven by `u_grain_colour`.  A shared RNG would
+// make sigma = sqrt(s1^2 + s2^2 + 2*rho*s1*s2) read as *coarser* grain, not more of it.
+const float SCAN_NOISE_UNIT = 0.004;      // linear-domain sigma at one slider unit
+const uint  SCAN_NOISE_SALT = 0x9E3779B9u;
+
+// d(sRGB code) / d(linear light).  Constant noise in linear space therefore shows up as a
+// *larger* code-space swing in the shadows: 12.92x at the toe, 6.4x at code 0.1, 1.08x at
+// 0.5, 0.44x at white.  This is half of why a pushed scan looks grainy in the shadows.
+float scan_code_slope(float c) {
+    if (c <= 0.04045) return 12.92;
+    return 0.4395833 * pow((c + 0.055) / 1.055, -1.4);
+}
+
+vec3 scan_noise_apply(ivec2 px) {
+    vec3 n;
+    for (int ch = 0; ch < 3; ch++) {
+        uvec3 state = uvec3(uint(px.x), uint(px.y),
+                            uint(u_grain_seed + ch) + SCAN_NOISE_SALT);
+        n[ch] = gauss_unit(state);
+    }
+    // Same algebra as `grain_apply`: per-record variance stays 1 for any `own`, while the
+    // luminance variance rises as the three draws are pulled towards their common mean.
+    float own = clamp(u_grain_colour, 0.0, 1.0);
+    float shared = sqrt(max(0.0, 3.0 - 2.0 * own * own)) - own;
+    float m = (n.r + n.g + n.b) / 3.0;
+    return own * n + vec3(shared * m);
+}
+
+// `slope_rgb` is the code value *before* the black-point lift.  A scanner's pedestal is added
+// after the ADC, so lifting the black point does not enlarge the read noise -- but it must not
+// shrink it either: evaluating the slope on the lifted value would make the noise fade as the
+// user raises black_lift, the exact opposite of a pushed scan.
+vec3 scan_noise_field(vec2 image_px, vec3 code_rgb, vec3 slope_rgb) {
+    if (u_scan_noise <= 0.0) return code_rgb;   // zero cost, frame unchanged bit for bit
+    ivec2 px = ivec2(floor(image_px + 0.5));
+    vec3 acc = vec3(0.0);
+    if (u_grain_taps < 2) {
+        acc = scan_noise_apply(px);
+    } else {
+        float norm = 0.0;
+        for (int dy = -4; dy <= 4; dy++) {
+            float wy = u_grain_kernel[dy + 4];
+            if (wy == 0.0) continue;
+            for (int dx = -4; dx <= 4; dx++) {
+                float w = u_grain_kernel[dx + 4] * wy;
+                if (w == 0.0) continue;
+                acc += scan_noise_apply(px + ivec2(dx, dy)) * w;
+                norm += w * w;              // keep sigma = 1 at every grain_size
+            }
+        }
+        acc /= sqrt(max(norm, 1e-6));
+    }
+    vec3 slope = vec3(scan_code_slope(slope_rgb.r),
+                      scan_code_slope(slope_rgb.g),
+                      scan_code_slope(slope_rgb.b));
+    // The clamp is the ADC floor: negative swings are cut, so the mean lifts and the frame
+    // goes grey -- the pedestal of a pushed scan, deliberately NOT zero-mean.
+    return clamp(code_rgb + acc * slope * (u_scan_noise * SCAN_NOISE_UNIT), 0.0, 1.0);
 }
 """
 

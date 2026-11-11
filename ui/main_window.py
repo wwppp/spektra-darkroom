@@ -2185,6 +2185,7 @@ class DarkroomMainWindow(QMainWindow):
             "grain": 0.4,
             "grain_size": 1.0,
             "grain_colour": 1.0,
+            "scan_noise": 0.0,
             "push_ev": 0,
             # Push is a development condition; "shot N stops under" is a capture decision. They
             # are linked only when the user asks for the whole workflow (see 模拟欠曝).
@@ -4915,7 +4916,7 @@ class DarkroomMainWindow(QMainWindow):
     def _init_grain_section(self):
         """M5: 银盐颗粒面板（`347b5cb` 删除后重建）。
 
-        三个滑块的语义（2026-11-05 用户拍板）：
+        四个滑块的语义（前三个 2026-11-05 用户拍板，扫描噪声为 2026-11-11 实验）：
         - 强度：倍率式 0–3，默认 1.0 = 标定参考；内部写 `grain` 键 = 倍率 × 0.4
           （M4 映射 u_grain_strength = grain / 0.4，0.4 是 gold200 锚点的参考强度）。
         - 大小：粒子面积倍率 0.5–2.0，直接写 `grain_size`。
@@ -4953,6 +4954,18 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_grain_colour.valueChanged.connect(lambda v: self._on_slider_live("grain_colour", v))
         self.slider_grain_colour.sliderReleased.connect(self._on_slider_committed)
         self.sec_grain.addWidget(self.slider_grain_colour)
+
+        # 实验：扫描仪读出噪声。默认 0 = 完全关闭，现有出图逐字节不变；用户手动拉才触发。
+        # 与乳剂颗粒是独立噪声源（暗部不再干净），只走 shader uniform，不进 LUT 缓存 key。
+        self.slider_scan_noise = AdobeScrubSlider(
+            "扫描噪声 (实验)", 0.0, 1.0, 0.0, step=0.01, unit="", decimals=2,
+            tooltip="模拟欠曝底片被强行扫描提亮时放大的读出噪声。\n"
+                    "0 = 关闭；拉起后暗部出现颗粒，亮部影响很小；配合「黑场」抬灰即发灰的冲扫件。\n"
+                    "仅在 GPU 预览与 GPU 导出生效，CPU 导出不含颗粒。"
+        )
+        self.slider_scan_noise.valueChanged.connect(lambda v: self._on_slider_live("scan_noise", v))
+        self.slider_scan_noise.sliderReleased.connect(self._on_slider_committed)
+        self.sec_grain.addWidget(self.slider_scan_noise)
 
         self.sidebar_layout.addWidget(self.sec_grain)
 
@@ -7716,6 +7729,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             "grain": 0.4,
             "grain_size": 1.0,
             "grain_colour": 1.0,
+            "scan_noise": 0.0,
             "lens": self._get_default_lens_params(),
             "split_x": 0.5,
             "view_mode": 0
@@ -7737,7 +7751,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         "halation", "halation_amount", "halation_boost", "boost_ev",
         "halation_spatial_scale", "scatter_amount",
         # 银盐颗粒
-        "grain", "grain_size", "grain_colour",
+        "grain", "grain_size", "grain_colour", "scan_noise",
         # 画幅规格只用于推导银盐晶体 / 弥散圈的物理相对尺度，无胶片时无意义
         "film_format_mm",
     })
@@ -8217,7 +8231,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
             },
             "grain": {
                 # grain 存的是引擎键（0.4 = 标定参考），滑块显示倍率 = grain / 0.4
-                "grain": 0.4, "grain_size": 1.0, "grain_colour": 1.0
+                "grain": 0.4, "grain_size": 1.0, "grain_colour": 1.0,
+                "scan_noise": 0.0
             }
         }
 
@@ -8780,6 +8795,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.slider_grain_strength.set_value((0.4 / _g) ** 0.5 if _g > 1e-6 else 0.0)
             if hasattr(self, 'slider_grain_size'): self.slider_grain_size.set_value(p.get("grain_size", 1.0))
             if hasattr(self, 'slider_grain_colour'): self.slider_grain_colour.set_value(p.get("grain_colour", 1.0))
+            if hasattr(self, 'slider_scan_noise'): self.slider_scan_noise.set_value(p.get("scan_noise", 0.0))
 
             # Lens correction controls
             lens_cfg = p.get("lens")
@@ -10600,6 +10616,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         grain_sliders = [
             getattr(self, "slider_grain_strength", None),
             getattr(self, "slider_grain_size", None),
+            getattr(self, "slider_scan_noise", None),
         ]
         for s in grain_sliders:
             if s is not None:
