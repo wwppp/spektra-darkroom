@@ -146,14 +146,30 @@ CLOSE_DWELL_MS = 1100
 _FRAME_DEBUG = bool(os.environ.get("SPEKTRA_FRAME_DEBUG"))
 _FRAME_LOG = os.path.join(os.environ.get("TEMP", "."), "spektra_frame.log")
 # Window frame strategy (SPEKTRA_FRAME_MODE):
-#   anim (default) - keep WS_CAPTION so DWM keeps animating minimise/maximise, but disable DWM
-#                    non-client rendering so the caption itself is never painted. Trade-off: the
-#                    native drop shadow is dropped as well.
-#   legacy         - keep WS_CAPTION with DWM non-client rendering on: keeps the shadow, relies
-#                    only on the message interception and one-shot style/icon setup.
+#   anim (default) - keep WS_CAPTION so DWM keeps animating minimise/maximise. The caption is
+#                    kept invisible by taking the whole window as client area in WM_NCCALCSIZE;
+#                    the DWM non-client rendering policy is chosen by SPEKTRA_NC_POLICY below.
+#   legacy         - same styles, leaves the DWM policy at its default (see SPEKTRA_NC_POLICY=0).
 #   clean          - drop WS_CAPTION entirely: no caption can ever be drawn, but the DWM zoom
 #                    animation is gone too (it needs a frame).
 _FRAME_MODE = os.environ.get("SPEKTRA_FRAME_MODE", "anim").strip().lower()
+
+# DWM non-client rendering policy for the "anim" frame (SPEKTRA_NC_POLICY, 0..2):
+#   0 - USEWINDOWSTYLE (default). DWM knows the window has a frame, so
+#       DWMWA_EXTENDED_FRAME_BOUNDS resolves to the work area. Screenshot / window-picker
+#       tools (WeChat, Snipping Tool) read that attribute, so they frame the window correctly.
+#   2 - ENABLED. Same frame bounds as 0.
+#   1 - DISABLED. Stops DWM from ever painting the classic caption (v0.4.54 set this to kill
+#       the title-bar flash) but it also erases the frame from DWM's model, so
+#       EXTENDED_FRAME_BOUNDS degrades to the raw window rect -- work area + the 8 px invisible
+#       resize border ring, which hangs over the taskbar (see docs). Only keep it if the
+#       caption flash returns and cannot be fixed any other way.
+try:
+    _NC_POLICY = int(os.environ.get("SPEKTRA_NC_POLICY", "0"))
+except ValueError:
+    _NC_POLICY = 0
+if _NC_POLICY not in (0, 1, 2):
+    _NC_POLICY = 0
 
 
 if sys.platform == "win32":
@@ -2595,15 +2611,21 @@ class DarkroomMainWindow(QMainWindow):
                 new_style = style | WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, new_style)
             if _FRAME_MODE == "anim":
-                # DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED: DWM keeps compositing the window
-                # (and animating it) but never renders its non-client frame / caption.
-                policy = ctypes.c_int(1)
+                # DWMWA_NCRENDERING_POLICY. DWMNCRP_DISABLED (1) would guarantee no classic
+                # caption is ever painted, but it also makes DWMWA_EXTENDED_FRAME_BOUNDS report
+                # the raw window rect (work area + 8 px invisible border) instead of the visible
+                # picture, so window-picker tools frame us 8 px too large and the bottom edge
+                # lands on the taskbar. USEWINDOWSTYLE (0) keeps the caption out of sight anyway
+                # -- WM_NCCALCSIZE hands the whole window to the client area, so there is no
+                # non-client strip left for DWM to paint -- and keeps the frame bounds honest.
+                policy = ctypes.c_int(_NC_POLICY)
                 try:
                     ctypes.windll.dwmapi.DwmSetWindowAttribute(
                         hwnd, 2, ctypes.byref(policy), ctypes.sizeof(policy))
                 except Exception:
                     pass
-            _frame_log(f"frame mode={_FRAME_MODE} style=0x{new_style & 0xFFFFFFFF:08X} "
+            _frame_log(f"frame mode={_FRAME_MODE} nc_policy={_NC_POLICY} "
+                       f"style=0x{new_style & 0xFFFFFFFF:08X} "
                        f"caption={int((new_style & WS_CAPTION) != 0)}")
             GWL_EXSTYLE = -20
             WS_EX_APPWINDOW = 0x00040000
@@ -2805,9 +2827,19 @@ class DarkroomMainWindow(QMainWindow):
                         mmi.ptMinTrackSize.y = min_h
                     return True, 0
 
-                # Suppress Windows Non-Client Painting and Text/Activation redraws entirely (prevents Win7 Aero Basic ghost titlebar)
-                if msg.message == 0x0085:  # WM_NCPAINT
-                    return True, 0
+                # Non-client painting / activation redraws.
+                #   WM_NCPAINT must be allowed through: it is how the system announces the frame to
+                #   DWM. Swallowing it (which this code did since v0.4.54) makes DWM forget the
+                #   window has a frame at all, so DWMWA_EXTENDED_FRAME_BOUNDS -- the rectangle every
+                #   window picker (WeChat, Snipping Tool) frames us with -- degrades from the work
+                #   area to the raw window rect: work area + the 8 px invisible resize ring, with
+                #   the bottom edge hanging over the taskbar. Measured: swallow -> accurate on the
+                #   first maximize only, then work+8 forever; pass through -> accurate every cycle.
+                #   Painting is a no-op anyway: WM_NCCALCSIZE hands the whole window to the client
+                #   area, so there is no non-client strip left to draw into (grab is pixel-identical
+                #   either way).
+                #   WM_NCACTIVATE and the WM_NCUAHDRAW* messages are still swallowed -- those are
+                #   what repaint the classic caption on activation on some Win10/11 builds.
                 if msg.message == 0x0086:  # WM_NCACTIVATE
                     return True, 1
                 if msg.message in (0x00AE, 0x00AF):  # WM_NCUAHDRAWCAPTION, WM_NCUAHDRAWFRAME
