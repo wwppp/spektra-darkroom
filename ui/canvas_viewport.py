@@ -238,6 +238,12 @@ uniform vec2 u_crop_flip;
 
 uniform float u_split_x;
 uniform int u_view_mode;
+// High-quality preview: a full-resolution offscreen frame, resampled on the CPU, shown
+// verbatim.  The grain is baked at the export pitch and then low-passed *with the image*,
+// which is what an external viewer does -- the live shader path generates grain after the
+// downscale instead.  Viewport-only: render_offscreen always forces u_hq_preview = 0.
+uniform sampler2D u_hq_tex;
+uniform int u_hq_preview;
 // Fit zoom develops four taps; only meaningful when no stage is already blurring the frame.
 uniform int u_supersample_ok;
 uniform float u_screen_aspect;
@@ -811,7 +817,22 @@ void main() {
     } else {
         sample_uv = clamp(sample_uv, half_texel, vec2(1.0) - half_texel);
     }
-    
+
+    if (u_hq_preview == 1 && u_view_mode == 0) {
+        // The HQ frame is already the FINAL rendered picture (crop, rotation, distortion, grade
+        // and grain included) -- it *is* the exported file.  So sample it with the plain quad
+        // coordinate, exactly how a viewer maps a finished picture onto the window.  Using
+        // pre_dist_uv here (the shader's own image-space coordinate) re-applies the crop: with
+        // a crop rect of h = 0.89 that uv only spans 0.11..1.0 of the texture, so the picture
+        // stretches vertically by 1/0.89 = 12.5% the instant the HQ frame replaces the live
+        // one -- the "画布静止时画面垂直拉伸" report.
+        vec2 hq_uv = vec2(img_uv.x, 1.0 - img_uv.y);
+        // level 0 explicitly: the HQ texture has no mip chain, and an implicit LOD (or a
+        // bilinear fetch at a half-texel phase) would low-pass the grain a second time.
+        fragColor = vec4(textureLod(u_hq_tex, clamp(hq_uv, vec2(0.0), vec2(1.0)), 0.0).rgb, 1.0);
+        return;
+    }
+
     vec3 orig_rgb = textureGrad(u_image, sample_uv, d_sample_dx, d_sample_dy).rgb;
 
     // The Before side reads the file, not the shaped preview: no exposure, no white balance, no
@@ -1638,6 +1659,21 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # Texture state
         self._image_tex_id = None
         self._lut_tex_id = None
+        # High-quality preview (viewport-only, never part of params / export):
+        # a full-resolution offscreen frame resampled down to the widget, uploaded as a plain
+        # display-code texture.  _hq_key is the view geometry it was built for; while the view
+        # is moving we fall back to the live shader so panning stays responsive.
+        self._hq_tex_id = None
+        self._hq_frame = None
+        self._hq_key = None
+        self._hq_dirty = False
+        self._hq_enabled = False
+        self._hq_resample = "area"
+        self._hq_divisor = 1
+        self._hq_busy = False
+        self._hq_timer = QTimer(self)
+        self._hq_timer.setSingleShot(True)
+        self._hq_timer.timeout.connect(self._rebuild_hq_preview)
         # Separable-Gaussian halation chain (ui/gl_halation.py). Created lazily on the first
         # render that needs it, so no GL objects exist before a context is current.
         self._halation_chain = None
@@ -1863,6 +1899,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
             except Exception:
                 pass
             self.vbo = None
+
+        hq_tex = getattr(self, "_hq_tex_id", None)
+        if hq_tex:
+            try:
+                GL.glDeleteTextures([hq_tex])
+            except Exception:
+                pass
+        # The context may be brand new: force a re-upload rather than sampling a dead id.
+        self._hq_tex_id = None
+        self._hq_frame = None
+        self._hq_key = None
 
     def initializeGL(self):
         self._release_gl_resources()
@@ -2196,6 +2243,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_split_x", self.params.get("split_x", 0.5))
         u_1i("u_view_mode", self.params.get("view_mode", 0))
         u_2f("u_viewport_size", float(max(1, self.width())), float(max(1, self.height())))
+        # HQ frame is viewport-only; while it is stale we keep drawing the live shader so
+        # zoom/pan never stalls, and rebuild once the view settles.
+        _hq_on = self.hq_preview_active()
+        u_1i("u_hq_preview", 1 if _hq_on else 0)
+        self._bind_hq_texture(u_1i)
+        if self._hq_enabled and not _hq_on:
+            self.schedule_hq_preview()
 
         # --- separable-Gaussian halo / scatter, the same chain the export uses -------
         # Without this the viewport keeps the 16-tap approximation while the export uses a
@@ -2399,6 +2453,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         """Upload source image array (float32 [H, W, 3]) to 2D texture, or clear if None."""
         self._is_placeholder = is_placeholder
         if float_img_rgb is None:
+            self._float_img_rgb = None
             self._image_width = 0
             self._image_height = 0
             self._master_width = 0
@@ -2420,6 +2475,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             return
 
         self._loaded_photo_id = photo_id
+        self._float_img_rgb = float_img_rgb
+        self._hq_key = None
+        self._hq_dirty = True
         try:
             h, w = float_img_rgb.shape[:2]
             self._image_width = w
@@ -2521,6 +2579,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         """Upload 3D LUT array (float32 [N, N, N, 3]) to 3D texture."""
         self._lut_baked = self._lookup_lut_baked(lut_array_3d)
         self._pending_lut = lut_array_3d
+        self.invalidate_hq_preview()
         self.update()
 
     set_lut = set_3d_lut
@@ -2528,6 +2587,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def set_grain_bundle(self, bundle):
         """Hand over the two density tables. ``None`` falls back to the single RGB table."""
         self._grain_cubes.set_bundle(bundle)
+        self.invalidate_hq_preview()
         self.update()
 
     def set_ffchain_bundle(self, bundle):
@@ -2537,6 +2597,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         在 net 上加零均值涨落，``ffchain_print`` 再走相纸。见 docs §15。
         """
         self._ffchain.set_bundle(bundle)
+        self.invalidate_hq_preview()
         self.update()
 
     def _do_upload_lut(self, lut_array_3d):
@@ -2637,8 +2698,209 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def update_params(self, **kwargs):
         """Update shader uniforms instantly and redraw."""
         self.params.update(kwargs)
+        self.invalidate_hq_preview()
         self.update()
 
+    # -------------------------------------------------------------
+    # High-quality (export-matched) preview.  Viewport-only state:
+    # nothing here is written into params, so exports and .sdc files
+    # never see it.  See scratch/_allgrain_fit_check.py for the
+    # measurement that motivated this mode.
+    # -------------------------------------------------------------
+    HQ_TEX_UNIT = 3
+
+    def set_hq_preview(self, enabled, resample="cubic", divisor=1):
+        enabled = bool(enabled)
+        if resample not in ("area", "cubic", "lanczos"):
+            resample = "cubic"
+        divisor = max(1, int(divisor))
+        changed = (enabled, resample, divisor) != (
+            self._hq_enabled, self._hq_resample, self._hq_divisor)
+        self._hq_enabled, self._hq_resample, self._hq_divisor = enabled, resample, divisor
+        if changed:
+            self._hq_key = None
+            self._hq_dirty = True
+        if enabled:
+            self.schedule_hq_preview(delay=0)
+        else:
+            self._hq_timer.stop()
+        self.update()
+        return enabled
+
+    def _hq_fit_view(self):
+        """True only when the photo sits fitted to the window (no zoom, no pan).
+
+        The mode exists for one case: at fit the live shader samples the grain lattice on the
+        screen lattice, so a 5208 px master is reviewed through an ~880 px window and the grain
+        is generated ~6x coarser than the file has it.  Zoomed in, the live shader already
+        samples close to 1:1 -- the HQ frame adds nothing there, and upscaling a fit-sized frame
+        with NEAREST only makes the grain look blocky.  So the multi-second render is spent on
+        the fit view only.
+        """
+        if int(self.params.get("view_mode", 0)) != 0:
+            return False
+        if getattr(self, "is_crop_editing", False):
+            return False
+        return (abs(float(self.zoom) - 1.0) <= 1.5e-3
+                and abs(float(self.pan_x)) <= 0.75e-3
+                and abs(float(self.pan_y)) <= 0.75e-3)
+
+    def schedule_hq_preview(self, delay=220, restart=False):
+        if not self._hq_enabled or self._hq_busy:
+            return
+        # Never queue a rebuild the shader would not display: leaving the fit view is
+        # exactly when the user wants the canvas to stay responsive.
+        if not self._hq_fit_view():
+            return
+        self._hq_dirty = True
+        # A rebuild blocks for seconds at full resolution, so a parameter change has to push
+        # the deadline back: without `restart` the timer set by the first slider tick fires
+        # 220 ms later, in the middle of the drag.  The paint path must NOT restart it (it
+        # runs 20+ times a second and would starve the timer forever).
+        if restart:
+            self._hq_timer.stop()
+        if not self._hq_timer.isActive():
+            self._hq_timer.start(max(0, int(delay)))
+
+    def invalidate_hq_preview(self):
+        self._hq_rev = getattr(self, "_hq_rev", 0) + 1
+        self.schedule_hq_preview(restart=True)
+
+    def _hq_param_fingerprint(self):
+        out = []
+        for k in sorted(self.params):
+            v = self.params[k]
+            if isinstance(v, (int, float, bool, str, type(None))):
+                out.append((k, round(v, 6) if isinstance(v, float) else v))
+            elif isinstance(v, (dict, list, tuple)):
+                out.append((k, repr(v)[:512]))
+        return hash(tuple(out))
+
+    def _hq_view_key(self):
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        return (round(float(self.zoom), 5), round(float(self.pan_x), 5),
+                round(float(self.pan_y), 5), int(self.width()), int(self.height()),
+                round(dpr, 3), int(self.params.get("view_mode", 0)),
+                getattr(self, "_hq_rev", 0), self._hq_param_fingerprint())
+
+    def hq_preview_active(self):
+        return (self._hq_enabled and self._hq_tex_id is not None
+                and self._hq_frame is not None and not self._hq_dirty
+                and self._hq_fit_view()
+                and self._hq_key == self._hq_view_key())
+
+    def _bind_hq_texture(self, u_1i):
+        GL.glActiveTexture(0x84C0 + self.HQ_TEX_UNIT)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._hq_tex_id or 0)
+        GL.glActiveTexture(0x84C0)
+        u_1i("u_hq_tex", self.HQ_TEX_UNIT)
+
+    def _ensure_hq_texture(self, rgb8):
+        """Upload an 8-bit display-code frame; the context must already be current."""
+        data = np.ascontiguousarray(rgb8, dtype=np.uint8)
+        h, w = data.shape[:2]
+        if self._hq_tex_id:
+            GL.glDeleteTextures([self._hq_tex_id])
+            self._hq_tex_id = None
+        self._hq_tex_id = GL.glGenTextures(1)
+        GL.glActiveTexture(0x84C0 + self.HQ_TEX_UNIT)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._hq_tex_id)
+        # NEAREST keeps the resampled grain intact at ~1 texel per screen pixel; LINEAR
+        # averaged neighbours at any sub-texel phase and cost ~30% of the noise sigma.
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB8, w, h, 0,
+                        GL.GL_RGB, GL.GL_UNSIGNED_BYTE, data)
+        GL.glActiveTexture(0x84C0)
+        self._hq_frame = data
+
+    def _rebuild_hq_preview(self):
+        """Render at the export lattice, then downscale that finished picture to the widget."""
+        if not self._hq_enabled or self._hq_busy:
+            return
+        if not self._hq_fit_view():
+            return
+        if not getattr(self, "_has_image", False) or not getattr(self, "_gl_initialized", False):
+            return
+        src = getattr(self, "_float_img_rgb", None)
+        if src is None or not self.isValid():
+            return
+        key = self._hq_view_key()
+        self._hq_busy = True
+        try:
+            import cv2
+            mw = max(1, int(getattr(self, "_master_width", 0) or self._image_width))
+            mh = max(1, int(getattr(self, "_master_height", 0) or self._image_height))
+            # The offscreen render fills the whole target with the CROPPED picture (the shader
+            # maps u_crop_rect onto the full frame), exactly like the export does.  So the
+            # target must carry the cropped aspect, not the master aspect -- otherwise the
+            # frame is a 1.5:1 master squeezed into a cropped 1.69:1 quad and the picture
+            # visibly stretches the moment the HQ frame replaces the live one.
+            crop = self.params.get("crop", {})
+            cw_f = ch_f = 1.0
+            if isinstance(crop, dict) and crop.get("enabled", False):
+                cw_f = min(1.0, max(0.05, float(crop.get("w", 1.0) or 1.0)))
+                ch_f = min(1.0, max(0.05, float(crop.get("h", 1.0) or 1.0)))
+            rot = int(crop.get("rot_90", 0)) % 360 if isinstance(crop, dict) else 0
+            if rot in (90, 270):
+                cw_f, ch_f = ch_f, cw_f
+            # Pixel pitch stays the export's: the long edge of the cropped area is kept at the
+            # master scale, so the grain lattice is the one the file would be written with.
+            base_w, base_h = max(64, int(round(mw * cw_f))), max(64, int(round(mh * ch_f)))
+            div = max(1, int(self._hq_divisor))
+            if base_w >= base_h:
+                tw = max(64, base_w // div)
+                th = max(64, int(round(tw * base_h / float(base_w))))
+            else:
+                th = max(64, base_h // div)
+                tw = max(64, int(round(th * base_w / float(base_h))))
+            # The grain lattice is defined by textureSize(u_image), so feeding an upscaled
+            # source gives the export-sized lattice without decoding the RAW again.  The
+            # interpolated base detail is downsampled straight back to a few hundred pixels,
+            # so it costs no visible sharpness.
+            if (tw, th) != (src.shape[1], src.shape[0]):
+                full = cv2.resize(np.asarray(src, np.float32), (tw, th),
+                                  interpolation=cv2.INTER_LINEAR)
+            else:
+                full = np.asarray(src, np.float32)
+            params = dict(self.params)
+            params.pop("view_mode", None)       # never bake a compare view into the frame
+            params.pop("split_x", None)
+            arr = self.render_offscreen(tw, th, float_img_rgb=full,
+                                        params_override=params, bit_depth=8)
+            if arr is None:
+                return
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            vw = max(1, int(round(self.width() * dpr)))
+            vh = max(1, int(round(self.height() * dpr)))
+            # The HQ texture covers the PHOTO QUAD, not the whole viewport.  Resampling to
+            # the viewport would make the shader downscale it a second time when mapping
+            # pre_dist_uv onto the quad, quietly low-passing the grain we just preserved.
+            left, right, top, bottom = self.get_image_bounds_norm()
+            pw = max(1.0, (right - left) * vw)
+            ph = max(1.0, (bottom - top) * vh)
+            hw = max(1, min(tw, int(round(pw))))
+            # Height from the quad's own aspect, not from ph: a couple of pixels of rounding
+            # here is a couple of pixels of anisotropy in the grain.
+            hh = max(1, min(th, int(round(hw * ph / pw))))
+            algo = {"area": cv2.INTER_AREA, "cubic": cv2.INTER_CUBIC,
+                    "lanczos": cv2.INTER_LANCZOS4}[self._hq_resample]
+            small = cv2.resize(arr, (hw, hh), interpolation=algo)
+            self.makeCurrent()
+            try:
+                self._ensure_hq_texture(small)
+            finally:
+                self.doneCurrent()
+            self._hq_key = key
+            self._hq_dirty = False
+        except Exception as e:                                   # noqa: BLE001 - UI only
+            print("[DarkroomGLCanvas] HQ preview rebuild failed:", e)
+        finally:
+            self._hq_busy = False
+            self.update()
 
     # -------------------------------------------------------------
     # Crop Mode Methods
@@ -3095,6 +3357,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         this is the one place that keeps the two in lockstep.
         """
         super().update(*args)
+        if getattr(self, "_hq_enabled", False) and not getattr(self, "_hq_busy", False):
+            if not self.hq_preview_active():
+                self.schedule_hq_preview()
         overlay = getattr(self, "crop_overlay", None)
         if overlay is not None and overlay.isVisible():
             overlay.update()
@@ -3689,6 +3954,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_split_x", split_x)
             u_1i("u_view_mode", view_mode)
             u_2f("u_viewport_size", float(target_w), float(target_h))
+            # Never recurse into the HQ display path: an export (and the HQ rebuild itself)
+            # must always develop the picture from scratch.
+            u_1i("u_hq_preview", 0)
+            u_1i("u_hq_tex", self.HQ_TEX_UNIT)
 
             # --- separable-Gaussian halation (ui/gl_halation.py, plan P2) -------------
             # Runs before the main draw and hands its result to the shader as the scene

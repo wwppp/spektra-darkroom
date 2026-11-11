@@ -583,6 +583,13 @@ class PreferencesDialog(QDialog):
         self.chk_hq_preview.setChecked(True)
         l_ren.addWidget(self.chk_hq_preview)
 
+        # 「高质量预览」开关从视图菜单挪到这里：它是一次几秒的重建，属于渲染策略，
+        # 不该混在视图菜单的缩放/对比项里；默认关，打开才有代价。
+        self.chk_hq_export_preview = QCheckBox("高质量预览（按导出分辨率渲染）")
+        self.chk_hq_export_preview.setChecked(False)
+        self.chk_hq_export_preview.setToolTip("开启后性能会下降，但预览会更准")
+        l_ren.addWidget(self.chk_hq_export_preview)
+
         r_cs = QHBoxLayout()
         lbl_cs = QLabel("工作色彩空间:")
         lbl_cs.setFixedWidth(100)
@@ -859,6 +866,7 @@ class PreferencesDialog(QDialog):
         self.combo_preview_res.setCurrentIndex(idx_res if idx_res >= 0 else 1)
 
         self.chk_hq_preview.setChecked(prefs.get("hq_preview", True))
+        self.chk_hq_export_preview.setChecked(bool(prefs.get("hq_preview_export", False)))
         self.chk_restore_last_files.setChecked(prefs.get("restore_last_session", prefs.get("restore_last_files", True)))
         self.chk_restore_geo.setChecked(prefs.get("restore_window_state", True))
 
@@ -1121,6 +1129,7 @@ class PreferencesDialog(QDialog):
         prefs["hardware_acceleration"] = (hw_mode != "off")
         prefs["preview_max_edge"] = int(self.combo_preview_res.currentData())
         prefs["hq_preview"] = self.chk_hq_preview.isChecked()
+        prefs["hq_preview_export"] = self.chk_hq_export_preview.isChecked()
         restore_val = self.chk_restore_last_files.isChecked()
         prefs["restore_last_session"] = restore_val
         prefs["restore_last_files"] = restore_val

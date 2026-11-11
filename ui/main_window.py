@@ -2271,6 +2271,7 @@ class DarkroomMainWindow(QMainWindow):
         self._init_menu_and_actions()
         self._wire_canvas_events()
         self._restore_saved_state()
+        self._apply_hq_preview_pref()
         self._on_theme_changed()
         theme_manager.themeChanged.connect(self._on_theme_changed)
 
@@ -5150,6 +5151,10 @@ class DarkroomMainWindow(QMainWindow):
         self.act_compare.setIcon(get_icon("compare.png"))
         self.act_compare.triggered.connect(self.toggle_split_view)
         view_menu.addAction(self.act_compare)
+
+        # Export-matched preview lives in 首选项 → 图像与渲染 (a multi-second rebuild is a
+        # render policy, not a view action).  Only the resample kernel is pinned here.
+        self._hq_resample = self._HQ_RESAMPLE
 
         self.act_fit_win = QAction("适应窗口", self)
         self.act_fit_win.setIcon(get_icon("fit_window.png"))
@@ -9432,6 +9437,34 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.set_view_mode(prev_mode)
             self.restore_default_status()
 
+    # Resample kernel for the HQ frame is pinned to cubic (the Windows-photos-like one);
+    # the option was scaffolding while the mode was being measured, not a user choice.
+    _HQ_RESAMPLE = "cubic"
+
+    def _apply_hq_preview_pref(self, *, announce=False):
+        """Push 首选项 → 高质量预览 into the canvas.
+
+        The switch used to be a checkable View-menu action; it now only lives in the
+        preferences dialog, so both the startup path and the dialog's OK path read the
+        pref instead of an action's checked state.  Off by default: the rebuild costs
+        seconds at full resolution.
+        """
+        try:
+            want = bool(config_manager.get_preference("hq_preview_export", False))
+        except Exception:
+            want = False
+        if not hasattr(self, "canvas"):
+            return want
+        self.canvas.set_hq_preview(want, resample=self._hq_resample)
+        if announce:
+            if not want:
+                self.set_app_status("高质量预览：关", timeout_ms=2200)
+            elif self.canvas._hq_fit_view():
+                self.set_app_status("高质量预览：开 · 按导出分辨率渲染后缩小", timeout_ms=2200)
+            else:
+                self.set_app_status("高质量预览：开 · 回到「适应窗口」才生效", timeout_ms=2600)
+        return want
+
     def toggle_split_view(self):
         if not self._is_photo_edited():
             self.set_app_status("原生未调色底片无前后对比", timeout_ms=1500)
@@ -13163,6 +13196,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         old_res = config_manager.get_preferences().get("preview_max_edge", 2048)
         dlg = PreferencesDialog(parent=self)
         if dlg.exec():
+            self._apply_hq_preview_pref(announce=True)
             new_res = config_manager.get_preferences().get("preview_max_edge", 2048)
             if old_res != new_res:
                 for p in self.photos:
