@@ -13,6 +13,7 @@ from PySide6.QtOpenGL import (
 )
 from core.path_utils import get_resource_dir
 from core import config_manager
+from core import proof
 from core.darkroom_math import scene_gain
 from core.halation_model import SPATIAL_SCALE_ENABLED
 from OpenGL import GL
@@ -1687,6 +1688,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
     requestCompareStart = Signal()
     requestCompareEnd = Signal()
     importRequested = Signal()
+    proofChanged = Signal(object)          # proof.ProofSettings
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1746,6 +1748,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._display_rescan_timer.timeout.connect(self._rescan_display_profile)
         self._apply_display_profile(notify=False)
         self._display_rescan_timer.start()
+        # P1 校样：只影响显示端，不进 LUT key，所以切换校样 = 重绘一帧，零重建。
+        self._proof = proof.ProofSettings(
+            on=bool(config_manager.get_preference("proof_on", False)),
+            target=str(config_manager.get_preference("proof_target", "sRGB") or "sRGB"),
+            warn=bool(config_manager.get_preference("proof_warn", False)),
+        )
+        self._ffchain.set_proof(self._proof)
         self._gl_initialized = False
 
         # Long-press on canvas to preview original (Before)
@@ -2751,6 +2760,43 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if p.identity:
             return "当前显示器 profile 即 sRGB，无需转换"
         return f"已接管：{p.label}"
+
+    # --- P1 校样 ------------------------------------------------------------------------
+    def proof_settings(self) -> "proof.ProofSettings":
+        return self._proof
+
+    def set_proof(self, on=None, target=None, warn=None, persist: bool = True):
+        """改校样状态（None = 保持原值）。返回新的 ``ProofSettings``。
+
+        校样不进 LUT key（LUT 仍烘 sRGB），所以切换校样不需要重建任何表；但 HQ 纹理里
+        烘的是"上屏后的像素"，和 P0 换 profile 一样必须作废 —— 同样不能当场 release。
+        """
+        cur = self._proof
+        new = proof.ProofSettings(
+            on=cur.on if on is None else bool(on),
+            target=cur.target if target is None else proof.resolve_target(target),
+            warn=cur.warn if warn is None else bool(warn),
+        )
+        changed = new != cur
+        self._proof = new
+        self._ffchain.set_proof(new)
+        if persist:
+            config_manager.set_preference("proof_on", new.on)
+            config_manager.set_preference("proof_target", new.target)
+            config_manager.set_preference("proof_warn", new.warn)
+        if changed:
+            QTimer.singleShot(0, self.invalidate_hq_preview)
+            self.update()
+            self.proofChanged.emit(new)
+        return new
+
+    def proof_status(self) -> str:
+        """菜单状态行 / 对话框用的一句话。"""
+        p = self._proof
+        if not p.on:
+            return "校样关闭"
+        tail = " · 色域警告" if p.warn else ""
+        return f"校样 · {p.canonical_target()}{tail}"
 
     def _do_upload_lut(self, lut_array_3d):
         size = lut_array_3d.shape[0]

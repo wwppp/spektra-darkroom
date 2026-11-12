@@ -29,6 +29,8 @@ try:                                            # 无 GL 上下文时（纯导�
 except Exception:                               # noqa: BLE001
     GL = None
 
+from core import proof
+
 # --- 常量（与 chain_min / bake 脚本同值，ui/ 不能依赖 scratch/ 所以复制）-----------------
 # Rec.2020 亮度权重，chain_min.LUMA_2020
 LUMA_2020 = (0.2627002, 0.6779981, 0.0593017)
@@ -74,6 +76,11 @@ uniform int       u_ff_display_managed;   // 1 = 按本机显示器 profile 输�
 uniform mat3      u_ff_srgb_to_display;   // 线性 sRGB → 显示器线性（Before / 占位图用）
 uniform int       u_ff_display_trc;       // 0 = sRGB 分段，1 = 纯 gamma，2 = 查表
 uniform float     u_ff_display_gamma;     // trc==1 时用
+// 校样（P1）。on=0 时下面几个全部不参与运算，尾段与只接 P0 时逐字节相同。
+uniform int       u_proof_on;             // 1 = 正在校样
+uniform int       u_proof_warn;           // 1 = 叠色域警告
+uniform mat3      u_proof_matrix;         // 线性 P3 → 目标线性
+uniform float     u_proof_eps;            // 越界容差（1/512）
 // 表格型 TRC 不再支持：Intel 驱动在"点式链 + 动态索引 uniform 数组"这一组合上
 // 直接段错误（同一个 shader 在无点式链时又能跑）。实测校准类 profile 只占极少数，
 // 遇到就降级为不接管（解析式覆盖 sRGB 分段与纯 gamma，已经是绝大多数显示器）。
@@ -335,17 +342,36 @@ vec3 ffchain_print(vec3 net) {
     vec3 lin_p3 = ff_linear3(u_ff_paper, pact, 33.0).rgb;
     if (u_ff_debug == 7) return clamp(lin_p3, 0.0, 1.0);
 
-    // 5. 线性 P3 → (显示器线性) → 编码。
+    // 4.5 校样（P1）：线性 P3 → 目标线性 → 相对比色 clip。
+    // 回程矩阵（目标线性 → P3）已经在 CPU 侧折进了 u_ff_p3_to_srgb，所以这里
+    // 只多一个 mat3 和一次 clamp —— shader 已经贴着 Intel 驱动的上限（见 P0 的教训），
+    // 能少一个 mat3 就少一个。
+    vec3 src = max(lin_p3, vec3(0.0));
+    int oog = 0;
+    if (u_proof_on == 1) {
+        vec3 t = u_proof_matrix * src;
+        oog = (any(lessThan(t, vec3(-u_proof_eps)))
+               || any(greaterThan(t, vec3(1.0 + u_proof_eps)))) ? 1 : 0;
+        src = clamp(t, 0.0, 1.0);
+    }
+
+    // 5. (校样后 P3) → (显示器线性) → 编码。
     // 接管显示端时 u_ff_p3_to_srgb 已经在 CPU 侧换成了「P3 → 显示器」的合成矩阵，
     // 所以这里与接入前**同一段代码**，只多一个 gamma 分支。刻意不在这里调函数：
     // 点式链的 shader 已经很大，多一次内联会让 Intel 驱动出非法 ISA（draw 段错误）。
-    vec3 lin_out = u_ff_p3_to_srgb * max(lin_p3, vec3(0.0));
+    vec3 lin_out = u_ff_p3_to_srgb * src;
     vec3 v = clamp(lin_out, 0.0, 1.0);
+    vec3 outc;
     if (u_ff_display_managed == 1 && u_ff_display_trc == 1) {
-        return pow(v, vec3(1.0 / max(u_ff_display_gamma, 1e-3)));
+        outc = pow(v, vec3(1.0 / max(u_ff_display_gamma, 1e-3)));
+    } else {
+        outc = mix(v * 12.92, 1.055 * pow(v, vec3(1.0 / 2.4)) - 0.055,
+                   step(vec3(0.0031308), v));
     }
-    return mix(v * 12.92, 1.055 * pow(v, vec3(1.0 / 2.4)) - 0.055,
-               step(vec3(0.0031308), v));
+    if (u_proof_warn == 1 && oog == 1) {
+        outc = mix(outc, vec3(1.0, 0.0, 1.0), 0.5);
+    }
+    return outc;
 }
 
 // 显示端编码（只给「线性 sRGB 入口」用：Before 面板 / 占位图 / 老 LUT 出口）。
@@ -412,6 +438,26 @@ class GLFFChain:
         self._display_key = None
         # 每帧 bind 都要判，所以只读一次环境变量，别在热路径里 os.environ.get
         self._p0_debug = bool(os.environ.get("SPECTRA_P0_DEBUG"))
+        # 校样（P1）。只作用于显示端：离屏导出永远不带它。
+        self.proof = proof.ProofSettings()
+        self._proof_key = None
+
+    def set_proof(self, settings):
+        """切换校样设置。下一次 bind 生效，不需要重建 LUT（校样不进 LUT key）。"""
+        self.proof = settings if settings is not None else proof.ProofSettings()
+        self._proof_key = None
+
+    def _proof_state(self):
+        """校样状态归一：``enabled`` + 上传用的矩阵。缓存到设置变化为止。"""
+        if self._proof_key is None:
+            p = self.proof
+            on = bool(p is not None and p.on)
+            self._proof_key = {
+                "enabled": on,
+                "warn": bool(on and p.warn),
+                "matrix": proof.proof_matrix(p) if on else np.eye(3, dtype=np.float64),
+            }
+        return self._proof_key
 
     def set_display(self, profile):
         """切换显示 profile；None 会让尾段退回 sRGB。下一次 upload/bind 生效。"""
@@ -659,23 +705,47 @@ class GLFFChain:
             GL.glUniform1i(loc, int(v))
 
     def _bind_display(self, program, display):
-        """上传显示端 uniform。identity / 关闭 / 离屏导出时 managed=0（走旧尾段）。"""
+        """上传显示端 + 校样 uniform。
+
+        三道闸（identity / 首选项关 / 离屏导出）任一满足就 managed=0 且校样关闭，
+        尾段与接入前逐字节相同。
+
+        校样为什么要在这里绑而不是单开一个函数：它和显示端共用同一个
+        ``u_ff_p3_to_srgb``（回程矩阵被折进去了），两者必须一起决定，分开写必然漏。
+        """
         prof = self.display
         st = self._display_key
-        if display and prof is not None and isinstance(st, dict) and not prof.identity:
+        managed = (display and prof is not None and isinstance(st, dict)
+                   and not prof.identity)
+        ps = self._proof_state()
+        # 离屏导出绝不能带校样：校样是"看"的东西，导出目标是用户在导出对话框里选的。
+        proof_on = bool(display and ps["enabled"])
+
+        # 尾段矩阵：显示器变换（或老路的 P3→sRGB）再乘上「目标 → P3」的回程。
+        base = st["matrix"] if managed else np.asarray(M_P3_TO_SRGB, np.float64)
+        final = proof.compose_display(base, self.proof) if proof_on else base
+        self._mat3(program, "u_ff_p3_to_srgb", final)
+
+        if managed:
             if self._p0_debug:
                 print("[P0] managed=1 trc=%d mat=%s" % (st["trc"], st["matrix"][0]), flush=True)
             self._int(program, "u_ff_display_managed", 1)
-            # 合成矩阵直接覆盖 p3_to_srgb：点式链尾段因此不需要第二个 mat3
-            self._mat3(program, "u_ff_p3_to_srgb", st["matrix"])
             self._mat3(program, "u_ff_srgb_to_display", st["matrix_srgb"])
             self._int(program, "u_ff_display_trc", st["trc"])
             if st["trc"] == 1:
                 self._float(program, "u_ff_display_gamma", st["gamma"])
         else:
             if self._p0_debug:
-                print("[P0] managed=0 display=%s st=%s identity=%s" % (display, type(st), getattr(prof, "identity", None)), flush=True)
+                print("[P0] managed=0 display=%s st=%s identity=%s"
+                      % (display, type(st), getattr(prof, "identity", None)), flush=True)
             self._int(program, "u_ff_display_managed", 0)
+
+        self._int(program, "u_proof_on", 1 if proof_on else 0)
+        self._int(program, "u_proof_warn",
+                  1 if (proof_on and ps["warn"]) else 0)
+        self._mat3(program, "u_proof_matrix",
+                   ps["matrix"] if proof_on else np.eye(3, dtype=np.float32))
+        self._float(program, "u_proof_eps", proof.GAMUT_EPS)
 
     def bind(self, program, unit_base=8, dir_total=1.0, display=True):
         """Bind everything this stage needs. Returns True when the shader should branch in.
@@ -700,9 +770,9 @@ class GLFFChain:
         self._vec3(program, "u_ff_luma", LUMA_2020)
         self._mat3(program, "u_ff_pp_to_2020", M_PP_TO_2020)
         self._mat3(program, "u_ff_domain", M_2020_TO_DOMAIN)
-        self._mat3(program, "u_ff_p3_to_srgb", M_P3_TO_SRGB)
-        # P0 显示端：identity（=本机 profile 就是 sRGB，或读不到 profile）时 managed=0，
-        # shader 尾段与接入前完全同路，逐字节不变。
+        # P0 显示端 + P1 校样：u_ff_p3_to_srgb 由 _bind_display 统一决定
+        # （identity 时 = M_P3_TO_SRGB，接管显示端时 = M_display，开着校样时再乘回程矩阵）。
+        # 这里不要再单独上传，否则会被一个更早的常量悄悄覆盖成"没校样"。
         self._bind_display(program, display)
         self._vec3(program, "u_ff_dmin", s["dmin"])
         self._vec3(program, "u_ff_rng", s["rng"])

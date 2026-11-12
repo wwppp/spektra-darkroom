@@ -5237,6 +5237,33 @@ class DarkroomMainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
+        # 校样（P1）。Ctrl+Y 保留给「重做」（Windows 用户肌肉记忆），
+        # 校样用 Ctrl+Shift+Y，色域警告用 Ctrl+Alt+Y。
+        self.act_proof = QAction("校样", self)
+        self.act_proof.setCheckable(True)
+        self.act_proof.setShortcut(QKeySequence("Ctrl+Shift+Y"))
+        self.act_proof.setStatusTip("按选定的输出色彩空间模拟显示")
+        self.act_proof.toggled.connect(self._on_proof_toggled)
+        view_menu.addAction(self.act_proof)
+        self.addAction(self.act_proof)
+
+        self.act_proof_warn = QAction("色域警告", self)
+        self.act_proof_warn.setCheckable(True)
+        self.act_proof_warn.setShortcut(QKeySequence("Ctrl+Alt+Y"))
+        self.act_proof_warn.setStatusTip("把超出校样色域的像素叠成品红")
+        self.act_proof_warn.toggled.connect(self._on_proof_warn_toggled)
+        view_menu.addAction(self.act_proof_warn)
+        self.addAction(self.act_proof_warn)
+
+        self.act_proof_setup = QAction("校样设置…", self)
+        self.act_proof_setup.triggered.connect(self.open_proof_setup)
+        view_menu.addAction(self.act_proof_setup)
+
+        # 打开时按已保存的偏好同步菜单勾选状态（此时 canvas 已经建好）
+        self._sync_proof_actions()
+
+        view_menu.addSeparator()
+
         self.menu_star_filter = view_menu.addMenu("星标筛选")
         self.menu_star_filter.setStyleSheet(get_darkroom_menu_style())
         self.star_filter_actions = {}
@@ -9511,6 +9538,81 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.canvas.set_viewport_color_management(want)
         return want
 
+    # --- P1 校样 ------------------------------------------------------------------------
+    def _sync_proof_actions(self):
+        """把 canvas 的校样状态推回菜单勾选（不要触发 toggled 再走一圈）。"""
+        try:
+            st = self.canvas.proof_settings()
+        except Exception:  # noqa: BLE001
+            return
+        for act, val in ((getattr(self, "act_proof", None), st.on),
+                         (getattr(self, "act_proof_warn", None), st.warn)):
+            if act is None:
+                continue
+            act.blockSignals(True)
+            act.setChecked(bool(val))
+            act.blockSignals(False)
+
+    def _on_proof_toggled(self, on: bool):
+        st = self.canvas.set_proof(on=bool(on))
+        if on:
+            self._sync_export_colorspace(st)
+            self.set_app_status(f"校样：{st.canonical_target()}", timeout_ms=1500)
+        else:
+            self.set_app_status("校样已关闭", timeout_ms=1200)
+
+    def _on_proof_warn_toggled(self, on: bool):
+        self.canvas.set_proof(warn=bool(on))
+
+    def open_proof_setup(self):
+        from ui.proof_dialog import ProofSetupDialog
+
+        st = self.canvas.proof_settings()
+        dlg = ProofSetupDialog(st, parent=self)
+        new = dlg.exec()
+        if new is None:
+            return
+        self.canvas.set_proof(on=new.on, target=new.target, warn=new.warn)
+        self._sync_proof_actions()
+        self._sync_export_colorspace(new)
+
+    def _sync_export_colorspace(self, settings):
+        """校样 → 导出联动（P1 的「所见即所得」闭环）。
+
+        只在**校样开着**时写回最近一次导出设置：用户按 Ctrl+Y 是想「按这个空间交付」，
+        导出默认跟着走才不误导。校样关掉不动导出设置 —— 关校样只是停止模拟。
+        """
+        if not settings.on:
+            return
+        try:
+            cfg = dict(config_manager.get_last_export_settings() or {})
+            if cfg.get("colorspace") != settings.canonical_target():
+                # save_* 是 merge 语义，只写这一个键，别把其它导出设置覆盖掉
+                config_manager.save_last_export_settings(
+                    {"colorspace": settings.canonical_target()})
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _sync_proof_from_export(self, colorspace):
+        """导出 → 校样（双向联动的另一半）。
+
+        校样开着 = 用户正在按某个空间交付；导出换了色彩空间就该同步，
+        否则回到「预览一个样、文件另一个样」——这正是 P1 要消灭的问题。
+        校样关掉时不动它（关校样只是停止模拟，不代表要改目标）。
+        """
+        if not colorspace or not hasattr(self, "canvas"):
+            return
+        try:
+            st = self.canvas.proof_settings()
+        except Exception:  # noqa: BLE001
+            return
+        if not st.on:
+            return
+        new = self.canvas.set_proof(target=colorspace)
+        if new.canonical_target() != st.canonical_target():
+            self._sync_proof_actions()
+            self.set_app_status(f"校样跟随导出：{new.canonical_target()}", timeout_ms=1800)
+
     def toggle_split_view(self):
         if not self._is_photo_edited():
             self.set_app_status("原生未调色底片无前后对比", timeout_ms=1500)
@@ -12765,6 +12867,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         self._seed_export_size_dialog(dlg, self._current_photo_path)
         if dlg.exec():
             cfg = dlg.get_export_config()
+            self._sync_proof_from_export(cfg.get("colorspace"))
             self._do_export_single(cfg)
 
     def _resolve_export_target(self, out_path, src_path=None, used=None, allow_overwrite=True):
@@ -13005,6 +13108,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             return
 
         cfg = dialog.get_export_config()
+        self._sync_proof_from_export(cfg.get("colorspace"))
         use_source_dir = str(cfg.get("path_mode", "custom")) == "source"
         out_dir = cfg.get("path", "").strip()
         if not use_source_dir:
