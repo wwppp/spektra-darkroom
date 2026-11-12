@@ -590,17 +590,21 @@ class PreferencesDialog(QDialog):
         self.chk_hq_export_preview.setToolTip("开启后性能会下降，但预览会更准")
         l_ren.addWidget(self.chk_hq_export_preview)
 
-        r_cs = QHBoxLayout()
-        lbl_cs = QLabel("工作色彩空间:")
-        lbl_cs.setFixedWidth(100)
-        r_cs.addWidget(lbl_cs)
-        self.combo_default_cs = QComboBox()
-        self.combo_default_cs.setFixedWidth(180)
-        setup_solid_combobox(self.combo_default_cs)
-        self.combo_default_cs.addItems(["sRGB", "Display P3", "Adobe RGB"])
-        r_cs.addWidget(self.combo_default_cs)
-        r_cs.addStretch(1)
-        l_ren.addLayout(r_cs)
+        # 「工作色彩空间」下拉框已删：它没有任何读写接线，而且我们本来就不存在
+        # "可切换的工作空间"（内部固定 ProPhoto → Rec.2020，出口固定线性 P3）。
+        # 真正可切的是**显示端**用哪个 profile —— 所以这里换成一个真开关。
+        self.chk_viewport_cm = QCheckBox("视口色彩管理（按显示器 profile 校正颜色）")
+        self.chk_viewport_cm.setToolTip(
+            "开启后视口按当前显示器的 ICC 输出，广色域屏上不再偏艳；\n"
+            "关闭则固定按 sRGB 直出（与旧版一致）。系统已开启自动色彩管理（ACM）时此项不生效。"
+        )
+        l_ren.addWidget(self.chk_viewport_cm)
+
+        self.lbl_viewport_cm = QLabel("")
+        self.lbl_viewport_cm.setWordWrap(True)
+        self.lbl_viewport_cm.setStyleSheet("color: #8a8f98; padding-left: 24px;")
+        l_ren.addWidget(self.lbl_viewport_cm)
+        self.chk_viewport_cm.toggled.connect(self._refresh_viewport_cm_status)
 
         l_ren.addStretch()
         self.tabs.addTab(tab_render, "图像与渲染")
@@ -867,6 +871,8 @@ class PreferencesDialog(QDialog):
 
         self.chk_hq_preview.setChecked(prefs.get("hq_preview", True))
         self.chk_hq_export_preview.setChecked(bool(prefs.get("hq_preview_export", False)))
+        self.chk_viewport_cm.setChecked(bool(prefs.get("viewport_color_management", True)))
+        self._refresh_viewport_cm_status()
         self.chk_restore_last_files.setChecked(prefs.get("restore_last_session", prefs.get("restore_last_files", True)))
         self.chk_restore_geo.setChecked(prefs.get("restore_window_state", True))
 
@@ -1118,6 +1124,25 @@ class PreferencesDialog(QDialog):
         except Exception:
             pass
 
+    def _refresh_viewport_cm_status(self):
+        """开关下面那行灰字：写真实状态，别让用户对着一个开关猜有没有生效。"""
+        try:
+            from core import display_profile as dp
+
+            prof = dp.current()
+            managed, why = dp.managed_default()
+            if not self.chk_viewport_cm.isChecked():
+                text = f"已关闭：视口按 sRGB 直出（{why}）" if why else "已关闭：视口按 sRGB 直出"
+            elif why:
+                text = why
+            elif prof.identity:
+                text = f"当前显示器：{prof.label}（无需转换）"
+            else:
+                text = f"当前显示器：{prof.label}"
+        except Exception as exc:  # noqa: BLE001 - 状态行不许把对话框弄挂
+            text = f"无法读取显示器 profile（{exc.__class__.__name__}）"
+        self.lbl_viewport_cm.setText(text)
+
     def _save_preferences(self):
         cfg = config_manager.load_config()
         if "preferences" not in cfg:
@@ -1130,6 +1155,7 @@ class PreferencesDialog(QDialog):
         prefs["preview_max_edge"] = int(self.combo_preview_res.currentData())
         prefs["hq_preview"] = self.chk_hq_preview.isChecked()
         prefs["hq_preview_export"] = self.chk_hq_export_preview.isChecked()
+        prefs["viewport_color_management"] = self.chk_viewport_cm.isChecked()
         restore_val = self.chk_restore_last_files.isChecked()
         prefs["restore_last_session"] = restore_val
         prefs["restore_last_files"] = restore_val

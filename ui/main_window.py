@@ -9497,6 +9497,20 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.set_app_status("高质量预览：开 · 回到「适应窗口」才生效", timeout_ms=2600)
         return want
 
+    def _apply_display_cm_pref(self):
+        """Push 首选项 → 视口色彩管理 into the canvas（P0 显示端）。
+
+        关掉时 canvas 会把 shader 尾段退回恒 sRGB —— 也就是接入 P0 之前的行为，
+        留给「ACM 用户」和排查用。改动只影响上屏，导出永远走 sRGB。
+        """
+        try:
+            want = bool(config_manager.get_preference("viewport_color_management", True))
+        except Exception:
+            want = True
+        if hasattr(self, "canvas") and hasattr(self.canvas, "set_viewport_color_management"):
+            self.canvas.set_viewport_color_management(want)
+        return want
+
     def toggle_split_view(self):
         if not self._is_photo_edited():
             self.set_app_status("原生未调色底片无前后对比", timeout_ms=1500)
@@ -13229,6 +13243,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         dlg = PreferencesDialog(parent=self)
         if dlg.exec():
             self._apply_hq_preview_pref(announce=True)
+            self._apply_display_cm_pref()
             new_res = config_manager.get_preferences().get("preview_max_edge", 2048)
             if old_res != new_res:
                 for p in self.photos:

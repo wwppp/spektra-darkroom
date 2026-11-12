@@ -312,6 +312,22 @@ vec3 prophoto_to_srgb(vec3 c) {
     return clamp(mix(lower, higher, cutoff), 0.0, 1.0);
 }
 
+// 同上，但停在**线性 sRGB**，留给显示端色彩管理自己编码（P0）。
+// 与 prophoto_to_srgb 的前半截必须逐字一致，否则 Before 面板会和主视图对不上。
+vec3 prophoto_to_srgb_linear(vec3 c) {
+    vec3 lin;
+    lin.r =  2.03649172 * c.r - 0.73759065 * c.g - 0.29925987 * c.b;
+    lin.g = -0.22571798 * c.r + 1.22317653 * c.g + 0.00272522 * c.b;
+    lin.b = -0.01054513 * c.r - 0.13487985 * c.g + 1.14521015 * c.b;
+    return digital_display_comp(max(vec3(0.0), lin));
+}
+
+vec3 srgb_decode(vec3 v) {
+    vec3 lo = v / 12.92;
+    vec3 hi = pow((v + 0.055) / 1.055, vec3(2.4));
+    return mix(hi, lo, step(v, vec3(0.04045)));
+}
+
 // Log Shaper: maps scene-linear ProPhoto [0.0, 8.0] into quasi-log space [0.0, 1.0]
 const float SHAPER_C = 60.0;
 const float SHAPER_INV_LOG = 0.16192058; // 1.0 / log(1.0 + 60.0 * 8.0)
@@ -582,6 +598,15 @@ vec3 develop_negative(vec3 linear_rgb, vec2 image_px) {
     // See ui/gl_grain.py for the sRGB-slope weighting and the 9-tap spatial kernel.
     //
     film_rgb = scan_noise_field(image_px, film_rgb, pre_lift_rgb);
+
+    // P0 显示端：老 LUT / 无胶片的出口恒为 sRGB 编码值，补偿在这里补做。
+    // 点式链不能走这里 —— 它在 ffchain_print 里用**线性 P3** 做（那里才有 P3→显示器的
+    // 完整色域信息，绕一趟 sRGB 会被裁掉，P0 就白做了）。所以判 u_ff_on。
+    if (u_ff_display_managed == 1 && u_ff_on == 0) {
+        vec3 dlin = clamp(u_ff_srgb_to_display * srgb_decode(clamp(film_rgb, 0.0, 1.0)),
+                          0.0, 1.0);
+        film_rgb = ff_trc_encode(dlin);
+    }
     return clamp(film_rgb, 0.0, 1.0);
 }
 
@@ -980,7 +1005,17 @@ void main() {
     // Before side sits up to ~1 stop hot and flat next to the developed side: the sky clips to
     // white and the shadows lift, which reads as a grey milky wash rather than a neutral baseline.
     vec3 before_lin = before_rgb * exp2(u_base_ev);
-    vec3 before_color = (u_is_bypass == 2) ? clamp(before_rgb, 0.0, 1.0) : clamp(prophoto_to_srgb(before_lin), 0.0, 1.0);
+    vec3 before_color;
+    if (u_ff_display_managed == 1) {
+        // P0：先拿到线性 sRGB，再统一走显示器编码（占位图是 sRGB 编码的贴图，先解码）。
+        vec3 lin_before = (u_is_bypass == 2)
+            ? srgb_decode(clamp(before_rgb, 0.0, 1.0))
+            : prophoto_to_srgb_linear(before_lin);
+        before_color = clamp(ff_display_encode(lin_before), 0.0, 1.0);
+    } else {
+        // 未接管显示端时必须走原路径，才能保证逐字节不变。
+        before_color = (u_is_bypass == 2) ? clamp(before_rgb, 0.0, 1.0) : clamp(prophoto_to_srgb(before_lin), 0.0, 1.0);
+    }
 
     // -------------------------------------------------------------
     // Compare Modes (Must execute BEFORE bypass early return!)
@@ -1018,7 +1053,9 @@ void main() {
     // 0. Bypass Mode:
     // 2: Direct sRGB passthrough (0ms placeholder / embedded preview from filmstrip or JPEG)
     if (u_is_bypass == 2) {
-        fragColor = vec4(clamp(orig_rgb, 0.0, 1.0), 1.0);
+        vec3 c = clamp(orig_rgb, 0.0, 1.0);
+        if (u_ff_display_managed == 1) c = clamp(ff_display_encode(srgb_decode(c)), 0.0, 1.0);
+        fragColor = vec4(c, 1.0);
         return;
     }
 
@@ -1291,6 +1328,13 @@ from .gl_ffchain import FFCHAIN_GLSL as _FFCHAIN_GLSL, GLFFChain   # noqa: E402
 
 FRAGMENT_SHADER_SRC = FRAGMENT_SHADER_SRC.replace("// {{FFCHAIN}}", _FFCHAIN_GLSL)
 FRAGMENT_SHADER_SRC = FRAGMENT_SHADER_SRC.replace("// {{GRAIN}}", _GRAIN_GLSL)
+
+
+def _safe_mtime(path) -> float:
+    try:
+        return os.path.getmtime(path) if path else 0.0
+    except OSError:
+        return 0.0
 
 
 CANVAS_BG_COLORS = {
@@ -1692,6 +1736,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._grain_cubes = GLCubeGrain()
         # fotufilm 点式链。同样是 inert：没有 bundle 时 u_ff_on=0，走原来的单表路径。
         self._ffchain = GLFFChain()
+        # P0 显示端色彩管理：读本机显示器 ICC，把链尾的线性 P3 正确送到这台屏上。
+        # 未接入/关闭/ACM 开着时 `_ffchain.display` 为 None，shader 走旧路径（逐字节不变）。
+        self._display_profile = None
+        self._display_note = ""
+        self._display_pref_on = bool(config_manager.get_preference("viewport_color_management", True))
+        self._display_rescan_timer = QTimer(self)
+        self._display_rescan_timer.setInterval(3000)
+        self._display_rescan_timer.timeout.connect(self._rescan_display_profile)
+        self._apply_display_profile(notify=False)
+        self._display_rescan_timer.start()
         self._gl_initialized = False
 
         # Long-press on canvas to preview original (Before)
@@ -2003,6 +2057,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self._pending_lut = None
         self._grain_cubes.upload_pending()
         self._ffchain.upload_pending()
+        self._ffchain.sync_display()
 
         funcs = QOpenGLContext.currentContext().functions()
         # One line per state change, never per frame: when a paint comes out black this is what
@@ -2600,6 +2655,103 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.invalidate_hq_preview()
         self.update()
 
+    # --- P0：显示端色彩管理 ---------------------------------------------------------
+
+    def _display_stamp(self):
+        p = self._display_profile
+        if p is None:
+            return None
+        try:
+            mtime = os.path.getmtime(p.path) if p.path else 0.0
+        except OSError:
+            mtime = 0.0
+        return (p.path, bool(p.identity), mtime)
+
+    def _apply_display_profile(self, force: bool = False, notify: bool = True):
+        """读本机 ICC 并决定是否接管显示端。无 GL context 也能调（只改数据）。
+
+        三道闸，任一不满足就退回旧行为：首选项关掉 / 系统 ACM 已接管 / profile 读不到。
+        退回时 shader 里 managed=0，输出与接入 P0 之前逐字节相同。
+
+        ``notify=False`` 供构造期使用：那时 QOpenGLWidget 还没建表面，update() 只会
+        在 initializeGL 之前塞一个 paint，属于自找麻烦。
+        """
+        from core import display_profile as dp
+
+        def _kick():
+            if not notify:
+                return
+            # HQ 纹理里烘的是"上屏后的像素"，profile 一换就必须重建 —— 但**不能立刻删**：
+            # 这一帧可能正在渲染（halation 阶段还拿着这张纹理），当场 release 会段错误。
+            # 延到事件循环下一拍，那时一定没有 draw 在跑。
+            QTimer.singleShot(0, self.invalidate_hq_preview)
+            self.update()
+
+        if not self._display_pref_on:
+            self._display_profile = None
+            self._display_note = "首选项已关闭"
+            self._ffchain.set_display(None)
+            _kick()
+            return
+
+        prof = dp.current()
+        managed_ok, why = dp.managed_default()
+
+        new_stamp = (prof.path, bool(prof.identity), _safe_mtime(prof.path))
+        old_stamp = self._display_stamp()
+        changed = force or new_stamp != old_stamp or self._display_profile is None
+        self._display_profile = prof
+        self._display_note = why or prof.label
+
+        if not managed_ok:
+            if changed:
+                self._ffchain.set_display(None)
+                _kick()
+            return
+
+        if changed:
+            # identity 也照样交过去：bind 里按 identity 判 managed，逻辑只有一处。
+            self._ffchain.set_display(prof)
+            _kick()
+
+    def _rescan_display_profile(self):
+        """低频轮询：显示器换了或 profile 文件被替换后重新读。"""
+        if not self._display_pref_on:
+            return
+        cur = self._display_stamp()
+        from core import display_profile as dp
+
+        path = None
+        try:
+            path = dp._windows_profile_path()
+        except Exception:  # noqa: BLE001
+            return
+        probe = (path, None, _safe_mtime(path))
+        if cur is None or cur[0] != probe[0] or cur[2] != probe[2]:
+            self._apply_display_profile(force=True)
+
+    def set_viewport_color_management(self, on: bool):
+        """首选项开关。关闭 = 回到恒 sRGB（广色域屏上会偏艳，但和旧版一致）。"""
+        self._display_pref_on = bool(on)
+        self._apply_display_profile(force=True)
+        if on and self._display_rescan_timer.isActive() is False:
+            self._display_rescan_timer.start()
+        elif not on:
+            self._display_rescan_timer.stop()
+
+    def display_color_management_status(self) -> str:
+        """给首选项显示一行真实状态，别让用户对着一个开关猜。"""
+        if not self._display_pref_on:
+            return "已关闭，视口按 sRGB 直出"
+        p = self._display_profile
+        if p is None:
+            return self._display_note or "未接入"
+        if self._display_note and self._display_note != p.label:
+            return self._display_note
+        if p.identity:
+            return "当前显示器 profile 即 sRGB，无需转换"
+        return f"已接管：{p.label}"
+
     def _do_upload_lut(self, lut_array_3d):
         size = lut_array_3d.shape[0]
         data = np.ascontiguousarray(lut_array_3d, dtype=np.float32)
@@ -2870,7 +3022,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             params.pop("view_mode", None)       # never bake a compare view into the frame
             params.pop("split_x", None)
             arr = self.render_offscreen(tw, th, float_img_rgb=full,
-                                        params_override=params, bit_depth=8)
+                                        params_override=params, bit_depth=8,
+                                        display_transform=True)
             if arr is None:
                 return
             dpr = max(1.0, float(self.devicePixelRatioF()))
@@ -3646,9 +3799,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
             print(f"[DarkroomGLCanvas] grain key 计算失败，退回纯 LUT: {ex}")
             return None
 
-    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None):
+    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None, display_transform=False):
         """Render image at target resolution on GPU using an offscreen FBO.
         Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
+
+        ``display_transform``: 默认 False —— 导出/直方图/缩略图都是 sRGB 域，绝不能把本机
+        显示器的补偿烘进去。唯一该给 True 的是 HQ 预览：它渲染的是一张"最终上屏"的纹理，
+        shader 后面不再过色彩管理，所以必须在这里就把显示变换做掉，否则 HQ 开/关在广色域
+        屏上颜色不一样。
         """
         # Oversize guard: GL textures cap at GL_MAX_TEXTURE_SIZE (typically 16384) and
         # there is no tiled renderer yet. Failing loudly beats a silently clipped or
@@ -3721,6 +3879,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # 症状是"预览对、导出错"，且只有换卷/换纸才暴露。
             self._grain_cubes.upload_pending()
             self._ffchain.upload_pending()
+            # 离屏也要保证 LUT 存在：窗口没真正绘制时（WA_DontShowOnScreen / 最小化 /
+            # 刚换显示器）paintGL 不会跑，只有这一次机会把表推上去。
+            self._ffchain.sync_display()
 
             if lut_override is not None:
                 size = lut_override.shape[0]
@@ -4081,7 +4242,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, eff_params, u_1fv=u_1fv,
                                    expect_key=self._grain_key_for(eff_params))
             self._ffchain.bind(self.shader_program,
-                               dir_total=float(eff_params.get("dir_amount", 1.0)))
+                               dir_total=float(eff_params.get("dir_amount", 1.0)),
+                               display=bool(display_transform))
 
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 

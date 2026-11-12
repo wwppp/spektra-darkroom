@@ -69,6 +69,14 @@ uniform vec3      u_ff_luma;
 uniform mat3      u_ff_pp_to_2020;
 uniform mat3      u_ff_domain;
 uniform mat3      u_ff_p3_to_srgb;
+// 显示端色彩管理（P0）。managed=0 时下面这些全部不参与运算，尾段逐字节等于旧行为。
+uniform int       u_ff_display_managed;   // 1 = 按本机显示器 profile 输出
+uniform mat3      u_ff_srgb_to_display;   // 线性 sRGB → 显示器线性（Before / 占位图用）
+uniform int       u_ff_display_trc;       // 0 = sRGB 分段，1 = 纯 gamma，2 = 查表
+uniform float     u_ff_display_gamma;     // trc==1 时用
+// 表格型 TRC 不再支持：Intel 驱动在"点式链 + 动态索引 uniform 数组"这一组合上
+// 直接段错误（同一个 shader 在无点式链时又能跑）。实测校准类 profile 只占极少数，
+// 遇到就降级为不接管（解析式覆盖 sRGB 分段与纯 gamma，已经是绝大多数显示器）。
 uniform vec3      u_ff_dmin;
 uniform vec3      u_ff_rng;
 uniform vec3      u_ff_pdmin;
@@ -310,6 +318,9 @@ vec4 ffchain_develop(vec3 prophoto) {
 
 // 4. filmOut → 相纸曲线 → paperOut，出口是显示值。
 // 输入是**净密度**（不是 logE，不是显示值），所以颗粒只要加在调用点之间就够了。
+vec3 ff_display_encode(vec3 src);   // 定义在下面，先声明
+vec3 ff_trc_encode(vec3 v);
+
 vec3 ffchain_print(vec3 net) {
     vec3 rel2 = ff_linear3(u_ff_film, net / u_ff_rng, 33.0).rgb;
     vec3 pact;
@@ -324,12 +335,41 @@ vec3 ffchain_print(vec3 net) {
     vec3 lin_p3 = ff_linear3(u_ff_paper, pact, 33.0).rgb;
     if (u_ff_debug == 7) return clamp(lin_p3, 0.0, 1.0);
 
-    // 5. P3 → sRGB 线性 → 编码
-    vec3 lin_srgb = u_ff_p3_to_srgb * max(lin_p3, vec3(0.0));
-    vec3 v = clamp(lin_srgb, 0.0, 1.0);
+    // 5. 线性 P3 → (显示器线性) → 编码。
+    // 接管显示端时 u_ff_p3_to_srgb 已经在 CPU 侧换成了「P3 → 显示器」的合成矩阵，
+    // 所以这里与接入前**同一段代码**，只多一个 gamma 分支。刻意不在这里调函数：
+    // 点式链的 shader 已经很大，多一次内联会让 Intel 驱动出非法 ISA（draw 段错误）。
+    vec3 lin_out = u_ff_p3_to_srgb * max(lin_p3, vec3(0.0));
+    vec3 v = clamp(lin_out, 0.0, 1.0);
+    if (u_ff_display_managed == 1 && u_ff_display_trc == 1) {
+        return pow(v, vec3(1.0 / max(u_ff_display_gamma, 1e-3)));
+    }
     return mix(v * 12.92, 1.055 * pow(v, vec3(1.0 / 2.4)) - 0.055,
                step(vec3(0.0031308), v));
 }
+
+// 显示端编码（只给「线性 sRGB 入口」用：Before 面板 / 占位图 / 老 LUT 出口）。
+// 点式链不调它 —— 那条路在 ffchain_print 里直接换矩阵，理由见那里的注释。
+vec3 ff_display_encode(vec3 src) {
+    vec3 s = max(src, vec3(0.0));
+    vec3 v = (u_ff_display_managed == 1) ? (u_ff_srgb_to_display * s) : s;
+    v = clamp(v, 0.0, 1.0);
+    if (u_ff_display_managed == 1 && u_ff_display_trc == 1) {
+        return pow(v, vec3(1.0 / max(u_ff_display_gamma, 1e-3)));
+    }
+    return mix(v * 12.92, 1.055 * pow(v, vec3(1.0 / 2.4)) - 0.055,
+               step(vec3(0.0031308), v));
+}
+
+// 只做 TRC 编码（输入已是显示器线性 0..1），显示矩阵由调用方负责。
+vec3 ff_trc_encode(vec3 v) {
+    if (u_ff_display_managed == 1 && u_ff_display_trc == 1) {
+        return pow(v, vec3(1.0 / max(u_ff_display_gamma, 1e-3)));
+    }
+    return mix(v * 12.92, 1.055 * pow(v, vec3(1.0 / 2.4)) - 0.055,
+               step(vec3(0.0031308), v));
+}
+
 
 // 整条链一次算完的兼容入口。诊断脚本和"不要颗粒"的调用点走这里。
 vec3 ffchain_run(vec3 prophoto) {
@@ -367,6 +407,45 @@ class GLFFChain:
         self.debug = 0
         self._pending = None
         self._signature = None
+        # 显示端色彩管理（P0）。None = 尚未接入，按 managed=0 走旧行为。
+        self.display = None
+        self._display_key = None
+        # 每帧 bind 都要判，所以只读一次环境变量，别在热路径里 os.environ.get
+        self._p0_debug = bool(os.environ.get("SPECTRA_P0_DEBUG"))
+
+    def set_display(self, profile):
+        """切换显示 profile；None 会让尾段退回 sRGB。下一次 upload/bind 生效。"""
+        self.display = profile
+        self._display_key = None      # 强制重传 LUT / 重设矩阵
+
+    def _matrix_srgb_to_display(self):
+        """线性 sRGB → 显示器线性 = M_display · inv(M_P3_TO_SRGB)。"""
+        prof = self.display
+        m = np.asarray(prof.matrix, np.float64)
+        try:
+            return m @ np.linalg.inv(np.asarray(M_P3_TO_SRGB, np.float64))
+        except np.linalg.LinAlgError:
+            return m
+
+    def _display_state(self):
+        """把 profile 归一成 shader 需要的三个标量/矩阵。identity 时返回 None。"""
+        prof = self.display
+        if prof is None or prof.identity:
+            return None
+        kind, param = prof.trc
+        if kind == 0:                       # TRC_SRGB
+            trc_kind, gamma = 0, 1.0
+        elif kind == 1:                     # TRC_GAMMA
+            trc_kind, gamma = 1, float(param)
+        else:                               # TRC_TABLE：驱动限制，降级为不接管
+            return None
+        return {
+            "matrix": np.asarray(prof.matrix, np.float64),
+            "matrix_srgb": self._matrix_srgb_to_display(),
+            "trc": trc_kind,
+            "gamma": gamma,
+            "path": prof.path,
+        }
 
     # -- staging ---------------------------------------------------------------------------
     def set_bundle(self, bundle):
@@ -458,6 +537,20 @@ class GLFFChain:
             })
         self.ready = True
         self._pending = None
+
+    def sync_display(self, unit_base=8):
+        """显示 profile 变了就重算上传所需的数值。纯 CPU，不碰 GL 状态。
+
+        早先这里在 paint 里上传一张 1024×1 的 LUT 纹理，结果在离屏渲染路径上稳定触发
+        段错误（纹理上下文/单元纠缠）。改用 uniform 数组后没有这个问题，也不需要
+        再管"离屏时有没有把表推上去"。
+        """
+        if self.display is None:
+            self._display_key = None
+            return
+        if self._display_key is not None:
+            return
+        self._display_key = self._display_state()
 
     @staticmethod
     def _rows_wide(arr):
@@ -565,10 +658,37 @@ class GLFFChain:
         if loc != -1:
             GL.glUniform1i(loc, int(v))
 
-    def bind(self, program, unit_base=8, dir_total=1.0):
-        """Bind everything this stage needs. Returns True when the shader should branch in."""
+    def _bind_display(self, program, display):
+        """上传显示端 uniform。identity / 关闭 / 离屏导出时 managed=0（走旧尾段）。"""
+        prof = self.display
+        st = self._display_key
+        if display and prof is not None and isinstance(st, dict) and not prof.identity:
+            if self._p0_debug:
+                print("[P0] managed=1 trc=%d mat=%s" % (st["trc"], st["matrix"][0]), flush=True)
+            self._int(program, "u_ff_display_managed", 1)
+            # 合成矩阵直接覆盖 p3_to_srgb：点式链尾段因此不需要第二个 mat3
+            self._mat3(program, "u_ff_p3_to_srgb", st["matrix"])
+            self._mat3(program, "u_ff_srgb_to_display", st["matrix_srgb"])
+            self._int(program, "u_ff_display_trc", st["trc"])
+            if st["trc"] == 1:
+                self._float(program, "u_ff_display_gamma", st["gamma"])
+        else:
+            if self._p0_debug:
+                print("[P0] managed=0 display=%s st=%s identity=%s" % (display, type(st), getattr(prof, "identity", None)), flush=True)
+            self._int(program, "u_ff_display_managed", 0)
+
+    def bind(self, program, unit_base=8, dir_total=1.0, display=True):
+        """Bind everything this stage needs. Returns True when the shader should branch in.
+
+        ``display=False`` 强制 managed=0：离屏导出必须出 sRGB，绝不能把本机显示器的
+        补偿烘进导出图。这条一旦漏了，导出的文件和预览就永远对不上，且只在非 sRGB
+        屏上才看得出来（最容易漏测的位置）。
+        """
         if not self.ready or GL is None:
+            # 点式链关掉时**仍然**要设显示端 uniform：无胶片 / 老 LUT 的出口也走
+            # 显示补偿（develop_negative 末尾那一跳），漏了这里就只有点式链生效。
             self._int(program, "u_ff_on", 0)
+            self._bind_display(program, display)
             return False
         # 总量必须和档位表同域：超出最后一档时 warp 会 clamp 而抑制量继续放大，
         # 中性锚定又会断，所以在这里一起 clamp。
@@ -581,6 +701,9 @@ class GLFFChain:
         self._mat3(program, "u_ff_pp_to_2020", M_PP_TO_2020)
         self._mat3(program, "u_ff_domain", M_2020_TO_DOMAIN)
         self._mat3(program, "u_ff_p3_to_srgb", M_P3_TO_SRGB)
+        # P0 显示端：identity（=本机 profile 就是 sRGB，或读不到 profile）时 managed=0，
+        # shader 尾段与接入前完全同路，逐字节不变。
+        self._bind_display(program, display)
         self._vec3(program, "u_ff_dmin", s["dmin"])
         self._vec3(program, "u_ff_rng", s["rng"])
         self._vec3(program, "u_ff_pdmin", s["pdmin"])
