@@ -21,6 +21,12 @@ from __future__ import annotations
 
 import numpy as np
 
+# Display P3 → sRGB linear.  Imported rather than copied: a render whose *source* space is
+# P3 must undo exactly the matrix the chain tail applied, including its hand-trimmed small
+# terms, or the round-trip picks up a shift at the neutral axis.  `ffchain_point` only
+# depends on numpy, so this import cannot cycle.
+from .ffchain_point import M_P3_TO_SRGB
+
 # ---------------------------------------------------------------------------
 # Canonical colour spaces
 # ---------------------------------------------------------------------------
@@ -316,10 +322,16 @@ def warm_up():
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
-def convert(img_rgb_float, target_colorspace="sRGB", raise_on_error=False, bit_depth=8):
-    """Convert sRGB non-linear image data to ``target_colorspace``.
+def convert(img_rgb_float, target_colorspace="sRGB", raise_on_error=False, bit_depth=8,
+            source_colorspace="sRGB"):
+    """Convert display-encoded image data to ``target_colorspace``.
 
-    The input is *display sRGB* (non-linear, 0..1), which is what both renderers emit.
+    ``source_colorspace`` says what the pixels already are.  Only ``"sRGB"`` and
+    ``"Display P3"`` are meaningful: the renderer can emit either (P2 keeps P3-native
+    pixels when the export target is wide gamut), and both use the same transfer function,
+    so the decode stage is identical — only the matrix differs.  Anything else, including
+    a typo, falls back to sRGB, which is the safe reading (pixels never claim a wider
+    gamut than they hold).
 
     ``bit_depth`` selects the accuracy tier, not the output dtype (the result is always
     float32): 8-bit output tolerates the table-driven fast path, 16-bit and float output
@@ -331,6 +343,7 @@ def convert(img_rgb_float, target_colorspace="sRGB", raise_on_error=False, bit_d
     sRGB ICC" instead of "sRGB pixels + wide-gamut ICC".
     """
     canonical, _icc = resolve(target_colorspace)
+    src_p3 = str(source_colorspace or "").strip().lower() in ("display p3", "p3")
     img = np.asarray(img_rgb_float)
     if img.dtype != np.float32:
         img = img.astype(np.float32)
@@ -339,10 +352,16 @@ def convert(img_rgb_float, target_colorspace="sRGB", raise_on_error=False, bit_d
     if img.ndim != 3 or img.shape[2] != 3:
         raise ValueError("expected an (H, W, 3) RGB array, got %r" % (img.shape,))
 
-    if canonical == "sRGB":
+    if canonical == "sRGB" and not src_p3:
+        return np.clip(img, 0.0, 1.0), canonical
+    # 源与目标同一个空间：直接交付。P3 源导出 P3 是 P2 的主路径，漏掉这一步会让
+    # base(单位阵) @ M_P3_TO_SRGB 把 P3 像素悄悄转成 sRGB 再标成 P3 —— 整张图偏淡。
+    if canonical == "Display P3" and src_p3:
         return np.clip(img, 0.0, 1.0), canonical
 
-    matrix = MATRICES[canonical]
+    # Identity target keeps the eye matrix: the only work left is P3 → sRGB.
+    base = np.eye(3, dtype=np.float32) if canonical == "sRGB" else MATRICES[canonical]
+    matrix = (base @ M_P3_TO_SRGB.astype(np.float32)) if src_p3 else base
     kind = ENCODERS[canonical]
     exact, lut = _numba_kernel()
     try:

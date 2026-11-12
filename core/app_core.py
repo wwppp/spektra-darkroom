@@ -317,14 +317,21 @@ def convert_image_colorspace(img_rgb_float, target_colorspace="sRGB", bit_depth=
     return out
 
 
-def convert_image_colorspace_checked(img_rgb_float, target_colorspace="sRGB", bit_depth=8):
+def convert_image_colorspace_checked(img_rgb_float, target_colorspace="sRGB", bit_depth=8,
+                                     source_colorspace="sRGB"):
     """Convert to ``target_colorspace``, returning ``(pixels, effective_colorspace)``.
+
+    ``source_colorspace`` is what the renderer actually produced: ``"sRGB"`` for every
+    path except a wide-gamut GPU export, which keeps P3-native pixels (see P2 in
+    ``docs/viewport-colorspace-plan.md``).  Getting this wrong double-converts and the
+    whole file goes wrong, so it is threaded explicitly rather than sniffed.
 
     ``effective_colorspace`` can differ from the requested one when the conversion is
     unavailable; it then falls back to sRGB.  Callers must embed the ICC profile of the
     *effective* space so pixels and profile can never disagree.
     """
-    return color_space.convert(img_rgb_float, target_colorspace, bit_depth=bit_depth)
+    return color_space.convert(img_rgb_float, target_colorspace, bit_depth=bit_depth,
+                               source_colorspace=source_colorspace)
 
 
 def get_icc_profile_bytes(target_colorspace="sRGB"):
@@ -938,14 +945,22 @@ def save_encoded_image(rendered_data, output_path, params_dict):
     #    up in `effective_colorspace`, which falls back to sRGB if the transform fails.
     #    Everything downstream (ICC embedding, EXIF ColorSpace tag, JXL CICP) must use the
     #    *effective* space, otherwise the file claims a wide gamut it does not contain.
-    #    sRGB is skipped entirely: rendered_float is already clamped to 0..1 above, and a
-    #    no-op transform would still copy the whole image (0.7 GB at 64 MP).
+    #
+    #    `source_colorspace` is what the renderer actually produced.  A GPU export that
+    #    targets Display P3 keeps P3-native pixels (P2), so the conversion must start from
+    #    P3; every other path still hands us sRGB.  The early-out below therefore only
+    #    applies when source and target agree — P3 pixels written as sRGB still need the
+    #    matrix.  sRGB→sRGB is skipped entirely: rendered_float is already clamped to 0..1
+    #    above, and a no-op transform would still copy the whole image (0.7 GB at 64 MP).
+    source_colorspace = str(params_dict.get("source_colorspace", "sRGB") or "sRGB")
+    src_is_p3 = source_colorspace.strip().lower() in ("display p3", "p3")
     requested_colorspace = color_space.resolve(colorspace)[0]
-    if requested_colorspace == "sRGB":
+    if requested_colorspace == "sRGB" and not src_is_p3:
         effective_colorspace = "sRGB"
     else:
         rendered_float, effective_colorspace = convert_image_colorspace_checked(
-            rendered_float, colorspace, bit_depth=bit_depth)
+            rendered_float, colorspace, bit_depth=bit_depth,
+            source_colorspace=source_colorspace)
         if effective_colorspace != requested_colorspace:
             logger.warning(
                 "Colorspace conversion unavailable for %r; writing sRGB pixels with an sRGB "

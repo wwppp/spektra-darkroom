@@ -81,6 +81,9 @@ uniform int       u_proof_on;             // 1 = 正在校样
 uniform int       u_proof_warn;           // 1 = 叠色域警告
 uniform mat3      u_proof_matrix;         // 线性 P3 → 目标线性
 uniform float     u_proof_eps;            // 越界容差（1/512）
+// 导出 P2：写广色域文件时尾段不乘 P3→sRGB（矩阵换成单位阵，见 _bind_display），
+// 8-bit 量化前加 TPDF 抖动打散色带。0 = 关，视口与 sRGB 导出都保持逐字节不变。
+uniform float     u_out_dither;           // 噪声幅度，单位是编码值（1/255 = 1 LSB）
 // 表格型 TRC 不再支持：Intel 驱动在"点式链 + 动态索引 uniform 数组"这一组合上
 // 直接段错误（同一个 shader 在无点式链时又能跑）。实测校准类 profile 只占极少数，
 // 遇到就降级为不接管（解析式覆盖 sRGB 分段与纯 gamma，已经是绝大多数显示器）。
@@ -370,6 +373,16 @@ vec3 ffchain_print(vec3 net) {
     }
     if (u_proof_warn == 1 && oog == 1) {
         outc = mix(outc, vec3(1.0, 0.0, 1.0), 0.5);
+    }
+    // 4.6 导出 TPDF 抖动（P2）：两个均匀量之差，幅度 ±1 LSB，均值 0。
+    //     放在警告之后：警告是"说明性"的叠加色，不该被量化噪声打散。
+    //     只在一个 uniform 控制下执行，视口 / sRGB 导出时整段被编译掉不进热路径；
+    //     刻意不写成函数——点式链 shader 已经很大，多一个内联会让 Intel 驱动出非法 ISA。
+    if (u_out_dither > 0.0) {
+        vec2 q = gl_FragCoord.xy;
+        float n1 = fract(sin(dot(q, vec2(12.9898, 78.233))) * 43758.5453);
+        float n2 = fract(sin(dot(q.yx + 3.17, vec2(39.3468, 11.135))) * 24634.6345);
+        outc = clamp(outc + (n1 - n2) * u_out_dither, 0.0, 1.0);
     }
     return outc;
 }
@@ -704,11 +717,15 @@ class GLFFChain:
         if loc != -1:
             GL.glUniform1i(loc, int(v))
 
-    def _bind_display(self, program, display):
-        """上传显示端 + 校样 uniform。
+    def _bind_display(self, program, display, output_p3=False, dither=0.0):
+        """上传显示端 + 校样 + 导出域 uniform。
 
         三道闸（identity / 首选项关 / 离屏导出）任一满足就 managed=0 且校样关闭，
         尾段与接入前逐字节相同。
+
+        ``output_p3``：离屏导出且目标是 Display P3 时，尾段**不乘** P3→sRGB，直接输出
+        P3 编码值。Display P3 与 sRGB 共用分段 TRC，所以把矩阵换成单位阵就够了，
+        不需要第二个编码分支。这个标志只可能来自导出路径（``display=False``）。
 
         校样为什么要在这里绑而不是单开一个函数：它和显示端共用同一个
         ``u_ff_p3_to_srgb``（回程矩阵被折进去了），两者必须一起决定，分开写必然漏。
@@ -722,9 +739,16 @@ class GLFFChain:
         proof_on = bool(display and ps["enabled"])
 
         # 尾段矩阵：显示器变换（或老路的 P3→sRGB）再乘上「目标 → P3」的回程。
-        base = st["matrix"] if managed else np.asarray(M_P3_TO_SRGB, np.float64)
+        if managed:
+            base = st["matrix"]
+        elif output_p3:
+            # 导出 P3 原生：P3 编码值 = 线性 P3 过 sRGB 的 TRC，所以矩阵是单位阵。
+            base = np.eye(3, dtype=np.float64)
+        else:
+            base = np.asarray(M_P3_TO_SRGB, np.float64)
         final = proof.compose_display(base, self.proof) if proof_on else base
         self._mat3(program, "u_ff_p3_to_srgb", final)
+        self._float(program, "u_out_dither", float(dither))
 
         if managed:
             if self._p0_debug:
@@ -747,16 +771,23 @@ class GLFFChain:
                    ps["matrix"] if proof_on else np.eye(3, dtype=np.float32))
         self._float(program, "u_proof_eps", proof.GAMUT_EPS)
 
-    def bind(self, program, unit_base=8, dir_total=1.0, display=True):
+    def bind(self, program, unit_base=8, dir_total=1.0, display=True,
+             output_p3=False, dither=0.0):
         """Bind everything this stage needs. Returns True when the shader should branch in.
 
         ``display=False`` 强制 managed=0：离屏导出必须出 sRGB，绝不能把本机显示器的
         补偿烘进导出图。这条一旦漏了，导出的文件和预览就永远对不上，且只在非 sRGB
         屏上才看得出来（最容易漏测的位置）。
+
+        ``output_p3`` 只在 ``display=False`` 时有意义（导出广色域文件）：尾段输出 P3
+        编码值，由 ``canvas.render_offscreen`` 决定，调用方必须同步告诉保存流程
+        ``source_colorspace="Display P3"``，否则会二次转换。
         """
         if not self.ready or GL is None:
             # 点式链关掉时**仍然**要设显示端 uniform：无胶片 / 老 LUT 的出口也走
             # 显示补偿（develop_negative 末尾那一跳），漏了这里就只有点式链生效。
+            # 注意 output_p3 在这里必须失效：老 LUT 出口的像素已经是 sRGB，标成 P3
+            # 会让导出侧二次转换，整张图颜色全错。
             self._int(program, "u_ff_on", 0)
             self._bind_display(program, display)
             return False
@@ -773,7 +804,7 @@ class GLFFChain:
         # P0 显示端 + P1 校样：u_ff_p3_to_srgb 由 _bind_display 统一决定
         # （identity 时 = M_P3_TO_SRGB，接管显示端时 = M_display，开着校样时再乘回程矩阵）。
         # 这里不要再单独上传，否则会被一个更早的常量悄悄覆盖成"没校样"。
-        self._bind_display(program, display)
+        self._bind_display(program, display, output_p3=output_p3, dither=dither)
         self._vec3(program, "u_ff_dmin", s["dmin"])
         self._vec3(program, "u_ff_rng", s["rng"])
         self._vec3(program, "u_ff_pdmin", s["pdmin"])

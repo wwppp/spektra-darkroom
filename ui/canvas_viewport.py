@@ -1755,6 +1755,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             warn=bool(config_manager.get_preference("proof_warn", False)),
         )
         self._ffchain.set_proof(self._proof)
+        # P2：最近一次离屏渲染的实际输出空间，导出侧保存前必须读它。
+        self._last_offscreen_space = "sRGB"
         self._gl_initialized = False
 
         # Long-press on canvas to preview original (Before)
@@ -3875,7 +3877,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
             print(f"[DarkroomGLCanvas] grain key 计算失败，退回纯 LUT: {ex}")
             return None
 
-    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None, display_transform=False):
+    def last_offscreen_source_space(self):
+        """最近一次 ``render_offscreen`` 实际产出的色彩空间（"sRGB" / "Display P3"）。
+
+        导出侧必须用它，而不是自己按"我请求了 P3"去推断：点式链没接管时请求会被
+        静默退回 sRGB，按请求标记就等于把 sRGB 像素写成 P3 标签，整张图偏色。
+        同步调用（导出队列和单片导出都在主线程渲染）所以读的是刚写下的值。
+        """
+        return getattr(self, "_last_offscreen_space", "sRGB")
+
+    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None, display_transform=False, output_p3=False):
         """Render image at target resolution on GPU using an offscreen FBO.
         Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
 
@@ -3883,7 +3894,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
         显示器的补偿烘进去。唯一该给 True 的是 HQ 预览：它渲染的是一张"最终上屏"的纹理，
         shader 后面不再过色彩管理，所以必须在这里就把显示变换做掉，否则 HQ 开/关在广色域
         屏上颜色不一样。
+
+        ``output_p3``: 导出广色域文件用（P2）。True 时链尾不乘 P3→sRGB，直接给 P3 编码值，
+        这样 P3 文件里才真的装得下超 sRGB 的颜色。是否真的生效取决于点式链在不在——老 LUT
+        出口的像素本来就是 sRGB，那时会退回原行为，调用方必须问
+        ``last_offscreen_source_space()`` 再决定保存时怎么标源空间，猜错就是二次转换。
         """
+        # P2：每次离屏渲染都从 sRGB 起算，只有点式链真的接管了才改成 P3。
+        self._last_offscreen_space = "sRGB"
+
         # Oversize guard: GL textures cap at GL_MAX_TEXTURE_SIZE (typically 16384) and
         # there is no tiled renderer yet. Failing loudly beats a silently clipped or
         # black export; the tile renderer (with the 3-sigma overlap from
@@ -4317,9 +4336,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 _px_um = float(_override)
             self._grain_cubes.bind(u_1i, u_1f, u_3f, u_3fv, _px_um, eff_params, u_1fv=u_1fv,
                                    expect_key=self._grain_key_for(eff_params))
-            self._ffchain.bind(self.shader_program,
-                               dir_total=float(eff_params.get("dir_amount", 1.0)),
-                               display=bool(display_transform))
+            _want_p3 = bool(output_p3 and not display_transform)
+            _ff_active = self._ffchain.bind(
+                self.shader_program,
+                dir_total=float(eff_params.get("dir_amount", 1.0)),
+                display=bool(display_transform),
+                output_p3=_want_p3,
+                # 抖动只对 8-bit 有意义：16-bit / float 的量化台阶远低于可见阈值。
+                dither=(1.0 / 255.0 if (_want_p3 and int(bit_depth) <= 8) else 0.0))
+            # 只有点式链接管了，尾段才真的输出 P3；老 LUT 出口仍是 sRGB（见 gl_ffchain.bind）。
+            self._last_offscreen_space = ("Display P3" if (_want_p3 and _ff_active)
+                                          else "sRGB")
 
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 

@@ -470,6 +470,7 @@ class ExportQueueManager(QObject):
                         params_override=task.params,
                         bit_depth=bit_depth,
                         lut_override=eff_lut,
+                        output_p3=self._wants_native_p3(task.params),
                     )
                     QCoreApplication.processEvents()
                 except Exception as ex_gl:
@@ -490,6 +491,13 @@ class ExportQueueManager(QObject):
                 # Step 3: Save to disk in background worker
                 save_params = dict(task.params)
                 save_params["scale_pct"] = 100  # rendered_arr is already scaled to tgt_w x tgt_h by offscreen canvas
+                # P2：颜色域由画布决定，并**不总是**等于用户选的目标空间。点式链没接管
+                # （老 LUT 出口 / 原生卷）时请求会被静默退回 sRGB，这里按实际结果标记，
+                # 否则 save 里会把 sRGB 像素当 P3 再转一次，整张图偏色。
+                try:
+                    save_params["source_colorspace"] = self.canvas.last_offscreen_source_space()
+                except Exception:
+                    save_params["source_colorspace"] = "sRGB"
                 save_worker = _SaveImageWorker(rendered_arr, task.output_path, save_params)
                 self._current_worker = save_worker
 
@@ -510,6 +518,20 @@ class ExportQueueManager(QObject):
 
         worker.finished_load.connect(_on_load_done)
         worker.start()
+
+    @staticmethod
+    def _wants_native_p3(params):
+        """导出目标是不是 Display P3 —— 唯一能保持 P3 原生像素的目标。
+
+        sRGB 不用说；Adobe / Rec.2020 / ProPhoto 的传递函数各不相同，链尾只有 sRGB 那套
+        编码，所以它们仍走"sRGB 源 → 转换"，否则得再给 shader 加一条编码分支（Intel 驱动
+        已经贴着上限，见 P0 教训）。pixels 因此会窄一些，但绝不撒谎。
+        """
+        try:
+            from core.colorspace import resolve
+            return resolve((params or {}).get("colorspace", "sRGB"))[0] == "Display P3"
+        except Exception:
+            return False
 
     def _start_cpu_export(self, task):
         # M4: the CPU block pipeline has no grain stage -- it was removed together with the
