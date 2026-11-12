@@ -2906,6 +2906,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
     # measurement that motivated this mode.
     # -------------------------------------------------------------
     HQ_TEX_UNIT = 3
+    # HQ 帧的像素上限。超过这个量级，Intel 共享显存会静默分配失败，之后的
+    # render_offscreen 全部读到未初始化显存（花屏），见 _rebuild_hq_preview 的注释。
+    HQ_MAX_PIXELS = 12_000_000
 
     def set_hq_preview(self, enabled, resample="cubic", divisor=1):
         enabled = bool(enabled)
@@ -3042,12 +3045,22 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if isinstance(crop, dict) and crop.get("enabled", False):
                 cw_f = min(1.0, max(0.05, float(crop.get("w", 1.0) or 1.0)))
                 ch_f = min(1.0, max(0.05, float(crop.get("h", 1.0) or 1.0)))
-            rot = int(crop.get("rot_90", 0)) % 360 if isinstance(crop, dict) else 0
-            if rot in (90, 270):
-                cw_f, ch_f = ch_f, cw_f
             # Pixel pitch stays the export's: the long edge of the cropped area is kept at the
             # master scale, so the grain lattice is the one the file would be written with.
-            base_w, base_h = max(64, int(round(mw * cw_f))), max(64, int(round(mh * ch_f)))
+            #
+            # 面积和形状要分开取。面积 = crop 区域有多少像素（crop 越小，渲染越省）；
+            # 形状则必须用 get_image_bounds_norm() 给出**最终上屏 quad**的宽高比 ——
+            # 它已经把 90°/270° 的倒数处理过了。原来这里自己乘 mw*cw、再"交换 cw/ch"
+            # 去修旋转，全幅时 cw==ch==1、交换等于没交换，竖 master 转出来的横图仍按
+            # 竖的像素尺寸渲染，贴到已经变横的 quad 上就整幅横向拉长（用户报的拉伸）。
+            area = float(max(1, mw * mh)) * cw_f * ch_f
+            rot = int(crop.get("rot_90", 0)) % 360 if isinstance(crop, dict) else 0
+            _l, _r, _t, _b = self.get_image_bounds_norm()
+            qw = max(1e-6, (_r - _l) * max(1, self.width()))
+            qh = max(1e-6, (_b - _t) * max(1, self.height()))
+            q_asp = qw / qh
+            base_w = max(64, int(round(math.sqrt(area * q_asp))))
+            base_h = max(64, int(round(math.sqrt(area / q_asp))))
             div = max(1, int(self._hq_divisor))
             if base_w >= base_h:
                 tw = max(64, base_w // div)
@@ -3055,12 +3068,29 @@ class DarkroomGLCanvas(QOpenGLWidget):
             else:
                 th = max(64, base_h // div)
                 tw = max(64, int(round(th * base_w / float(base_h))))
+            # 像素预算。HQ 帧是"一张全尺寸导出"再叠上主纹理和光晕链的中间纹理：
+            # 18 MP 的 master 会让同时驻留的纹理接近 1.5 GB。Intel 共享显存在分配失败时
+            # **不报 GL 错误**，只把未初始化的显存当纹理采样 —— 症状是花屏，而且污染是
+            # 持久的（之后所有 render_offscreen 都是彩噪，实测 divisor=1 花、2/4 正常）。
+            # 12 MP 是实测能稳的安全线，也在常见导出尺寸的同量级。
+            if tw * th > self.HQ_MAX_PIXELS:
+                k = math.sqrt(self.HQ_MAX_PIXELS / float(tw * th))
+                tw = max(64, int(round(tw * k)))
+                th = max(64, int(round(th * k)))
             # The grain lattice is defined by textureSize(u_image), so feeding an upscaled
             # source gives the export-sized lattice without decoding the RAW again.  The
             # interpolated base detail is downsampled straight back to a few hundred pixels,
             # so it costs no visible sharpness.
-            if (tw, th) != (src.shape[1], src.shape[0]):
-                full = cv2.resize(np.asarray(src, np.float32), (tw, th),
+            #
+            # 源纹理是**未旋转**的 master，而 tw/th 是**旋转后**的画幅：90°/270° 时两者
+            # 的长短边正好互换，喂错方向会让 cv2.resize 把横图压成竖图，shader 再转一次
+            # 就成了"宽高比对了但内容变形"。所以喂给纹理的尺寸要按未旋转方向给。
+            if rot in (90, 270):
+                src_w_, src_h_ = th, tw
+            else:
+                src_w_, src_h_ = tw, th
+            if (src_w_, src_h_) != (src.shape[1], src.shape[0]):
+                full = cv2.resize(np.asarray(src, np.float32), (src_w_, src_h_),
                                   interpolation=cv2.INTER_LINEAR)
             else:
                 full = np.asarray(src, np.float32)

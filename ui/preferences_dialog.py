@@ -579,10 +579,6 @@ class PreferencesDialog(QDialog):
         r_res.addStretch(1)
         l_ren.addLayout(r_res)
 
-        self.chk_hq_preview = QCheckBox("视口平滑与抗锯齿")
-        self.chk_hq_preview.setChecked(True)
-        l_ren.addWidget(self.chk_hq_preview)
-
         # 「高质量预览」开关从视图菜单挪到这里：它是一次几秒的重建，属于渲染策略，
         # 不该混在视图菜单的缩放/对比项里；默认关，打开才有代价。
         self.chk_hq_export_preview = QCheckBox("高质量预览（按导出分辨率渲染）")
@@ -869,7 +865,6 @@ class PreferencesDialog(QDialog):
         idx_res = self.combo_preview_res.findData(prev_res)
         self.combo_preview_res.setCurrentIndex(idx_res if idx_res >= 0 else 1)
 
-        self.chk_hq_preview.setChecked(prefs.get("hq_preview", True))
         self.chk_hq_export_preview.setChecked(bool(prefs.get("hq_preview_export", False)))
         self.chk_viewport_cm.setChecked(bool(prefs.get("viewport_color_management", True)))
         self._refresh_viewport_cm_status()
@@ -1153,7 +1148,6 @@ class PreferencesDialog(QDialog):
         prefs["hardware_acceleration_mode"] = hw_mode
         prefs["hardware_acceleration"] = (hw_mode != "off")
         prefs["preview_max_edge"] = int(self.combo_preview_res.currentData())
-        prefs["hq_preview"] = self.chk_hq_preview.isChecked()
         prefs["hq_preview_export"] = self.chk_hq_export_preview.isChecked()
         prefs["viewport_color_management"] = self.chk_viewport_cm.isChecked()
         restore_val = self.chk_restore_last_files.isChecked()

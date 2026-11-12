@@ -36,7 +36,8 @@ from PySide6.QtCore import (
 if sys.platform == "win32":
     from PySide6.QtCore import QAbstractNativeEventFilter
 from PySide6.QtGui import (
-    QAction, QFont, QIcon, QKeySequence, QPainter, QColor, QPen, QBrush, QPixmap, QImage, QLinearGradient, QCursor
+    QAction, QFont, QIcon, QKeySequence, QPainter, QColor, QPen, QBrush, QPixmap, QImage, QLinearGradient, QCursor,
+    QShortcut
 )
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -5237,23 +5238,30 @@ class DarkroomMainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
-        # 校样（P1）。Ctrl+Y 保留给「重做」（Windows 用户肌肉记忆），
-        # 校样用 Ctrl+Shift+Y，色域警告用 Ctrl+Alt+Y。
-        self.act_proof = QAction("校样", self)
+        # 校样（P1）。快捷键刻意**不用** QAction.setShortcut：
+        # QAction 的快捷键走 QShortcutMap，按住不放会随系统键盘重复率反复触发
+        # triggered/toggled —— 用户按住想"保持开启"，实际看到的是每秒几十次开关。
+        # QShortcut 可以 setAutoRepeat(False)，按住只发一次；菜单里的快捷键文字用
+        # tab 手写在文本里（Qt 会把 tab 后半段右对齐渲染成快捷键列）。
+        self.act_proof = QAction("校样\tCtrl+Shift+Y", self)
         self.act_proof.setCheckable(True)
-        self.act_proof.setShortcut(QKeySequence("Ctrl+Shift+Y"))
         self.act_proof.setStatusTip("按选定的输出色彩空间模拟显示")
         self.act_proof.toggled.connect(self._on_proof_toggled)
         view_menu.addAction(self.act_proof)
-        self.addAction(self.act_proof)
+        self._sc_proof = QShortcut(QKeySequence("Ctrl+Shift+Y"), self)
+        self._sc_proof.setAutoRepeat(False)
+        self._sc_proof.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._sc_proof.activated.connect(self.act_proof.toggle)
 
-        self.act_proof_warn = QAction("色域警告", self)
+        self.act_proof_warn = QAction("色域警告\tCtrl+Alt+Y", self)
         self.act_proof_warn.setCheckable(True)
-        self.act_proof_warn.setShortcut(QKeySequence("Ctrl+Alt+Y"))
         self.act_proof_warn.setStatusTip("把超出校样色域的像素叠成品红")
         self.act_proof_warn.toggled.connect(self._on_proof_warn_toggled)
         view_menu.addAction(self.act_proof_warn)
-        self.addAction(self.act_proof_warn)
+        self._sc_proof_warn = QShortcut(QKeySequence("Ctrl+Alt+Y"), self)
+        self._sc_proof_warn.setAutoRepeat(False)
+        self._sc_proof_warn.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._sc_proof_warn.activated.connect(self.act_proof_warn.toggle)
 
         self.act_proof_setup = QAction("校样设置…", self)
         self.act_proof_setup.triggered.connect(self.open_proof_setup)
