@@ -497,18 +497,33 @@ class BaseExportDialog(QDialog):
         from ui.window_utils import setup_solid_combobox, get_icon
         self.setWindowIcon(get_icon("dlg_export.png", is_dark=is_dark))
 
+    def _lock_width_fit_height(self, width=620):
+        """宽度锁死、高度按内容算。
+
+        两个导出对话框原来都写死高度（单片 338 / 批量 388）。表单内容比这个高，
+        固定高度于是把 QVBoxLayout 的 spacing 和每一行的高度一起压扁：实测单片
+        card 实高 255 而需要 274、输出尺寸控件 21 而需要 26、路径输入框 16 而需要
+        20 —— 看起来就是"行距太紧 + 下面几行像被裁掉"。宽度仍锁死，避免两列控件
+        在切换格式时忽长忽短。
+        """
+        self.setFixedWidth(width)
+        self.ensurePolished()
+        need = max(self.sizeHint().height(), self.minimumSizeHint().height())
+        if need > 0:
+            self.setFixedHeight(need)
+
     def _init_settings_card(self) -> tuple[QFrame, QVBoxLayout]:
         card = QFrame()
         card.setObjectName("settingsCard")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(14, 14, 14, 14)
-        card_layout.setSpacing(10)
+        card_layout.setSpacing(14)
 
         # Top 2 Rows: Format, Color Space, Resolution, Bit Depth in a unified QGridLayout
         grid_top = QGridLayout()
         grid_top.setContentsMargins(0, 0, 0, 0)
         grid_top.setHorizontalSpacing(12)
-        grid_top.setVerticalSpacing(8)
+        grid_top.setVerticalSpacing(12)
         grid_top.setColumnStretch(0, 0)
         grid_top.setColumnStretch(1, 1)
         grid_top.setColumnStretch(2, 0)
@@ -1142,7 +1157,6 @@ class SingleExportDialog(BaseExportDialog):
     def __init__(self, default_file_path: str, parent=None, source_path: str = ""):
         super().__init__(parent)
         self.setWindowTitle("单片扫描")
-        self.setFixedSize(620, 338)
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         # 源文件路径模式需要知道底片落在哪；缺省时按默认输出路径反推目录。
@@ -1150,6 +1164,7 @@ class SingleExportDialog(BaseExportDialog):
         self._init_ui()
         self._apply_style()
         self._apply_last_settings()
+        self._lock_width_fit_height(620)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1361,10 +1376,8 @@ class BatchExportDialog(BaseExportDialog):
         # fields silently changed meaning depending on how many frames were selected.
         if batch_count == 1:
             self.setWindowTitle("扫描当前底片")
-            self.setFixedSize(620, 388)
         else:
             self.setWindowTitle(f"批量扫描：{self.batch_count}张")
-            self.setFixedSize(620, 388)
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
@@ -1382,6 +1395,7 @@ class BatchExportDialog(BaseExportDialog):
         self._init_ui()
         self._apply_style()
         self._apply_last_settings()
+        self._lock_width_fit_height(620)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
