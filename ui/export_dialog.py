@@ -534,11 +534,10 @@ class BaseExportDialog(QDialog):
         20 —— 看起来就是"行距太紧 + 下面几行像被裁掉"。宽度仍锁死，避免两列控件
         在切换格式时忽长忽短。
 
-        620 是原来的宽度。宽度不能再靠对话框变宽来给「输出尺寸」腾地方，所以那一
-        格改成跨两列（行内布局见 `_init_settings_card`）：四列等宽时它只有 167 px、
-        文本区 133 px，而 "原尺寸·2454×3272" 要 165 px，Qt 的 CE_ComboBoxLabel 又
-        不做 elide，末尾直接被 drop-down 箭头盖住。跨列后这一格 251 px、文本区
-        217 px，五位数（12000×8000）也放得下，而对话框宽度回到 620。
+        620 是原来的宽度，四列等宽，每格 167 px、文本区 133 px。「输出尺寸」的当前
+        项带着像素数（"原尺寸·2454×3272"），用户截图实测这段文字占 103 px（截图
+        622×413，1:1 像素），放得下 —— 早前判断"需要 165 px 所以必须加宽"是用 Qt
+        离屏字体量的，那个回退字体比真机宽约 39%，属于误测。
         """
         self.setFixedWidth(width)
         self.ensurePolished()
@@ -589,40 +588,10 @@ class BaseExportDialog(QDialog):
         self.combo_colorspace.addItem("ProPhoto RGB", "ProPhoto RGB")
         grid_top.addWidget(self.combo_colorspace, 0, 3)
 
-        # Row 1: Bit Depth & Colour Subsampling (both are encoder properties)
-        lbl_bit = QLabel("输出位深:")
-        lbl_bit.setFixedWidth(72)
-        grid_top.addWidget(lbl_bit, 1, 0)
-
-        self.combo_depth = QComboBox()
-        setup_solid_combobox(self.combo_depth)
-        grid_top.addWidget(self.combo_depth, 1, 1)
-
-        lbl_sub = QLabel("色彩抽样:")
-        lbl_sub.setFixedWidth(72)
-        grid_top.addWidget(lbl_sub, 1, 2)
-
-        self.combo_subsampling = QComboBox()
-        setup_solid_combobox(self.combo_subsampling)
-        self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
-        self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
-        self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
-        grid_top.addWidget(self.combo_subsampling, 1, 3)
-
-        # Row 2: Output Size (spans two columns) & DPI.
-        # The size combo carries every preset's real pixel count ("A4·2480×3508"), so it is
-        # the longest text in the form; at four equal columns it needed more than its cell
-        # and Qt hard-clips combo labels instead of eliding.  Spanning columns 1-2 gives it
-        # the label column's 72 px as well, which is what lets the dialog stay at 620.
-        # DPI rides along on the right instead of owning a row: "300 DPI" needs no label,
-        # and it reads naturally right next to the pixel count it governs.
-        lbl_size = QLabel("输出尺寸:")
-        lbl_size.setFixedWidth(72)
-        self.lbl_output_size = lbl_size
-        grid_top.addWidget(lbl_size, 2, 0)
-
-        self.size_widget = ExportSizeWidget(self)
-        grid_top.addWidget(self.size_widget, 2, 1, 1, 2)
+        # Row 1: Resolution (DPI) & Bit Depth
+        lbl_dpi = QLabel("输出分辨率:")
+        lbl_dpi.setFixedWidth(72)
+        grid_top.addWidget(lbl_dpi, 1, 0)
 
         self.combo_dpi = QComboBox()
         setup_solid_combobox(self.combo_dpi)
@@ -630,10 +599,36 @@ class BaseExportDialog(QDialog):
         self.combo_dpi.addItem("300 DPI", 300)
         self.combo_dpi.addItem("600 DPI", 600)
         self.combo_dpi.setCurrentIndex(1)
-        # No label of its own any more: the value is self-describing, and the tooltip
-        # carries the one thing that is not obvious — it only writes metadata.
-        self.combo_dpi.setToolTip("输出分辨率：只写入文件的 DPI 元数据，不改变像素尺寸")
-        grid_top.addWidget(self.combo_dpi, 2, 3)
+        grid_top.addWidget(self.combo_dpi, 1, 1)
+
+        lbl_bit = QLabel("输出位深:")
+        lbl_bit.setFixedWidth(72)
+        grid_top.addWidget(lbl_bit, 1, 2)
+
+        self.combo_depth = QComboBox()
+        setup_solid_combobox(self.combo_depth)
+        grid_top.addWidget(self.combo_depth, 1, 3)
+
+        # Shared output-size row: every format can be scaled, so it sits above the format
+        # pages instead of inside one of them.
+        lbl_size = QLabel("输出尺寸:")
+        lbl_size.setFixedWidth(72)
+        self.lbl_output_size = lbl_size
+        grid_top.addWidget(lbl_size, 2, 0)
+
+        self.size_widget = ExportSizeWidget(self)
+        grid_top.addWidget(self.size_widget, 2, 1)
+
+        lbl_sub = QLabel("色彩抽样:")
+        lbl_sub.setFixedWidth(72)
+        grid_top.addWidget(lbl_sub, 2, 2)
+
+        self.combo_subsampling = QComboBox()
+        setup_solid_combobox(self.combo_subsampling)
+        self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
+        self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
+        self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
+        grid_top.addWidget(self.combo_subsampling, 2, 3)
 
         # No extra hint line: the resolved pixel size is folded into the size combo's own text,
         # so the form keeps four evenly spaced rows.
