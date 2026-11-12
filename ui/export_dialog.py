@@ -301,7 +301,14 @@ class ExportSizeWidget(QWidget):
         return {name: label for name, label, _edge, _paper in EXPORT_SIZE_PRESETS}
 
     def _update_summary(self):
-        """Fold the real pixel size into the combo's own text so it needs no extra row."""
+        """Fold the real pixel size into the combo's own text so it needs no extra row.
+
+        Keep the separator tight (no surrounding spaces) and the dialog wide enough for a
+        five-digit pair: "原尺寸 · 2454×3272" needed 165 px inside a 133 px label area, so the
+        tail was hard-clipped behind the drop-down arrow instead of elided.  Qt's
+        CE_ComboBoxLabel path draws text without elision, so the only safe fix is to make it
+        fit — `scratch/_export_size_combo_check.py` guards both the text and the width.
+        """
         out_w, out_h = self.output_pixels()
         labels = self._base_labels()
         if not self.combo.isEditable():
@@ -309,7 +316,7 @@ class ExportSizeWidget(QWidget):
             for name, text in labels.items():
                 row = self._preset_row(name)
                 if name == current and name != "custom":
-                    self.combo.setItemText(row, f"{text} · {out_w}×{out_h}")
+                    self.combo.setItemText(row, f"{text}·{out_w}×{out_h}")
                 else:
                     self.combo.setItemText(row, text)
         summary = f"{out_w} × {out_h} px"
@@ -497,7 +504,7 @@ class BaseExportDialog(QDialog):
         from ui.window_utils import setup_solid_combobox, get_icon
         self.setWindowIcon(get_icon("dlg_export.png", is_dark=is_dark))
 
-    def _lock_width_fit_height(self, width=620):
+    def _lock_width_fit_height(self, width=700):
         """宽度锁死、高度按内容算。
 
         两个导出对话框原来都写死高度（单片 338 / 批量 388）。表单内容比这个高，
@@ -505,6 +512,11 @@ class BaseExportDialog(QDialog):
         card 实高 255 而需要 274、输出尺寸控件 21 而需要 26、路径输入框 16 而需要
         20 —— 看起来就是"行距太紧 + 下面几行像被裁掉"。宽度仍锁死，避免两列控件
         在切换格式时忽长忽短。
+
+        700 而不是 620：「输出尺寸」下拉框把真实像素数拼进当前项文本
+        （"原尺寸·2454×3272"），620 时这一栏只有 167 px、文本可用区 133 px，
+        而文本要 165 px —— Qt 的 CE_ComboBoxLabel 不做 elide，末尾直接被 drop-down
+        箭头盖住。加宽后可用区 173 px，五位数（12000×8000，154 px）也留有余量。
         """
         self.setFixedWidth(width)
         self.ensurePolished()
@@ -1164,7 +1176,7 @@ class SingleExportDialog(BaseExportDialog):
         self._init_ui()
         self._apply_style()
         self._apply_last_settings()
-        self._lock_width_fit_height(620)
+        self._lock_width_fit_height()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1395,7 +1407,7 @@ class BatchExportDialog(BaseExportDialog):
         self._init_ui()
         self._apply_style()
         self._apply_last_settings()
-        self._lock_width_fit_height(620)
+        self._lock_width_fit_height()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
