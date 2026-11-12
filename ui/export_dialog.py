@@ -300,25 +300,46 @@ class ExportSizeWidget(QWidget):
         """Preset labels."""
         return {name: label for name, label, _edge, _paper in EXPORT_SIZE_PRESETS}
 
-    def _update_summary(self):
-        """Fold the real pixel size into the combo's own text so it needs no extra row.
+    def _pixels_for(self, key):
+        """Pixels a preset would produce, independent of which row is currently selected.
 
-        Keep the separator tight (no surrounding spaces) and the dialog wide enough for a
-        five-digit pair: "原尺寸 · 2454×3272" needed 165 px inside a 133 px label area, so the
-        tail was hard-clipped behind the drop-down arrow instead of elided.  Qt's
-        CE_ComboBoxLabel path draws text without elision, so the only safe fix is to make it
-        fit — `scratch/_export_size_combo_check.py` guards both the text and the width.
+        Same rule as `output_pixels` (pin the long edge, never upscale), but keyed instead
+        of read off the combo so the collapsed box can show a size for *every* row.
+        """
+        src_w, src_h = self.source_pixels()
+        long_edge = max(src_w, src_h)
+        for name, _label, edge, _paper in EXPORT_SIZE_PRESETS:
+            if name != key:
+                continue
+            # "custom" carries -1, so it lands here too and reports the source size — which
+            # is exactly what the custom editor defaults to.
+            if edge <= 0 or edge >= long_edge:
+                return src_w, src_h
+            scale = edge / float(long_edge)
+            return max(1, int(round(src_w * scale))), max(1, int(round(src_h * scale)))
+        return src_w, src_h
+
+    def _update_summary(self):
+        """Fold each preset's real pixel count into its own row text.
+
+        The pixel count belongs in the row text rather than a separate label: it turns the
+        drop-down into a menu of concrete outcomes ("A4·2480×3508") instead of a list of
+        names the user has to resolve themselves.  Keep the separator tight (no surrounding
+        spaces) and the cell wide enough — Qt's CE_ComboBoxLabel draws text without elision,
+        so a too-narrow cell hard-clips the tail behind the drop-down arrow instead of
+        showing "…".  `scratch/_export_size_combo_check.py` guards both the text and the
+        width for every preset, not just the selected one.
         """
         out_w, out_h = self.output_pixels()
-        labels = self._base_labels()
-        if not self.combo.isEditable():
-            current = self.combo.currentData()
-            for name, text in labels.items():
-                row = self._preset_row(name)
-                if name == current and name != "custom":
-                    self.combo.setItemText(row, f"{text}·{out_w}×{out_h}")
-                else:
-                    self.combo.setItemText(row, text)
+        known_source = self._src_w > 0 and self._src_h > 0
+        for name, text in self._base_labels().items():
+            if name == "custom":
+                # Editable row: the number lives in the line edit, not in the item text.
+                continue
+            if known_source:
+                w, h = self._pixels_for(name)
+                text = f"{text}·{w}×{h}"
+            self.combo.setItemText(self._preset_row(name), text)
         summary = f"{out_w} × {out_h} px"
         if self._dpi > 0 and self._src_w > 0:
             cm_w = out_w / self._dpi * 2.54
@@ -504,7 +525,7 @@ class BaseExportDialog(QDialog):
         from ui.window_utils import setup_solid_combobox, get_icon
         self.setWindowIcon(get_icon("dlg_export.png", is_dark=is_dark))
 
-    def _lock_width_fit_height(self, width=700):
+    def _lock_width_fit_height(self, width=620):
         """宽度锁死、高度按内容算。
 
         两个导出对话框原来都写死高度（单片 338 / 批量 388）。表单内容比这个高，
@@ -513,10 +534,11 @@ class BaseExportDialog(QDialog):
         20 —— 看起来就是"行距太紧 + 下面几行像被裁掉"。宽度仍锁死，避免两列控件
         在切换格式时忽长忽短。
 
-        700 而不是 620：「输出尺寸」下拉框把真实像素数拼进当前项文本
-        （"原尺寸·2454×3272"），620 时这一栏只有 167 px、文本可用区 133 px，
-        而文本要 165 px —— Qt 的 CE_ComboBoxLabel 不做 elide，末尾直接被 drop-down
-        箭头盖住。加宽后可用区 173 px，五位数（12000×8000，154 px）也留有余量。
+        620 是原来的宽度。宽度不能再靠对话框变宽来给「输出尺寸」腾地方，所以那一
+        格改成跨两列（行内布局见 `_init_settings_card`）：四列等宽时它只有 167 px、
+        文本区 133 px，而 "原尺寸·2454×3272" 要 165 px，Qt 的 CE_ComboBoxLabel 又
+        不做 elide，末尾直接被 drop-down 箭头盖住。跨列后这一格 251 px、文本区
+        217 px，五位数（12000×8000）也放得下，而对话框宽度回到 620。
         """
         self.setFixedWidth(width)
         self.ensurePolished()
@@ -567,10 +589,40 @@ class BaseExportDialog(QDialog):
         self.combo_colorspace.addItem("ProPhoto RGB", "ProPhoto RGB")
         grid_top.addWidget(self.combo_colorspace, 0, 3)
 
-        # Row 1: Resolution (DPI) & Bit Depth
-        lbl_dpi = QLabel("输出分辨率:")
-        lbl_dpi.setFixedWidth(72)
-        grid_top.addWidget(lbl_dpi, 1, 0)
+        # Row 1: Bit Depth & Colour Subsampling (both are encoder properties)
+        lbl_bit = QLabel("输出位深:")
+        lbl_bit.setFixedWidth(72)
+        grid_top.addWidget(lbl_bit, 1, 0)
+
+        self.combo_depth = QComboBox()
+        setup_solid_combobox(self.combo_depth)
+        grid_top.addWidget(self.combo_depth, 1, 1)
+
+        lbl_sub = QLabel("色彩抽样:")
+        lbl_sub.setFixedWidth(72)
+        grid_top.addWidget(lbl_sub, 1, 2)
+
+        self.combo_subsampling = QComboBox()
+        setup_solid_combobox(self.combo_subsampling)
+        self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
+        self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
+        self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
+        grid_top.addWidget(self.combo_subsampling, 1, 3)
+
+        # Row 2: Output Size (spans two columns) & DPI.
+        # The size combo carries every preset's real pixel count ("A4·2480×3508"), so it is
+        # the longest text in the form; at four equal columns it needed more than its cell
+        # and Qt hard-clips combo labels instead of eliding.  Spanning columns 1-2 gives it
+        # the label column's 72 px as well, which is what lets the dialog stay at 620.
+        # DPI rides along on the right instead of owning a row: "300 DPI" needs no label,
+        # and it reads naturally right next to the pixel count it governs.
+        lbl_size = QLabel("输出尺寸:")
+        lbl_size.setFixedWidth(72)
+        self.lbl_output_size = lbl_size
+        grid_top.addWidget(lbl_size, 2, 0)
+
+        self.size_widget = ExportSizeWidget(self)
+        grid_top.addWidget(self.size_widget, 2, 1, 1, 2)
 
         self.combo_dpi = QComboBox()
         setup_solid_combobox(self.combo_dpi)
@@ -578,36 +630,10 @@ class BaseExportDialog(QDialog):
         self.combo_dpi.addItem("300 DPI", 300)
         self.combo_dpi.addItem("600 DPI", 600)
         self.combo_dpi.setCurrentIndex(1)
-        grid_top.addWidget(self.combo_dpi, 1, 1)
-
-        lbl_bit = QLabel("输出位深:")
-        lbl_bit.setFixedWidth(72)
-        grid_top.addWidget(lbl_bit, 1, 2)
-
-        self.combo_depth = QComboBox()
-        setup_solid_combobox(self.combo_depth)
-        grid_top.addWidget(self.combo_depth, 1, 3)
-
-        # Shared output-size row: every format can be scaled, so it sits above the format
-        # pages instead of inside one of them.
-        lbl_size = QLabel("输出尺寸:")
-        lbl_size.setFixedWidth(72)
-        self.lbl_output_size = lbl_size
-        grid_top.addWidget(lbl_size, 2, 0)
-
-        self.size_widget = ExportSizeWidget(self)
-        grid_top.addWidget(self.size_widget, 2, 1)
-
-        lbl_sub = QLabel("色彩抽样:")
-        lbl_sub.setFixedWidth(72)
-        grid_top.addWidget(lbl_sub, 2, 2)
-
-        self.combo_subsampling = QComboBox()
-        setup_solid_combobox(self.combo_subsampling)
-        self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
-        self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
-        self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
-        grid_top.addWidget(self.combo_subsampling, 2, 3)
+        # No label of its own any more: the value is self-describing, and the tooltip
+        # carries the one thing that is not obvious — it only writes metadata.
+        self.combo_dpi.setToolTip("输出分辨率：只写入文件的 DPI 元数据，不改变像素尺寸")
+        grid_top.addWidget(self.combo_dpi, 2, 3)
 
         # No extra hint line: the resolved pixel size is folded into the size combo's own text,
         # so the form keeps four evenly spaced rows.
