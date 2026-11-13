@@ -1532,18 +1532,37 @@ class FilmGridCard(QFrame):
             """)
             self.lbl_name.setStyleSheet(f"QLabel#filmCardName {{ color: {name_color}; font-size: 9.5px; font-weight: 500; border: none; background: transparent; }}")
 
+    def highlight_now(self) -> None:
+        """把选中框立刻挪到这张卡上并同步重绘。
+
+        `selected` 是直连信号，接收方 `on_switch_film` 会在同一个调用里同步烘完整条 LUT
+        （原生→原生首次命中实测 690 ms）。排队重绘要等它返回，视觉上就是"点完要搁一拍
+        才亮"。这里先切样式、再 repaint() 同步画一帧，把高亮挤在阻塞之前。
+        """
+        group = getattr(self, "sibling_cards", None)
+        targets = list(group.items()) if group else [(self.stock_id, self)]
+        repaint = []
+        for sid, card in targets:
+            before = card.is_active
+            card.set_active(sid == self.stock_id)
+            if card.is_active != before:
+                repaint.append(card)
+        for card in repaint:
+            card.repaint()
+
     def mousePressEvent(self, event):
         if not self.isEnabled():
             event.ignore()
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            self.highlight_now()
             self.selected.emit(self.stock_id)
             event.accept()
         elif event.button() == Qt.MouseButton.RightButton:
             menu = QMenu(self)
             menu.setStyleSheet(get_darkroom_menu_style())
             act_apply = menu.addAction("应用预设")
-            act_apply.triggered.connect(lambda: self.selected.emit(self.stock_id))
+            act_apply.triggered.connect(lambda: (self.highlight_now(), self.selected.emit(self.stock_id)))
 
             menu.addSeparator()
 
@@ -4383,6 +4402,7 @@ class DarkroomMainWindow(QMainWindow):
                 card = FilmGridCard(item, is_active=(item["id"] == self.current_film_stock), is_custom=False, stock_type="film", parent=parent_w)
                 card.selected.connect(self.on_switch_film)
                 card.sortRequested.connect(lambda st, sb: self._sort_and_reflow_stocks(st, sb))
+                card.sibling_cards = self.film_cards
                 self.film_cards[item["id"]] = card
         if hasattr(self, 'film_header'):
             self.film_header.set_title_count(len(self.film_cards), len(self.film_cards))
@@ -4397,6 +4417,7 @@ class DarkroomMainWindow(QMainWindow):
             card = FilmGridCard(item, is_active=(item["id"] == self.current_paper_stock), is_custom=False, stock_type="paper", parent=parent_w)
             card.selected.connect(self.on_switch_paper)
             card.sortRequested.connect(lambda st, sb: self._sort_and_reflow_stocks(st, sb))
+            card.sibling_cards = self.paper_cards
             self.paper_cards[item["id"]] = card
         if hasattr(self, 'lbl_paper_title'):
             self.lbl_paper_title.setText(f"放大相纸 ({len(self.paper_cards)} 张)")
@@ -9759,6 +9780,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.set_app_status(f"{stock_id} 与当前胶卷不属同一条链，未切换", timeout_ms=2500)
             if hasattr(self, "combo_paper"):
                 self.combo_paper.set_value(getattr(self, "current_paper_stock", "none"))
+            # 卡片在点击时已经把高亮挪过去了（FilmGridCard.highlight_now，为了不等烘焙），
+            # 这里既然拒绝了切换，得把高亮挪回真正的当前纸，否则高亮停在没生效的那张上。
+            for pid, card in getattr(self, "paper_cards", {}).items():
+                card.set_active(str(pid) == str(getattr(self, "current_paper_stock", "none")))
             return
 
         prev_paper = self.current_paper_stock
