@@ -1772,7 +1772,7 @@ class CompactExifWidget(QWidget):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         self.card = QFrame()
@@ -3449,7 +3449,7 @@ class DarkroomMainWindow(QMainWindow):
 
         # 5. Right Sidebar Container
         if hasattr(self, 'sidebar_container'):
-            self.sidebar_container.setStyleSheet(f"background: {colors['panel_bg']};")
+            self.sidebar_container.setStyleSheet(f"background: {colors['app_bg']};")
 
         # 5b. 卡片墙托盘（底色 + 渐隐色一起走，浅色下渐隐带必须等于托盘色）
         if hasattr(self, 'film_tray'):
@@ -3976,7 +3976,9 @@ class DarkroomMainWindow(QMainWindow):
         left_panel.setMinimumWidth(160)
         left_panel.setMaximumWidth(460)
         lp_layout = QVBoxLayout(left_panel)
-        lp_layout.setContentsMargins(4, 4, 4, 4)
+        # 不额外内缩：卡片/托盘的边缘就是 splitter 的边缘，这样左栏的上下左右和
+        # 画布、底片槽、窗口边距才对得齐（曾经内缩 4px，四处各差 4px）
+        lp_layout.setContentsMargins(0, 0, 0, 0)
         lp_layout.setSpacing(4)
 
         # 3-tier vertical splitter (Delicate amber hairline fading at both ends)
@@ -3985,8 +3987,7 @@ class DarkroomMainWindow(QMainWindow):
         # Sub-window 1: 胶卷型号 (Films)
         film_subwin = QWidget()
         film_layout = QVBoxLayout(film_subwin)
-        # 与 EXIF 窗格同样的 4px 内缩：托盘边缘必须和 exifCard 对齐
-        film_layout.setContentsMargins(4, 4, 4, 4)
+        film_layout.setContentsMargins(0, 0, 0, 0)
         film_layout.setSpacing(0)
 
         # 托盘包住整个窗格（标题/搜索/分类胶囊 + 卡片列表）。只包卡片列表的话，上面是
@@ -4303,7 +4304,7 @@ class DarkroomMainWindow(QMainWindow):
         self.sidebar_container = QWidget()
         self.sidebar_container.setMinimumWidth(260)
         self.sidebar_container.setMaximumWidth(420)
-        self.sidebar_container.setStyleSheet(f"background: {theme_manager.color('panel_bg')};")
+        self.sidebar_container.setStyleSheet(f"background: {theme_manager.color('app_bg')};")
         sb_outer_layout = QVBoxLayout(self.sidebar_container)
         # Right margin is 4 (not 8) so the 6px scrollbar sits centred in the 14px gutter between
         # the parameter cards and the panel edge (4 | 6 | 4) instead of touching the cards.
