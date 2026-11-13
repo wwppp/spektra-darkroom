@@ -2272,6 +2272,7 @@ class DarkroomMainWindow(QMainWindow):
             "enlarger_yellow": 0.0,
             "print_exposure": 1.0,
             "pre_flash": 0.0,
+            "pre_flash_camera": 0.0,
             "black_lift": 0.0,
             "morph_gamma": 1.0,
             "developer_exhaustion": 0.0,
@@ -4936,8 +4937,17 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_print_exp.sliderReleased.connect(self._on_slider_committed)
         self.sec_enlarger.addWidget(self.slider_print_exp)
 
+        self.slider_preflash_camera = AdobeScrubSlider(
+            "胶片预闪", 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
+            tooltip="在显影前给底片叠加一层均匀曝光（相对计量中灰）。\n"
+                    "只抬暗部趾部、几乎不动高光，用来把死黑拉出细节；与下面的相纸预闪是两回事"
+        )
+        self.slider_preflash_camera.valueChanged.connect(lambda v: self._on_slider_live("pre_flash_camera", v))
+        self.slider_preflash_camera.sliderReleased.connect(self._on_slider_committed)
+        self.sec_enlarger.addWidget(self.slider_preflash_camera)
+
         self.slider_preflash = AdobeScrubSlider(
-            "预闪反差", 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
+            "相纸预闪", 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
             tooltip="在相纸曝光域叠加微量基础底光，柔化高光反差并保留亮部层次"
         )
         self.slider_preflash.valueChanged.connect(lambda v: self._on_slider_live("pre_flash", v))
@@ -7876,6 +7886,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             "enlarger_yellow": 0.0,
             "print_exposure": 1.0,
             "pre_flash": 0.0,
+            "pre_flash_camera": 0.0,
             "black_lift": 0.0,
             "morph_gamma": 1.0,
             "developer_exhaustion": 0.0,
@@ -7904,7 +7915,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         "dir_amount", "dir_interlayer", "dir_samelayer", "push_ev",
         # 放大机与相纸显影
         "enlarger_illuminant", "enlarger_cyan", "enlarger_magenta", "enlarger_yellow",
-        "print_exposure", "pre_flash",
+        "print_exposure", "pre_flash", "pre_flash_camera",
         "morph_gamma", "developer_exhaustion",
         # 物理光晕
         "halation", "halation_amount", "halation_boost", "boost_ev",
@@ -8372,11 +8383,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 # Push is a development condition, so it belongs to this track's reset: dragging
                 # "复原" here must return the film to standard development, not leave a +2 baked in.
                 "push_ev": 0, "push_underexpose": False,
+                # 胶片预闪也是胶片侧的曝光条件（显影前叠加的光），不属于放大机与相纸那一组。
+                "pre_flash_camera": 0.0,
             },
             "enlarger": {
                 "enlarger_illuminant": "TH-KG3",
                 "enlarger_cyan": 0.0, "enlarger_magenta": 0.0, "enlarger_yellow": 0.0,
-                "print_exposure": 1.0, "pre_flash": 0.0,
+                "print_exposure": 1.0, "pre_flash": 0.0, "pre_flash_camera": 0.0,
                 "morph_gamma": 1.0, "developer_exhaustion": 0.0
             },
             "halation": {
@@ -8943,6 +8956,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, 'slider_yellow'): self.slider_yellow.set_value(p.get("enlarger_yellow", 0.0))
             if hasattr(self, 'slider_cyan'): self.slider_cyan.set_value(p.get("enlarger_cyan", 0.0))
             if hasattr(self, 'slider_print_exp'): self.slider_print_exp.set_value(p.get("print_exposure", 1.0))
+            if hasattr(self, 'slider_preflash_camera'): self.slider_preflash_camera.set_value(p.get("pre_flash_camera", 0.0))
             if hasattr(self, 'slider_preflash'): self.slider_preflash.set_value(p.get("pre_flash", 0.0))
             if hasattr(self, 'slider_black_lift'): self.slider_black_lift.set_value(p.get("black_lift", 0.0))
             if hasattr(self, 'slider_morph_gamma'): self.slider_morph_gamma.set_value(p.get("morph_gamma", 1.0))
@@ -9511,6 +9525,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.current_params["enlarger_yellow"] = 0.0
             self.current_params["print_exposure"] = 1.0
             self.current_params["pre_flash"] = 0.0
+            self.current_params["pre_flash_camera"] = 0.0
             self.current_params["developer_exhaustion"] = 0.0
             self.current_params["morph_gamma"] = 1.0
             for pid, card in self.paper_cards.items():
@@ -11095,6 +11110,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if w is not None:
                 w.setEnabled(enlarger_available)
                 w.setToolTip(getattr(w, "default_tooltip", "") if enlarger_available else enlarger_hint)
+        # 胶片预闪只需要"有胶片介质"：反转片、直扫、黑白卷都有效（它发生在显影之前），
+        # 所以不能跟放大机那一组一起置灰，只在旁通模式下禁用。
+        cam_pf = getattr(self, 'slider_preflash_camera', None)
+        if cam_pf is not None:
+            cam_pf.setEnabled(not is_none)
+            cam_pf.setToolTip(
+                getattr(cam_pf, "default_tooltip", "") if not is_none
+                else "当前为数码原片旁通模式：没有胶片介质，胶片预闪无效")
         # fotufilm 点式链没有 morph / 显影衰竭这两个自由度（上游配置里根本没有这两类槽）。
         # 置灰并说明，而不是让它们看着能拖、实际什么都不做。
         if enlarger_available and self._on_ffchain_now():

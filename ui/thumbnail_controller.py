@@ -11,7 +11,8 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal, QThread, Qt
 from PySide6.QtGui import QImage, QPixmap
 from core import session_cache_manager
-from core.darkroom_math import wb_gains, paper_domain_adjust, chemistry_delta, apply_black_point
+from core.darkroom_math import (wb_gains, paper_domain_adjust, chemistry_delta,
+                                apply_black_point, apply_camera_preflash)
 import logging
 logger = logging.getLogger("SpektraDarkroom.ThumbnailController")
 
@@ -172,9 +173,19 @@ class StockThumbnailWorker(QThread):
             except Exception as e:
                 logger.error(f"Error applying optical diffusion: {e}")
 
+        # 3.6. 胶片预闪：显影前的均匀曝光补偿，必须在查 LUT 之前（与 GPU 的
+        #      develop_negative 入口、CPU 导出的 chunk 同一位置）。
+        cam_pre = 0.0
+        if self.current_film != "none":
+            try:
+                cam_pre = float(self.params_dict.get("pre_flash_camera", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                cam_pre = 0.0
+        if cam_pre > 0.0005:
+            small_linear = apply_camera_preflash(small_linear, cam_pre)
+
         # Reference film to pair with when current stock is 'none' (bypass mode)
         ref_film = self.current_film if self.current_film != "none" else "kodak_portra_400"
-
         if self._stopped:
             return
 

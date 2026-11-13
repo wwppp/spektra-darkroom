@@ -150,7 +150,8 @@ uniform float u_highlights;
 uniform float u_shadows;
 uniform vec3 u_cmy;
 uniform float u_print_exposure;
-uniform float u_preflash;
+uniform float u_preflash;             // paper pre-flash (softens highlights)
+uniform float u_cam_preflash;         // film pre-flash (lifts shadows), added before development
 uniform float u_black_lift;
 
 // Halation physics (Official Spektrafilm Model)
@@ -523,6 +524,15 @@ vec3 grain_on_density(vec3 density, vec2 px) {
 // pixel covers several image pixels; averaging them *after* this is what a downsample does --
 // averaging before it is what a different-looking picture does.
 vec3 develop_negative(vec3 linear_rgb, vec2 image_px) {
+    // Film pre-flash: a uniform second exposure of the negative, added in scene-linear
+    // radiance before development. Mid-grey is 0.18 here and the engine meters the value
+    // against mid-grey, so the offset is preflash * 0.18 (mirrors
+    // core/darkroom_math.apply_camera_preflash). It only looks at the toe - highlights,
+    // already far above mid-grey, barely move - which is why it is a separate slider from
+    // the paper pre-flash below.
+    if (u_cam_preflash > 5e-4) {
+        linear_rgb += vec3(max(0.0, u_cam_preflash) * 0.18);
+    }
     vec3 film_rgb;
     // 两条链在这里汇合到"净密度"：点式新链逐像素算，老路查 33³ 密度表。
     // 必须先算完密度再分头出显示值，颗粒才只有一处调用（见 grain_on_density 的注释：
@@ -560,13 +570,17 @@ vec3 develop_negative(vec3 linear_rgb, vec2 image_px) {
     //    stage). No post-LUT approximation is applied: dragging the DIR sliders rebakes the
     //    LUT at full resolution through the same code path, so preview == commit.
 
-    // 6. Enlarger CMY filtration, print exposure & pre-flash in paper-exposure domain
-    //    print = 1 / (1 + E^2.5)  ->  E' = E * 10^(-0.004 * cmy) / print_exposure + preflash
-    //    (mirrors core/darkroom_math.paper_domain_adjust)
+    // 6. Enlarger CMY filtration, print exposure & paper pre-flash in paper-exposure domain
+    //    print = 1 / (1 + E^2.5)   ->  E' = E * 10^(-0.004 * cmy) / print_exposure
+    //    pre-flash goes on the linear exposure X = E^2.5 = 1/pv - 1, where the engine adds it:
+    //    E' = (E'^2.5 + PF * 20.0)^0.4   (mirrors core/darkroom_math.paper_domain_adjust)
     if (any(greaterThan(abs(u_cmy), vec3(0.01))) || abs(u_print_exposure - 1.0) > 0.005 || u_preflash > 0.0005) {
         vec3 pv = clamp(film_rgb, 1e-4, 1.0 - 1e-4);
         vec3 e_paper = pow(vec3(1.0) / pv - vec3(1.0), vec3(0.4));
-        e_paper = e_paper * pow(vec3(10.0), -0.004 * u_cmy) / max(0.05, u_print_exposure) + vec3(max(0.0, u_preflash));
+        e_paper = e_paper * pow(vec3(10.0), -0.004 * u_cmy) / max(0.05, u_print_exposure);
+        if (u_preflash > 0.0005) {
+            e_paper = pow(pow(e_paper, vec3(2.5)) + vec3(max(0.0, u_preflash) * 20.0), vec3(0.4));
+        }
         film_rgb = vec3(1.0) / (vec3(1.0) + pow(e_paper, vec3(2.5)));
     }
 
@@ -1795,6 +1809,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             "enlarger_yellow": 0.0,
             "print_exposure": 1.0,
             "pre_flash": 0.0,
+            "pre_flash_camera": 0.0,
             "black_lift": 0.0,
             "morph_gamma": 1.0,
             "developer_exhaustion": 0.0,
@@ -2175,6 +2190,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         pmode = self.params.get("print_mode", getattr(self, "current_print_mode", "optical"))
         is_scan = (paper_id == "none" or paper_id == "digital_unmask" or pmode == "scan")
         u_1f("u_scan_noise", max(0.0, float(self.params.get("scan_noise", 0.0))))
+        # 胶片预闪在显影之前，与印相/扫描方式无关；只有旁通（没有胶片介质）才没有意义。
+        u_1f("u_cam_preflash",
+             0.0 if is_film_none else max(0.0, float(self.params.get("pre_flash_camera", 0.0))))
         if is_pos or is_scan:
             u_3f("u_cmy", 0.0, 0.0, 0.0)
             u_1f("u_print_exposure", 1.0)
@@ -4096,6 +4114,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # reads eff_params, so a new shader uniform must be set here too or the exported
             # file would come back without the noise the preview shows.
             u_1f("u_scan_noise", max(0.0, float(eff_params.get("scan_noise", 0.0))))
+            u_1f("u_cam_preflash",
+                 0.0 if is_film_none_off else max(0.0, float(eff_params.get("pre_flash_camera", 0.0))))
             if is_pos_off or is_scan_off:
                 u_3f("u_cmy", 0.0, 0.0, 0.0)
                 u_1f("u_print_exposure", 1.0)

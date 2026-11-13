@@ -4880,6 +4880,9 @@ class SpektraEngine:
                 y_val = float(params_dict.get("enlarger_yellow", 0.0))
                 print_exp = float(params_dict.get("print_exposure", 1.0))
                 preflash = float(params_dict.get("pre_flash", 0.0))
+            # 胶片预闪发生在显影之前，与是否印相/直扫无关；只有旁通（没有胶片介质）时无意义。
+            cam_preflash = (0.0 if str(film_stock).lower() in ("none", "")
+                            else float(params_dict.get("pre_flash_camera", 0.0)))
             black_lift = float(params_dict.get("black_lift", 0.0))
             halation = float(params_dict.get("halation_amount", params_dict.get("halation", 1.0)))
             hal_spatial_scale = float(params_dict.get("halation_spatial_scale", 1.0))
@@ -4960,7 +4963,7 @@ class SpektraEngine:
             base_temp = float(params_dict.get("base_temp", 5500.0))
             base_tint = float(params_dict.get("base_tint", 1.0))
             from .darkroom_math import (wb_gains, paper_domain_adjust, chemistry_delta,
-                                       apply_black_point)
+                                       apply_black_point, apply_camera_preflash)
             wb_g = wb_gains(temp_val, base_temp, tint_val, base_tint)
             lut_baked = self.get_lut_baked_params(lut_3d)
 
@@ -5099,6 +5102,10 @@ class SpektraEngine:
                         work[..., c] = cv2.GaussianBlur(work[..., c], (0, 0), enl_sigma_px)
                 chunk_linear = work[y0 - ys:y1 - ys]
                 del work
+
+                # 胶片预闪：加在查 LUT 之前（显影之前），与 GPU 的 develop_negative 入口一致。
+                # 预闪是均匀的，所以放在放大机模糊之后与之前等价，但必须与 shader 同位置对齐。
+                chunk_linear = apply_camera_preflash(chunk_linear, cam_preflash)
 
                 coords = np.clip(shaper_forward(chunk_linear) * (lut_size - 1), 0.0, lut_size - 1.0001)
                 idx0 = coords.astype(np.int32)
@@ -5329,6 +5336,8 @@ class SpektraEngine:
         params.enlarger.y_filter_neutral = float(base_filter[2])
         params.enlarger.m_filter_shift = float(params_dict.get("enlarger_magenta", 0.0))
         params.enlarger.y_filter_shift = float(params_dict.get("enlarger_yellow", 0.0))
+        # 相纸预闪：滑块的 0…0.25 已经按 engine 的 preflash_exposure 标定成 1:1
+        # （见 darkroom_math.PAPER_PREFLASH_SCALE），烘 .cube 时原样传进去即可。
         params.enlarger.preflash_exposure = float(params_dict.get("pre_flash", 0.0))
         params.enlarger.print_exposure = float(params_dict.get("print_exposure", 1.0))
         params.film_render.halation.active = False

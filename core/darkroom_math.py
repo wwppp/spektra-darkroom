@@ -59,6 +59,40 @@ PAPER_CLIP = 1e-4
 # Enlarger CMY slider unit expressed as log10 exposure change per slider unit
 CMY_LOG_UNIT = 0.004
 
+# Paper pre-flash: the engine (spektrafilm's printing stage, fotufilm's printerPreflash) adds the
+# value into the paper's *linear* exposure, where the paper's mid-exposure is 1.0. This model
+# carries the paper exposure as E with print = 1/(1+E^GAMMA), so the linear quantity is X = E^GAMMA
+# = 1/pv - 1 and the flash belongs on X, not on E: adding it to E instead left the toe untouched
+# and over-darkened the shadows (that is the bug this constant fixes).
+#
+# Calibrated on a 64-level wedge against spektrafilm (kodak_gold_200 / ektacolor_edge):
+#   pre 0.05 -> midtones -16 L*,  pre 0.25 -> midtones -40, highlights -47  (engine: -13 / -39...-47)
+#   toe moves -3.3 L* at 0.25 (engine -0.4)
+# 20.0 keeps that whole curve within ~8 L* of the engine; a single multiplier cannot do better
+# because this power-law paper has no real Dmax shoulder.
+PAPER_PREFLASH_SCALE = 20.0
+# Camera (film) pre-flash: the engine documents it as "uniform additive camera film preflash
+# relative to metered mid-grey", and implements it as raw_exposure + flash, so the linear scene
+# value gains preflash * 0.18. Applied before the LUT / point chain, i.e. before development.
+CAMERA_PREFLASH_MIDGREY = 0.18
+CAMERA_PREFLASH_EPS = 0.0005
+
+
+def apply_camera_preflash(linear, preflash=0.0):
+    """Add the film-exposure pre-flash to scene-linear radiance.
+
+    Uniform and additive, so it lifts the toe (shadows) while barely touching values already
+    far above mid-grey - that is what "pre-flashing the film" does physically. Runs before
+    the film's development, so it is a separate control from paper pre-flash.
+    """
+    if linear is None or preflash is None:
+        return linear
+    pre = max(0.0, float(preflash))
+    if pre <= CAMERA_PREFLASH_EPS:
+        return linear
+    return (np.asarray(linear, dtype=np.float32)
+            + np.float32(pre * CAMERA_PREFLASH_MIDGREY))
+
 
 def wb_gains(temp, base_temp, tint, base_tint):
     """Exponential, luminance-preserving white-balance gains (R, G, B)."""
@@ -123,7 +157,16 @@ def paper_domain_adjust(img, cmy=(0.0, 0.0, 0.0), print_exp=1.0, preflash=0.0):
     pv = np.clip(img, PAPER_CLIP, 1.0 - PAPER_CLIP)
     e = (1.0 / pv - 1.0) ** (1.0 / PAPER_GAMMA)
     gain = (10.0 ** (-CMY_LOG_UNIT * cmy)) / max(0.05, float(print_exp))
-    e = e * gain.astype(np.float32) + max(0.0, float(preflash))
+    e = e * gain.astype(np.float32)
+    # Paper pre-flash goes on the paper's linear exposure X = E^GAMMA (= 1/pv - 1), not on E:
+    # that is where the engine adds it, and it is why the toe barely moves - a region already at
+    # Dmax gains nothing from more light, while the bright end keeps falling. Skipped entirely at
+    # zero so the untouched path stays bit-identical. Not scaled by print_exposure: it is a
+    # second, separate exposure of the enlarger, so a brighter print exposure increases the
+    # flash's share rather than its absolute amount.
+    if preflash > 0.0005:
+        flash = np.float32(max(0.0, float(preflash)) * PAPER_PREFLASH_SCALE)
+        e = (e ** np.float32(PAPER_GAMMA) + flash) ** np.float32(1.0 / PAPER_GAMMA)
     return (1.0 / (1.0 + e ** PAPER_GAMMA)).astype(np.float32)
 
 
