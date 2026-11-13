@@ -313,29 +313,8 @@ class FilmstripItemWidget(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            h = float(self.height())
-            can_fit_stars = (h >= 50)
-            if can_fit_stars:
-                margin_y = h * 0.14
-                thumb_rect = QRectF(4.0, margin_y, self.width() - 8.0, h - margin_y * 2.0)
-                overlay_h = max(22.0, min(28.0, h * 0.35))
-                overlay_top = thumb_rect.bottom() - overlay_h
-                fn_h = overlay_h * 0.48
-                star_row_top = overlay_top + fn_h
-                click_x = event.position().x()
-                click_y = event.position().y()
-                if overlay_top <= click_y <= thumb_rect.bottom():
-                    start_x = thumb_rect.x() + 3.0
-                    star_w = max(7.0, min(9.0, (thumb_rect.width() - 6.0) / 5.2))
-                    star_area_end = start_x + 5.0 * star_w
-                    if star_row_top - 2.0 <= click_y <= thumb_rect.bottom() and start_x <= click_x <= star_area_end + 4.0:
-                        star_idx = int((click_x - start_x) / star_w) + 1
-                        star_idx = max(1, min(5, star_idx))
-                        new_r = 0 if star_idx == self.rating else star_idx
-                        self.set_rating(new_r)
-                        self.ratingChanged.emit(self.photo_id, new_r)
-                        event.accept()
-                        return
+            # 星标只做展示，不接点击：它压在缩略图右下角，点底片本身时手指/鼠标极容易
+            # 落在星标上，结果是"想选片却把评分改了"。评分统一走右键菜单与数字键。
             self.clicked.emit(self.photo_id, event)
             event.accept()
         elif event.button() == Qt.MouseButton.RightButton:
