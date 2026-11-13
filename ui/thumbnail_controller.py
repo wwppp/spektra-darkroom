@@ -559,8 +559,13 @@ class ThumbnailController(QObject):
                 pass
             if hasattr(worker, "isRunning") and worker.isRunning():
                 worker.stop()
-                worker.wait(100)
-                if worker.isRunning():
+                # Never block the GUI thread here.  stop() is cooperative: the worker finishes
+                # the card it is on (a 17^3 LUT miss costs 100 ms+, see the "3D LUT 生成完毕"
+                # log) and then sees _stopped at the top of the next iteration.  This used to
+                # be wait(100), which meant every slider commit that retriggered card previews
+                # paid a flat 100 ms of dead time on the GUI thread -- measured as the whole
+                # being of a "double-click to reset feels stuck".
+                if not worker.wait(0):
                     if not hasattr(self, "_retained_workers"):
                         self._retained_workers = []
                     self._retained_workers.append(worker)

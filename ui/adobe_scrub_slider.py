@@ -838,7 +838,16 @@ class ParamScrubSlider(QWidget):
     set_value = setValue
 
     def reset(self):
-        # setValue() already formats display and emits valueChanged once
+        # setValue() already formats display and emits valueChanged once.
+        #
+        # Equal value means nothing to do: a double-click on the track commits the tapped value
+        # on the first release, then the double-click event resets to the default.  When the tap
+        # landed on the default anyway (very common -- the track midpoint *is* the default for
+        # symmetric ranges), this used to emit valueChanged + sliderReleased a second time, and
+        # the main window answered each of those with a full thumbnail/card/SDC commit.  Two
+        # commits for a no-op is exactly what "double-click reset feels stuck" was.
+        if abs(float(self.current_val) - float(self.default_val)) <= 1e-12:
+            return
         self.setValue(self.default_val)
         self.sliderReleased.emit()
 

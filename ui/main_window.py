@@ -8336,19 +8336,31 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
         if hasattr(self, '_live_lut_timer') and self._live_lut_timer.isActive():
             self._live_lut_timer.stop()
-        if hasattr(self, '_live_thumb_timer') and self._live_thumb_timer.isActive():
-            self._live_thumb_timer.stop()
-        if hasattr(self, '_cards_debounce_timer') and self._cards_debounce_timer.isActive():
-            self._cards_debounce_timer.stop()
         if getattr(self, "_pending_lut_refresh", False):
             self._pending_lut_refresh = False
             if getattr(self, "current_film_stock", "none") != "none":
                 self._commit_lut_preview()
         self.push_undo_state(action=action)
         self._mark_current_photo_dirty()
-        self._update_active_thumbnails()
         self._save_current_photo_sdc()
-        self._refresh_card_previews()
+        self._schedule_preview_refresh()
+
+    def _schedule_preview_refresh(self, thumb_ms=60, cards_ms=220):
+        """缩略图与候选卡预览走已有的防抖，而不是在提交时同步烘。
+
+        这两样都是"看一眼就行"的产物，但一次全量刷新并不便宜：`_update_active_thumbnails`
+        要离屏渲染 + 落盘缓存（~10 ms，缩略图缓存命中率低时更多），`_refresh_card_previews`
+        要重启候选预览线程、并且每次为 53 张卡重算配对相纸（其中 23 次会重读偏好文件）。
+        双击复位是两个提交事件叠在一起（第一次 release 提交点击位置、双击再复位），以前
+        每个都同步跑一遍整条链 —— 用户看到的就是"卡一下"。
+
+        用 60 / 220 ms 的单次定时器之后，连着的两个提交只烘最后一遍；数值与画布仍然在
+        valueChanged 里立即更新，所以拖动手感不受影响。
+        """
+        if hasattr(self, '_live_thumb_timer'):
+            self._live_thumb_timer.start(thumb_ms)
+        if hasattr(self, '_cards_debounce_timer'):
+            self._cards_debounce_timer.start(cards_ms)
 
     def _action_apply_auto_meter(self):
         """Reset exposure compensation to the calibrated 18% middle-gray baseline (0.00 EV)."""
