@@ -749,7 +749,7 @@ class _ScrollEdgeOverlay(QWidget):
             sb = self.scroll_area.horizontalScrollBar()
             fade_w = 26.0
             if sb.maximum() > 0:
-                from PySide6.QtGui import QPainterPath, QImage
+                from PySide6.QtGui import QImage
                 fw = int(fade_w)
                 fh = max(1, int(h))
                 cache_key = (fw, fh, is_dark)
