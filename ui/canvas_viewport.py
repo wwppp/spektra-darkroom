@@ -253,6 +253,10 @@ uniform float u_image_aspect;
 uniform float u_native_aspect;
 uniform vec2 u_pan;
 uniform float u_zoom;
+// u_quad_snap=1 时照片矩形由 u_quad_rect (左, 上, 宽, 高，屏幕 uv) 直接给出，
+// 它是吸附到整设备像素的矩形，pan/zoom 不再参与换算。
+uniform int u_quad_snap;
+uniform vec4 u_quad_rect;
 uniform vec2 u_viewport_size;
 
 // Digital (no-film) display transform - must stay in step with core.app_core:
@@ -662,8 +666,14 @@ void main() {
         quad_scale = vec2(1.0, eff_screen_aspect / u_image_aspect);
     }
     
-    vec2 img_uv = (centered - u_pan) / (quad_scale * u_zoom);
-    img_uv = img_uv * 0.5 + 0.5;
+    vec2 img_uv;
+    if (u_quad_snap == 1) {
+        // 照片矩形已吸附到整设备像素：直接用它换算，别走 pan/zoom 的浮点路径。
+        img_uv = (cur_coord - u_quad_rect.xy) / u_quad_rect.zw;
+    } else {
+        img_uv = (centered - u_pan) / (quad_scale * u_zoom);
+        img_uv = img_uv * 0.5 + 0.5;
+    }
 
     // Uniform derivatives evaluated across 2x2 fragment quads BEFORE any conditional returns
     vec2 d_img_dx = dFdx(img_uv);
@@ -2161,6 +2171,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
         u_1f("u_native_aspect", native_aspect)
         u_2f("u_pan", self.pan_x, self.pan_y)
         u_1f("u_zoom", self.zoom)
+        # 吸附到整设备像素的照片矩形。HQ 帧是整数像素纹理，铺在小数 quad 上会两轴不同压缩；
+        # 吸附后 pw/ph 都是整数（纹理与 quad 一一对应），实时与 HQ 也共用同一个矩形。
+        if self._quad_snap_ok():
+            _ql, _qr, _qt, _qb = self.get_image_bounds_norm()
+            u_1i("u_quad_snap", 1)
+            _loc = self.shader_program.uniformLocation("u_quad_rect")
+            if _loc >= 0:
+                funcs.glUniform4f(_loc, float(_ql), float(_qt),
+                                  float(_qr - _ql), float(_qb - _qt))
+        else:
+            u_1i("u_quad_snap", 0)
 
         u_1i("u_has_image", 1 if self._has_image else 0)
         u_1i("u_has_lut", 1 if self._has_lut else 0)
@@ -2964,6 +2985,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         with NEAREST only makes the grain look blocky.  So the multi-second render is spent on
         the fit view only.
         """
+        if os.environ.get("SPECTRA_NO_QUAD_SNAP"):
+            return False
         if int(self.params.get("view_mode", 0)) != 0:
             return False
         if getattr(self, "is_crop_editing", False):
@@ -3237,6 +3260,27 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.zoomChanged.emit(self.get_actual_zoom_ratio())
         self.update()
 
+    def _quad_snap_ok(self):
+        """fit 视图下把照片矩形吸附到整设备像素。
+
+        HQ 帧是整数像素的纹理，铺到小数 quad 上时两轴压缩比不同（实测 440x658 对
+        439.541x658，横向多压 0.1%），画面就被单轴缩一点 —— 用户报的"中间像丢了两列、
+        左右两半吸在一起"。吸附之后 (right-left)*Wpx 是整数，纹理与 quad 一一对应，
+        实时与 HQ 也共用同一个矩形，两条路径逐像素一致。
+
+        代价：整幅画面最多偏 0.5 设备像素；只在这个状态生效（单视图、非裁剪编辑、
+        适应窗口），放大/平移/分屏都走原来的浮点路径。
+        """
+        if os.environ.get("SPECTRA_NO_QUAD_SNAP"):
+            return False
+        if int(self.params.get("view_mode", 0)) != 0:
+            return False
+        if getattr(self, "is_crop_editing", False):
+            return False
+        return (abs(float(self.zoom) - 1.0) <= 1.5e-3
+                and abs(float(self.pan_x)) <= 0.75e-3
+                and abs(float(self.pan_y)) <= 0.75e-3)
+
     def get_image_bounds_norm(self):
         """Calculate image normalized bounding box in viewport coordinates [0.0, 1.0].
         Returns: (left, right, top, bottom) where:
@@ -3281,6 +3325,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
         center_y = 0.5 - 0.5 * self.pan_y  # Qt top-down Y coordinate
         img_top = center_y - half_h
         img_bottom = center_y + half_h
+
+        if self._quad_snap_ok():
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            wpx = max(1, int(round(self.width() * dpr)))
+            hpx = max(1, int(round(self.height() * dpr)))
+            img_left = round(img_left * wpx) / wpx
+            img_right = round(img_right * wpx) / wpx
+            img_top = round(img_top * hpx) / hpx
+            img_bottom = round(img_bottom * hpx) / hpx
 
         return img_left, img_right, img_top, img_bottom
 
@@ -4094,6 +4147,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
             u_1f("u_native_aspect", float(src_w) / float(max(1, src_h)))
             u_2f("u_pan", 0.0, 0.0)
             u_1f("u_zoom", 1.0)
+            # 离屏永远是 full-bleed：绝不能继承 paintGL 里的吸附矩形
+            u_1i("u_quad_snap", 0)
 
             u_1i("u_has_image", 1)
             u_1i("u_has_lut", 1 if (active_lut_tex_id and (self._has_lut or lut_override is not None)) else 0)
