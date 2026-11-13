@@ -1851,6 +1851,9 @@ class CompactExifWidget(QWidget):
         card_bg = "#15161a" if is_dark else "#ffffff"
         card_border = "#262834" if is_dark else "#d8dce6"
         key_color = "#7b8092" if is_dark else "#64748b"
+        # 渐隐带底色必须等于卡片色，否则 EXIF 的下边缘会出现一条和胶卷卡片不同色的带子
+        if hasattr(self, "scroll_area") and self.scroll_area is not None:
+            self.scroll_area.set_fade_base_color(card_bg, height=16)
         val_color = "#e2e8f0" if is_dark else "#1e293b"
         title_color = "#f59e0b" if is_dark else "#d97706"
 

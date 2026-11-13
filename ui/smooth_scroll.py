@@ -398,13 +398,14 @@ class SmoothScrollArea(QScrollArea):
     def apply_theme(self, theme_name=None):
         is_dark = theme_manager.is_dark()
         if is_dark:
-            self.setStyleSheet("""
+            _track = theme_manager.color("subpanel_bg")
+            _qss = """
                 QScrollArea {
                     background: transparent;
                     border: none;
                 }
                 QScrollBar:vertical {
-                    background: rgba(18, 19, 24, 0.75);
+                    background: __TRACK__;
                     width: 6px;
                     margin: 0px;
                     border-radius: 3px;
@@ -465,15 +466,17 @@ class SmoothScrollArea(QScrollArea):
                     background: none;
                     border: none;
                 }
-            """)
+            """
+            self.setStyleSheet(_qss.replace("__TRACK__", _track))
         else:
-            self.setStyleSheet("""
+            _track = theme_manager.color("subpanel_bg")
+            _qss = """
                 QScrollArea {
                     background: transparent;
                     border: none;
                 }
                 QScrollBar:vertical {
-                    background: transparent;
+                    background: __TRACK__;
                     width: 6px;
                     margin: 0px;
                     border-radius: 3px;
@@ -534,7 +537,8 @@ class SmoothScrollArea(QScrollArea):
                     background: none;
                     border: none;
                 }
-            """)
+            """
+            self.setStyleSheet(_qss.replace("__TRACK__", _track))
         if hasattr(self, '_overlay') and self._overlay:
             self._sync_overlay()
 
