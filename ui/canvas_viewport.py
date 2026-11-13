@@ -18,6 +18,10 @@ from core import proof
 from core.darkroom_math import scene_gain
 from core.halation_model import SPATIAL_SCALE_ENABLED
 from OpenGL import GL
+import ctypes
+# 绑定了 PIXEL_PACK_BUFFER 时，glReadPixels 的 data 参数是**字节偏移**而不是指针，
+# PyOpenGL 的高层封装会硬塞一个真实指针进去（结果写坏显存），必须走裸函数。
+from OpenGL.raw.GL.VERSION.GL_1_1 import glReadPixels as _raw_gl_read_pixels
 
 
 _DIFFUSION_FAMILIES = ("glimmerglass", "black_pro_mist", "pro_mist", "cinebloom")
@@ -1755,6 +1759,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._hq_timer = QTimer(self)
         self._hq_timer.setSingleShot(True)
         self._hq_timer.timeout.connect(self._rebuild_hq_preview)
+        # 异步读回：渲染完先 DMA 到 PBO，主线程每 8 ms 查一次 fence，完成了才 map。
+        # 12 MP 的同步 glReadPixels 要 2.1 s，是 HQ 重建的全部成本。
+        self._hq_pbo = None
+        self._hq_pending = None
+        self._last_pack_sync = None
+        self._hq_poll_timer = QTimer(self)
+        self._hq_poll_timer.setSingleShot(False)
+        self._hq_poll_timer.setInterval(8)
+        self._hq_poll_timer.timeout.connect(self._poll_hq_async)
         # Separable-Gaussian halation chain (ui/gl_halation.py). Created lazily on the first
         # render that needs it, so no GL objects exist before a context is current.
         self._halation_chain = None
@@ -2980,6 +2993,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
     # 用户最后一次操作之后多久才允许重建。拖动分栏/滑块/平移期间一直顺延，
     # 停手 0.8 s 才渲那一帧。
     HQ_INPUT_SETTLE_MS = 800
+    HQ_POLL_MS = 8
 
     def set_hq_preview(self, enabled, resample="cubic", divisor=1):
         enabled = bool(enabled)
@@ -3198,11 +3212,6 @@ class DarkroomGLCanvas(QOpenGLWidget):
             params = dict(self.params)
             params.pop("view_mode", None)       # never bake a compare view into the frame
             params.pop("split_x", None)
-            arr = self.render_offscreen(tw, th, float_img_rgb=full,
-                                        params_override=params, bit_depth=8,
-                                        display_transform=True)
-            if arr is None:
-                return
             dpr = max(1.0, float(self.devicePixelRatioF()))
             vw = max(1, int(round(self.width() * dpr)))
             vh = max(1, int(round(self.height() * dpr)))
@@ -3223,6 +3232,31 @@ class DarkroomGLCanvas(QOpenGLWidget):
                       f"frame={hw}x{hh} stretch=({pw / hw:.5f},{ph / hh:.5f})")
             algo = {"area": cv2.INTER_AREA, "cubic": cv2.INTER_CUBIC,
                     "lanczos": cv2.INTER_LANCZOS4}[self._hq_resample]
+
+            # 读回走 PBO：渲染完只发起 DMA，主线程立刻返回；fence 完成后由
+            # _poll_hq_async() 取数据。这样 2.1 s 的同步等待不再堵事件循环。
+            need = int(tw) * int(th) * 4
+            self.makeCurrent()
+            try:
+                pbo = self._ensure_hq_pbo(need)
+            finally:
+                self.doneCurrent()
+            arr = self.render_offscreen(tw, th, float_img_rgb=full,
+                                        params_override=params, bit_depth=8,
+                                        display_transform=True, pack_pbo=pbo)
+            sync = self._last_pack_sync
+            self._last_pack_sync = None
+            if arr is None and sync is not None:
+                self._hq_pending = {
+                    "sync": sync, "pbo": pbo, "size": need,
+                    "tw": int(tw), "th": int(th), "hw": int(hw), "hh": int(hh),
+                    "key": key, "algo": algo, "t0": time.monotonic(),
+                }
+                self._hq_poll_timer.start(self.HQ_POLL_MS)
+                return                      # _hq_busy 由 poll 收尾时清
+            if arr is None:
+                return
+            # 退化路径（PBO 不可用）：还是同步缩放 + 上传。
             small = cv2.resize(arr, (hw, hh), interpolation=algo)
             self.makeCurrent()
             try:
@@ -3234,8 +3268,79 @@ class DarkroomGLCanvas(QOpenGLWidget):
         except Exception as e:                                   # noqa: BLE001 - UI only
             print("[DarkroomGLCanvas] HQ preview rebuild failed:", e)
         finally:
+            if self._hq_pending is None:
+                self._hq_busy = False
+                self.update()
+
+    def _ensure_hq_pbo(self, size):
+        """PBO 复用同一个 buffer；context 必须已经 current。"""
+        if not self._hq_pbo:
+            self._hq_pbo = int(GL.glGenBuffers(1))
+        GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, self._hq_pbo)
+        GL.glBufferData(GL.GL_PIXEL_PACK_BUFFER, int(size), None, GL.GL_STREAM_READ)
+        GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
+        return self._hq_pbo
+
+    def _poll_hq_async(self):
+        """fence 到点后取 PBO 数据、缩放、上传 HQ 纹理。"""
+        p = self._hq_pending
+        if not p:
+            self._hq_poll_timer.stop()
+            return
+        if not self.isValid():
+            return
+        # 窗口被最小化/隐藏时 isValid() 会一直是 False，读回永远等不到 —— 超时丢弃，
+        # 否则 _hq_busy 卡在 True，之后再也不重建。
+        if time.monotonic() - float(p.get("t0", 0.0)) > 120.0:
+            self.makeCurrent()
+            try:
+                if p.get("sync"):
+                    GL.glDeleteSync(p["sync"])
+            finally:
+                self.doneCurrent()
+            self._hq_pending = None
+            self._hq_poll_timer.stop()
             self._hq_busy = False
             self.update()
+            return
+        sync = p.get("sync")
+        self.makeCurrent()
+        try:
+            status = GL.glClientWaitSync(sync, 0, 0)
+            if status == GL.GL_TIMEOUT_EXPIRED:
+                # 还没渲完：**只**释放 context，pending 必须留着等下一轮。
+                # （早退也走 finally，所以清理逻辑不能写在 finally 里。）
+                return
+            GL.glDeleteSync(sync)
+            p["sync"] = None
+            size = int(p["size"])
+            tw, th = int(p["tw"]), int(p["th"])
+            GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, int(p["pbo"]))
+            ptr = GL.glMapBufferRange(GL.GL_PIXEL_PACK_BUFFER, 0, size, GL.GL_MAP_READ_BIT)
+            if not ptr:
+                GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
+                raise RuntimeError("glMapBufferRange 返回空")
+            try:
+                buf = (ctypes.c_ubyte * size).from_address(int(ptr))
+                rgba = np.frombuffer(buf, dtype=np.uint8).reshape((th, tw, 4))
+                import cv2
+                arr = cv2.flip(cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB), 0)
+                small = cv2.resize(arr, (p["hw"], p["hh"]), interpolation=p["algo"])
+            finally:
+                GL.glUnmapBuffer(GL.GL_PIXEL_PACK_BUFFER)
+                GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
+            self._ensure_hq_texture(small)
+            self._hq_key = p["key"]
+            self._hq_dirty = False
+        except Exception as e:                                   # noqa: BLE001 - UI only
+            print("[DarkroomGLCanvas] HQ async readback failed:", e)
+        finally:
+            self.doneCurrent()
+        # 走到这里只有两种可能：读回完成，或者出错 —— 都要收尾。
+        self._hq_pending = None
+        self._hq_poll_timer.stop()
+        self._hq_busy = False
+        self.update()
 
     # -------------------------------------------------------------
     # Crop Mode Methods
@@ -4020,7 +4125,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         """
         return getattr(self, "_last_offscreen_space", "sRGB")
 
-    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None, display_transform=False, output_p3=False):
+    def render_offscreen(self, target_w, target_h, float_img_rgb=None, params_override=None, bit_depth=8, lut_override=None, is_16bit=None, display_transform=False, output_p3=False, pack_pbo=None):
         """Render image at target resolution on GPU using an offscreen FBO.
         Returns uint8 or uint16 RGB numpy array (target_h, target_w, 3) or None on error.
 
@@ -4513,6 +4618,19 @@ class DarkroomGLCanvas(QOpenGLWidget):
                     img_arr = cv2.flip(cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB), 0)
                 except Exception:
                     img_arr = np.ascontiguousarray(np.flipud(rgba[..., :3]))
+            elif pack_pbo:
+                # 异步读回：先 DMA 到 PBO，立刻返回，由调用方轮询 fence 再取数据。
+                # 12 MP 的同步 glReadPixels 要 2.1 s（全是等 GPU + 传输），HQ 预览
+                # 一次重建 2.2 s 里有 2.13 s 就是这一句。
+                GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, int(pack_pbo))
+                _raw_gl_read_pixels(0, 0, int(target_w), int(target_h),
+                                    GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, ctypes.c_void_p(0))
+                GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
+                fbo.release()
+                self._last_pack_sync = GL.glFenceSync(GL.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
+                # 不 flush 的话命令会留在驱动队列里，fence 永远不会 signal。
+                GL.glFlush()
+                img_arr = None
             else:
                 raw_bytes = GL.glReadPixels(0, 0, target_w, target_h, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE)
                 fbo.release()

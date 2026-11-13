@@ -2844,7 +2844,7 @@ class DarkroomMainWindow(QMainWindow):
                 if self._start_next_pending_import_batch():
                     return
                 self._is_importing = False
-                self._set_import_hq_suspend(False)
+                self._set_import_hq_suspend(False, hold=(total_files > 1))
                 if hasattr(self, "btn_cancel_import"):
                     self.btn_cancel_import.setVisible(False)
                 if session_name:
@@ -2862,7 +2862,7 @@ class DarkroomMainWindow(QMainWindow):
             if self._start_next_pending_import_batch():
                 return
             self._is_importing = False
-            self._set_import_hq_suspend(False)
+            self._set_import_hq_suspend(False, hold=False)
             if hasattr(self, "btn_cancel_import"):
                 self.btn_cancel_import.setVisible(False)
             self.set_app_status(f"载入会话失败：{err_msg}", spinning=False, timeout_ms=4000)
@@ -10737,7 +10737,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         completed_count = getattr(self, "_import_session_completed", len(self.photos))
         self.set_app_status(f"已导入 {completed_count} 张底片", spinning=False, timeout_ms=3000)
-        self._set_import_hq_suspend(False)
+        self._set_import_hq_suspend(False, hold=(completed_count > 1))
 
         # Real-time session state save & cache maintenance
         try:
@@ -10759,7 +10759,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         except Exception:
             pass
 
-    def _set_import_hq_suspend(self, on, resume_delay=1200):
+    def _set_import_hq_suspend(self, on, resume_delay=1200, hold=True):
         """导入 / 恢复会话期间挂起 HQ 预览重建。
 
         一次 HQ 重建要 2.2 s，其中 2.1 s 是 12 MP 的同步 glReadPixels —— 全在主线程上，
@@ -10778,9 +10778,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if not getattr(self, "_hq_import_suspended", False):
                 return
             self._hq_import_suspended = False
-            # 导入/恢复刚结束时**不**自动重建：那一帧要 0.8-2.4 s，正好砸在用户开始
+            # 批量导入/恢复刚结束时**不**自动重建：那一帧要 0.8-2.4 s，正好砸在用户开始
             # 翻照片的时刻。等用户第一次操作（滚轮/平移/切图/改参数）再渲。
-            canvas.resume_hq_preview(delay=resume_delay, hold=True)
+            # 单张打开没有"之后要翻什么"的情况，照常重建，否则 HQ 开了却一直不出帧。
+            canvas.resume_hq_preview(delay=resume_delay, hold=hold)
 
     def _safely_terminate_worker(self, worker, wait_ms=1000):
         if not worker:
@@ -10850,7 +10851,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         self._is_importing = False
         # 取消是用户主动打断的：HQ 晚一点再重建，别让他刚点完取消又卡 2 秒。
-        self._set_import_hq_suspend(False, resume_delay=3000)
+        self._set_import_hq_suspend(False, resume_delay=3000, hold=True)
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(False)
         self.restore_default_status()
@@ -10952,7 +10953,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
 
         self._is_importing = False
-        self._set_import_hq_suspend(False)
+        self._set_import_hq_suspend(False, hold=(len(self.photos) > 1))
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(False)
         sess_name = os.path.basename(self._current_session_path) if getattr(self, "_current_session_path", None) else ""
