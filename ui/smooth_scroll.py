@@ -303,6 +303,10 @@ class SmoothScrollArea(QScrollArea):
         super().__init__(parent)
         self.is_horizontal = is_horizontal
         self.enable_edge_fade = (not is_horizontal) if enable_edge_fade is None else enable_edge_fade
+        # 渐隐带的底色。默认 None = 按主题取 panel_bg；卡片墙这类"面板里还有一层托盘"的
+        # 场景必须显式设成托盘色，否则渐隐带会和真实背景差好几个色阶，看着像一块白雾。
+        self._fade_base_color = None
+        self._fade_height = 16
         self.setWidgetResizable(True)
 
         # Distance per wheel notch.  Vertical lists: 76px, horizontal filmstrip: 120px.
@@ -355,6 +359,18 @@ class SmoothScrollArea(QScrollArea):
 
         # A touch panel has no wheel: a finger drag has to scroll, and still click on a tap.
         install_touch_scroll(self)
+
+    def set_fade_base_color(self, color, height=None):
+        """指定边缘渐隐带的底色（默认按主题取 panel_bg）。
+
+        渐隐是"把内容淡出到底色"，底色必须等于控件背后真实的填充色。卡片墙外面套了
+        托盘之后，背后是 subpanel_bg 而不是 panel_bg；不设这个，浅色下渐隐带会比背景
+        亮 6-7 级，看上去是一块发白的雾压在卡片上。
+        """
+        self._fade_base_color = QColor(color) if color is not None else None
+        if height is not None:
+            self._fade_height = max(4, int(height))
+        self._sync_overlay()
 
     def eventFilter(self, obj, event):
         if obj == self.viewport():
@@ -671,7 +687,13 @@ class _ScrollEdgeOverlay(QWidget):
             return
         painter = QPainter(self)
         is_dark = theme_manager.is_dark()
-        if is_dark:
+        base = getattr(self.scroll_area, "_fade_base_color", None)
+        if base is not None:
+            fade_col = QColor(base)
+            fade_col.setAlpha(220)
+            trans_col = QColor(base)
+            trans_col.setAlpha(0)
+        elif is_dark:
             fade_col = QColor(18, 19, 24, 210)
             trans_col = QColor(18, 19, 24, 0)
         else:
@@ -682,20 +704,21 @@ class _ScrollEdgeOverlay(QWidget):
 
         if not self.scroll_area.is_horizontal:
             sb = self.scroll_area.verticalScrollBar()
+            fh = max(4, int(getattr(self.scroll_area, "_fade_height", 16)))
             if sb.maximum() > 0:
                 # Top edge indicator: if scrolled down from 0
                 if sb.value() > 0:
-                    grad_top = QLinearGradient(0, 0, 0, 16)
+                    grad_top = QLinearGradient(0, 0, 0, fh)
                     grad_top.setColorAt(0.0, fade_col)
                     grad_top.setColorAt(1.0, trans_col)
-                    painter.fillRect(QRectF(0, 0, w, 16), grad_top)
+                    painter.fillRect(QRectF(0, 0, w, fh), grad_top)
 
                 # Bottom edge indicator: if not yet at maximum
                 if sb.value() < sb.maximum():
-                    grad_bottom = QLinearGradient(0, h - 16, 0, h)
+                    grad_bottom = QLinearGradient(0, h - fh, 0, h)
                     grad_bottom.setColorAt(0.0, trans_col)
                     grad_bottom.setColorAt(1.0, fade_col)
-                    painter.fillRect(QRectF(0, h - 16, w, 16), grad_bottom)
+                    painter.fillRect(QRectF(0, h - fh, w, fh), grad_bottom)
         else:
             sb = self.scroll_area.horizontalScrollBar()
             fade_w = 26.0

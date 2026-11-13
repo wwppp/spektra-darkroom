@@ -36,8 +36,8 @@ from PySide6.QtCore import (
 if sys.platform == "win32":
     from PySide6.QtCore import QAbstractNativeEventFilter
 from PySide6.QtGui import (
-    QAction, QFont, QIcon, QKeySequence, QPainter, QColor, QPen, QBrush, QPixmap, QImage, QLinearGradient, QCursor,
-    QShortcut
+    QAction, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPainterPath, QColor, QPen, QBrush,
+    QPixmap, QImage, QLinearGradient, QCursor, QShortcut
 )
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -1107,6 +1107,116 @@ class SessionRestoreWorker(QThread):
         self.run()
 
 
+def _thumb_clip_path(w: float, h: float, top_r: float = 5.0) -> QPainterPath:
+    """卡片缩略图的裁切形状：只圆上面两角，下缘直角接文字条。
+
+    同心的前提是 `R内 = R外 - 内缩`：外框 6、边框 1 → 内圈只能 5，而且缩略图必须贴到
+    边框内侧（内缩 1）。早先"6px 白边 + 内圆角 4"是 6-7 = -1，数学上永远落不到同一点。
+    """
+    r = max(0.0, min(top_r, w / 2.0, h / 2.0))
+    path = QPainterPath()
+    path.moveTo(0.0, h)
+    path.lineTo(0.0, r)
+    path.quadTo(0.0, 0.0, r, 0.0)
+    path.lineTo(w - r, 0.0)
+    path.quadTo(w, 0.0, w, r)
+    path.lineTo(w, h)
+    path.closeSubpath()
+    return path
+
+
+class _ElidedNameLabel(QLabel):
+    """两行折行 + 末行省略号。
+
+    QLabel 的 wordWrap 只会硬裁：第二行放不下的字直接消失，看不出"还有下文"。
+    这里自己按宽度折行，超出行数就把最后一行 elide 成 "...".
+    字体由 `setFont()` 决定（QSS 的 font-size 不进 QFont，量出来的宽度会和实际绘制对不上）。
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._source_text = text or ""
+        self._text_color = None
+        self.setWordWrap(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+
+    def setText(self, text):  # noqa: N802 - Qt 命名
+        self._source_text = text or ""
+        self.update()
+
+    def text(self):
+        return self._source_text
+
+    def set_text_color(self, color):
+        self._text_color = QColor(color) if color is not None else None
+        self.update()
+
+    def _break_at(self, fm, text, start, width):
+        """返回从 start 起能塞进 width 的字符边界（优先在空格处断，CJK 逐字可断）。"""
+        n = len(text)
+        last_space = -1
+        acc = 0.0
+        i = start
+        while i < n:
+            w = fm.horizontalAdvance(text[i])
+            if acc + w > width and i > start:
+                return last_space if last_space > start else i
+            acc += w
+            if text[i] == " ":
+                last_space = i
+            i += 1
+        return n
+
+    def _compute_lines(self):
+        """返回 (lines, line_h, rect)。放不下就省略号结尾，不硬裁。"""
+        rect = self.contentsRect()
+        fm = QFontMetrics(self.font())
+        line_h = max(1, fm.height())
+        max_lines = max(1, int(rect.height() // line_h))
+        text = self._source_text.strip()
+        if not text:
+            return [], line_h, rect
+
+        lines = []
+        pos = 0
+        n = len(text)
+        while pos < n and len(lines) < max_lines:
+            cut = max(pos + 1, self._break_at(fm, text, pos, rect.width()))
+            line_start = pos
+            line = text[line_start:cut].strip()
+            next_pos = cut
+            while next_pos < n and text[next_pos] == " ":
+                next_pos += 1
+            if next_pos < n and len(lines) == max_lines - 1:
+                # 还有剩：最后一行放不下就整体省略，别直接截断
+                lines.append(fm.elidedText(text[line_start:], Qt.TextElideMode.ElideRight, rect.width()))
+                pos = n
+                break
+            lines.append(line)
+            pos = next_pos
+        return lines, line_h, rect
+
+    def paintEvent(self, event):  # noqa: N802 - Qt 命名
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        color = self._text_color
+        if color is None:
+            color = self.palette().color(self.foregroundRole())
+        painter.setPen(color)
+        painter.setFont(self.font())
+
+        lines, line_h, rect = self._compute_lines()
+        self._last_lines = list(lines)
+        if not lines:
+            return
+        y = rect.top() + (rect.height() - len(lines) * line_h) / 2.0
+        for line in lines:
+            painter.drawText(QRectF(rect.left(), y, rect.width(), line_h),
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, line)
+            y += line_h
+
+
 class FilmGridCard(QFrame):
     """Item 6: Large 2:3 aspect ratio photographic card (114x171px):
     - 2:3 ratio vertical photo preview of the active image
@@ -1164,6 +1274,13 @@ class FilmGridCard(QFrame):
         "agfa_cp30": "Agfa CP30"
     }
 
+    # 卡片几何预算。QSS 的 1px 边框会让 contentsRect 比 widget 小 2px，任何按 widget
+    # 宽度直接算内件的写法都会偏 2px（旧版缩略图左边 7 右边 5 就是这么来的）。
+    BORDER = 2
+    NAME_H = 28
+    NAME_GAP = 2
+    BOTTOM_PAD = 4
+
     def __init__(self, stock_info, is_active=False, is_custom=False, stock_type="film", parent=None):
         super().__init__(parent)
         self.setObjectName("filmGridCard")
@@ -1178,7 +1295,7 @@ class FilmGridCard(QFrame):
 
         # Compact photographic card dynamically resizable
         self.card_w = 110
-        self.card_h = 118
+        self.card_h = self._height_for_width(110)
         self.setFixedSize(self.card_w, self.card_h)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -1200,25 +1317,40 @@ class FilmGridCard(QFrame):
     def set_card_tooltip(self, tip: str):
         self.setToolTip(tip)
 
+    @classmethod
+    def _thumb_size_for_width(cls, card_w: int):
+        tw = max(10, int(card_w) - cls.BORDER)
+        th = max(8, int(round(tw * (2.0 / 3.0))))
+        return tw, th
+
+    @classmethod
+    def _height_for_width(cls, card_w: int) -> int:
+        _, th = cls._thumb_size_for_width(card_w)
+        return th + cls.BORDER + cls.NAME_GAP + cls.NAME_H + cls.BOTTOM_PAD
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 4)
-        layout.setSpacing(2)
+        # 缩略图贴到边框内侧（方案 C：满幅，只圆上两角），间距只留文字条那 2px + 4px 下边距
+        layout.setContentsMargins(0, 0, 0, self.BOTTOM_PAD)
+        layout.setSpacing(self.NAME_GAP)
 
-        # Image preview frame (centered, rounded corners)
+        # Image preview: 满幅贴边，圆角由 pixmap 自己裁（外 6 内 5，同心）
         self.lbl_thumb = QLabel()
         self.lbl_thumb.setObjectName("filmCardThumb")
-        self.lbl_thumb.setFixedSize(98, 70)
+        self.lbl_thumb.setFixedSize(*self._thumb_size_for_width(self.card_w))
         self.lbl_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_thumb.setStyleSheet("QLabel#filmCardThumb { border-radius: 4px; background: transparent; border: none; }")
-        layout.addWidget(self.lbl_thumb, 0, Qt.AlignmentFlag.AlignCenter)
+        self.lbl_thumb.setStyleSheet("QLabel#filmCardThumb { background: transparent; border: none; }")
+        layout.addWidget(self.lbl_thumb, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        # Bottom label container
-        self.lbl_name = QLabel(self.clean_name)
+        # Bottom label container（自己折行 + 省略号，见 _ElidedNameLabel）
+        self.lbl_name = _ElidedNameLabel(self.clean_name)
         self.lbl_name.setObjectName("filmCardName")
-        self.lbl_name.setFixedHeight(28)
-        self.lbl_name.setWordWrap(True)
+        self.lbl_name.setFixedHeight(self.NAME_H)
         self.lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_font = QFont(self.lbl_name.font())
+        name_font.setPointSizeF(7.1)
+        name_font.setWeight(QFont.Weight.Medium)
+        self.lbl_name.setFont(name_font)
         layout.addWidget(self.lbl_name)
 
         self._update_appearance()
@@ -1226,9 +1358,8 @@ class FilmGridCard(QFrame):
 
     def update_card_dimensions(self, new_w):
         new_w = max(96, min(220, int(new_w)))
-        thumb_w = new_w - 12
-        thumb_h = int(round(thumb_w * (66.0 / 98.0)))
-        new_h = thumb_h + 40
+        thumb_w, thumb_h = self._thumb_size_for_width(new_w)
+        new_h = self._height_for_width(new_w)
         if new_w != self.card_w or new_h != self.card_h:
             self.card_w = new_w
             self.card_h = new_h
@@ -1247,15 +1378,21 @@ class FilmGridCard(QFrame):
         self._thumb_pixmap = pixmap
         tw, th = self.lbl_thumb.width(), self.lbl_thumb.height()
         if pixmap and not pixmap.isNull():
-            scaled = pixmap.scaled(tw, th, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            out_pm = QPixmap(scaled.size())
+            # 满幅：按覆盖方式放大后居中裁切，不留 letterbox 白条
+            scaled = pixmap.scaled(tw, th, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                   Qt.TransformationMode.SmoothTransformation)
+            cx = max(0, (scaled.width() - tw) // 2)
+            cy = max(0, (scaled.height() - th) // 2)
+            cropped = scaled.copy(cx, cy, tw, th)
+            out_pm = QPixmap(tw, th)
             out_pm.fill(Qt.GlobalColor.transparent)
             p = QPainter(out_pm)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            p.setBrush(QBrush(scaled))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawRoundedRect(QRectF(0.0, 0.0, float(scaled.width()), float(scaled.height())), 4.0, 4.0)
+            p.setClipPath(_thumb_clip_path(tw, th, top_r=5.0))
+            p.drawPixmap(0, 0, cropped)
+            p.end()
+            self.lbl_thumb.setPixmap(out_pm)
             p.end()
             self.lbl_thumb.setPixmap(out_pm)
         else:
@@ -1455,12 +1592,22 @@ class FilmGridCard(QFrame):
             p.setPen(text_color)
             p.drawText(QRectF(cx, band_y + 3, can_w, band_h - 3), Qt.AlignmentFlag.AlignCenter, short_code)
 
-        # Subtle card thumbnail outer frame
+        # Subtle card thumbnail outer frame（跟着裁切形状走，不再画四角全圆的框）
+        clip_path = _thumb_clip_path(tw, th, top_r=5.0)
         p.setPen(QPen(QColor("#222530"), 1.0))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(QRectF(0.5, 0.5, tw - 1.0, th - 1.0), 4.0, 4.0)
+        p.drawPath(clip_path)
         p.end()
-        self.lbl_thumb.setPixmap(pm)
+
+        # 圆角裁切：上两角 5、下缘直角，与外框同心
+        masked = QPixmap(tw, th)
+        masked.fill(Qt.GlobalColor.transparent)
+        mp = QPainter(masked)
+        mp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        mp.setClipPath(clip_path)
+        mp.drawPixmap(0, 0, pm)
+        mp.end()
+        self.lbl_thumb.setPixmap(masked)
 
 
     def set_active(self, is_active):
@@ -1479,7 +1626,7 @@ class FilmGridCard(QFrame):
         thumb_bg = "transparent"
 
         if hasattr(self, "lbl_thumb") and self.lbl_thumb:
-            self.lbl_thumb.setStyleSheet("QLabel#filmCardThumb { border: none; background: transparent; border-radius: 4px; }")
+            self.lbl_thumb.setStyleSheet("QLabel#filmCardThumb { border: none; background: transparent; }")
 
         if not self.isEnabled():
             dis_bg = "#101114" if is_dark else "#f1f5f9"
@@ -1491,11 +1638,12 @@ class FilmGridCard(QFrame):
                     border: 1px solid {dis_border};
                     border-radius: 6px;
                 }}
-                QLabel#filmCardThumb {{ border: none; background: transparent; border-radius: 4px; }}
-                QLabel#filmCardName {{ border: none; background: transparent; color: {dis_name}; font-size: 9.5px; }}
+                QLabel#filmCardThumb {{ border: none; background: transparent; }}
+                QLabel#filmCardName {{ border: none; background: transparent; color: {dis_name}; }}
                 {tooltip_bubble_style}
             """)
-            self.lbl_name.setStyleSheet(f"QLabel#filmCardName {{ color: {dis_name}; font-size: 9.5px; border: none; background: transparent; }}")
+            self.lbl_name.setStyleSheet(f"QLabel#filmCardName {{ color: {dis_name}; border: none; background: transparent; }}")
+            self.lbl_name.set_text_color(dis_name)
             return
         if self.is_active:
             act_bg = "rgba(245, 158, 11, 0.08)" if is_dark else "rgba(245, 158, 11, 0.12)"
@@ -1505,11 +1653,12 @@ class FilmGridCard(QFrame):
                     border: 1px solid #f59e0b;
                     border-radius: 6px;
                 }}
-                QLabel#filmCardThumb {{ border: none; background: transparent; border-radius: 4px; }}
-                QLabel#filmCardName {{ border: none; background: transparent; color: #f59e0b; font-size: 9.5px; font-weight: 500; }}
+                QLabel#filmCardThumb {{ border: none; background: transparent; }}
+                QLabel#filmCardName {{ border: none; background: transparent; color: #f59e0b; }}
                 {tooltip_bubble_style}
             """)
-            self.lbl_name.setStyleSheet("QLabel#filmCardName { color: #f59e0b; font-size: 9.5px; font-weight: 500; border: none; background: transparent; }")
+            self.lbl_name.setStyleSheet("QLabel#filmCardName { color: #f59e0b; border: none; background: transparent; }")
+            self.lbl_name.set_text_color("#f59e0b")
         else:
             idle_bg = "#15161c" if is_dark else "#ffffff"
             idle_border = "#282a36" if is_dark else "#d8dce6"
@@ -1526,11 +1675,12 @@ class FilmGridCard(QFrame):
                     border-color: {hover_border};
                     background: {hover_bg};
                 }}
-                QLabel#filmCardThumb {{ border: none; background: transparent; border-radius: 4px; }}
-                QLabel#filmCardName {{ border: none; background: transparent; color: {name_color}; font-size: 9.5px; font-weight: 500; }}
+                QLabel#filmCardThumb {{ border: none; background: transparent; }}
+                QLabel#filmCardName {{ border: none; background: transparent; color: {name_color}; }}
                 {tooltip_bubble_style}
             """)
-            self.lbl_name.setStyleSheet(f"QLabel#filmCardName {{ color: {name_color}; font-size: 9.5px; font-weight: 500; border: none; background: transparent; }}")
+            self.lbl_name.setStyleSheet(f"QLabel#filmCardName {{ color: {name_color}; border: none; background: transparent; }}")
+            self.lbl_name.set_text_color(name_color)
 
     def highlight_now(self) -> None:
         """把选中框立刻挪到这张卡上并同步重绘。
@@ -3233,6 +3383,20 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'title_bar'):
             self.title_bar.setStyleSheet(f"background: {tb_bg}; border: none; border-top-left-radius: {tb_radius}; border-top-right-radius: {tb_radius};")
 
+    def _apply_tray_style(self, tray, scroll=None):
+        """卡片墙托盘的底色/描边 + 同色边缘渐隐。主题切换时也要重调。"""
+        if tray is None:
+            return
+        colors = theme_manager.get_colors()
+        tray.setStyleSheet(
+            f"QFrame#{tray.objectName()} {{"
+            f" background: {colors['tray_bg']};"
+            f" border: 1px solid {colors['tray_border']};"
+            f" border-radius: 8px; }}"
+        )
+        if scroll is not None and hasattr(scroll, "set_fade_base_color"):
+            scroll.set_fade_base_color(colors["tray_bg"], height=16)
+
     def _on_theme_changed(self, theme_name=None):
         is_dark = theme_manager.is_dark()
         colors = theme_manager.get_colors()
@@ -3258,6 +3422,10 @@ class DarkroomMainWindow(QMainWindow):
         # 5. Right Sidebar Container
         if hasattr(self, 'sidebar_container'):
             self.sidebar_container.setStyleSheet(f"background: {colors['panel_bg']};")
+
+        # 5b. 卡片墙托盘（底色 + 渐隐色一起走，浅色下渐隐带必须等于托盘色）
+        if hasattr(self, 'film_tray'):
+            self._apply_tray_style(self.film_tray, getattr(self, 'film_scroll', None))
 
         # 6. View Toolbar & Status Bar Controls
         self._update_view_toolbar_style()
@@ -3819,7 +3987,16 @@ class DarkroomMainWindow(QMainWindow):
         self._film_vp_filter = ViewportResizeFilter(self.reflow_grids, self)
         self.film_scroll.installEventFilter(self._film_vp_filter)
 
-        film_layout.addWidget(self.film_scroll, 1)
+        # 托盘：卡片不再直接浮在面板底色上。有了这一层，上下边缘渐隐才有地方"化开"，
+        # 视觉上也和右侧参数窗格对齐（自己一块圆角底 + 1px 描边）。
+        self.film_tray = QFrame()
+        self.film_tray.setObjectName("filmTray")
+        tray_layout = QVBoxLayout(self.film_tray)
+        tray_layout.setContentsMargins(8, 8, 8, 8)
+        tray_layout.setSpacing(0)
+        tray_layout.addWidget(self.film_scroll)
+        self._apply_tray_style(self.film_tray, self.film_scroll)
+        film_layout.addWidget(self.film_tray, 1)
 
         self._populate_film_grid()
         self.left_splitter.addWidget(film_subwin)
