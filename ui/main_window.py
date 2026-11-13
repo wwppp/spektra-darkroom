@@ -2736,6 +2736,7 @@ class DarkroomMainWindow(QMainWindow):
         self.photos = [None] * total_files
         self._is_importing = True
         self._import_lock_time = time.time()
+        self._set_import_hq_suspend(True)
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(True)
 
@@ -2843,6 +2844,7 @@ class DarkroomMainWindow(QMainWindow):
                 if self._start_next_pending_import_batch():
                     return
                 self._is_importing = False
+                self._set_import_hq_suspend(False)
                 if hasattr(self, "btn_cancel_import"):
                     self.btn_cancel_import.setVisible(False)
                 if session_name:
@@ -2860,6 +2862,7 @@ class DarkroomMainWindow(QMainWindow):
             if self._start_next_pending_import_batch():
                 return
             self._is_importing = False
+            self._set_import_hq_suspend(False)
             if hasattr(self, "btn_cancel_import"):
                 self.btn_cancel_import.setVisible(False)
             self.set_app_status(f"载入会话失败：{err_msg}", spinning=False, timeout_ms=4000)
@@ -10478,6 +10481,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._photo_id_counter = start_idx + len(new_paths)
 
         self._import_filmstrip_buffer = []
+        self._set_import_hq_suspend(True)
         self._import_worker = BatchImportWorker(new_paths, self.engine, start_idx=start_idx, parent=self)
         self._import_worker.photoLoaded.connect(self._on_single_photo_imported)
         self._import_worker.importFinished.connect(self._on_all_photos_imported)
@@ -10501,6 +10505,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.btn_cancel_import.setVisible(True)
 
         logger.info(f"Import queue: starting next batch with {len(next_batch)} files (start_idx={start_idx})")
+        self._set_import_hq_suspend(True)
         self._import_worker = BatchImportWorker(next_batch, self.engine, start_idx=start_idx, parent=self)
         self._import_worker.photoLoaded.connect(self._on_single_photo_imported)
         self._import_worker.importFinished.connect(self._on_all_photos_imported)
@@ -10732,6 +10737,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         completed_count = getattr(self, "_import_session_completed", len(self.photos))
         self.set_app_status(f"已导入 {completed_count} 张底片", spinning=False, timeout_ms=3000)
+        self._set_import_hq_suspend(False)
 
         # Real-time session state save & cache maintenance
         try:
@@ -10741,9 +10747,40 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 if self.photos:
                     self._save_auto_temp_session()
                     config_manager.save_last_session_path(config_manager.get_auto_saved_session_path())
+        except Exception:
+            pass
+        # 缓存修剪要遍历整个缓存目录，放在导入完成的当口会平白多卡几百毫秒 —— 推后跑，
+        # 这时用户已经在看照片了。
+        QTimer.singleShot(1500, self._deferred_prune_cache)
+
+    def _deferred_prune_cache(self):
+        try:
             session_cache_manager.prune_cache_if_needed()
         except Exception:
             pass
+
+    def _set_import_hq_suspend(self, on, resume_delay=1200):
+        """导入 / 恢复会话期间挂起 HQ 预览重建。
+
+        一次 HQ 重建要 2.2 s，其中 2.1 s 是 12 MP 的同步 glReadPixels —— 全在主线程上，
+        期间事件循环不转，取消按钮点了也没反应。导入/恢复本来就不是看画质的时候，
+        退回实时 shader 更合适。
+        """
+        canvas = getattr(self, "canvas", None)
+        if canvas is None or not hasattr(canvas, "suspend_hq_preview"):
+            return
+        if on:
+            if getattr(self, "_hq_import_suspended", False):
+                return
+            self._hq_import_suspended = True
+            canvas.suspend_hq_preview()
+        else:
+            if not getattr(self, "_hq_import_suspended", False):
+                return
+            self._hq_import_suspended = False
+            # 导入/恢复刚结束时**不**自动重建：那一帧要 0.8-2.4 s，正好砸在用户开始
+            # 翻照片的时刻。等用户第一次操作（滚轮/平移/切图/改参数）再渲。
+            canvas.resume_hq_preview(delay=resume_delay, hold=True)
 
     def _safely_terminate_worker(self, worker, wait_ms=1000):
         if not worker:
@@ -10785,7 +10822,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self._import_worker.importFinished.disconnect()
             except Exception:
                 pass
-            self._safely_terminate_worker(self._import_worker, wait_ms=1000)
+            self._safely_terminate_worker(self._import_worker, wait_ms=0)
             self._import_worker = None
 
         # 3. Terminate slot decode worker
@@ -10796,7 +10833,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self._slot_decode_worker.finished.disconnect()
             except Exception:
                 pass
-            self._safely_terminate_worker(self._slot_decode_worker, wait_ms=1000)
+            self._safely_terminate_worker(self._slot_decode_worker, wait_ms=0)
             self._slot_decode_worker = None
 
         # 4. Terminate session restore worker
@@ -10808,10 +10845,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self._session_restore_worker.failed.disconnect()
             except Exception:
                 pass
-            self._safely_terminate_worker(self._session_restore_worker, wait_ms=1000)
+            self._safely_terminate_worker(self._session_restore_worker, wait_ms=0)
             self._session_restore_worker = None
 
         self._is_importing = False
+        # 取消是用户主动打断的：HQ 晚一点再重建，别让他刚点完取消又卡 2 秒。
+        self._set_import_hq_suspend(False, resume_delay=3000)
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(False)
         self.restore_default_status()
@@ -10913,6 +10952,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
 
         self._is_importing = False
+        self._set_import_hq_suspend(False)
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(False)
         sess_name = os.path.basename(self._current_session_path) if getattr(self, "_current_session_path", None) else ""

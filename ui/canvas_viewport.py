@@ -1,5 +1,6 @@
 import os
 import math
+import time
 import numpy as np
 from PySide6.QtCore import (Qt, Signal, QPointF, QRectF, QTimer,
                             QEvent, QObject, QElapsedTimer)
@@ -1741,6 +1742,16 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._hq_resample = "area"
         self._hq_divisor = 1
         self._hq_busy = False
+        # 挂起计数：导入/恢复会话期间不重建（一次重建 2.2 s，其中 2.1 s 是 glReadPixels，
+        # 卡在主线程等于窗口假死，取消按钮也点不动）。
+        self._hq_suspend = 0
+        # 最近一次 resize / 用户输入的时刻：视口还在变、或手指还按在画布/滑块上时，
+        # 不许开始重建（一次 2.4 s，正好砸在用户正在做的事上）。
+        self._last_resize_ms = 0.0
+        self._last_input_ms = 0.0
+        # 导入/恢复刚结束时置位：这一帧不自动重建，等用户第一次真正操作（滚轮、平移、
+        # 切照片、改参数）之后再说。否则"导入完成"后 1.2 s 会冷不丁卡 0.8-2.4 s。
+        self._hq_hold = False
         self._hq_timer = QTimer(self)
         self._hq_timer.setSingleShot(True)
         self._hq_timer.timeout.connect(self._rebuild_hq_preview)
@@ -2483,6 +2494,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self._hq_enabled and self._hq_suspend == 0:
+            # 拖分栏/拖窗口：把已排的重建作废，等尺寸静下来再说。不这么做的话，
+            # 每 220 ms 就会有一次 12 MP 渲染 + 36 MB 同步读回砸在主线程上。
+            self._last_resize_ms = time.monotonic() * 1000.0
+            self._hq_timer.start(self.HQ_RESIZE_SETTLE_MS)
         if hasattr(self, 'crop_overlay') and self.crop_overlay.isVisible():
             self.crop_overlay.setGeometry(self.rect())
         if self.params.get("view_mode") == 1:
@@ -2881,6 +2897,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         once more when the interaction stops, this time with the full-quality path.
         """
         self._interacting = True
+        self._last_input_ms = time.monotonic() * 1000.0
+        self._hq_hold = False
         # Let the candidate-card wall know a human is in the middle of something: it reads this
         # between cards and pauses, so panning/zooming never queues behind cosmetic baking.
         watch = getattr(self, "_interaction_watch", None)
@@ -2956,6 +2974,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
     # HQ 帧的像素上限。超过这个量级，Intel 共享显存会静默分配失败，之后的
     # render_offscreen 全部读到未初始化显存（花屏），见 _rebuild_hq_preview 的注释。
     HQ_MAX_PIXELS = 12_000_000
+    # 视口停止变化多久之后才允许重建 HQ 帧。拖分栏时每次 resize 都会把定时器推后，
+    # 于是整个拖动过程一次都不重建，松手 0.4 s 后才渲一帧。
+    HQ_RESIZE_SETTLE_MS = 400
+    # 用户最后一次操作之后多久才允许重建。拖动分栏/滑块/平移期间一直顺延，
+    # 停手 0.8 s 才渲那一帧。
+    HQ_INPUT_SETTLE_MS = 800
 
     def set_hq_preview(self, enabled, resample="cubic", divisor=1):
         enabled = bool(enabled)
@@ -2968,6 +2992,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if changed:
             self._hq_key = None
             self._hq_dirty = True
+        self._hq_hold = False
         if enabled:
             self.schedule_hq_preview(delay=0)
         else:
@@ -2995,8 +3020,25 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 and abs(float(self.pan_x)) <= 0.75e-3
                 and abs(float(self.pan_y)) <= 0.75e-3)
 
+    def suspend_hq_preview(self):
+        """导入 / 恢复会话期间禁用 HQ 重建（成对调用 resume_hq_preview）。"""
+        self._hq_suspend += 1
+        self._hq_timer.stop()
+
+    def resume_hq_preview(self, delay=500, hold=False):
+        """结束挂起。``hold=True`` 时不立即重建，等用户下一次操作再排。"""
+        self._hq_suspend = max(0, self._hq_suspend - 1)
+        if self._hq_suspend == 0 and self._hq_enabled:
+            if hold:
+                self._hq_hold = True
+                self._hq_dirty = True
+                self.update()
+            else:
+                self._hq_hold = False
+                self.schedule_hq_preview(delay=delay, restart=True)
+
     def schedule_hq_preview(self, delay=220, restart=False):
-        if not self._hq_enabled or self._hq_busy:
+        if not self._hq_enabled or self._hq_busy or self._hq_suspend > 0 or self._hq_hold:
             return
         # Never queue a rebuild the shader would not display: leaving the fit view is
         # exactly when the user wants the canvas to stay responsive.
@@ -3014,6 +3056,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def invalidate_hq_preview(self):
         self._hq_rev = getattr(self, "_hq_rev", 0) + 1
+        self._hq_hold = False
         self.schedule_hq_preview(restart=True)
 
     def _hq_param_fingerprint(self):
@@ -3034,6 +3077,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 getattr(self, "_hq_rev", 0), self._hq_param_fingerprint())
 
     def hq_preview_active(self):
+        if self._hq_suspend > 0:
+            return False
         return (self._hq_enabled and self._hq_tex_id is not None
                 and self._hq_frame is not None and not self._hq_dirty
                 and self._hq_fit_view()
@@ -3069,7 +3114,14 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def _rebuild_hq_preview(self):
         """Render at the export lattice, then downscale that finished picture to the widget."""
-        if not self._hq_enabled or self._hq_busy:
+        if not self._hq_enabled or self._hq_busy or self._hq_suspend > 0:
+            return
+        _recent_input = max(self._last_resize_ms, self._last_input_ms)
+        if (time.monotonic() * 1000.0 - _recent_input) < max(self.HQ_RESIZE_SETTLE_MS,
+                                                             self.HQ_INPUT_SETTLE_MS):
+            # 尺寸还在变 / 用户还在操作：再等一轮。拖动期间这个分支会一直把我们推后，
+            # 重建只在真正静下来之后发生一次。
+            self._hq_timer.start(self.HQ_INPUT_SETTLE_MS)
             return
         if not self._hq_fit_view():
             return
