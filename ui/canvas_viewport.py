@@ -3051,6 +3051,18 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 self._hq_hold = False
                 self.schedule_hq_preview(delay=delay, restart=True)
 
+    def rehold_hq_preview(self):
+        """把 HQ 重建重新压住，等用户下一次操作再排。
+
+        `on_switch_photo` 会 `invalidate_hq_preview()` 把 hold 清掉，导入刚结束时紧接着
+        就跑一次 2.2 s 的全分辨率读回 —— 用户刚看完"已导入 N 张"就被冻住。切完图再压一次。
+        """
+        if self._hq_enabled and self._hq_suspend == 0:
+            self._hq_hold = True
+            self._hq_dirty = True
+            self._hq_timer.stop()
+            self.update()
+
     def schedule_hq_preview(self, delay=220, restart=False):
         if not self._hq_enabled or self._hq_busy or self._hq_suspend > 0 or self._hq_hold:
             return

@@ -17,8 +17,10 @@ import os
 import sys
 import copy
 import ctypes
+import queue
 import threading
 import time
+from collections import deque
 from ctypes import c_int, byref
 from datetime import datetime
 import logging
@@ -667,6 +669,60 @@ class BatchImportWorker(QThread):
     def _emit_import_finished(self, loaded_count):
         self._import_finished_emitted = True
         self.importFinished.emit(int(loaded_count or 0))
+
+
+class ThumbGradeWorker(QThread):
+    """导入期把 `.sdc` 缩略图的 3D LUT 现烤挪出主线程。
+
+    每张 `.sdc` 带自己的一套参数，LUT 缓存键因此张张不同、几乎全 miss：一次 17³ 烘焙
+    120-730 ms，26 张就是 4.4 s，全部压在主线程上 —— 那是"导入全程点不动"的头号来源
+    （实测单条 `_on_single_photo_imported` 最长 1890 ms，其中 726 ms 是这一项）。
+    `engine.get_3d_lut` 自带 `_lut_bake_lock`，decode 线程本来就在并发用同一个 engine，
+    所以这里只是把同样的活换到另一个线程，语义不变。
+    """
+    thumbGraded = Signal(str, object)  # photo_id, graded uint8 thumbnail
+
+    def __init__(self, thumb_controller, parent=None):
+        super().__init__(parent)
+        self._tc = thumb_controller
+        self._jobs = queue.Queue()
+        self._stopped = False
+
+    def enqueue(self, photo_id, raw_thumb, film, paper, params):
+        if self._stopped or raw_thumb is None:
+            return
+        self._jobs.put((photo_id, raw_thumb, film, paper, dict(params or {})))
+
+    def pending(self):
+        return self._jobs.qsize()
+
+    def stop(self):
+        self._stopped = True
+        self._jobs.put(None)
+
+    def run(self):
+        while not self._stopped:
+            job = self._jobs.get()
+            if job is None or self._stopped:
+                break
+            pid, raw, film, paper, params = job
+            try:
+                graded = self._tc.grade_thumbnail_fast(raw, film=film, paper=paper, params=params)
+            except Exception as ex:
+                logger.warning(f"Deferred thumbnail grade failed for {pid}: {ex}")
+                graded = None
+            if graded is not None and not self._stopped:
+                self.thumbGraded.emit(pid, graded)
+
+
+# 导入期把 worker 的结果按帧预算投放到主线程：单条最重的可能是 700-1800 ms 的调用，
+# 而 worker 一秒钟能吐出几十条，一次事件循环把十几条连跑完就是"整段卡死"。
+IMPORT_DRAIN_TICK_MS = 16
+IMPORT_DRAIN_BUDGET_MS = 16.0
+IMPORT_DRAIN_MAX_ITEMS = 12
+# 导入期首图只铺内嵌 JPEG，全分辨率链等导入结束再跑（那一次 1.4-1.9 s，见
+# `_show_import_placeholder`）；留一拍先让状态栏和底片条画出来。
+IMPORT_DEFERRED_SWITCH_DELAY_MS = 120
 
 
 # A measurement is only complete when all four keys are present: sidecars written before the
@@ -2720,7 +2776,7 @@ class DarkroomMainWindow(QMainWindow):
 
             # 6. Silent session cache auto-cleaning check
             if not os.environ.get("FAST_TEST"):
-                QTimer.singleShot(2500, session_cache_manager.check_and_auto_clean)
+                QTimer.singleShot(2500, self._auto_clean_cache_soon)
         except Exception as e:
             logger.warning(f"Error restoring application state: {e}")
 
@@ -10434,9 +10490,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.stack.setCurrentIndexAnimated(1, duration_ms=250)
         self.btn_title_export.setVisible(True)
 
-        # 2. Add to recent files
-        for p in new_paths:
-            config_manager.add_recent_file(p)
+        # 2. Add to recent files（一次读写，别在导入循环里逐张存配置）
+        config_manager.add_recent_files(new_paths)
 
         # 3. Ensure cancel button is visible
         if hasattr(self, "btn_cancel_import"):
@@ -10481,10 +10536,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._photo_id_counter = start_idx + len(new_paths)
 
         self._import_filmstrip_buffer = []
+        self._reset_import_delivery()
         self._set_import_hq_suspend(True)
         self._import_worker = BatchImportWorker(new_paths, self.engine, start_idx=start_idx, parent=self)
-        self._import_worker.photoLoaded.connect(self._on_single_photo_imported)
-        self._import_worker.importFinished.connect(self._on_all_photos_imported)
+        self._wire_import_worker(self._import_worker)
         self._import_worker.start(QThread.Priority.LowPriority)
 
     def _start_next_pending_import_batch(self):
@@ -10505,12 +10560,196 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.btn_cancel_import.setVisible(True)
 
         logger.info(f"Import queue: starting next batch with {len(next_batch)} files (start_idx={start_idx})")
+        self._reset_import_delivery()
         self._set_import_hq_suspend(True)
         self._import_worker = BatchImportWorker(next_batch, self.engine, start_idx=start_idx, parent=self)
-        self._import_worker.photoLoaded.connect(self._on_single_photo_imported)
-        self._import_worker.importFinished.connect(self._on_all_photos_imported)
+        self._wire_import_worker(self._import_worker)
         self._import_worker.start(QThread.Priority.LowPriority)
         return True
+
+    # ------------------------------------------------------------------ 导入投放节流
+    def _reset_import_delivery(self):
+        """换批次/开始新导入时清空投放队列与收尾标记。"""
+        if getattr(self, "_import_deliver_timer", None) is not None:
+            self._import_deliver_timer.stop()
+        self._import_deliver_queue = deque()
+        self._import_stream_finished = False
+        self._import_stream_total = 0
+        self._deferred_switch_id = None
+
+    def _wire_import_worker(self, worker):
+        """worker 不再直连主线程槽，改为进队列由定时器按帧预算投放。
+
+        worker 一秒能吐几十条，而单条最重可以是 700-1800 ms；直连时一次事件循环会把排队
+        的信号连跑十几条，用户看到的就是"整段卡死、取消键也点不动"。
+        """
+        worker.photoLoaded.connect(self._enqueue_imported_photo)
+        worker.importFinished.connect(self._on_import_stream_finished)
+
+    def _enqueue_imported_photo(self, photo_entry, current_idx, total_count):
+        q = getattr(self, "_import_deliver_queue", None)
+        if q is None:
+            q = deque()
+            self._import_deliver_queue = q
+        q.append((photo_entry, current_idx, total_count))
+        if getattr(self, "_import_deliver_timer", None) is None:
+            self._import_deliver_timer = QTimer(self)
+            self._import_deliver_timer.setInterval(IMPORT_DRAIN_TICK_MS)
+            self._import_deliver_timer.timeout.connect(self._drain_import_queue)
+        if not self._import_deliver_timer.isActive():
+            self._import_deliver_timer.start(IMPORT_DRAIN_TICK_MS)
+
+    def _on_import_stream_finished(self, total_loaded):
+        # 收尾信号可能比最后几条 photoLoaded 早到（队列里还有货），等队列排空再真正收尾。
+        self._import_stream_finished = True
+        self._import_stream_total = int(total_loaded or 0)
+        self._drain_import_queue()
+
+    def _drain_import_queue(self):
+        q = getattr(self, "_import_deliver_queue", None)
+        if q is None:
+            q = deque()
+            self._import_deliver_queue = q
+
+        t0 = time.perf_counter()
+        n = 0
+        while q and n < IMPORT_DRAIN_MAX_ITEMS:
+            entry, cur, tot = q.popleft()
+            n += 1
+            try:
+                self._on_single_photo_imported(entry, cur, tot)
+            except Exception as ex:
+                logger.error(f"Import delivery failed: {ex}", exc_info=True)
+            # 预算只在"整条做完"之后判：中途打断一条会把照片留在半初始化的状态。
+            if (time.perf_counter() - t0) * 1000 >= IMPORT_DRAIN_BUDGET_MS:
+                break
+
+        if not q and getattr(self, "_import_stream_finished", False):
+            if getattr(self, "_import_deliver_timer", None) is not None:
+                self._import_deliver_timer.stop()
+            self._import_stream_finished = False
+            self._on_all_photos_imported(self._import_stream_total)
+
+    def _thumb_grade_worker(self):
+        """惰性创建导入期的缩略图烘焙线程（一次 120-730 ms 的 LUT 现烤）。"""
+        w = getattr(self, "_thumb_grade_worker_ref", None)
+        if w is not None:
+            return w
+        tc = getattr(self, "thumb_controller", None)
+        if tc is None:
+            return None
+        w = ThumbGradeWorker(tc, parent=self)
+        w.thumbGraded.connect(self._on_thumb_graded)
+        w.start(QThread.Priority.LowPriority)
+        self._thumb_grade_worker_ref = w
+        return w
+
+    def _grade_thumb_or_defer(self, photo_entry, raw_th, film, paper, params):
+        """导入期把烘焙丢给 worker，先返回原片缩略图（卡片"先粗糙"）。
+
+        非导入路径（打开单张、手动重渲染）照旧同步跑，避免为了省一次 170 ms 把交互
+        逻辑也改成异步。
+        """
+        worker = self._thumb_grade_worker() if getattr(self, "_is_importing", False) else None
+        if worker is None:
+            return self.thumb_controller.grade_thumbnail_fast(
+                raw_th, film=film, paper=paper, params=params)
+        pid = photo_entry.get("id")
+        if not pid:
+            return raw_th
+        pending = getattr(self, "_pending_grade_ids", None)
+        if pending is None:
+            pending = set()
+            self._pending_grade_ids = pending
+        pending.add(pid)
+        worker.enqueue(pid, raw_th, film, paper, params)
+        return raw_th
+
+    def _on_thumb_graded(self, photo_id, graded):
+        pending = getattr(self, "_pending_grade_ids", None)
+        if pending:
+            pending.discard(photo_id)
+        photo = next((p for p in self.photos if p and p.get("id") == photo_id), None)
+        if photo is None or graded is None:
+            return
+        try:
+            self.thumb_controller.update_graded_thumbnail(photo, graded, self.filmstrip)
+        except Exception as ex:
+            logger.warning(f"Applying deferred thumbnail failed for {photo_id}: {ex}")
+            return
+        # 导入已经收尾了才轮到它的：状态栏把"补齐缩略图"的尾巴交代清楚。
+        if not getattr(self, "_is_importing", False):
+            left = self._thumb_grade_worker().pending() if getattr(
+                self, "_thumb_grade_worker_ref", None) is not None else 0
+            if left <= 0:
+                done = getattr(self, "_import_session_completed", len(self.photos))
+                self.set_app_status(f"已导入 {done} 张底片", spinning=False, timeout_ms=3000)
+            else:
+                self.set_app_status(f"正在补齐缩略图（剩余 {left} 张）…", spinning=True, timeout_ms=0)
+
+    def _should_defer_first_switch(self):
+        """批量导入才延后首图，单张打开照旧（否则打开一张也要等导入"结束"才出图）。"""
+        if not getattr(self, "_is_importing", False):
+            return False
+        if len(getattr(self, "_current_import_batch", None) or []) <= 1:
+            return False
+        canvas = getattr(self, "canvas", None)
+        return canvas is not None and hasattr(canvas, "set_placeholder_image")
+
+    def _show_import_placeholder(self, photo_entry):
+        """导入期首图：直接铺相机内嵌 JPEG（sRGB bypass），完整链留到导入结束。
+
+        取舍是用户拍板的"先粗糙后精细"：导入期间画布上是未调色的原片，导完再变成
+        调色后的画面。换来的是导入一开始就能点按钮、能翻底片条。
+        """
+        pid = photo_entry.get("id")
+        if not pid:
+            return
+        self.active_photo_id = pid
+        self._current_photo_path = photo_entry.get("path")
+        self._deferred_switch_id = pid
+        # 参数面板里还是上一张的内容：这里绝不能报脏，否则切回首图时会把上一张的参数
+        # 写进这张的 .sdc。
+        self._photo_is_dirty = False
+        exif = photo_entry.get("exif") or {}
+        try:
+            self.exif_widget.set_exif_data(exif)
+            if hasattr(self, "histogram_exif_bar") and self.histogram_exif_bar:
+                self.histogram_exif_bar.set_exif_data(exif)
+        except Exception:
+            pass
+        th = photo_entry.get("raw_thumbnail_rgb")
+        if th is None:
+            th = photo_entry.get("thumbnail_rgb")
+        try:
+            self.canvas.set_has_library_photos(True)
+            if th is not None:
+                self.canvas.set_placeholder_image(
+                    th,
+                    master_width=int(photo_entry.get("width") or 0) or None,
+                    master_height=int(photo_entry.get("height") or 0) or None,
+                    photo_id=pid,
+                )
+        except Exception as ex:
+            logger.warning(f"Import placeholder failed for {pid}: {ex}")
+
+    def _activate_deferred_photo(self):
+        """导入/取消结束后，把首图从内嵌 JPEG 换成真正调色后的画面。"""
+        pid = getattr(self, "_deferred_switch_id", None)
+        self._deferred_switch_id = None
+        if not pid or pid != getattr(self, "active_photo_id", None):
+            return  # 用户在导入期间已经自己点了别的照片
+        if not any(p and p.get("id") == pid for p in self.photos):
+            return
+        try:
+            self.on_switch_photo(pid, force=True)
+        except Exception as ex:
+            logger.error(f"Deferred first-photo switch failed: {ex}", exc_info=True)
+        # 完整链会 `invalidate_hq_preview()` 把 hold 清掉；这里再压一次，别让 2.2 s 的
+        # 全分辨率读回紧跟着导入结束砸下来（用户这会儿正在翻底片条）。
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None and hasattr(canvas, "rehold_hq_preview"):
+            canvas.rehold_hq_preview()
 
     def _on_single_photo_imported(self, photo_entry, current_idx, total_count):
         # Defensive check: ensure photo_entry ID is strictly unique
@@ -10549,8 +10788,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 photo_entry["is_dirty"] = is_dirty
                 photo_entry["is_edited"] = is_edited
                 if (is_edited or photo_entry["film_profile"] != "none") and raw_th is not None:
-                    graded = self.thumb_controller.grade_thumbnail_fast(
-                        raw_th,
+                    graded = self._grade_thumb_or_defer(
+                        photo_entry, raw_th,
                         photo_entry["film_profile"],
                         self._photo_effective_paper(photo_entry),
                         photo_entry["params"]
@@ -10583,8 +10822,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
                         photo_entry["graded_thumbnail_rgb"] = sdc["thumbnail_rgb"]
                         photo_entry["thumbnail_rgb"] = sdc["thumbnail_rgb"]
                     elif raw_th is not None:
-                        graded = self.thumb_controller.grade_thumbnail_fast(
-                            raw_th,
+                        graded = self._grade_thumb_or_defer(
+                            photo_entry, raw_th,
                             photo_entry["film_profile"],
                             th_paper,
                             photo_entry["params"]
@@ -10602,7 +10841,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.filmstrip.append_photo(photo_entry, is_active=True)
             if photo_entry.get("is_dirty") or photo_entry.get("is_edited"):
                 self.filmstrip.set_photo_dirty(photo_entry["id"], True)
-            self.on_switch_photo(photo_entry["id"])
+            if self._should_defer_first_switch():
+                # 批量导入期间先只铺内嵌 JPEG：完整链那一次要 1.4-1.9 s（解码 + 烘 LUT +
+                # 上传纹理），正好砸在导入刚开始、用户最想点取消的那一刻。
+                self._show_import_placeholder(photo_entry)
+            else:
+                self.on_switch_photo(photo_entry["id"])
         else:
             # Buffer for batch insertion to eliminate main-thread layout thrashing
             if not hasattr(self, "_import_filmstrip_buffer") or self._import_filmstrip_buffer is None:
@@ -10739,6 +10983,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.set_app_status(f"已导入 {completed_count} 张底片", spinning=False, timeout_ms=3000)
         self._set_import_hq_suspend(False, hold=(completed_count > 1))
 
+        # 首图还停在导入期铺的内嵌 JPEG 上，现在才跑完整链（一次 0.3-1.9 s）。
+        # 留一拍让"已导入 N 张"和底片条先画出来，别让用户以为收尾时又卡住了。
+        if getattr(self, "_deferred_switch_id", None):
+            QTimer.singleShot(IMPORT_DEFERRED_SWITCH_DELAY_MS, self._activate_deferred_photo)
+
         # Real-time session state save & cache maintenance
         try:
             if self._current_session_path and os.path.exists(self._current_session_path):
@@ -10749,15 +10998,43 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     config_manager.save_last_session_path(config_manager.get_auto_saved_session_path())
         except Exception:
             pass
-        # 缓存修剪要遍历整个缓存目录，放在导入完成的当口会平白多卡几百毫秒 —— 推后跑，
-        # 这时用户已经在看照片了。
-        QTimer.singleShot(1500, self._deferred_prune_cache)
+        # 缓存修剪要遍历整个缓存目录，一次 300-400 ms（实测 prune_cache_by_size 351 ms），
+        # 放在导入完成的当口正好砸在用户开始翻照片的时候。推后跑，并在真正的导入/恢复
+        # 期间继续顺延 —— 宁可晚一点修剪，也不要再添一次卡顿。
+        QTimer.singleShot(5000, self._deferred_prune_cache)
 
     def _deferred_prune_cache(self):
-        try:
-            session_cache_manager.prune_cache_if_needed()
-        except Exception:
-            pass
+        if getattr(self, "_is_importing", False):
+            QTimer.singleShot(5000, self._deferred_prune_cache)
+            return
+        self._run_cache_maintenance("prune", session_cache_manager.prune_cache_if_needed)
+
+    def _run_cache_maintenance(self, tag, fn):
+        """缓存目录维护（遍历几千个文件 + stat，一次 300-500 ms）挪出主线程。
+
+        这些操作只读目录、删的是可再生的缓存文件，失败一律容忍（下次缓存 miss 重算）。
+        放在主线程上无论怎么排都会留下一次几百毫秒的冻结 —— 实测启动后 2.5 s 那次
+        `check_and_auto_clean` 就占 487 ms，正撞在用户刚点完导入的当口。
+        """
+        if getattr(self, "_cache_maintenance_running", False):
+            return
+        self._cache_maintenance_running = True
+
+        def _work():
+            try:
+                fn()
+            except Exception as ex:
+                logger.warning(f"Cache maintenance ({tag}) failed: {ex}")
+            finally:
+                self._cache_maintenance_running = False
+
+        threading.Thread(target=_work, daemon=True, name=f"CacheMaint-{tag}").start()
+
+    def _auto_clean_cache_soon(self):
+        if getattr(self, "_is_importing", False):
+            QTimer.singleShot(5000, self._auto_clean_cache_soon)
+            return
+        self._run_cache_maintenance("autoclean", session_cache_manager.check_and_auto_clean)
 
     def _set_import_hq_suspend(self, on, resume_delay=1200, hold=True):
         """导入 / 恢复会话期间挂起 HQ 预览重建。
@@ -10814,6 +11091,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._import_flush_timer.stop()
         if hasattr(self, "_import_buffer_timer") and self._import_buffer_timer is not None:
             self._import_buffer_timer.stop()
+        # 投放队列里还没跑的条目一并丢掉，否则取消之后它们还会继续往底片库里塞
+        if getattr(self, "_import_deliver_timer", None) is not None:
+            self._import_deliver_timer.stop()
+        if getattr(self, "_import_deliver_queue", None) is not None:
+            self._import_deliver_queue.clear()
+        self._import_stream_finished = False
         self._flush_import_filmstrip_buffer()
 
         # 2. Terminate and disconnect batch import worker
@@ -10852,6 +11135,18 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._is_importing = False
         # 取消是用户主动打断的：HQ 晚一点再重建，别让他刚点完取消又卡 2 秒。
         self._set_import_hq_suspend(False, resume_delay=3000, hold=True)
+        # 首图还停在导入期铺的内嵌 JPEG 上。取消后不能就这么留着 —— 画布上是"原片"，
+        # 而参数面板里还是上一张的参数，拖滑块会拿低分辨率贴图当前景渲。
+        # 也别在这儿补完整链：那一跑 300-500 ms，正好砸在用户刚点完取消的瞬间。
+        # 直接退回空画布，用户点哪张就正常加载哪张。
+        if getattr(self, "_deferred_switch_id", None):
+            self._deferred_switch_id = None
+            self.active_photo_id = None
+            try:
+                self.canvas.set_image(None)
+            except Exception:
+                pass
+        self.canvas.set_has_library_photos(bool(self.photos))
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(False)
         self.restore_default_status()
@@ -12283,6 +12578,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             gc.collect()
 
     def on_switch_photo(self, photo_id, force=False):
+        # 用户自己在导入期间点了照片：作废"导入结束后再切回首图"的约定。
+        # `_activate_deferred_photo` 是先把 id 取走再调进来的，所以这里清空不会打断它自己。
+        self._deferred_switch_id = None
         # Stop any lingering live/debounce timers from previous photo
         if hasattr(self, '_live_thumb_timer') and self._live_thumb_timer.isActive():
             self._live_thumb_timer.stop()
@@ -14321,6 +14619,10 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         try:
             if hasattr(self, 'thumb_controller'):
                 self.thumb_controller.cancel_card_preview_worker()
+            if getattr(self, "_thumb_grade_worker_ref", None) is not None:
+                self._thumb_grade_worker_ref.stop()
+                self._safely_terminate_worker(self._thumb_grade_worker_ref, wait_ms=1000)
+                self._thumb_grade_worker_ref = None
             if hasattr(self, '_single_photo_loader') and self._single_photo_loader:
                 self._safely_terminate_worker(self._single_photo_loader, wait_ms=1000)
                 self._single_photo_loader = None

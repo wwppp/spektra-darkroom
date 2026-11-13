@@ -417,6 +417,29 @@ def add_recent_file(path: str):
     save_config(cfg)
 
 
+def add_recent_files(paths) -> None:
+    """批量版 `add_recent_file`：一次读、一次写。
+
+    旧代码在导入循环里逐张调用 `add_recent_file`，每张都要 load_config + save_config
+    各一次（整份 JSON 读进来再写回去）。导入 400 多张时那是几百次磁盘往返，全在主线程上，
+    实测第一批照片还没解码就先卡 344 ms。
+    """
+    cfg = None
+    for path in paths or []:
+        if not path or not os.path.exists(path):
+            continue
+        if cfg is None:
+            cfg = load_config()
+        norm_path = os.path.abspath(path)
+        recent = cfg.get("recent_files", [])
+        if norm_path in recent:
+            recent.remove(norm_path)
+        recent.insert(0, norm_path)
+        cfg["recent_files"] = recent[:MAX_RECENT_FILES]
+    if cfg is not None:
+        save_config(cfg)
+
+
 def clear_recent_files():
     cfg = load_config()
     cfg["recent_files"] = []
