@@ -38,7 +38,9 @@ class ScrubLabel(QLabel):
         self._last_global_x = 0.0
         self.setMinimumWidth(10)
         self.setMinimumHeight(22)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # Preferred, not Ignored: the label must report its text width so the row can lay the
+        # value box out against the real title instead of against an invisible full-width bar.
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.apply_theme()
         theme_manager.themeChanged.connect(self.apply_theme)
 
@@ -231,6 +233,10 @@ class RoundScrubSlider(QSlider):
     # edge lines up with the label above it (it used to be inset by r+2, which read as
     # "everything is indented by 11px and nothing is flush").
     KNOB_R = 6.5
+    # Vertical half-height of the band that actually reacts to the pointer.  The groove is a
+    # 3 px line in the middle of an 18 px row; the knob is 13 px across.  Everything outside
+    # this band is dead air, so it must not wear a hand cursor and must not swallow clicks.
+    TRACK_HIT_HALF = 7.0
 
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
@@ -299,15 +305,30 @@ class RoundScrubSlider(QSlider):
     def _hit_knob(self, x):
         return abs(float(x) - self._knob_cx()) <= self.KNOB_R + 5.0
 
-    def _update_hover_cursor(self, x=None):
-        """A hand everywhere on the track: knob and groove both grab.
+    def _in_hit_band(self, y):
+        """Is this y inside the groove/knob band (vs the dead air above and below it)?"""
+        try:
+            return abs(float(y) - self.height() / 2.0) <= self.TRACK_HIT_HALF
+        except (TypeError, ValueError):
+            return True
+
+    def _update_hover_cursor(self, x=None, y=None):
+        """A hand on the groove and the knob, an arrow everywhere else.
 
         The groove used to keep the default arrow, which said "nothing here" about the one
-        place a click seeks the value.  Every draggable surface in the app shows a hand
-        (canvas pan, parameter titles, sliders), so the slider does too.
+        place a click seeks the value -- so the whole row got the hand.  It then read as a
+        hand over the empty 7 px above and below a 3 px line, which is what "the hit area is
+        too wide" was about.  Now it matches the pixels that respond: the band, not the row.
         """
         if not self.isEnabled():
             # Disabled rows must not keep a stale hand from before the toggle.
+            self.unsetCursor()
+            self._set_hover_knob(False)
+            return
+        if x is None:
+            pt = self.mapFromGlobal(QCursor.pos())
+            x, y = pt.x(), pt.y()
+        if not self._in_hit_band(y):
             self.unsetCursor()
             self._set_hover_knob(False)
             return
@@ -315,8 +336,6 @@ class RoundScrubSlider(QSlider):
         if self._pressed:
             self._set_hover_knob(False)
             return
-        if x is None:
-            x = self.mapFromGlobal(QCursor.pos()).x()
         self._set_hover_knob(self._hit_knob(x))
 
     def _set_hover_knob(self, on):
@@ -362,6 +381,12 @@ class RoundScrubSlider(QSlider):
             super().mousePressEvent(event)
             return
         pos = event.position()
+        if not self._in_hit_band(pos.y()):
+            # Dead air above/below the groove: let the click fall through instead of grabbing
+            # the value from a spot the pointer never claimed was interactive.
+            self._update_hover_cursor(pos.x(), pos.y())
+            event.ignore()
+            return
         self._pressed = True
         self._press_pos = pos
         self._intent = None
@@ -374,7 +399,7 @@ class RoundScrubSlider(QSlider):
             self._grab_offset = pos.x() - self._knob_cx()
         else:
             self._grab_offset = 0.0
-        self._update_hover_cursor(pos.x())
+        self._update_hover_cursor(pos.x(), pos.y())
         # Grab right away: without it the drag is lost the moment the pointer leaves this
         # 22px-tall row, which is exactly what read as "the knob sticks".
         try:
@@ -388,7 +413,7 @@ class RoundScrubSlider(QSlider):
             event.ignore()
             return
         if not self._pressed:
-            self._update_hover_cursor(event.position().x())
+            self._update_hover_cursor(event.position().x(), event.position().y())
             super().mouseMoveEvent(event)
             return
         pos = event.position()
@@ -587,7 +612,15 @@ class ParamScrubSlider(QWidget):
         self.label.scrubDelta.connect(self._on_scrub)
         self.label.scrubFinished.connect(self._on_scrub_finished)
         self.label.doubleClicked.connect(self.reset)
-        header_layout.addWidget(self.label, 1)
+        # The title only takes the width of its own text.  It used to be given stretch=1 and an
+        # Ignored size policy, so it swallowed the whole rest of the row -- and since it carries
+        # a pointing-hand cursor, every row showed a hand over ~130 px of empty space to the
+        # right of the word (the exposure row was the one exception, because add_header_widget
+        # narrows it to make room for the AU chip).  Owning exactly the text keeps the cursor,
+        # the hover tint and the scrub target on the same pixels.
+        header_layout.addWidget(self.label, 0)
+        header_layout.addStretch(1)
+        self._header_stretch_added = True
 
         self.value_edit = QLineEdit()
         self.value_edit.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
@@ -641,11 +674,10 @@ class ParamScrubSlider(QWidget):
         """Mount an extra control in the header row, right *after* the scrub title.
 
         Used for compact per-parameter actions (e.g. the AU metered-exposure button on the
-        exposure slider).  Appending it at the end of the row (the old behaviour) pushed the
-        numeric box and the reset button leftwards, so that row's reset no longer lined up
-        with the column every other row builds.  Inserting at index 1 keeps the trailing
-        controls in place, and the added stretch keeps the chip hugging the label text
-        instead of floating in the middle of the row.
+        exposure slider).  Appending it at the end of the row pushed the numeric box leftwards,
+        so that row's value no longer lined up with the column every other row builds.
+        Inserting at index 1 puts it between the title and the row's stretch, which keeps the
+        chip hugging the label text and the numeric box in place.
         """
         item = self.layout().itemAt(0)
         if item is None:
@@ -654,13 +686,9 @@ class ParamScrubSlider(QWidget):
         if header is None:
             return
         header.insertWidget(1, w, stretch)
-        if not getattr(self, "_header_stretch_added", False):
-            header.insertStretch(2)
-            # The label must stop absorbing the spare width, or the chip is pushed to the far
-            # right and only *looks* like it follows the label.
-            self.label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-            header.setStretch(0, 0)
-            self._header_stretch_added = True
+        # The row already ends with a stretch and a narrow label (see _init_ui), so the chip
+        # lands directly to the right of the title with nothing else to arrange.
+        self._header_stretch_added = True
 
     def apply_theme(self, theme_name=None):
         is_dark = theme_manager.is_dark()
