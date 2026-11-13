@@ -3998,6 +3998,10 @@ class DarkroomMainWindow(QMainWindow):
         tray_layout.setSpacing(6)
 
         self.film_header = FilmFilterHeader()
+        # 这块必须显式透明：它自己会按 palette 的 Window 色铺一层底（暗 #121316 / 亮
+        # #ebedf2）。以前它直接坐在面板底色上，看不出来；挪进托盘后就在标题和分类
+        # 胶囊后面留下一块和托盘不同色的方块。
+        self.film_header.setStyleSheet("background: transparent;")
         self.lbl_film_title = self.film_header.lbl_title
         self.film_header.searchChanged.connect(self._on_film_search_changed)
         self.film_header.categoryChanged.connect(self._on_film_category_changed)
