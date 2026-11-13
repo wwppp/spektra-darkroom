@@ -529,7 +529,25 @@ class SmoothScrollArea(QScrollArea):
                     hbar.raise_()
             else:
                 overlay.raise_()
-        overlay.update()
+
+        # The fade is a two-state indicator per axis: it only appears when the bar is off an
+        # edge.  Repainting on every tick meant ~125 full-viewport composites per second for
+        # an image that is almost always identical.  Compare the only inputs `paintEvent`
+        # reads (size, range, both edge predicates, theme, enable flag) and repaint on change.
+        bar = self.horizontalScrollBar() if self.is_horizontal else self.verticalScrollBar()
+        if bar is None:
+            overlay.update()
+            return
+        state = (
+            target.width(), target.height(),
+            bar.minimum(), bar.maximum(),
+            bar.value() > 0, bar.value() < bar.maximum(),
+            bool(getattr(self, "enable_edge_fade", True)),
+            theme_manager.is_dark(),
+        )
+        if getattr(self, "_overlay_state", None) != state:
+            self._overlay_state = state
+            overlay.update()
 
     def _is_animating(self) -> bool:
         return (self._anim.state() == QAbstractAnimation.State.Running
