@@ -3141,6 +3141,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             # Height from the quad's own aspect, not from ph: a couple of pixels of rounding
             # here is a couple of pixels of anisotropy in the grain.
             hh = max(1, min(th, int(round(hw * ph / pw))))
+            if os.environ.get("SPECTRA_HQ_DEBUG"):
+                print(f"[HQ] widget={self.width()}x{self.height()} dpr={dpr:.3f} "
+                      f"fb={vw}x{vh} quad={pw:.3f}x{ph:.3f} target={tw}x{th} "
+                      f"frame={hw}x{hh} stretch=({pw / hw:.5f},{ph / hh:.5f})")
             algo = {"area": cv2.INTER_AREA, "cubic": cv2.INTER_CUBIC,
                     "lanczos": cv2.INTER_LANCZOS4}[self._hq_resample]
             small = cv2.resize(arr, (hw, hh), interpolation=algo)
