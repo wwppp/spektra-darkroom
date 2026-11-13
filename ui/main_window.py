@@ -7931,14 +7931,33 @@ aspect_ratio=self._lens_frame_aspect(photo),
         return (getattr(self, "current_film_stock", "none") == "none"
                 and param_key in self.BYPASS_INERT_PARAMS)
 
+    def _slider_is_dragging(self) -> bool:
+        """Whether this value change comes from an ongoing drag rather than a single click.
+
+        `canvas.begin_interaction()` is not free: it makes the canvas paint a cheap frame right
+        away and a second, full-quality frame once the gesture has been idle for 160 ms.  A
+        click commits once and is over immediately, so arming it pays two full-frame composites
+        (~75 ms each here) for one click -- and that second frame is still rendering when the
+        next click arrives, which is exactly what reads as "the second click sticks".
+        """
+        src = self.sender()
+        if src is not None and hasattr(src, "is_scrubbing"):
+            return bool(src.is_scrubbing())
+        try:
+            from PySide6.QtWidgets import QApplication
+            return bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
+        except Exception:                       # noqa: BLE001 - never break a slider over this
+            return True
+
     def _on_slider_live(self, param_key, val):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
             return
         if self._bypass_blocks_param(param_key):
             return
-        began = getattr(self.canvas, "begin_interaction", None)
-        if began is not None:
-            began()
+        if self._slider_is_dragging():
+            began = getattr(self.canvas, "begin_interaction", None)
+            if began is not None:
+                began()
         self.current_params[param_key] = val
         if param_key == "halation_amount":
             self.current_params["halation"] = val

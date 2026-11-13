@@ -811,6 +811,18 @@ class ParamScrubSlider(QWidget):
     def _on_slider_released(self):
         self.sliderReleased.emit()
 
+    def is_scrubbing(self) -> bool:
+        """True while this row's track or title is being dragged right now.
+
+        A click and a drag both arrive as `valueChanged`, so the canvas cannot tell them apart
+        on its own.  It matters: arming the canvas's interaction shortcut makes it paint a cheap
+        frame now and a second, full-quality frame 160 ms after the gesture ends.  For a click
+        that means two full-frame composites for one action, and the second one is still
+        rendering when the next click lands -- which is what reads as "the second click sticks".
+        """
+        return bool(getattr(self.slider, "_pressed", False)
+                    or getattr(self.label, "_dragging", False))
+
     def _on_scrub(self, delta_x):
         if not hasattr(self, "_precise_val") or self._precise_val is None:
             self._precise_val = float(self.current_val)
