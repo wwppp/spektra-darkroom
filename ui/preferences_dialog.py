@@ -31,7 +31,10 @@ class PreferencesDialog(QDialog):
         self.setWindowTitle("首选项")
         # 480, not 460: the 暗房与工作流 tab gained the 负片默认相纸 row and was 20px over
         # the old height, which silently squeezed the bottom rows together.
-        self.setFixedSize(520, 480)
+        # 520, not 480: 2026-11-13 拆成「原生卷默认纸 / 转换卷默认纸」两行后，这个 tab 又高了
+        # 40 px（实测 sizeHint 366 → 406）。没有 QScrollArea，超出就是直接裁掉底部，所以
+        # 跟着加高，保持与拆分前相同的 12 px 余量。
+        self.setFixedSize(520, 520)
         self.setModal(True)
         # 相纸清单来自引擎；保存后要用主窗口把"没选过相纸"的照片重刷一遍。
         self._engine = getattr(parent, "engine", None)
@@ -657,8 +660,10 @@ class PreferencesDialog(QDialog):
 
         # 负片默认相纸：新照片、"没选过相纸"的底片（含缩略图）都落到这张纸上。
         # 已经手动选过相纸的底片不受影响。
+        # 2026-11-13：两条链的相纸集合只有 4 张交集，一个默认值必然有一边越界（越界就会
+        # 静默换纸），所以拆成两条链各一个。
         r_dpaper = QHBoxLayout()
-        lbl_dpaper = QLabel("负片默认相纸:")
+        lbl_dpaper = QLabel("原生卷默认纸:")
         lbl_dpaper.setFixedWidth(100)
         r_dpaper.addWidget(lbl_dpaper)
         self.combo_default_paper = QComboBox()
@@ -671,20 +676,51 @@ class PreferencesDialog(QDialog):
             papers = list(self._engine.get_paper_stocks()) if self._engine is not None else []
         except Exception:
             papers = []
+        ffchain_papers = set(getattr(self._engine, "FFCHAIN_PAPERS", ()) or ())
+        native_papers = set(getattr(self._engine, "NATIVE_PAPERS", ()) or ())
         for item in papers:
             pid = str(item.get("id") or "")
             if not pid or pid in ("none", "screen"):
+                continue
+            # 只有点式链才有的纸在这一行是越界值，不列。
+            if native_papers and pid in ffchain_papers and pid not in native_papers:
                 continue
             self.combo_default_paper.addItem(item.get("name") or pid, pid)
         if self.combo_default_paper.count() == 0:
             self.combo_default_paper.addItem("未载入相纸资源", None)
             self.combo_default_paper.setEnabled(False)
         self.combo_default_paper.setToolTip(
-            "新导入的负片与未手动选过相纸的底片默认用这张相纸（缩略图同步）；"
-            "选「胶片直扫」则先看未反相的负像")
+            "原生卷（spektrafilm 链）的默认相纸：新导入的底片与未手动选过相纸的底片用它"
+            "（缩略图同步）；选「胶片直扫」则先看未反相的负像")
         r_dpaper.addWidget(self.combo_default_paper)
         r_dpaper.addStretch(1)
         l_dr.addLayout(r_dpaper)
+
+        # 转换卷（fotufilm 点式链）的默认纸。转换卷一导入就是要印相的，所以这里不提供
+        # 「胶片直扫」；可选项只有点式链真有表的那几张。
+        r_fpaper = QHBoxLayout()
+        lbl_fpaper = QLabel("转换卷默认纸:")
+        lbl_fpaper.setFixedWidth(100)
+        r_fpaper.addWidget(lbl_fpaper)
+        self.combo_default_ffchain_paper = QComboBox()
+        self.combo_default_ffchain_paper.setFixedWidth(180)
+        setup_solid_combobox(self.combo_default_ffchain_paper)
+        for item in papers:
+            pid = str(item.get("id") or "")
+            if not pid or pid in ("none", "screen"):
+                continue
+            if ffchain_papers and pid not in ffchain_papers:
+                continue
+            self.combo_default_ffchain_paper.addItem(item.get("name") or pid, pid)
+        if self.combo_default_ffchain_paper.count() == 0:
+            self.combo_default_ffchain_paper.addItem("未载入相纸资源", None)
+            self.combo_default_ffchain_paper.setEnabled(False)
+        self.combo_default_ffchain_paper.setToolTip(
+            "转换卷（fotufilm 点式链，含 CineStill / UltraMax 等）的默认相纸："
+            "只列出这条链真正有表的纸")
+        r_fpaper.addWidget(self.combo_default_ffchain_paper)
+        r_fpaper.addStretch(1)
+        l_dr.addLayout(r_fpaper)
 
         self.chk_restore_last_files = QCheckBox("启动时打开上次工程")
         self.chk_restore_last_files.setChecked(True)
@@ -882,6 +918,12 @@ class PreferencesDialog(QDialog):
         if idx_dp < 0 and self.combo_default_paper.count():
             idx_dp = 0
         self.combo_default_paper.setCurrentIndex(idx_dp if idx_dp >= 0 else 0)
+
+        def_fpaper = prefs.get("default_ffchain_paper", "kodak_2383")
+        idx_fp = self.combo_default_ffchain_paper.findData(def_fpaper)
+        if idx_fp < 0 and self.combo_default_ffchain_paper.count():
+            idx_fp = 0
+        self.combo_default_ffchain_paper.setCurrentIndex(idx_fp if idx_fp >= 0 else 0)
 
         max_gb = float(prefs.get("session_cache_max_gb", 2.0))
         idx_max = -1
@@ -1159,6 +1201,10 @@ class PreferencesDialog(QDialog):
         new_default_paper = self.combo_default_paper.currentData()
         if new_default_paper:
             prefs["default_negative_paper"] = new_default_paper
+        old_default_ffchain = prefs.get("default_ffchain_paper", "kodak_2383")
+        new_default_ffchain = self.combo_default_ffchain_paper.currentData()
+        if new_default_ffchain:
+            prefs["default_ffchain_paper"] = new_default_ffchain
         prefs["session_cache_max_gb"] = float(self.combo_cache_max_size.currentData())
         prefs["session_cache_clean_interval_days"] = int(self.combo_clean_interval.currentData())
 
@@ -1177,10 +1223,17 @@ class PreferencesDialog(QDialog):
 
         config_manager.save_config(cfg)
         # 默认相纸变了：让主窗口重刷那些"没选过相纸"的底片（缩略图 + 当前照片的 LUT）。
+        # 两条链各刷各的 —— 一次只改一边时，另一边的照片不该被重刷（那张纸对它们没意义）。
         if new_default_paper and new_default_paper != old_default_paper:
             try:
                 if self._parent_window is not None and hasattr(self._parent_window, "on_default_negative_paper_changed"):
                     self._parent_window.on_default_negative_paper_changed()
+            except Exception:
+                pass
+        if new_default_ffchain and new_default_ffchain != old_default_ffchain:
+            try:
+                if self._parent_window is not None and hasattr(self._parent_window, "on_default_ffchain_paper_changed"):
+                    self._parent_window.on_default_ffchain_paper_changed()
             except Exception:
                 pass
         self.accept()

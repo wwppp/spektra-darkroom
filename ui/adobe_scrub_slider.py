@@ -1436,21 +1436,32 @@ class ComboBoxRow(QWidget):
         if self.default_val is not None:
             self.set_value(self.default_val)
 
-    def set_items(self, items, default_val=None):
+    def set_items(self, items, default_val=None, keep_value=None):
+        """Rebuild the list without emitting ``valueChanged``.
+
+        ``keep_value`` is for the case where the *set* of legal values depends on other state
+        (the paper list depends on which chain the current film runs on): keep the current
+        selection when it survives, otherwise fall back to ``default_val`` and then to the
+        first item.  No signal is emitted on purpose -- the caller owns the state and sets it
+        explicitly, so the panel can never drift away from the model in silence.
+        """
+        want = keep_value
+        if want is None:
+            want = default_val
+        if want is None:
+            want = self.combo.currentData()
         self.combo.blockSignals(True)
         self.combo.clear()
-        for idx, (text, val) in enumerate(items):
+        for text, val in items:
             self.combo.addItem(text, val)
-        if default_val is not None:
-            idx = self.combo.findData(default_val)
-            if idx >= 0:
-                self.combo.setCurrentIndex(idx)
-            elif self.combo.count() > 0:
-                self.combo.setCurrentIndex(0)
-        elif self.combo.count() > 0:
-            self.combo.setCurrentIndex(0)
+        idx = self.combo.findData(want) if want is not None else -1
+        if idx < 0 and self.combo.count() > 0:
+            idx = 0
+        if idx >= 0:
+            self.combo.setCurrentIndex(idx)
         if self.combo.currentIndex() >= 0:
             txt = self.combo.currentText()
             self.combo.setToolTip(txt if txt else self.default_tooltip)
         self.combo.blockSignals(False)
+        self.update()
 

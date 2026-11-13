@@ -122,6 +122,13 @@ def load_sdc(image_path: str) -> dict | None:
             # null or a string here would raise AttributeError deep in the UI.
             if not isinstance(data.get("params"), dict):
                 data["params"] = {}
+            # 旁挂的另一条链的相纸选择：类型在这里就规范好，消费方直接 .get()。
+            by_scope = data.get("paper_by_scope")
+            if not isinstance(by_scope, dict):
+                by_scope = {}
+            data["paper_by_scope"] = {
+                str(k): str(v) for k, v in by_scope.items()
+                if k in ("native", "ffchain") and v}
             # base_ev is the auto-metering anchor for the *file*, not a user edit. It is
             # derived from the decoded preview and cached against the file's mtime+size.
             # Older sidecars carry a copy; honouring it made the rendered exposure depend on
@@ -151,7 +158,8 @@ def save_sdc(
     thumbnail_rgb: np.ndarray = None,
     print_mode: str = None,
     rating: int = None,
-    paper_explicit: bool = None
+    paper_explicit: bool = None,
+    paper_by_scope: dict = None
 ) -> bool:
     """Save sidecar editing configuration next to the image file, optionally caching thumbnail.
     Note: Star ratings belong exclusively to session files (.sdss) and are never written to .sdc sidecars.
@@ -187,6 +195,15 @@ def save_sdc(
         # 相纸时只有"没选过"的照片才该跟着变，所以这个标记必须落到盘上。
         if paper_explicit is not None:
             data["paper_explicit"] = bool(paper_explicit)
+
+        # 另一条链上的相纸选择（`{"native": id, "ffchain": id}`）。`paper_profile` 永远存
+        # 当前卷所属那条链的合法值，这份只是旁挂 —— 两条链的纸不相通，只用一个字段时
+        # 切卷会把用户在另一条链上选过的纸覆写掉，切回去也回不来。
+        if paper_by_scope is not None:
+            clean = {str(k): str(v) for k, v in (paper_by_scope or {}).items()
+                     if k in ("native", "ffchain") and v}
+            if clean:
+                data["paper_by_scope"] = clean
 
         # Embed compact JPEG thumbnail (~2KB) so any machine/session opens with instant graded preview
         if thumbnail_rgb is not None and isinstance(thumbnail_rgb, np.ndarray) and thumbnail_rgb.size > 0:

@@ -54,7 +54,12 @@ DEFAULT_CONFIG = {
         "auto_meter_on_import": False,
         # 全新安装（还没有配置文件）时的负片默认相纸。用户指定："胶片直扫"，即新底片先
         # 看未反相的原始负像，选过相纸之后才印相。
+        # 2026-11-13：拆成两条链各一个默认值。两条链的相纸集合只有 4 张交集（原生 8 张 /
+        # 转换 8 张），一个全局默认值必然有一边越界，越界就会静默换纸。
+        #   default_negative_paper -> 原生链（spektrafilm 单表）：none + NATIVE_PAPERS
+        #   default_ffchain_paper  -> 转换卷（fotufilm 点式链）：FFCHAIN_PAPERS，不含 none
         "default_negative_paper": "none",
+        "default_ffchain_paper": "kodak_2383",
         "session_cache_max_gb": 2.0,
         "session_cache_clean_interval_days": 7,
         "session_cache_last_clean_time": 0.0,
@@ -340,6 +345,53 @@ def set_preferences(prefs_dict: dict):
     prefs = cfg.setdefault("preferences", {})
     prefs.update(prefs_dict)
     save_config(cfg)
+
+
+def migrate_default_papers(ffchain_papers, native_papers, default_ffchain="kodak_2383"):
+    """把「一个负片默认相纸」的旧配置迁到「两条链各一个」。
+
+    2026-11-13 之前 `default_negative_paper` 是唯一默认值，但两条链的相纸集合只有 4 张
+    交集。用户如果把它设成了只有点式链才有的纸（Eterna CP / Agfa CP30 …），原生卷那边
+    就必然会静默换纸。这里的规则是**保住用户的选择**：那张纸挪到它真正归属的链上，
+    另一条链回到出厂值。返回是否改过配置。
+
+    只在启动时调一次（调用方知道 FFCHAIN_PAPERS / NATIVE_PAPERS，config_manager 不 import 引擎）。
+    """
+    ffchain = {str(p) for p in (ffchain_papers or ())}
+    native = {str(p) for p in (native_papers or ())}
+    if not ffchain and not native:
+        return False
+
+    cfg = load_config()
+    prefs = cfg.setdefault("preferences", {})
+    changed = False
+
+    native_val = prefs.get("default_negative_paper", "none")
+    ffchain_val = prefs.get("default_ffchain_paper", default_ffchain)
+
+    # 旧配置选的是纯点式纸（只有转换卷能用）：这张纸其实是给转换卷选的。
+    if (native_val not in ("", None, "none") and str(native_val) in ffchain
+            and str(native_val) not in native):
+        prefs["default_ffchain_paper"] = str(native_val)
+        prefs["default_negative_paper"] = "none"
+        changed = True
+
+    # 两侧各自夹进自己的合法域（纸退役、手改配置、从别的版本带过来的值）。
+    ffchain_val = prefs.get("default_ffchain_paper", default_ffchain)
+    if str(ffchain_val) not in ffchain:
+        prefs["default_ffchain_paper"] = default_ffchain
+        changed = True
+    native_val = prefs.get("default_negative_paper", "none")
+    if (native_val not in ("", None, "none") and native
+            and str(native_val) in ffchain and str(native_val) not in native):
+        prefs["default_negative_paper"] = "none"
+        changed = True
+
+    if changed:
+        save_config(cfg)
+        logger.info("Migrated default paper preferences: native=%r ffchain=%r",
+                    prefs.get("default_negative_paper"), prefs.get("default_ffchain_paper"))
+    return changed
 
 
 # =========================================================================

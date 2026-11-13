@@ -1580,7 +1580,10 @@ class SpektraEngine:
     BUILTIN_PAPER_IDS = {
         "none", "kodak_2383", "kodak_2393", "kodak_portra_endura", "kodak_ultra_endura",
         "kodak_supra_endura", "kodak_endura_premier", "kodak_ektacolor_edge",
-        "fujifilm_crystal_archive_typeii"
+        "fujifilm_crystal_archive_typeii",
+        # 2026-11-13 补进来的 fotufilm 印相纸（仅转换卷可用）
+        "fujifilm_eterna_cp", "fujifilm_eterna_cp_3521xd",
+        "kodak_exr_5386", "agfa_cp30"
     }
 
     def get_film_stocks(self):
@@ -1840,6 +1843,32 @@ class SpektraEngine:
                 "name": "Kodak Vision 2393",
                 "badge": "高密黑阶",
                 "desc": "专业电影放映正片，拥有极高的最大光学密度与纯净高光分离感。"
+            },
+            # 2026-11-13：以下四张是从 fotufilm 引擎补进来的印相纸，**只对转换卷开放**
+            # （它们只有点式链的（卷，纸）配对表，没有 spektrafilm 相纸档案）。
+            {
+                "id": "fujifilm_eterna_cp",
+                "name": "Fujifilm Eterna CP",
+                "badge": "电影发行正片",
+                "desc": "富士电影发行拷贝正片，色彩克制、暗部干净，把负片压成院线发行拷贝的质感。"
+            },
+            {
+                "id": "fujifilm_eterna_cp_3521xd",
+                "name": "Fujifilm Eterna CP 3521XD",
+                "badge": "低密发行版",
+                "desc": "Eterna CP 的低银量版本，高光更通透、颗粒更细，适合亮调与高调影像。"
+            },
+            {
+                "id": "kodak_exr_5386",
+                "name": "Kodak Vision 5386",
+                "badge": "柯达发行正片",
+                "desc": "柯达 EXR 系列电影发行正片，青橙分色浓、黑位深，经典好莱坞观感。"
+            },
+            {
+                "id": "agfa_cp30",
+                "name": "Agfa CP30",
+                "badge": "欧洲发行正片",
+                "desc": "爱克发电影发行拷贝正片，中性偏冷的色彩与柔和高光，带一点欧陆影调。"
             },
             {
                 "id": "kodak_portra_endura",
@@ -2443,7 +2472,8 @@ class SpektraEngine:
             # 返回 `none` 会让它永远匹配不上任何一张烘好的表。
             return "screen"
         if info is not None and getattr(info, "channel_model", None) == "bw":
-            return "kodak_2383" if paper_stock == "none" else paper_stock
+            return self._clamp_paper(film_stock,
+                                     "kodak_2383" if paper_stock == "none" else paper_stock)
         if paper_stock == self.DIGITAL_UNMASK_PAPER:
             # 没有纸。返回 `none` 是有意的：`none` 不在 FFCHAIN_PAPERS 里，点式链因此
             # 返回 None、回落到单表 —— 中性去色罩本来也没有（卷，纸）配对的表可找。
@@ -2451,7 +2481,19 @@ class SpektraEngine:
         if print_mode == "scan":
             # A scanned negative has no sheet: the inversion is timed off Ektacolor Edge.
             return "kodak_ektacolor_edge"
-        return "kodak_2383" if paper_stock == "none" else paper_stock
+        return self._clamp_paper(film_stock,
+                                 "kodak_2383" if paper_stock == "none" else paper_stock)
+
+    def _clamp_paper(self, film_stock, paper):
+        """这张卷用不了这张纸时，退回该链的默认纸。
+
+        放在这里而不是只靠 UI 置灰：`.sdc`、旧会话、导出任务、收藏预设里都可能存着一张
+        当前卷不支持的纸。不夹的话烘焙只会**静默回落到另一条链**，面板写着 A 纸、出的图
+        是 B 纸，而且没有任何一处报错。
+        """
+        if self.paper_available(film_stock, paper):
+            return paper
+        return self.default_paper_for(film_stock) or "kodak_ektacolor_edge"
 
     def _filter_fingerprint(self, base_paper, film_stock, push_stops=0):
         """Neutral filtration the bake reads, as a hashable value plus a short digest.
@@ -2462,6 +2504,12 @@ class SpektraEngine:
         """
         try:
             prof = self._load_profile(film_stock)
+            # 只存在于点式链的相纸（2026-11-13 补进来的 4 张）没有 spektrafilm 档案，也没有
+            # 中性滤色片可言：引擎的 `paperOutput` 表里本来就烘进了相纸平衡。放行求解只会
+            # 抛 FileNotFound 再回落到"未解析"，因此这里直接给一个稳定值 —— 它只是缓存键的
+            # 一部分（卷和纸本来就在键里），不参与任何颜色计算。
+            if str(base_paper) in self.FFCHAIN_PAPERS and str(base_paper) not in self.NATIVE_PAPERS:
+                return ("ffchain",), "00000000"
             # Monochrome negatives solve like colour ones -- zero filtration prints the
             # paper's own imbalance (see _neutral_filter_base).
             values = tuple(round(float(v), 2) for v in
@@ -2484,7 +2532,21 @@ class SpektraEngine:
     #
     # 每种相纸是一张独立的表（相纸是另一种材料，曲线和光谱都不同），只有下面这些有。
     # 换到没有点式表的相纸必须回原链，绝不能拿别的相纸的表凑。
-    FFCHAIN_PAPERS = ("kodak_ektacolor_edge", "kodak_2383", "screen")
+    #
+    # 2026-11-13 补表：fotufilm 引擎里另有 6 张印相纸，已按「卷 × 纸」烘齐（184 组）。
+    # 其中 ilfochrome 两张**故意不收**——它们是正-正纸，负片打上去中性灰的 L* 只有 7.5
+    # （几乎全黑），而我们的反转卷永远走 screen，所以这两张表没有任何消费方。
+    # crystal-archive（Type CA）同样不收：我们那张是 Type II，两者不是同一材料。
+    FFCHAIN_PAPERS = ("kodak_ektacolor_edge", "kodak_2383", "screen",
+                      "kodak_2393", "kodak_endura_premier",
+                      "fujifilm_eterna_cp", "fujifilm_eterna_cp_3521xd",
+                      "kodak_exr_5386", "agfa_cp30")
+    # 原生链（spektrafilm 单表 LUT）能印的相纸，与 `resources/print_luts.json` 一一对应。
+    # 两份集合只在 2383 / 2393 / Ektacolor Edge / Endura Premier 四张上重叠。
+    NATIVE_PAPERS = ("kodak_2383", "kodak_2393", "kodak_ektacolor_edge",
+                     "kodak_endura_premier", "kodak_portra_endura",
+                     "kodak_supra_endura", "kodak_ultra_endura",
+                     "fujifilm_crystal_archive_typeii")
     # 盘缓存版本：改了 ffchain_point 的算术就要 +1，否则旧表会被继续读
     FFP_LUT_VERSION = "ffp1"
 
@@ -2516,6 +2578,54 @@ class SpektraEngine:
                 ok = False
         cache[film_stock] = ok
         return ok
+
+    # -- 相纸可用性（链条决定） ----------------------------------------------------------------
+    #
+    # 两条链的相纸集合不同，而且**不可互换**：转换卷走 fotufilm 点式链，印相方式来自引擎里
+    # 那张（卷，纸）配对的 `paperOutput` 表；原生卷走 spektrafilm 单表 LUT，相纸来自
+    # `spektrafilm/data/profiles/<paper>.json`。没有表就不能选，否则只能回落到另一条链，
+    # 出来的东西和面板上写的相纸不是一回事（CineStill 400D 偏紫就是这么暴露的）。
+    #
+    # 反转片不参与：引擎对它恒用 `screen` 介质，相纸选择只是"留给下一张负片"的携带状态。
+    def paper_scope(self, film_stock):
+        """'ffchain' / 'native' / 'inert' —— 决定这张卷能用哪一组相纸。"""
+        if not film_stock or film_stock == "none":
+            return "inert"
+        try:
+            if self.is_positive_film(film_stock):
+                return "inert"
+        except Exception:                              # noqa: BLE001 - 判不出来按原生处理
+            pass
+        return "ffchain" if self._is_fotufilm_chain_stock(film_stock) else "native"
+
+    def paper_available(self, film_stock, paper_stock):
+        """这张卷能不能用这张纸。`none`（直扫）永远可用——它不是相纸。"""
+        paper = str(paper_stock or "").lower()
+        if paper in ("", "none", "scan"):
+            return True
+        scope = self.paper_scope(film_stock)
+        if scope == "inert":
+            return True                                 # 反转 / 旁通：全部保留，UI 另有置灰规则
+        if scope == "ffchain":
+            return paper in self.FFCHAIN_PAPERS
+        return paper in self.NATIVE_PAPERS
+
+    def default_paper_for(self, film_stock):
+        """切卷落点：转换卷落到首选项的「转换卷默认纸」，原生卷返回 None（交给调用方）。
+
+        转换卷这一侧读首选项而不是写死 2383：`_clamp_paper` 也要用它，否则 `.sdc`/导出任务
+        里存着一张越界的纸时，引擎会夹到 2383、而面板按首选项显示另一张 —— 面板与出图分叉。
+        读取失败或值失效一律回 2383（点式链一直以来的落点）。
+        """
+        if self.paper_scope(film_stock) != "ffchain":
+            return None
+        fallback = "kodak_2383"
+        try:
+            from . import config_manager
+            pid = str(config_manager.get_preference("default_ffchain_paper", fallback) or "")
+        except Exception:                              # noqa: BLE001 - 配置读不到不能挡烘焙
+            return fallback
+        return pid if pid in self.FFCHAIN_PAPERS else fallback
 
     def _ffchain_point_lut(self, film_stock, paper_stock, lut_size, bundle, dir_total):
         """点式链在 shaper 格点上的显示 LUT（`lut_size³`），带盘缓存。
@@ -2569,6 +2679,25 @@ class SpektraEngine:
     # 任何立方体。曾经有 44 个离线烘的 `<卷>__<相纸>__grain33.npz` 只为这两张表存在，
     # 2026-11-07 核实它们在 u_ff_on 下从不被采样后整批删除（8.9 MB）。
 
+    def _film_params_safe(self, film_stock, paper_stock):
+        """`init_params`，但相纸没有 spektrafilm 档案时退回 2383。
+
+        2026-11-13 补进来的四张相纸（eterna-cp / 3521xd / exr-5386 / agfa-cp30）只存在于
+        fotufilm 点式链。颗粒这边只要胶片的 `film.data`、`grain` 与 `scanner.unsharp_mask`，
+        相纸参数只是为了让 `init_params` 建得起来 —— 拿它当占位退回 2383 不影响任何读数，
+        而不退回就会抛 `FileNotFound`（调用方吞成"没有颗粒"）或让整条颗粒静默消失。
+
+        `paper_stock` 是 none / scan 时不退回：那种情况本来就走 `kodak_2383` 这个既定锚点，
+        真的失败说明胶片档案本身有问题，应当照常抛给调用方。
+        """
+        paper_for_grain = None if paper_stock in (None, "", "none", "scan") else paper_stock
+        try:
+            return init_params(film_stock, paper_for_grain or "kodak_2383"), paper_for_grain
+        except Exception:                              # noqa: BLE001
+            if not paper_for_grain:
+                raise
+            return init_params(film_stock, "kodak_2383"), paper_for_grain
+
     def _ffchain_film_data(self, film_stock, paper_stock):
         """颗粒分层表与标量要的 film_data（外加一份干净参数）。
 
@@ -2584,7 +2713,7 @@ class SpektraEngine:
             return cache[key]
         try:
             from spektrafilm.runtime.process import Simulator
-            params = init_params(film_stock, paper_for_grain or "kodak_2383")
+            params, _paper_used = self._film_params_safe(film_stock, paper_for_grain)
             params.film_render.halation.active = False
             params.film_render.grain.active = False
             sim = Simulator(digest_params(params))
@@ -2716,6 +2845,13 @@ class SpektraEngine:
             print_mode = str(print_mode).lower()
         if print_mode not in ("optical", "scan"):
             print_mode = "optical"
+
+        # 链条不支持的纸在这里就夹掉，**必须早于 cache_key**：`_resolve_base_paper` 的兜底
+        # 只服务缓存键，烘焙分支用的是原始 `paper_stock`，以前这里会直接
+        # `_load_profile("fujifilm_eterna_cp")` 抛 FileNotFound，整帧不出图。
+        # `digital_unmask` 是"没有纸"的语义，不参与夹取。
+        if str(paper_stock or "") != self.DIGITAL_UNMASK_PAPER:
+            paper_stock = self._clamp_paper(film_stock, paper_stock)
 
         illuminant = str(params_dict.get("enlarger_illuminant", "TH-KG3"))
         dir_amt = round(float(params_dict.get("dir_amount", 1.0)), 2)
@@ -3340,9 +3476,8 @@ class SpektraEngine:
         # neither reads the print profile at all. Passing None used to reach `load_profile` and
         # raise `NoneType + str`, which `_grain_bundle_for_current` swallows into a None bundle --
         # and that is a frame with *no grain at all*, on every slide stock in the app.
-        from spektrafilm import init_params
         paper_for_grain = None if paper_stock in (None, "", "none", "scan") else paper_stock
-        clean_params = init_params(film_stock, paper_for_grain or "kodak_2383")
+        clean_params, _paper_used = self._film_params_safe(film_stock, paper_for_grain)
         grain_params = clean_params.film_render.grain
 
         bundle = {

@@ -85,7 +85,14 @@ class StockThumbnailWorker(QThread):
         self.current_paper = current_paper
         # 胶卷卡片用哪张纸来印。旁通（film=none）时当前相纸会被强制成直扫，若直接拿它
         # 去配每一支卷，整片网格都是橙色负像。调用方按"选中这支卷实际会用的相纸"传入。
-        self.film_paper = str(film_paper or current_paper or "none")
+        # 可以是单个 id，也可以是 `{film_id: paper_id}`：两条链的纸不相通，一个值发给
+        # 所有卷时，当前纸是原生专属纸的话整排转换卷卡片都会烘成同一张默认纸。
+        if isinstance(film_paper, dict):
+            self.film_papers = {str(k): str(v or "none") for k, v in film_paper.items()}
+            self.film_paper = None
+        else:
+            self.film_papers = {}
+            self.film_paper = str(film_paper or current_paper or "none")
         self.do_films = do_films
         self.do_papers = do_papers
         self.ev = float(ev)
@@ -187,11 +194,14 @@ class StockThumbnailWorker(QThread):
                         self.film_ready.emit(sid, pix)
                     else:
                         p_dict = dict(self.params_dict)
+                        # 每支卷按它自己的链配纸：卡片墙是"换这支卷会是什么样"的橱窗。
+                        card_paper = self.film_papers.get(
+                            sid, self.film_paper or self.current_paper or "none")
                         # 印相模式跟着配对相纸走：有纸就印，纸是"直扫"才输出负像。
                         # 之前只看 params 里的 print_mode，旁通状态下会把有纸的预览也烘成负像。
                         p_dict["print_mode"] = (
-                            "scan" if self.film_paper in ("none", "") else "optical")
-                        lut = self.engine.get_3d_lut(sid, self.film_paper, lut_size=17, params_dict=p_dict)
+                            "scan" if card_paper in ("none", "") else "optical")
+                        lut = self.engine.get_3d_lut(sid, card_paper, lut_size=17, params_dict=p_dict)
                         graded_f32 = self.engine.apply_lut_to_linear(small_linear, lut, as_float=True)
                         graded_f32 = apply_post_lut_adjustments_f32(graded_f32, p_dict, self.engine.get_lut_baked_params(lut))
                         graded_u8 = (np.clip(graded_f32, 0.0, 1.0) * 255.0).astype(np.uint8)

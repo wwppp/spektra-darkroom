@@ -782,7 +782,8 @@ class SessionRestoreWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, existing_files, active_file=None, thumb_controller=None, engine=None,
-                 is_params_modified_fn=None, ratings_map=None, default_paper=None, parent=None):
+                 is_params_modified_fn=None, ratings_map=None, default_paper=None,
+                 default_ffchain_paper=None, parent=None):
         super().__init__(parent)
         self.existing_files = list(existing_files or [])
         self.active_file = active_file
@@ -790,10 +791,32 @@ class SessionRestoreWorker(QThread):
         self.engine = engine
         self.is_params_modified_fn = is_params_modified_fn
         self.ratings_map = dict(ratings_map or {})
-        # 首选项里的负片默认相纸；负片且 .sdc 没记相纸的缩略图用它，避免整条胶卷条
+        # 两条链各一个默认相纸；负片且 .sdc 没记相纸的缩略图按它自己的卷取，避免整条胶卷条
         # 都是橙色负像（works on a copy so the worker does not read config from a thread）
         self.default_paper = default_paper or "none"
+        self.default_ffchain_paper = default_ffchain_paper or "kodak_2383"
         self._stopped = False
+
+    def _default_paper_for(self, film_profile):
+        """这张照片的卷该落到哪张默认纸（与主窗口同一套链条判定）。
+
+        以前整个 worker 只有一个 `default_paper`，会话里只要混着一条转换卷，它的缩略图就会
+        拿原生链那张纸去烘 —— 烘焙时被 clamp 成别的纸，卡片文字和画面不是一回事。
+        """
+        if not film_profile or film_profile == "none":
+            return self.default_paper
+        try:
+            if self.engine is not None and self.engine.paper_scope(film_profile) == "ffchain":
+                paper = self.default_ffchain_paper
+                try:
+                    if not self.engine.paper_available(film_profile, paper):
+                        return "kodak_2383"
+                except Exception:
+                    pass
+                return paper
+        except Exception:
+            pass
+        return self.default_paper
 
     def stop(self):
         self._stopped = True
@@ -810,6 +833,7 @@ class SessionRestoreWorker(QThread):
             rating = 0
         film_profile = sdc.get("film_profile", "none") if sdc else "none"
         paper_profile = sdc.get("paper_profile", "none") if sdc else "none"
+        paper_by_scope = dict((sdc or {}).get("paper_by_scope") or {})
         print_mode = sdc.get("print_mode", sdc.get("params", {}).get("print_mode", "optical")) if sdc else "scan"
         params = dict(sdc.get("params", {})) if sdc else None
         is_dirty = False
@@ -851,17 +875,50 @@ class SessionRestoreWorker(QThread):
         render_paper = paper_profile
         implicit_paper = False
         explicit_paper = bool(sdc and sdc.get("paper_explicit"))
-        if (film_profile not in ("none", "", None)
+        chain_paper = self._default_paper_for(film_profile)
+
+        # 链归属：.sdc 里的 paper_profile 可能是另一条链存的（旧档、或用户之后改过卷），
+        # 直接拿去 grade 时引擎会静默换成该链默认纸 —— 缩略图和面板从此对不上。
+        # 先看旁挂记忆能不能补一张本链的纸，补不到再落该链默认纸。这两种情况都不算
+        # "用户在这条链上选过"，所以内嵌缩略图（旧链渲的）也要丢掉重烘。
+        scope = None
+        if self.engine is not None and film_profile not in ("none", "", None):
+            try:
+                scope = self.engine.paper_scope(film_profile)
+            except Exception:                          # noqa: BLE001
+                scope = None
+            if scope not in ("native", "ffchain"):
+                scope = None
+        explicit_out = explicit_paper
+        if scope and paper_profile not in ("", "none", None):
+            paper_ok = True
+            try:
+                paper_ok = bool(self.engine.paper_available(film_profile, paper_profile))
+            except Exception:                          # noqa: BLE001
+                paper_ok = True
+            if not paper_ok:
+                restored = paper_by_scope.get(scope)
+                if restored is not None and self.engine.paper_available(film_profile, restored):
+                    paper_profile = restored
+                    explicit_out = True
+                else:
+                    paper_profile = chain_paper or "none"
+                    explicit_out = False
+                render_paper = paper_profile
+                implicit_paper = True
+        if (not implicit_paper
+                and film_profile not in ("none", "", None)
                 and paper_profile in ("", "none", None)
                 and not explicit_paper
-                and self.default_paper not in ("none", "", None)):
+                and chain_paper not in ("none", "", None)):
             try:
                 is_pos = bool(self.engine and self.engine.is_positive_film(film_profile))
             except Exception:
                 is_pos = False
             if not is_pos:
-                render_paper = self.default_paper
+                render_paper = chain_paper
                 implicit_paper = True
+                explicit_out = False
 
         if sdc and not implicit_paper:
             sdc_th = sdc.get("thumbnail_rgb")
@@ -916,6 +973,10 @@ class SessionRestoreWorker(QThread):
                 "is_raw": cache_item.get("is_raw", is_raw_p),
                 "film_profile": film_profile,
                 "paper_profile": paper_profile,
+                # 相纸是不是用户在这条链上选的，以及另一条链的选择。缺了前者，
+                # 空串/默认纸会被读成"用户选过"；缺了后者，跨链往返会丢选择。
+                "paper_explicit": bool(explicit_out),
+                "paper_by_scope": dict(paper_by_scope),
                 "print_mode": print_mode,
                 "params": params,
                 "crop": crop_data,
@@ -963,6 +1024,10 @@ class SessionRestoreWorker(QThread):
                 "is_raw": is_raw_p,
                 "film_profile": film_profile,
                 "paper_profile": paper_profile,
+                # 相纸是不是用户在这条链上选的，以及另一条链的选择。缺了前者，
+                # 空串/默认纸会被读成"用户选过"；缺了后者，跨链往返会丢选择。
+                "paper_explicit": bool(explicit_out),
+                "paper_by_scope": dict(paper_by_scope),
                 "print_mode": print_mode,
                 "params": params,
                 "crop": crop_data,
@@ -1092,7 +1157,11 @@ class FilmGridCard(QFrame):
         "kodak_2383": "2383 电影放映",
         "kodak_portra_endura": "Portra 展览相纸",
         "fujifilm_crystal_archive_typeii": "水晶二代相纸",
-        "kodak_ultra_endura": "Ultra 高反差相纸"
+        "kodak_ultra_endura": "Ultra 高反差相纸",
+        "fujifilm_eterna_cp": "Eterna CP 发行",
+        "fujifilm_eterna_cp_3521xd": "Eterna CP 3521XD",
+        "kodak_exr_5386": "Vision 5386",
+        "agfa_cp30": "Agfa CP30"
     }
 
     def __init__(self, stock_info, is_active=False, is_custom=False, stock_type="film", parent=None):
@@ -2133,10 +2202,23 @@ class DarkroomMainWindow(QMainWindow):
     # 负片默认落在哪张纸上，完全跟首选项的"负片默认相纸"走（用户 2026-11-10 指定出厂值为
     # "胶片直扫"：新底片先看未反相的原始负像）。这里只是配置缺失或 id 失效时的兜底。
     DEFAULT_NEGATIVE_PAPER = "none"
+    # 转换卷（fotufilm 点式链）的默认纸。点式链一直落到 2383（电影放映正片），这里把它
+    # 提成首选项的第二条默认值，配置缺失/失效时仍回这个值，行为与拆分之前一致。
+    DEFAULT_FFCHAIN_PAPER = "kodak_2383"
 
     def __init__(self, engine, initial_session=None, initial_files=None):
         super().__init__()
         self.engine = engine
+        # 旧配置只有一个「负片默认相纸」，可能设的是一张只有点式链才有的纸。改成两条链
+        # 各一个默认值之后必须先迁移，否则原生卷那边会读到越界值（然后被静默换掉）。
+        try:
+            from core import config_manager
+            config_manager.migrate_default_papers(
+                getattr(engine, "FFCHAIN_PAPERS", ()),
+                getattr(engine, "NATIVE_PAPERS", ()),
+                self.DEFAULT_FFCHAIN_PAPER)
+        except Exception:                              # noqa: BLE001 - 迁移不能挡启动
+            pass
         self._initial_session = initial_session
         self._initial_files = initial_files or []
         self._has_cli_targets = bool(initial_session or (initial_files and len(initial_files) > 0))
@@ -2434,6 +2516,7 @@ class DarkroomMainWindow(QMainWindow):
             is_params_modified_fn=self._is_params_modified,
             ratings_map=ratings_map,
             default_paper=self._default_negative_paper(),
+            default_ffchain_paper=self._default_ffchain_paper(),
             parent=self
         )
         self._session_restore_worker = worker
@@ -7637,6 +7720,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
             snap["params"] = copy.deepcopy(p["params"])
         if "crop" in p and isinstance(p["crop"], dict):
             snap["crop"] = copy.deepcopy(p["crop"])
+        # 旁挂的跨链相纸记忆也必须是副本：撤销回退后继续切卷会原地改这份 dict，
+        # 浅拷贝会让快照跟着一起变（重做就回不到原来的选择）。
+        if "paper_by_scope" in p and isinstance(p["paper_by_scope"], dict):
+            snap["paper_by_scope"] = dict(p["paper_by_scope"])
         return snap
 
     def _apply_library_history_state(self, state: dict):
@@ -8155,7 +8242,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     self.current_params,
                     thumbnail_rgb=cur_thumb,
                     print_mode=getattr(self, "current_print_mode", "optical"),
-                    paper_explicit=self._photo_paper_is_explicit(curr_p)
+                    paper_explicit=self._photo_paper_is_explicit(curr_p),
+                    paper_by_scope=self._paper_by_scope(curr_p)
                 )
                 curr_p["film_profile"] = self.current_film_stock
                 curr_p["paper_profile"] = paper_for_sdc
@@ -8552,7 +8640,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
             photo = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
         if photo is not None and self._photo_paper_is_explicit(photo):
             return
-        paper = self._default_negative_paper()
+        paper = self._default_paper_for(self.current_film_stock)
+        # `_default_paper_for` 已经按链条取值（转换卷落点式链默认、原生卷落首选项），所以
+        # 这里不再需要"越界了就退回另一张"的分支。旧写法是
+        # ``default_paper_for(...) or paper`` —— 原生卷那边 `default_paper_for` 返回 None，
+        # `or` 于是把越界的首选项值原样留下，重置完停在一张置灰的纸上（实测）。
         mode = "scan" if str(paper or "none") in ("none", "") else "optical"
         if paper == self.current_paper_stock and mode == self.current_print_mode:
             return False
@@ -8592,7 +8684,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # as the clear-.sdc path: bypass renders through its own table, the paper only decides
         # where the panel sits and what the next stock selection inherits.
         self.current_film_stock = "none"
-        self.current_paper_stock = self._default_negative_paper()
+        # 旁通没有相纸语义，这里写的是"下一次选卷要继承的那张"——所以取原生链的默认纸
+        # （转换卷的那张纸在旁通面板上没有意义）。选卷时 on_switch_film 会按链条重新落。
+        self.current_paper_stock = self._default_paper_for("none")
         self.current_print_mode = (
             "scan" if str(self.current_paper_stock or "none") in ("none", "") else "optical")
         self.current_params["print_mode"] = self.current_print_mode
@@ -8627,6 +8721,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 # "" = "never picked", so this photo keeps following the preference default.
                 photo["paper_profile"] = ""
                 photo["paper_explicit"] = False
+                # 重置是"这张照片回到初始"：另一条链的那份选择也一起清掉，否则之后切卷往返
+                # 会把重置前的那张纸又恢复出来，和"已恢复至原始底片状态"自相矛盾。
+                photo.pop("paper_by_scope", None)
                 photo["print_mode"] = self.current_print_mode
                 photo["params"] = copy.deepcopy(self.current_params)
                 photo["crop"] = dict(default_crop)
@@ -9103,11 +9200,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._refresh_card_previews()
 
     def _default_negative_paper(self):
-        """首选项里的"负片默认相纸"。
+        """首选项里的「原生链默认相纸」（spektrafilm 单表）。
 
         "none" 是合法值（胶片直扫，不印相），出厂默认就是它。配置里可能是旧 id、被删掉的
         相纸或空串，这几种退回类常量，免得新建照片落到一个不存在的纸 id 上。每次读配置而
         不是缓存：首选项改完要立刻生效。
+
+        2026-11-13 起这里只管原生链：只有点式链才有的纸（Eterna CP / Agfa CP30 …）不再是
+        合法的原生默认值，读到就退回 `DEFAULT_NEGATIVE_PAPER`。旧配置的迁移见
+        `config_manager.migrate_default_papers()`。
         """
         fallback = self.DEFAULT_NEGATIVE_PAPER
         try:
@@ -9119,11 +9220,91 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return "none"
         if not pid or pid in ("", "screen"):
             return fallback
+        ffchain = set(getattr(self.engine, "FFCHAIN_PAPERS", ()) or ())
+        native = set(getattr(self.engine, "NATIVE_PAPERS", ()) or ())
+        # 纯点式纸不合法；自定义纸（不在 FFCHAIN_PAPERS 里）照旧放行 —— 用户导入的相纸
+        # 走原生链，把它判掉等于让「默认相纸」对自定义纸失效。
+        if native and pid in ffchain and pid not in native:
+            return fallback
         try:
             ids = {str(item.get("id")) for item in self.engine.get_paper_stocks()}
         except Exception:
             ids = set()
         return pid if (not ids or pid in ids) else fallback
+
+    def _default_ffchain_paper(self):
+        """首选项里的「转换卷默认相纸」（fotufilm 点式链）。
+
+        转换卷一定能印相，所以这里不接 `none`：读到空/直扫/退役的纸都退回结构默认
+        （`kodak_2383`，也就是点式链一直以来的落点，行为不变）。
+        """
+        fallback = self.DEFAULT_FFCHAIN_PAPER
+        try:
+            from core import config_manager
+            pid = str(config_manager.get_preference("default_ffchain_paper", fallback) or "")
+        except Exception:
+            return fallback
+        if not pid or pid in ("none", "screen"):
+            return fallback
+        ffchain = set(getattr(self.engine, "FFCHAIN_PAPERS", ()) or ())
+        return pid if (not ffchain or pid in ffchain) else fallback
+
+    def _default_paper_for(self, film_stock=None):
+        """这张卷该落到哪张默认纸。所有落点入口都走这一个函数。
+
+        以前每个入口各自读一遍 `default_negative_paper` 再各自兜底（其中一处还硬编码
+        Ektacolor Edge、另一处 `or paper` 把越界值原样留下），于是同一个"默认"在原生链和
+        转换卷上落成不同的纸，面板和出图还会分叉。链条归属只在这里判一次。
+
+        `film=none`（旁通/刚刚重置）返回原生链的默认纸：相纸是"下一次选卷要继承"的面板
+        状态，不能因为旁通就写成直扫。
+        """
+        film = getattr(self, "current_film_stock", "none") if film_stock is None else film_stock
+        try:
+            scope = self.engine.paper_scope(film)
+        except Exception:                              # noqa: BLE001 - 判不出来按原生
+            scope = "native"
+        if scope == "ffchain":
+            return self._default_ffchain_paper()
+        return self._default_negative_paper()
+
+    def _film_scope(self, film):
+        """这支卷属于哪条链：`native`（spektrafilm 单表）、`ffchain`（fotufilm 点式链），
+        或 `None`（旁通 / 反转 —— 引擎判 inert，根本不过纸）。
+
+        旁通与反转返回 None 是有意的：它们的相纸只是"下面那张负片"的携带状态，
+        跨过去再回来不该改写那份记忆，也不该被另一条链的记忆顶掉。
+        """
+        try:
+            scope = self.engine.paper_scope(film)
+        except Exception:                              # noqa: BLE001 - 判不出来按原生
+            return "native"
+        return scope if scope in ("native", "ffchain") else None
+
+    @staticmethod
+    def _paper_by_scope(photo):
+        """照片旁挂的另一条链的相纸选择（`{"native": id, "ffchain": id}`）。"""
+        by = photo.get("paper_by_scope") if photo else None
+        return dict(by) if isinstance(by, dict) else {}
+
+    def _set_paper_by_scope(self, photo, scope, paper):
+        """把一次显式选择记到 `scope` 这条链上。
+
+        `none`（胶片直扫）也要记：那是用户在这条链上的选择，切回来必须还是直扫。
+        空串表示"这条链上没有显式选择"，清掉。
+        """
+        if not photo or not scope:
+            return
+        by = self._paper_by_scope(photo)
+        paper = str(paper or "")
+        if paper:
+            by[scope] = paper
+        else:
+            by.pop(scope, None)
+        if by:
+            photo["paper_by_scope"] = by
+        else:
+            photo.pop("paper_by_scope", None)
 
     @staticmethod
     def _photo_paper_is_explicit(photo):
@@ -9157,15 +9338,26 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 return paper
         except Exception:
             pass
-        return self._default_negative_paper()
+        return self._default_paper_for(film)
 
     def on_default_negative_paper_changed(self):
-        """首选项换了"负片默认相纸"：只重刷没选过相纸的负片，选过的原样保留。
+        """首选项换了「原生链默认相纸」：只重刷这条链上没选过相纸的负片。"""
+        self._refresh_default_paper_thumbnails("native")
+
+    def on_default_ffchain_paper_changed(self):
+        """首选项换了「转换卷默认相纸」：只重刷转换卷上没选过相纸的负片。"""
+        self._refresh_default_paper_thumbnails("ffchain")
+
+    def _refresh_default_paper_thumbnails(self, scope=None):
+        """默认相纸换了：重刷这条链上"没选过相纸"的负片，选过的原样保留。
 
         每张缩略图要烘一次 17³ LUT（几十毫秒），几十张就是几秒，所以排队交给定时器分批
         处理，保存完首选项立刻能返回。当前照片同步重贴 LUT，画布与缩略图保持一致。
+
+        `scope` 是这条链（`native` / `ffchain`）。以前这里不分链，一次改默认纸会把两条链
+        的照片全刷一遍，而且用的是同一张纸 id —— 转换卷那边只能靠烘焙时的 clamp 兜，
+        烘出来的其实是另一张纸（卡片文字和画面不是一回事）。
         """
-        new_paper = self._default_negative_paper()
         queue = []
         for photo in getattr(self, "photos", []):
             if not photo or self._photo_paper_is_explicit(photo):
@@ -9178,10 +9370,16 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     continue
             except Exception:
                 pass
+            if scope is not None:
+                try:
+                    if self.engine.paper_scope(film) != scope:
+                        continue
+                except Exception:
+                    pass
             queue.append(photo)
 
         self._default_paper_queue = queue
-        self._default_paper_value = new_paper
+        self._default_paper_scope = scope
         self._default_paper_refreshed = 0
         if not hasattr(self, "_default_paper_timer"):
             self._default_paper_timer = QTimer(self)
@@ -9198,8 +9396,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 is_pos = self.engine.is_positive_film(self.current_film_stock)
             except Exception:
                 is_pos = False
-            if not is_pos:
-                self.on_switch_paper(new_paper, push_undo=False)
+            if not is_pos and self._paper_allowed_now(
+                    self._default_paper_for(self.current_film_stock)):
+                self.on_switch_paper(self._default_paper_for(self.current_film_stock),
+                                     push_undo=False)
 
         # 左侧胶卷卡片是按"默认相纸"配对的，换纸后必须重排一次；否则要等切换分类/
         # 换底片才刷新（用户看到的正是"设置默认相纸后缩略图还是橙色负片"）。
@@ -9209,9 +9409,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._refresh_card_previews(film_only=True)
 
     def _drain_default_paper_queue(self):
-        """分批重刷 on_default_negative_paper_changed 排下的缩略图（每 tick 4 张）。"""
+        """分批重刷 _refresh_default_paper_thumbnails 排下的缩略图（每 tick 4 张）。"""
         queue = getattr(self, "_default_paper_queue", None) or []
-        new_paper = getattr(self, "_default_paper_value", self._default_negative_paper())
         done = 0
         while queue and done < 4:
             photo = queue.pop(0)
@@ -9219,9 +9418,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
             raw = self.thumb_controller.get_raw_thumbnail(photo)
             if raw is None or getattr(raw, "size", 0) == 0:
                 continue
+            # 每张照片按自己的链条取默认纸，不能拿"刚改的那个值"套到所有照片上。
+            paper = self._default_paper_for(photo.get("film_profile", "none"))
             try:
                 graded = self.thumb_controller.grade_thumbnail_fast(
-                    raw, photo.get("film_profile", "none"), new_paper, photo.get("params") or {})
+                    raw, photo.get("film_profile", "none"), paper, photo.get("params") or {})
                 self.thumb_controller.update_graded_thumbnail(photo, graded, self.filmstrip)
                 self._default_paper_refreshed = getattr(self, "_default_paper_refreshed", 0) + 1
             except Exception:
@@ -9233,14 +9434,22 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.set_app_status(f"默认相纸已更新，{n} 张底片已更新", timeout_ms=3000)
 
     def _photo_effective_paper(self, photo):
-        """给某张照片算它实际该用的相纸（见 _effective_paper_for_photo + 显式标记）。"""
+        """给某张照片算它实际该用的相纸（见 _effective_paper_for_photo + 显式标记）。
+
+        显式选过的纸也要过一道链归属：`.sdc` 可能是另一支卷存的、撤销可能退回跨链状态，
+        直接拿去烘时引擎的 `_clamp_paper` 会静默换成该链默认纸 —— 缩略图看着是 A 纸、
+        面板写着 B 纸。夹在这里，缩略图 / 画布 / 导出用的是同一个 id。
+        """
         if not photo:
             return "none"
+        film = photo.get("film_profile") or "none"
         if self._photo_paper_is_explicit(photo):
-            # 用户选过（包括主动选了"胶片直扫"= paper 空）：原样，绝不套默认。
-            return str(photo.get("paper_profile") or "none")
-        return self._effective_paper_for_photo(photo.get("film_profile") or "none",
-                                               photo.get("paper_profile") or "none")
+            paper = str(photo.get("paper_profile") or "none")
+        else:
+            paper = self._effective_paper_for_photo(film, photo.get("paper_profile") or "none")
+        if not self._paper_allowed_now(paper, film=film):
+            paper = self._default_paper_for(film)
+        return paper
 
     def on_switch_film(self, stock_id, push_undo=True):
         # Retired push stocks arrive here from old sessions and dropped folders: "Portra 800 Push 1"
@@ -9259,6 +9468,25 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         if push_undo and stock_id != self.current_film_stock:
             self._mark_current_photo_dirty()
+
+        # 跨链切卷要保住用户在另一条链上选过的纸。`paper_profile` 永远存**当前链**的合法值，
+        # 另一条链的那份旁挂在 `paper_by_scope` 里 —— 只用一个字段时切卷会把它覆写成新链的
+        # 默认纸，切回去也回不来（实测：一次往返就永久丢掉用户的选择）。
+        prev_film = getattr(self, "current_film_stock", "none")
+        prev_paper = getattr(self, "current_paper_stock", "none")
+        prev_scope = self._film_scope(prev_film)
+        new_scope = self._film_scope(stock_id)
+        scope_changed = bool(new_scope and prev_scope != new_scope)
+        cur_photo = None
+        restored_paper = None
+        if self._current_photo_path:
+            cur_photo = next((p for p in getattr(self, "photos", [])
+                              if p and p.get("path") == self._current_photo_path), None)
+        if cur_photo is not None and scope_changed:
+            if prev_scope and self._photo_paper_is_explicit(cur_photo):
+                self._set_paper_by_scope(cur_photo, prev_scope, prev_paper)
+            restored_paper = self._paper_by_scope(cur_photo).get(new_scope)
+
         self.current_film_stock = stock_id
         self._update_push_ui_state()
 
@@ -9289,11 +9517,23 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 card.set_active(pid == "none")
             self._update_all_sliders_from_params()
         elif not is_pos:
-            # 负片选中时接上首选项的"负片默认相纸"。默认值可能是"胶片直扫"（none）——那就要
-            # 把印相模式一起摆到 scan，否则会出现"纸=直扫、模式=印相"的不一致状态，面板显示的
-            # 和实际烘出来的 LUT 不是一回事。
-            if getattr(self, "current_paper_stock", "none") in (None, "", "none"):
-                default_paper = self._default_negative_paper()
+            # 负片选中时接上这条链的默认相纸（原生链 / 转换卷各一个）。原生链的默认值可能是
+            # "胶片直扫"（none）——那就要把印相模式一起摆到 scan，否则会出现"纸=直扫、模式=印相"
+            # 的不一致状态，面板显示的和实际烘出来的 LUT 不是一回事。
+            #
+            # 跨链往返时先看旁挂记忆：用户在这条链上选过就恢复它（包括主动选的直扫），
+            # 没有才落默认纸。判断用 `is not None`，"none" 是合法记录。
+            if restored_paper is not None and self._paper_allowed_now(restored_paper, film=stock_id):
+                self.current_paper_stock = restored_paper
+                restored_is_scan = str(restored_paper or "none") in ("none", "")
+                self.current_print_mode = "scan" if restored_is_scan else "optical"
+                self.current_params["print_mode"] = self.current_print_mode
+                if hasattr(self, "combo_paper"):
+                    self.combo_paper.set_value(restored_paper)
+                for pid, card in self.paper_cards.items():
+                    card.set_active(pid == restored_paper)
+            elif getattr(self, "current_paper_stock", "none") in (None, "", "none"):
+                default_paper = self._default_paper_for(stock_id)
                 self.current_paper_stock = default_paper
                 default_is_scan = str(default_paper or "none") in ("none", "")
                 self.current_print_mode = "scan" if default_is_scan else "optical"
@@ -9302,6 +9542,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     self.combo_paper.set_value(default_paper)
                 for pid, card in self.paper_cards.items():
                     card.set_active(pid == default_paper)
+            # 换了链条（原生 ↔ fotufilm）时，手里那张纸可能不属于新链条：落到新链条的默认纸。
+            # 必须在下面烘 LUT 之前做，否则这一帧会先用一张不支持的纸去烘焙（引擎会 clamp，
+            # 于是面板写着 A 纸、画面出的是 B 纸）。
+            self._ensure_paper_allowed(stock_id)
 
         for sid, card in self.film_cards.items():
             card.set_active(sid == stock_id)
@@ -9320,9 +9564,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     # the negative's paper choice intact for when the user switches back.
                     # 自动套上的默认纸不写实值：写作空串，这张照片仍算"没选过相纸"，
                     # 首选项换默认纸时会跟着变（.sdc 的空串就是"未选择"）。
+                    #
+                    # 跨链时"显式"由旁挂记忆决定：恢复了记忆 => 用户选的；落默认纸 => 自动值。
+                    # 同链切卷沿用原标记。
+                    explicit_here = (restored_paper is not None if scope_changed
+                                     else self._photo_paper_is_explicit(photo))
+                    photo["paper_explicit"] = bool(explicit_here)
                     photo["paper_profile"] = (
-                        self.current_paper_stock
-                        if self._photo_paper_is_explicit(photo) else "")
+                        self.current_paper_stock if explicit_here else "")
                     photo["print_mode"] = self.current_print_mode
                 if stock_id == "none":
                     photo["graded_thumbnail_rgb"] = None
@@ -9352,6 +9601,18 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._save_current_photo_sdc()
             film_desc = "无" if stock_id == "none" else f"{stock_id}"
             self.set_app_status(f"胶卷：{film_desc}", timeout_ms=2500)
+            # 跨链换纸一定要说出来：这一整轮 bug 的共同形状都是"静默换纸"（面板 A、出图 B），
+            # 而用户看不出缩略图用的是哪张纸。恢复记忆时不提示 —— 那是用户自己的选择，
+            # 面板已经显示回来了。
+            if (scope_changed and restored_paper is None
+                    and str(prev_paper or "none") != str(self.current_paper_stock or "none")
+                    and str(prev_paper or "none") not in ("", "none")):
+                prev_label = FilmGridCard.CLEAN_NAMES.get(str(prev_paper), str(prev_paper))
+                now_label = FilmGridCard.CLEAN_NAMES.get(str(self.current_paper_stock),
+                                                         str(self.current_paper_stock))
+                self.set_app_status(
+                    f"{prev_label} 只用于另一条链，已切到 {now_label}；切回原来的卷会自动恢复",
+                    timeout_ms=4500)
 
     def on_switch_print_mode(self, mode, push_undo=True):
         if mode not in ("optical", "scan"):
@@ -9421,6 +9682,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.set_app_status("反转片不使用相纸，当前选择已保留给负片", timeout_ms=2500)
             return
 
+        if stock_id not in ("", "none") and not self._paper_allowed_now(
+                stock_id, self.paper_cards.get(stock_id)):
+            # 链条不支持这张纸：不动状态，只解释。卡片是置灰的，走到这里通常是会话/快捷键
+            # 或旧配置，硬切过去只会让烘焙回落到另一条链。
+            self.set_app_status(f"{stock_id} 与当前胶卷不属同一条链，未切换", timeout_ms=2500)
+            if hasattr(self, "combo_paper"):
+                self.combo_paper.set_value(getattr(self, "current_paper_stock", "none"))
+            return
+
         prev_paper = self.current_paper_stock
         if push_undo and stock_id != self.current_paper_stock:
             self._mark_current_photo_dirty()
@@ -9444,6 +9714,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if photo:
                 photo["paper_profile"] = stock_id
                 photo["print_mode"] = self.current_print_mode
+                # 记到当前链上：跨链切回来时靠这份记忆恢复（`paper_profile` 只存当前链的值，
+                # 单靠它在往返时会把另一条链的选择擦掉）。
+                scope_now = self._film_scope(self.current_film_stock)
+                if scope_now:
+                    self._set_paper_by_scope(photo, scope_now, stock_id)
                 # 只有真的换过纸才算"用户选过"：这个标记让首选项改默认相纸时，已经选过
                 # 相纸的底片不被覆盖，而没选过的继续跟随默认值。
                 if stock_id != prev_paper:
@@ -10668,6 +10943,75 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if not available:
                 section.set_reset_enabled(False)
 
+    # -- 相纸的链条归属 ------------------------------------------------------------------------
+    #
+    # 转换卷（fotufilm 点式链）和原生卷（spektrafilm 单表）各有一组相纸，重叠只有四张。
+    # 判定放在引擎里（`paper_available`），这里只负责把它翻译成界面状态。
+    def _paper_allowed_now(self, paper_id, card=None, film=None):
+        """这张纸在当前卷上能不能选。用户自己导入的相纸不参与链条判定。"""
+        if card is not None and getattr(card, "is_custom", False):
+            return True
+        try:
+            return self.engine.paper_available(
+                film or getattr(self, "current_film_stock", "none"), paper_id)
+        except Exception:                              # noqa: BLE001 - 判不出来就别禁用
+            return True
+
+    def _paper_unavailable_hint(self):
+        scope = "native"
+        try:
+            scope = self.engine.paper_scope(getattr(self, "current_film_stock", "none"))
+        except Exception:                              # noqa: BLE001
+            pass
+        if scope == "ffchain":
+            return "这张相纸只用于原生链（spektrafilm）；当前是 fotufilm 转换卷，改用点式链相纸"
+        return "这张相纸只有 fotufilm 点式链的表；当前是原生链胶卷，请改用原生相纸"
+
+    def _refresh_paper_combo(self):
+        """按当前卷重列相纸下拉框（只列能选的），保留仍在列表里的那个值。"""
+        combo = getattr(self, "combo_paper", None)
+        if combo is None or not hasattr(combo, "set_items"):
+            return
+        items = []
+        for item in self.engine.get_paper_stocks():
+            pid = item["id"]
+            if pid in ("", "none"):
+                items.append((item.get("name") or pid, pid))
+                continue
+            if self._paper_allowed_now(pid, self.paper_cards.get(pid)):
+                items.append((item.get("name") or pid, pid))
+        combo.set_items(items, keep_value=getattr(self, "current_paper_stock", "none"))
+
+    def _ensure_paper_allowed(self, film=None):
+        """当前相纸在这支卷上用不了时，落到该链的默认纸。返回是否改过。
+
+        每个入口都要过这一道：切卷、激活照片、应用 .sdc、重置。`.sdc` 里可能存着一张
+        当前卷不支持的纸，引擎虽然会 `_clamp_paper` 兜底，但面板会和出图对不上。
+        """
+        film = film or getattr(self, "current_film_stock", "none")
+        paper = getattr(self, "current_paper_stock", "none")
+        if self._paper_allowed_now(paper, film=film):
+            return False
+        landing = self._default_paper_for(film)
+        if not landing or not self._paper_allowed_now(landing, film=film):
+            # 两条链的默认值都在各自合法域内，这条分支理论上不可达；留一个最保守的落点。
+            try:
+                scope = self.engine.paper_scope(film)
+            except Exception:                          # noqa: BLE001
+                scope = "native"
+            landing = "kodak_2383" if scope == "ffchain" else "kodak_ektacolor_edge"
+        self.current_paper_stock = landing
+        self.current_print_mode = (
+            "scan" if str(landing or "none") in ("none", "") else "optical")
+        self.current_params["print_mode"] = "optical"
+        for pid, card in self.paper_cards.items():
+            card.set_active(pid == landing)
+        if hasattr(self, "combo_paper"):
+            self.combo_paper.set_value(landing)
+        if hasattr(self.canvas, "update_params"):
+            self.canvas.update_params(paper_profile=landing, print_mode="optical")
+        return True
+
     def _update_stock_mode_ui(self):
         """Update parameter availability based on film type (negative vs slide/reversal vs none/bypass) and print mode."""
         is_none = (getattr(self, "current_film_stock", "none") == "none")
@@ -10842,14 +11186,23 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     card.setEnabled(False)
                     card.setToolTip("反转正片不经过相纸；当前选择保留，切回负片时继续使用")
                 else:
-                    card.setEnabled(True)
-                    card.setToolTip(getattr(card, "original_tooltip", ""))
+                    # 两条链的相纸集合不通用（见 engine.paper_available）：没有（卷，纸）
+                    # 配对表的纸在这里置灰，而不是让它落到另一条链上出图。
+                    allowed = self._paper_allowed_now(pid, card)
+                    card.setEnabled(allowed)
+                    if allowed:
+                        card.setToolTip(getattr(card, "original_tooltip", ""))
+                    else:
+                        card.setToolTip(self._paper_unavailable_hint())
 
         self._update_reset_buttons_state()
 
         # 右侧相纸下拉框跟随当前状态（切换底片/撤销/相纸变更都走这里）
         combo_paper = getattr(self, "combo_paper", None)
         if combo_paper is not None:
+            # 下拉框只列当前卷能用的纸；被链条排除的纸留在左侧卡片墙上（置灰 + 说明），
+            # 这样用户能看到"这张纸存在，只是换不了"，而不是它凭空消失。
+            self._refresh_paper_combo()
             # 旁通态不再把相纸改写成"直扫"：删掉 .sdc 之后相纸要留在首选项的默认纸上
             # （用户指定），这里改写成 none 会立刻把它抹掉。旁通本来就不走印相（引擎对
             # film=none 直接出旁通表），控制已置灰，保留选择只是让面板状态说得通。
@@ -11692,6 +12045,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 if photo is not None and not self._photo_paper_is_explicit(photo):
                     photo["paper_explicit"] = False
 
+            # .sdc / 旧会话里可能存着这张卷不支持的纸（例如在原生卷上存了 Portra Endura，
+            # 再拿同一份配置去开一张转换卷）。落点跟切卷同一条规则，别让面板和出图分叉。
+            self._ensure_paper_allowed(self.current_film_stock)
+
             self.filmstrip.set_photo_dirty(photo_id, self._photo_is_dirty)
             self._update_window_title()
 
@@ -12044,6 +12401,20 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 if not getattr(self, "_is_multi_selecting", False):
                     self.set_app_status(f"底片已载入：{fn}", spinning=False, timeout_ms=2000)
 
+    def _card_paper_for(self, film, current_paper):
+        """这张胶卷卡片该配哪张纸：本卷用得了当前纸就用它，否则用这支卷所在链的默认纸。
+
+        卡片墙是"换这支卷会是什么样"的橱窗，所以每张卡必须按它自己的链出图。以前是一个
+        值发给所有卷：当前纸是 Portra Endura 时，整排转换卷卡片都烘成 2383（实测与 2383
+        逐位相同，max|d| = 0.0），用户看到的是一排假预览。
+        """
+        paper = str(current_paper or "none")
+        if paper in ("none", ""):
+            return paper or "none"
+        if self._paper_allowed_now(paper, film=film):
+            return paper
+        return self._default_paper_for(film)
+
     def _update_card_live_thumbnails(self, thumb_data, do_films=True, do_papers=True):
         if thumb_data is None:
             return
@@ -12082,7 +12453,11 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             film_cards_dict = matched_films if matched_films else self.film_cards
         else:
             film_cards_dict = {}
-        paper_cards_dict = self.paper_cards if do_papers else {}
+        # 置灰（跨链不可选）的相纸卡片不烘预览：那张图在物理上不存在，烘出来只会是
+        # 引擎夹取后的另一张纸（实测：原生卷下四张点式纸的卡片画面逐位相同），
+        # 既误导用户又白烧 LUT。保留它们上一帧的图，比给一张假的强。
+        paper_cards_dict = ({k: v for k, v in self.paper_cards.items() if v.isEnabled()}
+                            if do_papers else {})
 
         params = dict(self.current_params)
         params["base_temp"] = getattr(self, "_active_base_temp", 5500.0)
@@ -12100,7 +12475,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 active = next((p for p in self.photos
                                if p and p.get("path") == self._current_photo_path), None)
             if not self._photo_paper_is_explicit(active):
-                preview_paper = self._default_negative_paper()
+                preview_paper = self._default_paper_for(self.current_film_stock)
 
         self.thumb_controller.trigger_candidate_card_previews(
             thumb_data,
@@ -12111,7 +12486,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             params,
             on_film_ready=self._on_film_thumb_ready,
             on_paper_ready=self._on_paper_thumb_ready,
-            film_paper=preview_paper
+            film_paper={sid: self._card_paper_for(sid, preview_paper) for sid in film_cards_dict}
         )
 
     def _refresh_card_previews(self, film_only=False, paper_only=False):
@@ -12427,7 +12802,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         # 清掉 .sdc 后胶卷回到"原生底片"，相纸不该跟着掉到"胶片直扫"：它跟首选项的负片
         # 默认相纸走（用户指定）。film=none 走旁通表，相纸在这里不影响渲染，但面板状态和
         # 接下来选胶卷时的落点都按这张纸来。
-        reset_paper = self._default_negative_paper()
+        reset_paper = self._default_paper_for("none")
         reset_mode = "scan" if str(reset_paper or "none") in ("none", "") else "optical"
         for p in target_photos:
             pid = p["id"]
