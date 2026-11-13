@@ -4335,6 +4335,9 @@ class DarkroomMainWindow(QMainWindow):
         sidebar_scroll.setWidgetResizable(True)
         sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # 渐隐带只铺在参数卡片宽度内：卡片右侧留了 4px 滚动条缝、卡片本身是 R6 圆角，
+        # 满宽铺会糊出卡片边缘，在留白上留一条白带
+        sidebar_scroll.set_fade_geometry(inset_left=0, inset_right=4, radius=6.0)
         self.sidebar_scroll = sidebar_scroll
 
         self.sidebar_content = QWidget()

@@ -9,7 +9,7 @@ See the class docstring for the measurements behind that.
 import math
 from PySide6.QtCore import (Qt, QAbstractAnimation, QEasingCurve, QElapsedTimer, QObject,
                             QRectF, QTimer, QEvent, QVariantAnimation, Signal)
-from PySide6.QtGui import QPainter, QColor, QLinearGradient
+from PySide6.QtGui import QPainter, QColor, QLinearGradient, QPainterPath, QBrush
 from PySide6.QtWidgets import QScrollArea, QWidget
 
 from ui.theme_manager import theme_manager
@@ -307,6 +307,11 @@ class SmoothScrollArea(QScrollArea):
         # 场景必须显式设成托盘色，否则渐隐带会和真实背景差好几个色阶，看着像一块白雾。
         self._fade_base_color = None
         self._fade_height = 16
+        # 渐隐带左右内缩 + 圆角：内容卡片比 viewport 窄时（右侧留滚动条缝、卡片圆角），
+        # 满宽画出来会糊出卡片边缘，变成一条压在留白上的白带。
+        self._fade_inset_l = 0
+        self._fade_inset_r = 0
+        self._fade_radius = 0.0
         self.setWidgetResizable(True)
 
         # Distance per wheel notch.  Vertical lists: 76px, horizontal filmstrip: 120px.
@@ -370,6 +375,13 @@ class SmoothScrollArea(QScrollArea):
         self._fade_base_color = QColor(color) if color is not None else None
         if height is not None:
             self._fade_height = max(4, int(height))
+        self._sync_overlay()
+
+    def set_fade_geometry(self, inset_left=0, inset_right=0, radius=0.0):
+        """把渐隐带限制在卡片宽度内（inset 是左右内缩，radius 对齐卡片圆角）。"""
+        self._fade_inset_l = max(0, int(inset_left))
+        self._fade_inset_r = max(0, int(inset_right))
+        self._fade_radius = max(0.0, float(radius))
         self._sync_overlay()
 
     def eventFilter(self, obj, event):
@@ -705,20 +717,34 @@ class _ScrollEdgeOverlay(QWidget):
         if not self.scroll_area.is_horizontal:
             sb = self.scroll_area.verticalScrollBar()
             fh = max(4, int(getattr(self.scroll_area, "_fade_height", 16)))
+            li = max(0, int(getattr(self.scroll_area, "_fade_inset_l", 0)))
+            ri = max(0, int(getattr(self.scroll_area, "_fade_inset_r", 0)))
+            band_w = max(1, w - li - ri)
+            radius = min(float(getattr(self.scroll_area, "_fade_radius", 0.0)), band_w / 2.0, fh / 2.0)
             if sb.maximum() > 0:
                 # Top edge indicator: if scrolled down from 0
                 if sb.value() > 0:
                     grad_top = QLinearGradient(0, 0, 0, fh)
                     grad_top.setColorAt(0.0, fade_col)
                     grad_top.setColorAt(1.0, trans_col)
-                    painter.fillRect(QRectF(0, 0, w, fh), grad_top)
+                    if radius > 0:
+                        path = QPainterPath()
+                        path.addRoundedRect(QRectF(li, 0, band_w, fh), radius, radius)
+                        painter.fillPath(path, QBrush(grad_top))
+                    else:
+                        painter.fillRect(QRectF(li, 0, band_w, fh), grad_top)
 
                 # Bottom edge indicator: if not yet at maximum
                 if sb.value() < sb.maximum():
                     grad_bottom = QLinearGradient(0, h - fh, 0, h)
                     grad_bottom.setColorAt(0.0, trans_col)
                     grad_bottom.setColorAt(1.0, fade_col)
-                    painter.fillRect(QRectF(0, h - fh, w, fh), grad_bottom)
+                    if radius > 0:
+                        path = QPainterPath()
+                        path.addRoundedRect(QRectF(li, h - fh, band_w, fh), radius, radius)
+                        painter.fillPath(path, QBrush(grad_bottom))
+                    else:
+                        painter.fillRect(QRectF(li, h - fh, band_w, fh), grad_bottom)
         else:
             sb = self.scroll_area.horizontalScrollBar()
             fade_w = 26.0
