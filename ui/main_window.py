@@ -3414,14 +3414,16 @@ class DarkroomMainWindow(QMainWindow):
         if tray is None:
             return
         colors = theme_manager.get_colors()
+        # 与 CompactExifWidget 的 exifCard 同一套配色：subpanel_bg + panel_border + R6
+        card_bg = colors["subpanel_bg"]
         tray.setStyleSheet(
             f"QFrame#{tray.objectName()} {{"
-            f" background: {colors['tray_bg']};"
-            f" border: 1px solid {colors['tray_border']};"
-            f" border-radius: 8px; }}"
+            f" background: {card_bg};"
+            f" border: 1px solid {colors['panel_border']};"
+            f" border-radius: 6px; }}"
         )
         if scroll is not None and hasattr(scroll, "set_fade_base_color"):
-            scroll.set_fade_base_color(colors["tray_bg"], height=16)
+            scroll.set_fade_base_color(card_bg, height=16)
 
     def _on_theme_changed(self, theme_name=None):
         is_dark = theme_manager.is_dark()
@@ -3983,7 +3985,8 @@ class DarkroomMainWindow(QMainWindow):
         # Sub-window 1: 胶卷型号 (Films)
         film_subwin = QWidget()
         film_layout = QVBoxLayout(film_subwin)
-        film_layout.setContentsMargins(0, 0, 0, 0)
+        # 与 EXIF 窗格同样的 4px 内缩：托盘边缘必须和 exifCard 对齐
+        film_layout.setContentsMargins(4, 4, 4, 4)
         film_layout.setSpacing(0)
 
         # 托盘包住整个窗格（标题/搜索/分类胶囊 + 卡片列表）。只包卡片列表的话，上面是
@@ -3991,7 +3994,7 @@ class DarkroomMainWindow(QMainWindow):
         self.film_tray = QFrame()
         self.film_tray.setObjectName("filmTray")
         tray_layout = QVBoxLayout(self.film_tray)
-        tray_layout.setContentsMargins(8, 8, 8, 6)
+        tray_layout.setContentsMargins(6, 6, 6, 6)
         tray_layout.setSpacing(6)
 
         self.film_header = FilmFilterHeader()
