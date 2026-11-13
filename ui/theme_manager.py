@@ -260,10 +260,14 @@ class ThemeManager(QObject):
 
         new_eff = self._resolve_theme(mode)
         self._effective_theme = new_eff
+        if new_eff == old_eff and mode == old_mode:
+            # 什么都没变就别重设 app 样式表：app.setStyleSheet() 会让 Qt 对全部控件
+            # 重新 polish（本机 694 个控件实测 0.9-1.7 s），而且它**不比对内容**——
+            # 同一个字符串再设一次照样要一秒。首选项每次保存都会走这里，主题没改时
+            # 白卡 1-2 s，实测保存从 1.3-2.1 s 掉到 30-46 ms。
+            return
         self._apply_app_palette()
-
-        if new_eff != old_eff or mode != old_mode:
-            self.themeChanged.emit(new_eff)
+        self.themeChanged.emit(new_eff)
 
     def get_colors(self) -> dict:
         """Return the palette dictionary for the current effective theme."""
