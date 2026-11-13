@@ -4021,6 +4021,13 @@ class DarkroomMainWindow(QMainWindow):
         self.film_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.film_scroll.setWidget(self.film_container)
 
+        # 卡片背后不能再有一层灰：QWidget 默认会按 palette 的 Window 色铺底，托盘的白底
+        # 只在 padding 那一圈可见，中间整块是 app_bg。容器和视口都要显式透明。
+        self.film_container.setStyleSheet("background: transparent;")
+        if self.film_scroll.viewport():
+            self.film_scroll.viewport().setStyleSheet("background: transparent;")
+            self.film_scroll.viewport().setAutoFillBackground(False)
+
         self.film_scroll.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.film_scroll.customContextMenuRequested.connect(self._on_film_blank_context_menu)
         self.film_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -4308,7 +4315,8 @@ class DarkroomMainWindow(QMainWindow):
         sb_outer_layout = QVBoxLayout(self.sidebar_container)
         # Right margin is 4 (not 8) so the 6px scrollbar sits centred in the 14px gutter between
         # the parameter cards and the panel edge (4 | 6 | 4) instead of touching the cards.
-        sb_outer_layout.setContentsMargins(8, 8, 4, 8)
+        # 不留内缩：右栏卡片的顶边要对齐左侧胶卷卡片，底边对齐底片栏
+        sb_outer_layout.setContentsMargins(0, 0, 0, 0)
         sb_outer_layout.setSpacing(6)
 
         # Top Pinned Real-time RGB & Luma Histogram (始终置顶不跟随滚动)

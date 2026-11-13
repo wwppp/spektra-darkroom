@@ -945,7 +945,7 @@ class FilmstripWidget(QWidget):
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(8, 2, 8, 2)
+        main_layout.setContentsMargins(0, 2, 0, 2)
         main_layout.setSpacing(6)
         is_dark = theme_manager.is_dark()
         top_border = "#1c1e28" if is_dark else "#c2c8d4"
@@ -957,7 +957,7 @@ class FilmstripWidget(QWidget):
         self.track_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.track_container.customContextMenuRequested.connect(self._on_blank_context_menu)
         track_layout = QVBoxLayout(self.track_container)
-        track_layout.setContentsMargins(2, 1, 2, 1)
+        track_layout.setContentsMargins(0, 1, 0, 1)
         track_layout.setSpacing(0)
 
         # Scroll area for items (Smooth non-linear scrolling within the concave track)
@@ -1012,7 +1012,7 @@ class FilmstripWidget(QWidget):
         self.scroll_content = QWidget()
         self.scroll_content.setStyleSheet("background: transparent; border: none;")
         self.scroll_layout = QHBoxLayout(self.scroll_content)
-        self.scroll_layout.setContentsMargins(8, 0, 8, 0)
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_layout.setSpacing(6)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
