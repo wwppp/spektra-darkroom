@@ -2310,6 +2310,11 @@ class DarkroomMainWindow(QMainWindow):
         # Central canvas & widgets
         self.thumb_controller = ThumbnailController(self.engine, self)
         self.canvas = DarkroomGLCanvas(self)
+        # One shared timestamp of the user's most recent input.  The candidate-card wall reads it
+        # between cards and stands aside while a click/drag is in flight -- the wall is cosmetic,
+        # the picture is not.  Same list object as the controller's, so no signal plumbing.
+        self._interaction_watch = self.thumb_controller._interaction_watch
+        self.canvas._interaction_watch = self._interaction_watch
         # Surface a GPU->CPU fallback in the status bar: it is not an error (the export still
         # succeeds) but it changes the wait from seconds to minutes, and the console line was
         # invisible from inside the app.
@@ -7954,6 +7959,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
         if self._bypass_blocks_param(param_key):
             return
+        if getattr(self, "_interaction_watch", None):
+            self._interaction_watch[0] = time.perf_counter()
         if self._slider_is_dragging():
             began = getattr(self.canvas, "begin_interaction", None)
             if began is not None:
@@ -8353,6 +8360,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
     def _on_slider_committed(self, action: str = None):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
             return
+        if getattr(self, "_interaction_watch", None):
+            self._interaction_watch[0] = time.perf_counter()
         if hasattr(self, '_live_lut_timer') and self._live_lut_timer.isActive():
             self._live_lut_timer.stop()
         if getattr(self, "_pending_lut_refresh", False):

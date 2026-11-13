@@ -2860,6 +2860,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
         once more when the interaction stops, this time with the full-quality path.
         """
         self._interacting = True
+        # Let the candidate-card wall know a human is in the middle of something: it reads this
+        # between cards and pauses, so panning/zooming never queues behind cosmetic baking.
+        watch = getattr(self, "_interaction_watch", None)
+        if watch is not None:
+            import time as _time
+            watch[0] = _time.perf_counter()
         timer = getattr(self, "_interaction_idle", None)
         if timer is None:
             from PySide6.QtCore import QTimer

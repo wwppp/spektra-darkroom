@@ -6,6 +6,7 @@ Unified architecture for:
 """
 
 import os
+import time
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, Signal, QThread, Qt
@@ -64,7 +65,7 @@ class StockThumbnailWorker(QThread):
 
     def __init__(self, engine, linear_thumb, film_stocks, paper_stocks, current_film, current_paper,
                  do_films=True, do_papers=True, ev=0.0, highlights=0.0, shadows=0.0, base_ev=0.0,
-                 params_dict=None, parent=None, film_paper=None):
+                 params_dict=None, parent=None, film_paper=None, interaction_watch=None):
         super().__init__(parent)
         self.engine = engine
         # Store reference without deepcopying large arrays synchronously on GUI thread
@@ -101,7 +102,25 @@ class StockThumbnailWorker(QThread):
         self.shadows = float(shadows)
         self.base_ev = float(base_ev)
         self.params_dict = dict(params_dict) if params_dict else {}
+        # One-element list holding the timestamp of the user's last input, shared with the GUI
+        # thread.  Baking is stepwise (one card per iteration), so it can stand aside between
+        # cards and let clicks, re-renders and slider drags through instead of competing with
+        # them for the whole wall.  Reading a float out of a list is atomic enough for this: a
+        # stale value only costs one extra card of latency.
+        self._interaction_watch = interaction_watch
         self._stopped = False
+
+    def _yield_to_user(self) -> None:
+        """Sleep between cards while the user is actively interacting.
+
+        Without this the wall keeps baking through a drag or a click burst: the cards are
+        cosmetic, the picture is not, so the picture gets the CPU first.
+        """
+        watch = self._interaction_watch
+        if not watch:
+            return
+        while not self._stopped and (time.perf_counter() - watch[0]) < 0.3:
+            QThread.msleep(12)
 
     def stop(self):
         self._stopped = True
@@ -222,8 +241,10 @@ class StockThumbnailWorker(QThread):
                         self.film_ready.emit(sid, pix)
                 except Exception:
                     pass
-                # Cooperatively yield GIL to GUI thread so mouse, scroll, and clicks stay at 60 FPS
+                # Cooperatively yield GIL to GUI thread so mouse, scroll, and clicks stay at 60 FPS,
+                # and stand aside entirely while the user is still interacting.
                 if not self._stopped:
+                    self._yield_to_user()
                     QThread.msleep(4)
 
         if self._stopped:
@@ -260,8 +281,10 @@ class StockThumbnailWorker(QThread):
                         self.paper_ready.emit(sid, pix)
                 except Exception:
                     pass
-                # Cooperatively yield GIL to GUI thread so mouse, scroll, and clicks stay at 60 FPS
+                # Cooperatively yield GIL to GUI thread so mouse, scroll, and clicks stay at 60 FPS,
+                # and stand aside entirely while the user is still interacting.
                 if not self._stopped:
+                    self._yield_to_user()
                     QThread.msleep(4)
 
 
@@ -277,6 +300,12 @@ class ThumbnailController(QObject):
         super().__init__(parent)
         self.engine = engine
         self._card_worker = None
+        # Newest card-wall request that arrived while a worker was busy (see
+        # trigger_candidate_card_previews): it runs once that worker finishes.
+        self._pending_card_request = None
+        # Shared one-element list: timestamp of the user's last input.  The card worker reads it
+        # between cards and stands aside while the user is still clicking or dragging.
+        self._interaction_watch = [0.0]
 
     # =========================================================================
     # 1. Bottom Filmstrip Thumbnail Management (Dual-Layer: Raw Base + Graded)
@@ -546,6 +575,9 @@ class ThumbnailController(QObject):
 
     def cancel_card_preview_worker(self):
         """Safely stops any active background candidate preview generator without blocking GUI thread."""
+        # An explicit cancel means the request itself is obsolete (stock/photo switched), so a
+        # queued rerun would only paint the same stale cards again.
+        self._pending_card_request = None
         if self._card_worker:
             worker = self._card_worker
             self._card_worker = None
@@ -581,6 +613,21 @@ class ThumbnailController(QObject):
             except Exception:
                 pass
 
+    def _on_card_worker_finished(self, worker):
+        """Run the rerun that was queued while this worker was busy.
+
+        Every slider commit schedules a card refresh, and restarting the worker each time threw
+        away all the cards already baked.  With ~50 films on the wall a cold refresh takes
+        seconds, so the wall never finished: it restarted from card #1 on every click, which is
+        what "the cards never finish baking" looked like.  Now a busy worker keeps its progress
+        and the newest request runs once it is done.
+        """
+        self._cleanup_worker(worker)
+        req = getattr(self, "_pending_card_request", None)
+        if req is not None:
+            self._pending_card_request = None
+            self.trigger_candidate_card_previews(*req)
+
     def update_active_card_wysiwyg(self, film_cards: dict, paper_cards: dict,
                                    active_film: str, active_paper: str, pixmap: QPixmap, force: bool = False):
         """Updates active cards only if uninitialized or explicitly forced; preserves crisp CPU candidate thumbnails."""
@@ -598,6 +645,14 @@ class ThumbnailController(QObject):
                                         current_film: str, current_paper: str, params: dict, base_ev: float = 0.0,
                                         on_film_ready=None, on_paper_ready=None, film_paper=None):
         """Starts background worker generating candidate previews for unselected film & paper cards."""
+        if self._card_worker is not None and self._card_worker.isRunning():
+            # Keep the running wall: it already has most of the cards, and restarting it means
+            # starting from card #1 every time the slider commits.  Remember only the newest
+            # request; it runs when the current worker finishes.
+            self._pending_card_request = (linear_thumb, film_cards, paper_cards, current_film,
+                                          current_paper, params, base_ev, on_film_ready,
+                                          on_paper_ready, film_paper)
+            return
         self.cancel_card_preview_worker()
         if linear_thumb is None or linear_thumb.size == 0:
             return
@@ -617,10 +672,13 @@ class ThumbnailController(QObject):
             ev=ev, highlights=hl, shadows=sh, base_ev=eff_base_ev,
             params_dict=params,
             parent=self,
-            film_paper=film_paper
+            film_paper=film_paper,
+            interaction_watch=self._interaction_watch
         )
         if on_film_ready:
             self._card_worker.film_ready.connect(on_film_ready)
         if on_paper_ready:
             self._card_worker.paper_ready.connect(on_paper_ready)
+        self._card_worker.finished.connect(
+            lambda w=self._card_worker: self._on_card_worker_finished(w))
         self._card_worker.start()
