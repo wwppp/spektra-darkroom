@@ -17,6 +17,7 @@ import os
 import sys
 import copy
 import ctypes
+import functools
 import queue
 import threading
 import time
@@ -2861,6 +2862,13 @@ class DarkroomMainWindow(QMainWindow):
 
             target_entry = next((p for p in self.photos if p and p.get("path") == final_target_path), self.photos[0] if self.photos else None)
             target_id = target_entry["id"] if target_entry else None
+            # `activePhotoReady` 已经切过一次了。同 target 且 float_img 已经就位就不要再来一遍
+            # —— 一次 on_switch_photo 实测 1.4-2.2 s（33³ LUT 现烘 + 24 MP 纹理上传）。
+            already_loaded = bool(
+                target_id
+                and self.active_photo_id == target_id
+                and (target_entry or {}).get("float_img") is not None
+            )
 
             # Populate filmstrip with full session photos
             self.filmstrip.set_photos(self.photos, target_id)
@@ -2871,7 +2879,7 @@ class DarkroomMainWindow(QMainWindow):
                     self.filmstrip.set_photo_dirty(entry["id"], True)
 
             # Force activation of target photo so filmstrip, canvas, sidebar, cards, and histogram are all completely initialized
-            if target_id:
+            if target_id and not already_loaded:
                 try:
                     self.on_switch_photo(target_id, force=True)
                 except Exception as e:
@@ -2903,10 +2911,13 @@ class DarkroomMainWindow(QMainWindow):
                 if hasattr(self, "btn_cancel_import"):
                     self.btn_cancel_import.setVisible(True)
                 self.set_app_status(f"正在恢复底片库（0/{len(uncached_slots)}）…", spinning=True, timeout_ms=0)
+                self._reset_import_delivery()
                 self._slot_decode_worker = SlotDecodeWorker(uncached_slots, self.engine, parent=self)
-                self._slot_decode_worker.slotDecoded.connect(self._on_slot_photo_decoded)
+                # 16 个解码线程一秒能吐上百条，和导入一样必须按帧投放；收尾也排队，
+                # 否则 `finished` 会比最后几条结果早到，状态栏先说"就绪"而底片条还在补图。
+                self._slot_decode_worker.slotDecoded.connect(self._enqueue_slot_decoded)
                 self._slot_decode_worker.progress.connect(self._on_slot_decode_progress)
-                self._slot_decode_worker.finished.connect(self._on_all_slots_decoded)
+                self._slot_decode_worker.finished.connect(self._on_slot_stream_finished)
                 self._slot_decode_worker.start()
             else:
                 if self._start_next_pending_import_batch():
@@ -8218,8 +8229,18 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     lut_size=17,
                     params_dict=self.current_params
                 )
+                # 这条兜底以前直接拿 `_current_photo_linear` 算 —— 那是**主图**（24 MP
+                # float32），`apply_lut_to_linear` 的逐像素三线性插值得跑 14.7 s（实测，
+                # 会话恢复期间画布还没上纹理时就会走到这里）。直方图只要 256 级统计，
+                # 抽稀到 ~0.5 MP 足够，代价降到几十毫秒。
+                src_lin = self._current_photo_linear
+                _h, _w = src_lin.shape[:2]
+                if _h * _w > 64_000:
+                    _step = int((_h * _w / 64_000) ** 0.5) + 1
+                    src_lin = np.ascontiguousarray(src_lin[::_step, ::_step])
                 eff_exp = float(self.current_params.get("exposure_ev", 0.0)) + float(self.current_params.get("base_ev", 0.0))
-                src_lin = self._current_photo_linear * (2.0 ** eff_exp) if abs(eff_exp) > 0.001 else self._current_photo_linear
+                if abs(eff_exp) > 0.001:
+                    src_lin = src_lin * (2.0 ** eff_exp)
                 graded = self.engine.apply_lut_to_linear(src_lin, lut_3d)
                 self.histogram_widget.update_from_rgb(graded)
             elif self._current_photo_thumb is not None:
@@ -10585,8 +10606,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if getattr(self, "_import_deliver_timer", None) is not None:
             self._import_deliver_timer.stop()
         self._import_deliver_queue = deque()
-        self._import_stream_finished = False
-        self._import_stream_total = 0
+        self._deliver_finalizer = None
         self._deferred_switch_id = None
 
     def _wire_import_worker(self, worker):
@@ -10598,12 +10618,17 @@ aspect_ratio=self._lens_frame_aspect(photo),
         worker.photoLoaded.connect(self._enqueue_imported_photo)
         worker.importFinished.connect(self._on_import_stream_finished)
 
-    def _enqueue_imported_photo(self, photo_entry, current_idx, total_count):
+    def _queue_ui_work(self, fn):
+        """把一件主线程工作排进投放队列：每个事件循环周期最多做 IMPORT_DRAIN_BUDGET_MS。
+
+        队列里放的是**可调用对象**而不是"照片条目"，导入（photoLoaded）和会话恢复
+        （slotDecoded）因此共用同一套节流，不必维护两份几乎一样的分帧逻辑。
+        """
         q = getattr(self, "_import_deliver_queue", None)
         if q is None:
             q = deque()
             self._import_deliver_queue = q
-        q.append((photo_entry, current_idx, total_count))
+        q.append(fn)
         if getattr(self, "_import_deliver_timer", None) is None:
             self._import_deliver_timer = QTimer(self)
             self._import_deliver_timer.setInterval(IMPORT_DRAIN_TICK_MS)
@@ -10611,11 +10636,29 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if not self._import_deliver_timer.isActive():
             self._import_deliver_timer.start(IMPORT_DRAIN_TICK_MS)
 
-    def _on_import_stream_finished(self, total_loaded):
-        # 收尾信号可能比最后几条 photoLoaded 早到（队列里还有货），等队列排空再真正收尾。
-        self._import_stream_finished = True
-        self._import_stream_total = int(total_loaded or 0)
+    def _enqueue_imported_photo(self, photo_entry, current_idx, total_count):
+        self._queue_ui_work(functools.partial(
+            self._on_single_photo_imported, photo_entry, current_idx, total_count))
+
+    def _enqueue_slot_decoded(self, slot_idx, decoded_entry):
+        self._queue_ui_work(functools.partial(
+            self._on_slot_photo_decoded, slot_idx, decoded_entry))
+
+    def _finalize_after_delivery(self, fn):
+        """让 worker 的"完成"信号也走队列：队列里还有货时不能先收尾。
+
+        直连的 finished 会比最后几条结果早到 —— 导入会变成"已导入 N 张"却少几张，
+        恢复会话会变成状态栏说"底片库已就绪"而底片条还在补图。
+        """
+        self._deliver_finalizer = fn
         self._drain_import_queue()
+
+    def _on_import_stream_finished(self, total_loaded):
+        self._finalize_after_delivery(functools.partial(
+            self._on_all_photos_imported, int(total_loaded or 0)))
+
+    def _on_slot_stream_finished(self):
+        self._finalize_after_delivery(self._on_all_slots_decoded)
 
     def _drain_import_queue(self):
         q = getattr(self, "_import_deliver_queue", None)
@@ -10626,21 +10669,22 @@ aspect_ratio=self._lens_frame_aspect(photo),
         t0 = time.perf_counter()
         n = 0
         while q and n < IMPORT_DRAIN_MAX_ITEMS:
-            entry, cur, tot = q.popleft()
+            item = q.popleft()
             n += 1
             try:
-                self._on_single_photo_imported(entry, cur, tot)
+                item()
             except Exception as ex:
-                logger.error(f"Import delivery failed: {ex}", exc_info=True)
+                logger.error(f"Deferred UI work failed: {ex}", exc_info=True)
             # 预算只在"整条做完"之后判：中途打断一条会把照片留在半初始化的状态。
             if (time.perf_counter() - t0) * 1000 >= IMPORT_DRAIN_BUDGET_MS:
                 break
 
-        if not q and getattr(self, "_import_stream_finished", False):
+        if not q and getattr(self, "_deliver_finalizer", None) is not None:
+            fn = self._deliver_finalizer
+            self._deliver_finalizer = None
             if getattr(self, "_import_deliver_timer", None) is not None:
                 self._import_deliver_timer.stop()
-            self._import_stream_finished = False
-            self._on_all_photos_imported(self._import_stream_total)
+            fn()
 
     def _thumb_grade_worker(self):
         """惰性创建导入期的缩略图烘焙线程（一次 120-730 ms 的 LUT 现烤）。"""
@@ -11108,7 +11152,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._import_deliver_timer.stop()
         if getattr(self, "_import_deliver_queue", None) is not None:
             self._import_deliver_queue.clear()
-        self._import_stream_finished = False
+        self._deliver_finalizer = None
         self._flush_import_filmstrip_buffer()
 
         # 2. Terminate and disconnect batch import worker
@@ -11190,7 +11234,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
             # 没选过相纸的负片用首选项的默认相纸出缩略图，否则这里是橙色负像。
             th_paper = self._photo_effective_paper(photo)
             if th_film != "none" or th_paper != "none" or abs(p_params.get("exposure_ev", 0.0)) > 0.001:
-                graded = self.grade_thumbnail_fast(
+                # 和导入同一条路：恢复期间先把原片缩略图挂上去，LUT 现烤交给 worker
+                # （每张 .sdc 参数不同 → 缓存全 miss，单张 120-730 ms 全压主线程）。
+                graded = self._grade_thumb_or_defer(
+                    photo,
                     raw_th,
                     th_film,
                     th_paper,
