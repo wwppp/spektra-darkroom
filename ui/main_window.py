@@ -9314,13 +9314,28 @@ aspect_ratio=self._lens_frame_aspect(photo),
         状态，不能因为旁通就写成直扫。
         """
         film = getattr(self, "current_film_stock", "none") if film_stock is None else film_stock
+        if self._paper_scope_key(film) == "ffchain":
+            return self._default_ffchain_paper()
+        return self._default_negative_paper()
+
+    def _paper_scope_key(self, film_stock=None):
+        """`'ffchain'` 或 `'native'` —— `_default_paper_for` 只分这两叉。"""
+        film = getattr(self, "current_film_stock", "none") if film_stock is None else film_stock
         try:
             scope = self.engine.paper_scope(film)
         except Exception:                              # noqa: BLE001 - 判不出来按原生
             scope = "native"
-        if scope == "ffchain":
-            return self._default_ffchain_paper()
-        return self._default_negative_paper()
+        return "ffchain" if scope == "ffchain" else "native"
+
+    def _default_paper_pair(self):
+        """两条链的默认纸各取一次，供"一轮里要问很多张卡"的调用方复用。
+
+        `_default_negative_paper()` 以前每次都枚举整个 `profiles/` 来核一个 id（122 ms），
+        卡片墙按卡片逐个问就成了 53 × 122 ms —— 见 `_custom_paper_stocks` 的缓存与
+        `_update_card_live_thumbnails` 的用法。
+        """
+        return {"native": self._default_negative_paper(),
+                "ffchain": self._default_ffchain_paper()}
 
     def _film_scope(self, film):
         """这支卷属于哪条链：`native`（spektrafilm 单表）、`ffchain`（fotufilm 点式链），
@@ -12464,18 +12479,26 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 if not getattr(self, "_is_multi_selecting", False):
                     self.set_app_status(f"底片已载入：{fn}", spinning=False, timeout_ms=2000)
 
-    def _card_paper_for(self, film, current_paper):
+    def _card_paper_for(self, film, current_paper, default_papers=None):
         """这张胶卷卡片该配哪张纸：本卷用得了当前纸就用它，否则用这支卷所在链的默认纸。
 
         卡片墙是"换这支卷会是什么样"的橱窗，所以每张卡必须按它自己的链出图。以前是一个
         值发给所有卷：当前纸是 Portra Endura 时，整排转换卷卡片都烘成 2383（实测与 2383
         逐位相同，max|d| = 0.0），用户看到的是一排假预览。
+
+        `default_papers`（`_default_paper_pair()`）由一轮刷新共用：当前纸是只对转换卷开放
+        的那种（Eterna CP / CP30 …）时，每张原生卷卡片都会落到这里，逐张去读偏好配置会让
+        一次点击卡 1 s 以上。
         """
         paper = str(current_paper or "none")
         if paper in ("none", ""):
             return paper or "none"
         if self._paper_allowed_now(paper, film=film):
             return paper
+        if default_papers is not None:
+            chain = self._paper_scope_key(film)
+            if chain in default_papers:
+                return default_papers[chain]
         return self._default_paper_for(film)
 
     def _update_card_live_thumbnails(self, thumb_data, do_films=True, do_papers=True):
@@ -12540,6 +12563,14 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             if not self._photo_paper_is_explicit(active):
                 preview_paper = self._default_paper_for(self.current_film_stock)
 
+        # 一轮刷新只读一次两条链的默认纸：卡片墙是逐张配纸的，以前每张卡都去枚举一遍
+        # 相纸档案（122 ms），选中 Eterna CP 这类"只对转换卷开放"的纸时一次点击卡 1 s+。
+        film_paper = {}
+        if film_cards_dict:
+            default_papers = self._default_paper_pair()
+            film_paper = {sid: self._card_paper_for(sid, preview_paper, default_papers)
+                          for sid in film_cards_dict}
+
         self.thumb_controller.trigger_candidate_card_previews(
             thumb_data,
             film_cards_dict,
@@ -12549,7 +12580,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             params,
             on_film_ready=self._on_film_thumb_ready,
             on_paper_ready=self._on_paper_thumb_ready,
-            film_paper={sid: self._card_paper_for(sid, preview_paper) for sid in film_cards_dict}
+            film_paper=film_paper
         )
 
     def _refresh_card_previews(self, film_only=False, paper_only=False):

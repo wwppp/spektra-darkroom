@@ -1723,55 +1723,7 @@ class SpektraEngine:
                 ]
             }
         ]
-        # Dynamically discover user-imported custom film profiles
-        custom_films = []
-        if os.path.exists(self.profiles_dir):
-            import json
-            for f in sorted(os.listdir(self.profiles_dir)):
-                if f.endswith(".json"):
-                    sid = f[:-5]
-                    if sid not in self.BUILTIN_FILM_IDS and sid not in self.BUILTIN_PAPER_IDS:
-                        try:
-                            with open(os.path.join(self.profiles_dir, f), "r", encoding="utf-8") as fp:
-                                meta = json.load(fp)
-                            if not isinstance(meta.get("data"), dict) or "density_curves" not in meta["data"]:
-                                # Not a film: this directory also holds the baked grain table
-                                # (grain_params.json), which has curves of its own but no profile.
-                                # It used to be listed as a stock called "Grain Params".
-                                continue
-                            info_obj = meta.get("info", {})
-                            if meta.get("type") != "paper" and "paper" not in sid.lower() and info_obj.get("support") != "paper":
-                                channel_model = info_obj.get("channel_model", "color")
-                                film_type = info_obj.get("type", "negative")
-                                badge = meta.get("badge") or info_obj.get("badge")
-                                if not badge:
-                                    if "aerochrome" in sid or "infrared" in sid:
-                                        badge = "红外假色"
-                                    elif "cinestill" in sid or "eterna" in sid or "double_x" in sid or info_obj.get("use") == "cine":
-                                        badge = "电影底片"
-                                    elif "phoenix" in sid or "lomochrome" in sid or "lomography" in sid:
-                                        badge = "实验胶卷"
-                                    elif channel_model == "bw":
-                                        badge = "黑白银盐"
-                                    elif film_type == "positive":
-                                        badge = "正片反转"
-                                    else:
-                                        badge = "经典彩负"
-
-                                name_str = meta.get("name") or info_obj.get("name") or sid.replace("_", " ").title()
-                                desc_str = meta.get("desc") or info_obj.get("desc") or f"{name_str} 81波段全光谱物理档案"
-                                custom_films.append({
-                                    "id": sid,
-                                    "name": name_str,
-                                    "badge": badge,
-                                    "desc": desc_str,
-                                    "channel_model": channel_model,
-                                    "type": film_type,
-                                    "use": info_obj.get("use", "still"),
-                                    "is_custom": True
-                                })
-                        except Exception:
-                            pass
+        custom_films = self._custom_film_stocks()
         if custom_films:
             stocks.append({
                 "category": "物理测定胶卷扩充库 (Fotufilm & Custom)",
@@ -1907,38 +1859,142 @@ class SpektraEngine:
                 "desc": "富士纯白高光表现，色彩鲜艳明快，层次丰富持久。"
             }
         ]
-        # Dynamically discover user-imported custom paper profiles
-        if os.path.exists(self.profiles_dir):
-            import json
-            for f in sorted(os.listdir(self.profiles_dir)):
-                if f.endswith(".json"):
-                    sid = f[:-5]
-                    if sid not in self.BUILTIN_FILM_IDS and sid not in self.BUILTIN_PAPER_IDS:
-                        try:
-                            with open(os.path.join(self.profiles_dir, f), "r", encoding="utf-8") as fp:
-                                meta = json.load(fp)
-                            info_obj = meta.get("info", {}) or {}
-                            # A profile belongs here when it is a print medium, which the
-                            # `info.support` field states directly.  Relying only on
-                            # `type == "paper"` or a "paper" id missed instant films such as
-                            # Instax (type=positive, support=paper, stage=printing): they are
-                            # excluded from the film list for exactly that reason, so they used
-                            # to appear in neither list and could not be selected at all.
-                            is_paper = (meta.get("type") == "paper"
-                                        or "paper" in sid.lower()
-                                        or info_obj.get("support") == "paper"
-                                        or info_obj.get("stage") == "printing")
-                            if is_paper:
-                                papers.append({
-                                    "id": sid,
-                                    "name": meta.get("name", sid),
-                                    "badge": "自定义相纸",
-                                    "desc": meta.get("desc") or (info_obj.get("desc", "")) or "用户自定义相纸配置",
-                                    "is_custom": True
-                                })
-                        except Exception:
-                            pass
+        papers.extend(self._custom_paper_stocks())
         return papers
+
+    def _profiles_dir_signature(self):
+        """``profiles/`` 里所有 json 的 (名字, mtime, 大小)，用来判断自定义档案缓存是否过期。
+
+        只要 0.5 ms（62 个文件 listdir + stat），对比"逐个 open + json.load"的 122 ms。
+        新增/删除文件改目录列举结果，改内容改 mtime_ns，两条都覆盖得到。
+        """
+        try:
+            names = sorted(f for f in os.listdir(self.profiles_dir) if f.endswith(".json"))
+        except OSError:
+            return ()
+        sig = []
+        for f in names:
+            try:
+                st = os.stat(os.path.join(self.profiles_dir, f))
+                sig.append((f, st.st_mtime_ns, st.st_size))
+            except OSError:
+                sig.append((f, 0, 0))
+        return tuple(sig)
+
+    def _custom_film_stocks(self):
+        """用户导入的胶卷档案（不含相纸），与 `_custom_paper_stocks` 共用一份目录签名。
+
+        以前每次调用都全量枚举 + 解析 62 个 json（实测 90 ms），切卷、打开胶片下拉、
+        刷新卡片墙都各吃一遍。判定逻辑与拆出来之前逐条一致：只有带 `data.density_curves`
+        的才算胶卷（同目录还躺着 `grain_params.json`，它有曲线但没有档案）。
+        """
+        if not os.path.exists(self.profiles_dir):
+            return []
+        sig = self._profiles_dir_signature()
+        cached = getattr(self, "_custom_film_cache", None)
+        if cached is not None and cached[0] == sig:
+            return [dict(x) for x in cached[1]]
+
+        import json
+        films = []
+        for f, _mtime, _size in sig:
+            sid = f[:-5]
+            if sid in self.BUILTIN_FILM_IDS or sid in self.BUILTIN_PAPER_IDS:
+                continue
+            try:
+                with open(os.path.join(self.profiles_dir, f), "r", encoding="utf-8") as fp:
+                    meta = json.load(fp)
+                if not isinstance(meta.get("data"), dict) or "density_curves" not in meta["data"]:
+                    continue
+                info_obj = meta.get("info", {})
+                if (meta.get("type") == "paper" or "paper" in sid.lower()
+                        or info_obj.get("support") == "paper"):
+                    continue
+                channel_model = info_obj.get("channel_model", "color")
+                film_type = info_obj.get("type", "negative")
+                badge = meta.get("badge") or info_obj.get("badge")
+                if not badge:
+                    if "aerochrome" in sid or "infrared" in sid:
+                        badge = "红外假色"
+                    elif ("cinestill" in sid or "eterna" in sid or "double_x" in sid
+                          or info_obj.get("use") == "cine"):
+                        badge = "电影底片"
+                    elif "phoenix" in sid or "lomochrome" in sid or "lomography" in sid:
+                        badge = "实验胶卷"
+                    elif channel_model == "bw":
+                        badge = "黑白银盐"
+                    elif film_type == "positive":
+                        badge = "正片反转"
+                    else:
+                        badge = "经典彩负"
+
+                name_str = (meta.get("name") or info_obj.get("name")
+                            or sid.replace("_", " ").title())
+                desc_str = (meta.get("desc") or info_obj.get("desc")
+                            or f"{name_str} 81波段全光谱物理档案")
+                films.append({
+                    "id": sid,
+                    "name": name_str,
+                    "badge": badge,
+                    "desc": desc_str,
+                    "channel_model": channel_model,
+                    "type": film_type,
+                    "use": info_obj.get("use", "still"),
+                    "is_custom": True
+                })
+            except Exception:
+                pass
+        self._custom_film_cache = (sig, films)
+        return [dict(x) for x in films]
+
+    def _custom_paper_stocks(self):
+        """用户导入的相纸档案，按 `profiles/` 的目录签名缓存。
+
+        以前每次调用都全量枚举 + 解析 62 个 json（实测 122 ms）。这个函数被
+        `_default_negative_paper()` 用来核对一个 id 是否存在，于是"每张候选卡配一张纸"
+        就变成 53 次 × 122 ms —— 点一下滑块主线程卡 1 s 以上（Eterna CP 这类只对转换卷
+        开放的纸，会让每张原生卷卡片都落到这条路上）。
+        """
+        if not os.path.exists(self.profiles_dir):
+            return []
+        sig = self._profiles_dir_signature()
+        cached = getattr(self, "_custom_paper_cache", None)
+        if cached is not None and cached[0] == sig:
+            return [dict(p) for p in cached[1]]
+
+        import json
+        papers = []
+        for f, _mtime, _size in sig:
+            sid = f[:-5]
+            if sid in self.BUILTIN_FILM_IDS or sid in self.BUILTIN_PAPER_IDS:
+                continue
+            try:
+                with open(os.path.join(self.profiles_dir, f), "r", encoding="utf-8") as fp:
+                    meta = json.load(fp)
+                info_obj = meta.get("info", {}) or {}
+                # A profile belongs here when it is a print medium, which the
+                # `info.support` field states directly.  Relying only on
+                # `type == "paper"` or a "paper" id missed instant films such as
+                # Instax (type=positive, support=paper, stage=printing): they are
+                # excluded from the film list for exactly that reason, so they used
+                # to appear in neither list and could not be selected at all.
+                is_paper = (meta.get("type") == "paper"
+                            or "paper" in sid.lower()
+                            or info_obj.get("support") == "paper"
+                            or info_obj.get("stage") == "printing")
+                if is_paper:
+                    papers.append({
+                        "id": sid,
+                        "name": meta.get("name", sid),
+                        "badge": "自定义相纸",
+                        "desc": meta.get("desc") or (info_obj.get("desc", "")) or "用户自定义相纸配置",
+                        "is_custom": True
+                    })
+            except Exception:
+                pass
+        self._custom_paper_cache = (sig, papers)
+        # 调用方可能往返回的 dict 里塞东西，别让缓存被外面改脏。
+        return [dict(p) for p in papers]
 
     def _lookup_neutral_table(self, paper_stock, film_stock):
         """Measured neutral filtration for a paper/film pair, or None when unmeasured."""
