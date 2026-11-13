@@ -3138,9 +3138,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             pw = max(1.0, (right - left) * vw)
             ph = max(1.0, (bottom - top) * vh)
             hw = max(1, min(tw, int(round(pw))))
-            # Height from the quad's own aspect, not from ph: a couple of pixels of rounding
-            # here is a couple of pixels of anisotropy in the grain.
-            hh = max(1, min(th, int(round(hw * ph / pw))))
+            # 两个轴各自取整，不要用 hw 反推 hh。quad 高度常是整数、宽度常是小数，
+            # 反推会让画出来的帧比 quad **高 1 px**（实测 440x659 对 439.54x658），
+            # 上屏时两轴被压的比例不同 —— 那就是"横向/纵向单轴缩一点"的来源。
+            hh = max(1, min(th, int(round(ph))))
             if os.environ.get("SPECTRA_HQ_DEBUG"):
                 print(f"[HQ] widget={self.width()}x{self.height()} dpr={dpr:.3f} "
                       f"fb={vw}x{vh} quad={pw:.3f}x{ph:.3f} target={tw}x{th} "
