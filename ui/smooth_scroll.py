@@ -158,6 +158,9 @@ class WheelFollower(QObject):
         self._pos = float(bar.value())
         self._vel = 0.0
         self._target = float(bar.value())
+        # The integer we last wrote into the bar.  Anything else in there means somebody
+        # else moved it (see `_advance`); ``None`` means "unknown, don't judge yet".
+        self._bar_written = None
         self._clock = QElapsedTimer()
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -183,6 +186,7 @@ class WheelFollower(QObject):
         self._vel = 0.0
         self._pos = float(self._bar.value() if value is None else value)
         self._target = self._pos
+        self._bar_written = None
 
     def add(self, delta: float) -> None:
         """Push the target by ``delta`` px.  Repeated calls accumulate."""
@@ -197,6 +201,7 @@ class WheelFollower(QObject):
             self._pos = float(self._bar.value())
             self._vel = 0.0
             self._target = self._pos
+            self._bar_written = int(round(self._pos))
             self._clock.start()
             self._timer.start()
         self._target = max(lo, min(hi, self._target + delta))
@@ -215,11 +220,28 @@ class WheelFollower(QObject):
             return self.FRAME_MS / 1000.0
         return min(0.05, self._clock.restart() / 1000.0)
 
+    def _write_bar(self) -> None:
+        """Write our float position into the integer scrollbar, remembering what we wrote."""
+        value = int(round(self._pos))
+        self._bar_written = value
+        self._bar.setValue(value)
+
     def _tick(self) -> None:
         self._advance(self._claim_time())
 
     def _advance(self, dt: float) -> bool:
         """Move for ``dt`` seconds.  Returns True while there is motion left."""
+        # Somebody else wrote the bar mid-flight: touch inertia (16 ms steps), the export
+        # queue restoring its position after a card reorder, `ensureVisible` from a focus
+        # change, or Qt clamping the value when the range shrank.  Those writers own the
+        # position now.  Carrying on would put the bar back on our own `_pos` on the very
+        # next frame and both sides would pull at each other every 8-16 ms -- which is the
+        # panel that "twitches" until the user touches something else.  Standing down costs
+        # at most the rest of one glide; fighting costs a visible shake.
+        if self._bar_written is not None and self._bar.value() != self._bar_written:
+            self.reset()
+            return False
+
         lo = float(self._bar.minimum())
         hi = float(self._bar.maximum())
         # The range can collapse under a flight -- a panel section folds, a dropdown is
@@ -261,11 +283,11 @@ class WheelFollower(QObject):
             self._pos = self._target
             self._vel = 0.0
             self._timer.stop()
-            self._bar.setValue(int(round(self._pos)))
+            self._write_bar()
             self.finished.emit()
             return False
 
-        self._bar.setValue(int(round(self._pos)))
+        self._write_bar()
         return True
 
 
