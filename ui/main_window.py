@@ -125,6 +125,7 @@ from ui.spinner_widget import SpinnerWidget
 from ui.histogram_widget import HistogramWidget, HistogramExifBar
 from ui.fading_stacked_widget import FadingStackedWidget
 from ui.theme_manager import theme_manager
+from ui import ui_scale
 from ui.tooltip import block_tooltips_under
 
 
@@ -1172,7 +1173,7 @@ class _ElidedNameLabel(QLabel):
         """返回 (lines, line_h, rect)。放不下就省略号结尾，不硬裁。"""
         rect = self.contentsRect()
         fm = QFontMetrics(self.font())
-        line_h = max(1, fm.height())
+        line_h = max(1, fm.lineSpacing())
         max_lines = max(1, int(rect.height() // line_h))
         text = self._source_text.strip()
         if not text:
@@ -1277,9 +1278,10 @@ class FilmGridCard(QFrame):
     # 卡片几何预算。QSS 的 1px 边框会让 contentsRect 比 widget 小 2px，任何按 widget
     # 宽度直接算内件的写法都会偏 2px（旧版缩略图左边 7 右边 5 就是这么来的）。
     BORDER = 2
-    NAME_H = 28
     NAME_GAP = 2
-    BOTTOM_PAD = 4
+    BOTTOM_PAD = 2
+    # 名称字号的设计值（9.5px），实际按首选项的字号比例缩放
+    NAME_PT = 7.1
 
     def __init__(self, stock_info, is_active=False, is_custom=False, stock_type="film", parent=None):
         super().__init__(parent)
@@ -1294,6 +1296,7 @@ class FilmGridCard(QFrame):
         self._thumb_pixmap = None
 
         # Compact photographic card dynamically resizable
+        self._apply_name_font()
         self.card_w = 110
         self.card_h = self._height_for_width(110)
         self.setFixedSize(self.card_w, self.card_h)
@@ -1306,6 +1309,8 @@ class FilmGridCard(QFrame):
 
         self._init_ui()
         theme_manager.themeChanged.connect(lambda _: self._update_appearance())
+        # 名称是自绘的（QFont 不走 QSS 的 font-size 缩放），字号变了得自己跟着改高度
+        ui_scale.bus.changed.connect(self._on_ui_scale_changed)
 
     def setToolTip(self, tip: str):
         super().setToolTip(tip)
@@ -1323,10 +1328,34 @@ class FilmGridCard(QFrame):
         th = max(8, int(round(tw * (2.0 / 3.0))))
         return tw, th
 
-    @classmethod
-    def _height_for_width(cls, card_w: int) -> int:
-        _, th = cls._thumb_size_for_width(card_w)
-        return th + cls.BORDER + cls.NAME_GAP + cls.NAME_H + cls.BOTTOM_PAD
+    def _height_for_width(self, card_w: int) -> int:
+        _, th = self._thumb_size_for_width(card_w)
+        return th + self.BORDER + self.NAME_GAP + self.name_h + self.BOTTOM_PAD
+
+    def _apply_name_font(self):
+        """名称字号 = 设计值 × 首选项比例；两行高度跟着字号走，别写死 28。"""
+        font = QFont(self.font())
+        font.setPointSizeF(self.NAME_PT * ui_scale.current_scale())
+        font.setWeight(QFont.Weight.Medium)
+        self.name_font = font
+        fm = QFontMetrics(font)
+        self.name_line_h = max(1, fm.lineSpacing())
+        self.name_h = self.name_line_h * 2 + 4
+        if hasattr(self, "lbl_name") and self.lbl_name:
+            self.lbl_name.setFont(font)
+            self.lbl_name.setFixedHeight(self.name_h)
+
+    def _on_ui_scale_changed(self):
+        self._apply_name_font()
+        tw, th = self._thumb_size_for_width(self.card_w)
+        self.card_h = self._height_for_width(self.card_w)
+        self.setFixedSize(self.card_w, self.card_h)
+        self.lbl_thumb.setFixedSize(tw, th)
+        if self._thumb_pixmap and not self._thumb_pixmap.isNull():
+            self.set_thumbnail(self._thumb_pixmap)
+        else:
+            self._draw_color_pill()
+        self.update()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -1345,12 +1374,9 @@ class FilmGridCard(QFrame):
         # Bottom label container（自己折行 + 省略号，见 _ElidedNameLabel）
         self.lbl_name = _ElidedNameLabel(self.clean_name)
         self.lbl_name.setObjectName("filmCardName")
-        self.lbl_name.setFixedHeight(self.NAME_H)
+        self.lbl_name.setFixedHeight(self.name_h)
         self.lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_font = QFont(self.lbl_name.font())
-        name_font.setPointSizeF(7.1)
-        name_font.setWeight(QFont.Weight.Medium)
-        self.lbl_name.setFont(name_font)
+        self.lbl_name.setFont(self.name_font)
         layout.addWidget(self.lbl_name)
 
         self._update_appearance()
@@ -3958,13 +3984,21 @@ class DarkroomMainWindow(QMainWindow):
         film_subwin = QWidget()
         film_layout = QVBoxLayout(film_subwin)
         film_layout.setContentsMargins(0, 0, 0, 0)
-        film_layout.setSpacing(4)
+        film_layout.setSpacing(0)
+
+        # 托盘包住整个窗格（标题/搜索/分类胶囊 + 卡片列表）。只包卡片列表的话，上面是
+        # 面板底、下面是托盘底，中间会横着一道换底色的接缝。
+        self.film_tray = QFrame()
+        self.film_tray.setObjectName("filmTray")
+        tray_layout = QVBoxLayout(self.film_tray)
+        tray_layout.setContentsMargins(8, 8, 8, 6)
+        tray_layout.setSpacing(6)
 
         self.film_header = FilmFilterHeader()
         self.lbl_film_title = self.film_header.lbl_title
         self.film_header.searchChanged.connect(self._on_film_search_changed)
         self.film_header.categoryChanged.connect(self._on_film_category_changed)
-        film_layout.addWidget(self.film_header)
+        tray_layout.addWidget(self.film_header)
 
         self.film_scroll = SmoothScrollArea()
         self.film_scroll.setWidgetResizable(True)
@@ -3987,14 +4021,8 @@ class DarkroomMainWindow(QMainWindow):
         self._film_vp_filter = ViewportResizeFilter(self.reflow_grids, self)
         self.film_scroll.installEventFilter(self._film_vp_filter)
 
-        # 托盘：卡片不再直接浮在面板底色上。有了这一层，上下边缘渐隐才有地方"化开"，
-        # 视觉上也和右侧参数窗格对齐（自己一块圆角底 + 1px 描边）。
-        self.film_tray = QFrame()
-        self.film_tray.setObjectName("filmTray")
-        tray_layout = QVBoxLayout(self.film_tray)
-        tray_layout.setContentsMargins(8, 8, 8, 8)
-        tray_layout.setSpacing(0)
-        tray_layout.addWidget(self.film_scroll)
+        # 有了托盘这一层，上下边缘渐隐才有地方"化开"，视觉上也和右侧参数窗格对齐
+        tray_layout.addWidget(self.film_scroll, 1)
         self._apply_tray_style(self.film_tray, self.film_scroll)
         film_layout.addWidget(self.film_tray, 1)
 
