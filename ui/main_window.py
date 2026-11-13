@@ -1959,6 +1959,9 @@ class FadingSplitterHandle(QSplitterHandle):
         super().__init__(orientation, parent)
         self.setMouseTracking(True)
         self._hovered = False
+        # 指示线贴哪一侧：'trailing' = 竖 handle 贴右、横 handle 贴下（默认，贴着后面那个
+        # pane）；'leading' = 竖 handle 贴左、横 handle 贴上。由 FadingSplitter 按索引下发。
+        self.indicator_side = "trailing"
         theme_manager.themeChanged.connect(lambda _: self.update())
 
     def enterEvent(self, ev):
@@ -1990,9 +1993,10 @@ class FadingSplitterHandle(QSplitterHandle):
         # right), a horizontal one on its bottom edge (against the pane below). The ends still
         # fade out so it reads as a hairline rather than a hard rule.
         accent = QColor(theme_manager.color("accent"))
+        leading = (getattr(self, "indicator_side", "trailing") == "leading")
         if self.orientation() == Qt.Orientation.Vertical:
             # Horizontal bar separating vertically stacked panes
-            y = max(0, h - _SPLIT_INDICATOR_PX)
+            y = 0 if leading else max(0, h - _SPLIT_INDICATOR_PX)
             start_x, end_x = 8, max(8 + 24, w - 8)
             grad = QLinearGradient(start_x, 0, end_x, 0)
             for stop, alpha in _SPLIT_INDICATOR_STOPS:
@@ -2004,7 +2008,7 @@ class FadingSplitterHandle(QSplitterHandle):
             painter.drawRect(start_x, y, end_x - start_x, _SPLIT_INDICATOR_PX)
         else:
             # Vertical bar separating horizontally arranged panes
-            x = max(0, w - _SPLIT_INDICATOR_PX)
+            x = 0 if leading else max(0, w - _SPLIT_INDICATOR_PX)
             start_y, end_y = 8, max(8 + 32, h - 8)
             grad = QLinearGradient(0, start_y, 0, end_y)
             for stop, alpha in _SPLIT_INDICATOR_STOPS:
@@ -2022,9 +2026,44 @@ class FadingSplitter(QSplitter):
         self.setHandleWidth(4 if orientation == Qt.Orientation.Vertical else 5)
         self.setChildrenCollapsible(False)
         self.setStyleSheet("QSplitter { background: transparent; }")
+        self._indicator_sides = {}
 
     def createHandle(self):
         return FadingSplitterHandle(self.orientation(), self)
+
+    def set_indicator_side(self, index, side):
+        """把第 index 条缝的指示线钉到某一侧（'leading' / 'trailing'）。"""
+        self._indicator_sides[int(index)] = side
+        self._sync_indicator_sides()
+
+    def _sync_indicator_sides(self):
+        if not self._indicator_sides:
+            return
+        n = self.count() - 1
+        if n <= 0:
+            return
+        handles = [h for h in self.findChildren(FadingSplitterHandle) if h.isVisible()]
+        if len(handles) < n:
+            return
+        # findChildren 里可能混有构造期残留的 handle，只取几何参与布局的那些
+        if self.orientation() == Qt.Orientation.Horizontal:
+            handles.sort(key=lambda h: h.x())
+        else:
+            handles.sort(key=lambda h: h.y())
+        handles = handles[-n:]
+        for i, h in enumerate(handles):
+            side = self._indicator_sides.get(i, "trailing")
+            if getattr(h, "indicator_side", "trailing") != side:
+                h.indicator_side = side
+                h.update()
+
+    def showEvent(self, ev):  # noqa: N802 - Qt 命名
+        super().showEvent(ev)
+        self._sync_indicator_sides()
+
+    def resizeEvent(self, ev):  # noqa: N802 - Qt 命名
+        super().resizeEvent(ev)
+        self._sync_indicator_sides()
 
 
 class ViewportResizeFilter(QObject):
@@ -4378,6 +4417,9 @@ class DarkroomMainWindow(QMainWindow):
 
         self.main_splitter.addWidget(self.sidebar_container)
         self.main_splitter.setCollapsible(2, False)
+        # 参数面板那条竖缝的指示线贴在**画布视口右侧**（即缝的左缘），而不是参数面板左侧：
+        # 视觉上指示线属于它正在标记的边界，画布与参数面板之间读作"画布的右边界"。
+        self.main_splitter.set_indicator_side(1, "leading")
 
         # Splitter proportion defaults: Left panel 320px (comfortably fits 3 columns), Center 800px, Right 320px
         self.main_splitter.setStretchFactor(0, 0)
