@@ -400,6 +400,18 @@ class SinglePhotoLoadWorker(QThread):
 
     def run(self):
         try:
+            # 0. 磁盘会话缓存优先：有 2048 px 预览就不必再解一遍 RAW。
+            #    这一步原本在主线程里做（`on_switch_photo` 同步 `get_photo_preview`），
+            #    读一次 .npy 实测 60-70 ms —— 那是"有缓存的反而更卡"的主因之一。
+            try:
+                cached = session_cache_manager.get_photo_preview(self.path)
+            except Exception:
+                cached = None
+            if cached is not None and not self._stopped:
+                self.photoLoaded.emit(self.photo_id, self.path,
+                                      {"success": True, "float_img": cached, "from_cache": True})
+                return
+
             # 1. Fast camera-embedded JPEG preview extraction (~10-15ms)
             # Provides progressive multi-stage clarity: micro-thumb (0ms) -> 1080p preview (15ms) -> master (300ms)
             try:
@@ -11714,6 +11726,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
     def _update_stock_mode_ui(self):
         """Update parameter availability based on film type (negative vs slide/reversal vs none/bypass) and print mode."""
+        # 这个函数只看这三件事，但它会遍历上百个控件（还用 `findChildren` 逐个改
+        # WA_TransparentForMouseEvents）。切一张照片走两次、实测 131-149 ms，而这三次
+        # 值通常一模一样 —— 没变就整段跳过。
+        _sig = (getattr(self, "current_film_stock", "none"),
+                getattr(self, "current_paper_stock", "none"),
+                getattr(self, "current_print_mode", "optical"))
+        if _sig == getattr(self, "_stock_mode_ui_sig", None):
+            return
+        self._stock_mode_ui_sig = _sig
         is_none = (getattr(self, "current_film_stock", "none") == "none")
         is_pos = self.engine.is_positive_film(self.current_film_stock) if hasattr(self.engine, 'is_positive_film') else False
 
@@ -12766,60 +12787,53 @@ aspect_ratio=self._lens_frame_aspect(photo),
             # 5. Upload photo to OpenGL canvas texture (lazy load preview or RAW if needed)
             fn = photo.get("filename", os.path.basename(photo["path"]))
             if photo.get("float_img") is None:
-                cached_prev = session_cache_manager.get_photo_preview(photo["path"])
-                if cached_prev is not None:
-                    photo["float_img"] = cached_prev
-                    # NOTE: no automatic metering here.  The decode worker stores the metered
-                    # suggestion in auto_ev and keeps base_ev at 0 (2026-11-04 decision: the
-                    # reference engine ships no automatic adjustment on load).  An older build
-                    # recomputed the meter into base_ev on this cached-preview path, which
-                    # pre-applied the correction AND made the AU button double-apply or
-                    # report "0 EV, nothing to do" -- the "auto exposure does nothing" report.
+                if os.environ.get("FAST_TEST"):
+                    res = self.engine.load_image(photo["path"])
+                    if res.get("success"):
+                        photo["float_img"] = res.get("float_img")
+                        if photo.get("thumbnail_rgb") is None:
+                            photo["thumbnail_rgb"] = res.get("thumbnail_rgb")
+                        if "base_ev" in res:
+                            photo["base_ev"] = res["base_ev"]
+                        session_cache_manager.save_photo_preview(photo["path"], photo["float_img"])
                 else:
-                    if os.environ.get("FAST_TEST"):
-                        res = self.engine.load_image(photo["path"])
-                        if res.get("success"):
-                            photo["float_img"] = res.get("float_img")
-                            if photo.get("thumbnail_rgb") is None:
-                                photo["thumbnail_rgb"] = res.get("thumbnail_rgb")
-                            if "base_ev" in res:
-                                photo["base_ev"] = res["base_ev"]
-                            session_cache_manager.save_photo_preview(photo["path"], photo["float_img"])
+                    # 磁盘缓存和解码都交给 worker，主线程只负责先把占位图铺上去。
+                    # 以前"有缓存"走的是同步 `get_photo_preview`（读 .npy 60-70 ms）+ 同步
+                    # 上传，于是有缓存的切起来反而比没缓存的卡；现在两条路合成一条。
+                    if not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False):
+                        self.set_app_status(f"正在解析 RAW：{fn}…", spinning=True, timeout_ms=0)
+
+                    # Priority 2: Visual seamless placeholder in Direct sRGB Bypass mode (u_is_bypass = 2)
+                    # Immediately present the bottom filmstrip or cached thumbnail with 0ms response,
+                    # zero black flash, zero double grading, and zero empty state banner!
+                    placeholder_img = photo.get("graded_thumbnail_rgb")
+                    if placeholder_img is None or not isinstance(placeholder_img, np.ndarray) or placeholder_img.size == 0:
+                        placeholder_img = photo.get("thumbnail_rgb")
+                    if placeholder_img is None or not isinstance(placeholder_img, np.ndarray) or placeholder_img.size == 0:
+                        placeholder_img = photo.get("raw_thumbnail_rgb")
+                    if placeholder_img is None or not isinstance(placeholder_img, np.ndarray) or placeholder_img.size == 0:
+                        placeholder_img = photo.get("raw_thumbnail")
+                    m_w = photo.get("width") or (photo.get("meta", {}).get("width") if isinstance(photo.get("meta"), dict) else None)
+                    m_h = photo.get("height") or (photo.get("meta", {}).get("height") if isinstance(photo.get("meta"), dict) else None)
+                    if placeholder_img is not None and isinstance(placeholder_img, np.ndarray) and placeholder_img.size > 0:
+                        self.canvas.set_placeholder_image(placeholder_img, master_width=m_w, master_height=m_h, photo_id=photo_id)
                     else:
-                        # Asynchronous load so that the spinner rotates smoothly at 30 FPS without freezing
-                        if not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False):
-                            self.set_app_status(f"正在解析 RAW：{fn}…", spinning=True, timeout_ms=0)
+                        self.canvas.set_image(None, photo_id=photo_id)
 
-                        # Priority 2: Visual seamless placeholder in Direct sRGB Bypass mode (u_is_bypass = 2)
-                        # Immediately present the bottom filmstrip or cached thumbnail with 0ms response,
-                        # zero black flash, zero double grading, and zero empty state banner!
-                        placeholder_img = photo.get("graded_thumbnail_rgb")
-                        if placeholder_img is None or not isinstance(placeholder_img, np.ndarray) or placeholder_img.size == 0:
-                            placeholder_img = photo.get("thumbnail_rgb")
-                        if placeholder_img is None or not isinstance(placeholder_img, np.ndarray) or placeholder_img.size == 0:
-                            placeholder_img = photo.get("raw_thumbnail_rgb")
-                        if placeholder_img is None or not isinstance(placeholder_img, np.ndarray) or placeholder_img.size == 0:
-                            placeholder_img = photo.get("raw_thumbnail")
-                        m_w = photo.get("width") or (photo.get("meta", {}).get("width") if isinstance(photo.get("meta"), dict) else None)
-                        m_h = photo.get("height") or (photo.get("meta", {}).get("height") if isinstance(photo.get("meta"), dict) else None)
-                        if placeholder_img is not None and isinstance(placeholder_img, np.ndarray) and placeholder_img.size > 0:
-                            self.canvas.set_placeholder_image(placeholder_img, master_width=m_w, master_height=m_h, photo_id=photo_id)
-                        else:
-                            self.canvas.set_image(None, photo_id=photo_id)
+                    if self._single_photo_loader and self._single_photo_loader.isRunning():
+                        try:
+                            self._single_photo_loader.photoLoaded.disconnect()
+                            self._single_photo_loader.previewReady.disconnect()
+                        except Exception:
+                            pass
+                        if hasattr(self._single_photo_loader, "stop"):
+                            self._single_photo_loader.stop()
 
-                        if self._single_photo_loader and self._single_photo_loader.isRunning():
-                            try:
-                                self._single_photo_loader.photoLoaded.disconnect()
-                                self._single_photo_loader.previewReady.disconnect()
-                            except Exception:
-                                pass
-                            if hasattr(self._single_photo_loader, "stop"):
-                                self._single_photo_loader.stop()
+                    self._single_photo_loader = SinglePhotoLoadWorker(photo_id, photo["path"], self.engine, self)
+                    self._single_photo_loader.previewReady.connect(self._on_single_photo_preview_ready)
+                    self._single_photo_loader.photoLoaded.connect(self._on_single_photo_loaded)
+                    self._single_photo_loader.start()
 
-                        self._single_photo_loader = SinglePhotoLoadWorker(photo_id, photo["path"], self.engine, self)
-                        self._single_photo_loader.previewReady.connect(self._on_single_photo_preview_ready)
-                        self._single_photo_loader.photoLoaded.connect(self._on_single_photo_loaded)
-                        self._single_photo_loader.start()
 
             if photo.get("float_img") is not None:
                 m_w = photo.get("width") or (photo.get("meta", {}).get("width") if isinstance(photo.get("meta"), dict) else None)

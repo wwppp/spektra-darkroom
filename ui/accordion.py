@@ -151,8 +151,16 @@ class ParameterGroupCard(QWidget):
     def set_available(self, available: bool, reason: str = ""):
         """Mark the section as inapplicable to the current stock (dimmed, reset off) while
         keeping the header hoverable so it can explain why on hover."""
+        # 切一张照片就会走一遍 `_update_stock_mode_ui`，每个 section 都会调到这里。
+        # `apply_theme()` 要重设整段样式表，8 个 section × 两次调用实测 130-150 ms ——
+        # 而这期间状态根本没变。状态没变就直接返回。
+        new_reason = "" if available else (reason or "")
+        state = (bool(available), new_reason)
+        if getattr(self, "_avail_state", None) == state:
+            return
+        self._avail_state = state
         self._is_available = bool(available)
-        self._unavailable_reason = "" if available else (reason or "")
+        self._unavailable_reason = new_reason
         self.apply_theme()
         tip = self._unavailable_reason
         self.setToolTip(tip)
