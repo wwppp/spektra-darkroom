@@ -202,6 +202,8 @@ class FilmstripItemWidget(QFrame):
 
         self._base_pixmap = None
         self._pixmap = None
+        # 有图才画（见 paintEvent）：占位阶段整格隐形，只占布局位置。
+        self._pending = True
         # 换图淡入用：占位（0.0）→ 真图（1.0）。只在"从没有图变成有图"时跑一次。
         self._reveal = 1.0
         self._reveal_anim = None
@@ -225,6 +227,7 @@ class FilmstripItemWidget(QFrame):
             tw = max(10, int(cur_w - 8))
             th = max(10, int(cur_h - my * 2.0))
             self._pixmap = self._base_pixmap.scaled(tw, th, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self._pending = not self.has_thumbnail()
 
     def set_item_size(self, target_w, target_h):
         if self.width() == target_w and self.height() == target_h and self._pixmap and not self._pixmap.isNull():
@@ -259,8 +262,11 @@ class FilmstripItemWidget(QFrame):
                 tw, th, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             )
             if not had_image:
+                # 整格从"隐形"变成"一整格底片"：先解除 pending 再淡入。
+                self._pending = False
                 self._start_reveal()
             else:
+                self._pending = False
                 self.update()
 
     def has_thumbnail(self) -> bool:
@@ -393,8 +399,16 @@ class FilmstripItemWidget(QFrame):
             super().mousePressEvent(event)
 
     def paintEvent(self, event):
+        # 还没有图就不画任何东西：**连胶片框和齿孔也不画**。
+        # 预摆的这些格子只负责占住布局位置（滚动范围和顺序），视觉上等照片到了再作为
+        # 一整格底片出现 —— 否则会先冒出一排带齿孔的空框，看着像一堆坏图。
+        if self._pending:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 整格淡入（框、齿孔、缩略图、文字一起），而不是只有画面那块慢慢亮。
+        if self._reveal < 1.0:
+            painter.setOpacity(max(0.02, min(1.0, self._reveal)))
 
         w = float(self.width())
         h = float(self.height())
@@ -463,36 +477,15 @@ class FilmstripItemWidget(QFrame):
         thumb_rect = QRectF(4.0, margin_y, w - 8.0, h - margin_y * 2.0)
         has_img = self._pixmap is not None and not self._pixmap.isNull()
         painter.setClipRect(thumb_rect)
-        # 空窗口别填纯黑：一整条"黑方块"读起来就是一堆坏图，而不是"还没轮到这张"。
-        # 未曝光的片基本来就是一层很淡的琥珀渐变（和空片基同色系），图填进来那一刻
-        # 整格颜色一起亮起来 —— 这才是"底片一格格亮起来"该有的样子。
+        # 画面窗口（letterbox）保持深色，让不同长宽比的图有统一的画框底。
         well_grad = QLinearGradient(thumb_rect.topLeft(), thumb_rect.bottomLeft())
-        if has_img:
-            well_grad.setColorAt(0.0, QColor(12, 9, 7))
-            well_grad.setColorAt(1.0, QColor(9, 7, 5))
-        else:
-            well_grad.setColorAt(0.0, QColor(52, 29, 17))
-            well_grad.setColorAt(0.55, QColor(36, 20, 12))
-            well_grad.setColorAt(1.0, QColor(24, 13, 7))
+        well_grad.setColorAt(0.0, QColor(12, 9, 7))
+        well_grad.setColorAt(1.0, QColor(9, 7, 5))
         painter.fillRect(thumb_rect, QBrush(well_grad))
         if has_img:
-            # 换图时淡入 120 ms：占位格是"亮起来"，不是"啪一下换一张"。
-            if self._reveal < 1.0:
-                painter.setOpacity(max(0.0, min(1.0, self._reveal)))
             px = thumb_rect.x() + (thumb_rect.width() - self._pixmap.width()) / 2.0
             py = thumb_rect.y() + (thumb_rect.height() - self._pixmap.height()) / 2.0
             painter.drawPixmap(int(px), int(py), self._pixmap)
-            painter.setOpacity(1.0)
-        else:
-            # 待载入标记：三颗很淡的琥珀点。有它就不会被当成"坏掉的缩略图"。
-            dot_r = max(1.0, min(1.6, thumb_rect.height() * 0.035))
-            gap = dot_r * 3.4
-            cy = thumb_rect.center().y()
-            cx = thumb_rect.center().x()
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(214, 164, 106, 96))
-            for k in (-1, 0, 1):
-                painter.drawEllipse(QRectF(cx + k * gap - dot_r, cy - dot_r, dot_r * 2.0, dot_r * 2.0))
 
         # 4. Draw camera aperture frame border around the exposed thumbnail
         painter.setClipping(False)
@@ -1729,10 +1722,7 @@ class FilmstripWidget(QWidget):
             self.selectionChanged.emit([])
             return
 
-        if hasattr(self, '_empty_lbl') and self._empty_lbl is not None:
-            self.scroll_layout.removeWidget(self._empty_lbl)
-            self._empty_lbl.deleteLater()
-            self._empty_lbl = None
+        self._drop_empty_label()
 
         # Re-add with current dynamic size in a single clean batch without layout thrashing
         container = self.scroll_content if (hasattr(self, 'scroll_content') and self.scroll_content) else self
@@ -1815,10 +1805,7 @@ class FilmstripWidget(QWidget):
 
     def append_photo(self, photo, is_active=False):
         """Incrementally appends a single photo entry to the filmstrip without clearing."""
-        if hasattr(self, '_empty_lbl') and self._empty_lbl is not None:
-            self.scroll_layout.removeWidget(self._empty_lbl)
-            self._empty_lbl.deleteLater()
-            self._empty_lbl = None
+        self._drop_empty_label()
 
         # 按 id 判重，不能写 `photo not in self._photos_list`：photo 是 dict，`in` 会逐键
         # 比值，而 `thumbnail_rgb` 是 ndarray（main_window 里 `np.full((72,76,3), ...)`），
@@ -1850,20 +1837,39 @@ class FilmstripWidget(QWidget):
         if is_active:
             self.selectionChanged.emit(list(self._selected_ids))
 
+    def _drop_empty_label(self):
+        """把"底片槽路为空…"那行提示拿掉。
+
+        `deleteLater` 要等真正的 event loop 跑 DeferredDelete 才生效，中间这段时间它还是
+        **可见**的 —— 导入时就会看到那行字压在逐渐出现的格子后面。先隐藏再摘，确定消失。
+        """
+        lbl = getattr(self, "_empty_lbl", None)
+        if lbl is None:
+            return
+        try:
+            lbl.setVisible(False)
+            self.scroll_layout.removeWidget(lbl)
+            lbl.setParent(None)
+            lbl.deleteLater()
+        except Exception:
+            pass
+        self._empty_lbl = None
+
     def append_placeholders(self, entries):
-        """按最终顺序先把格子摆出来（缩略图留空），随后用 ``fill_placeholder`` 逐个填图。
+        """按最终顺序先把格子摆出来（整格隐形），随后用 ``fill_placeholder`` 逐个填图。
 
         为什么要先摆：worker 的解码是乱序完成的，发射必须保序才能让底片栏顺序正确，于是
         只要有一张慢（实测偶发 1.5 s），整条栏就停在"只有一两张"然后突然全出现 —— 看起来
-        像完全卡死。先摆格子就没有这个问题：用户看到的是灰格一个个变亮，顺序天然正确。
+        像完全卡死。先摆格子就没有这个问题：照片到了就地填，一格完整底片（框、齿孔、
+        缩略图）一起淡入，顺序天然正确。
+
+        注意这些格子**什么都不画**（见 `FilmstripItemWidget.paintEvent`）：它们只占住
+        布局位置和滚动范围。早先画成"带齿孔的空框"会先冒出一整排空底片，看着像坏图。
         """
         if not entries:
             return
         self._cancel_pending_scroll_timers()
-        if getattr(self, "_empty_lbl", None) is not None:
-            self.scroll_layout.removeWidget(self._empty_lbl)
-            self._empty_lbl.deleteLater()
-            self._empty_lbl = None
+        self._drop_empty_label()
 
         container = self.scroll_content if getattr(self, "scroll_content", None) else self
         container.setUpdatesEnabled(False)
@@ -1931,10 +1937,7 @@ class FilmstripWidget(QWidget):
         if not photos_list:
             return
 
-        if hasattr(self, '_empty_lbl') and self._empty_lbl is not None:
-            self.scroll_layout.removeWidget(self._empty_lbl)
-            self._empty_lbl.deleteLater()
-            self._empty_lbl = None
+        self._drop_empty_label()
 
         container = self.scroll_content if (hasattr(self, 'scroll_content') and self.scroll_content) else self
         container.setUpdatesEnabled(False)
