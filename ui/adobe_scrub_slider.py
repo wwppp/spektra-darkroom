@@ -1175,13 +1175,8 @@ class DarkroomComboListView(QListView):
         if sb.maximum() <= 0:
             event.ignore()
             return
-        # A touchpad flick reverses on the spot; a notched wheel keeps the additive
-        # semantics (see WheelFollower.add).
-        try:
-            continuous = event.phase() != Qt.ScrollPhase.NoScrollPhase
-        except AttributeError:
-            continuous = False
-        self._scroll.add(-(delta / 120.0) * 72.0, allow_reverse_takeover=continuous)
+        # A flick reverses on the spot; see WheelFollower.add.
+        self._scroll.add(-(delta / 120.0) * 72.0)
         event.accept()
 
     def mouseMoveEvent(self, event):

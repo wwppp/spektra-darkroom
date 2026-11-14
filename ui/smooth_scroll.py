@@ -150,10 +150,14 @@ class WheelFollower(QObject):
     FRAME_MS = GLIDE_FRAME_MS  # twice the display rate, so a frame never sees a stale position
     SNAP_PX = 0.75        # sub-pixel: at this distance the bar has already rounded still
     #: A reverse gesture has to displace the target this far before it takes over the flight
-    #: that is still in the air.  Two orders of magnitude below one notch (76 px), so a real
-    #: reversal feels immediate, but far above the 1-3 px of finger jitter a hard touchpad
-    #: spin produces -- those must never cancel the glide the user just asked for.
-    REVERSE_TAKEOVER_PX = 6.0
+    #: that is still in the air.  Below one notch (76 px) by a wide margin, so a real reversal
+    #: feels immediate, but far above the 1-3 px of finger jitter a hard spin produces --
+    #: those must never cancel the glide the user just asked for.
+    REVERSE_TAKEOVER_PX = 12.0
+    #: ...and only when there is a real flight left to cancel.  A glider that is already
+    #: within a notch of its target just lands; taking over there would turn a quick
+    #: forward/back pair into "it jumped an extra notch".
+    REVERSE_MIN_REMAINING_PX = 60.0
 
     finished = Signal()
 
@@ -196,14 +200,8 @@ class WheelFollower(QObject):
         self._bar_written = None
         self._reverse_px = 0.0
 
-    def add(self, delta: float, allow_reverse_takeover: bool = False) -> None:
-        """Push the target by ``delta`` px.  Repeated calls accumulate.
-
-        ``allow_reverse_takeover`` is for continuous devices (touchpad, momentum scrolling):
-        they fire dozens of events per gesture, so a reverse flick is one gesture that must
-        win immediately.  A notched mouse wheel keeps the additive semantics instead -- one
-        notch down then one notch up has to come back to where it started.
-        """
+    def add(self, delta: float) -> None:
+        """Push the target by ``delta`` px.  Repeated calls accumulate."""
         lo = float(self._bar.minimum())
         hi = float(self._bar.maximum())
         if hi <= lo:
@@ -220,14 +218,19 @@ class WheelFollower(QObject):
             self._timer.start()
 
         # A spin that is still on its way somewhere and a wheel turned the other way: the old
-        # distance used to have to be paid back first, so two hard touchpad flicks read as
-        # "it will not reverse until it stops on its own".  A reverse gesture takes over
-        # instead -- the unflown distance is dropped and the new direction starts from where
-        # the bar is now.  The threshold keeps finger jitter from cancelling a normal spin.
+        # distance used to have to be paid back first, so a hard flick read as "it will not
+        # reverse until it stops on its own".  A reverse gesture takes over instead -- the
+        # unflown distance is dropped and the new direction starts from where the bar is now.
+        #
+        # This deliberately does *not* consult QWheelEvent.phase(): on Windows it is
+        # NoScrollPhase for touchpads too (only macOS/Wayland report ScrollBegin/Update), so
+        # keying the behaviour on it meant the takeover never fired for the very user this
+        # was written for.
         remaining = self._target - self._pos
-        if allow_reverse_takeover and delta and remaining and (delta > 0.0) != (remaining > 0.0):
+        if delta and remaining and (delta > 0.0) != (remaining > 0.0):
             self._reverse_px += abs(delta)
-            if self._reverse_px >= self.REVERSE_TAKEOVER_PX:
+            if (self._reverse_px >= self.REVERSE_TAKEOVER_PX
+                    and abs(remaining) >= self.REVERSE_MIN_REMAINING_PX):
                 self._target = self._pos
                 self._reverse_px = 0.0
         else:
@@ -676,14 +679,7 @@ class SmoothScrollArea(QScrollArea):
         # The target is a running sum, so a notch is never lost to a clamp: at the edge the
         # difference is simply zero and the glide has nothing to do.
         self._anim.stop()
-        # Touchpads and momentum scrolling report a phase; a notched wheel reports
-        # NoScrollPhase.  Only the continuous devices get to take over a flight on reversal
-        # (see WheelFollower.add) -- for a wheel, one notch back must undo one notch forward.
-        try:
-            continuous = event.phase() != Qt.ScrollPhase.NoScrollPhase
-        except AttributeError:
-            continuous = False
-        self._wheel.add(ticks * self._step_size, allow_reverse_takeover=continuous)
+        self._wheel.add(ticks * self._step_size)
         self._current_pos = self._wheel.pos
         event.accept()
 

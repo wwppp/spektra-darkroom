@@ -2836,8 +2836,10 @@ class DarkroomMainWindow(QMainWindow):
         self._is_importing = True
         self._import_lock_time = time.time()
         self._set_import_hq_suspend(True)
+        # 恢复会话不给"取消"按钮：这里的主线程被解码/布局占着，按钮即使显示了也点不动
+        # （实测用户点了没反应），摆一个按不下去的按钮比不摆更糟。导入那条路仍然保留。
         if hasattr(self, "btn_cancel_import"):
-            self.btn_cancel_import.setVisible(True)
+            self.btn_cancel_import.setVisible(False)
 
         target_path = active_file if (active_file and active_file in existing_files) else existing_files[0]
         self._target_initial_active_path = target_path
@@ -2953,8 +2955,9 @@ class DarkroomMainWindow(QMainWindow):
             if uncached_slots:
                 self._is_importing = True
                 self._import_lock_time = time.time()
+                # 同上：这一段是恢复流程的延续，按钮在这里同样按不动，不显示。
                 if hasattr(self, "btn_cancel_import"):
-                    self.btn_cancel_import.setVisible(True)
+                    self.btn_cancel_import.setVisible(False)
                 self.set_app_status(f"正在恢复底片库（0/{len(uncached_slots)}）…", spinning=True, timeout_ms=0)
                 self._reset_import_delivery()
                 self._slot_decode_worker = SlotDecodeWorker(uncached_slots, self.engine, parent=self)
