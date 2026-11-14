@@ -202,6 +202,9 @@ class FilmstripItemWidget(QFrame):
 
         self._base_pixmap = None
         self._pixmap = None
+        # 换图淡入用：占位（0.0）→ 真图（1.0）。只在"从没有图变成有图"时跑一次。
+        self._reveal = 1.0
+        self._reveal_anim = None
         thumb_rgb = photo_data.get("thumbnail_rgb")
 
         if is_dummy_or_corrupted_thumbnail(thumb_rgb):
@@ -247,6 +250,7 @@ class FilmstripItemWidget(QFrame):
     def set_thumbnail(self, pixmap):
         """Update thumbnail pixmap dynamically in real-time."""
         if pixmap and not pixmap.isNull():
+            had_image = self._base_pixmap is not None and not self._base_pixmap.isNull()
             self._base_pixmap = pixmap
             my = self.height() * 0.14
             tw = max(10, int(self.width() - 8))
@@ -254,7 +258,43 @@ class FilmstripItemWidget(QFrame):
             self._pixmap = self._base_pixmap.scaled(
                 tw, th, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             )
+            if not had_image:
+                self._start_reveal()
+            else:
+                self.update()
+
+    def has_thumbnail(self) -> bool:
+        return self._pixmap is not None and not self._pixmap.isNull()
+
+    def _start_reveal(self):
+        """从空窗口变成真图时淡入一次。批量导入/恢复时每格各跑 140 ms，代价只有重绘自己。"""
+        self._reveal = 0.0
+        try:
+            if not self.isVisible():
+                self._reveal = 1.0
+                self.update()
+                return
+            if self._reveal_anim is not None:
+                self._reveal_anim.stop()
+                self._reveal_anim.deleteLater()
+            anim = QVariantAnimation(self)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setDuration(140)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.valueChanged.connect(self._on_reveal_value)
+            self._reveal_anim = anim
+            anim.start()
+        except Exception:
+            self._reveal = 1.0
             self.update()
+
+    def _on_reveal_value(self, value):
+        try:
+            self._reveal = float(value)
+        except (TypeError, ValueError):
+            self._reveal = 1.0
+        self.update()
 
     def fill_thumbnail_from_photo(self, photo_entry) -> bool:
         """占位格拿到真图后原地换图 —— 不重建 widget，列表顺序和滚动位置都不动。
@@ -421,12 +461,38 @@ class FilmstripItemWidget(QFrame):
 
         # 3. Draw Thumbnail strictly inside leader bands with camera aperture frame border
         thumb_rect = QRectF(4.0, margin_y, w - 8.0, h - margin_y * 2.0)
+        has_img = self._pixmap is not None and not self._pixmap.isNull()
         painter.setClipRect(thumb_rect)
-        painter.fillRect(thumb_rect, QColor(10, 8, 6))
-        if self._pixmap and not self._pixmap.isNull():
+        # 空窗口别填纯黑：一整条"黑方块"读起来就是一堆坏图，而不是"还没轮到这张"。
+        # 未曝光的片基本来就是一层很淡的琥珀渐变（和空片基同色系），图填进来那一刻
+        # 整格颜色一起亮起来 —— 这才是"底片一格格亮起来"该有的样子。
+        well_grad = QLinearGradient(thumb_rect.topLeft(), thumb_rect.bottomLeft())
+        if has_img:
+            well_grad.setColorAt(0.0, QColor(12, 9, 7))
+            well_grad.setColorAt(1.0, QColor(9, 7, 5))
+        else:
+            well_grad.setColorAt(0.0, QColor(52, 29, 17))
+            well_grad.setColorAt(0.55, QColor(36, 20, 12))
+            well_grad.setColorAt(1.0, QColor(24, 13, 7))
+        painter.fillRect(thumb_rect, QBrush(well_grad))
+        if has_img:
+            # 换图时淡入 120 ms：占位格是"亮起来"，不是"啪一下换一张"。
+            if self._reveal < 1.0:
+                painter.setOpacity(max(0.0, min(1.0, self._reveal)))
             px = thumb_rect.x() + (thumb_rect.width() - self._pixmap.width()) / 2.0
             py = thumb_rect.y() + (thumb_rect.height() - self._pixmap.height()) / 2.0
             painter.drawPixmap(int(px), int(py), self._pixmap)
+            painter.setOpacity(1.0)
+        else:
+            # 待载入标记：三颗很淡的琥珀点。有它就不会被当成"坏掉的缩略图"。
+            dot_r = max(1.0, min(1.6, thumb_rect.height() * 0.035))
+            gap = dot_r * 3.4
+            cy = thumb_rect.center().y()
+            cx = thumb_rect.center().x()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(214, 164, 106, 96))
+            for k in (-1, 0, 1):
+                painter.drawEllipse(QRectF(cx + k * gap - dot_r, cy - dot_r, dot_r * 2.0, dot_r * 2.0))
 
         # 4. Draw camera aperture frame border around the exposed thumbnail
         painter.setClipping(False)
@@ -1825,21 +1891,32 @@ class FilmstripWidget(QWidget):
         self.count_label.setText(f"{len(self._photos_list)} 张")
 
     def fill_placeholder(self, pid, photo_entry) -> bool:
-        """把某一格换成这张照片（占位→真图，或解码补上来的新缩略图），次序不变。"""
+        """把某一格换成这张照片（占位→真图，或解码补上来的新缩略图），次序不变。
+
+        返回 True 只代表"这一格存在、收到了数据"；图有没有真的填进去要看 item。
+        没填进去就不能把 id 从 ``_placeholder_ids`` 里摘掉 —— 否则收尾盘点时看不见它，
+        那一格会永远停在空窗口上（实测恢复会话的首图就是这样黑着的）。
+        """
         if not pid:
             return False
-        self._placeholder_ids.discard(pid)
         item = self._item_widgets.get(pid)
         if item is None:
             return False
         # 复用同一个 dict：`_photos_list` 的次序就是用户看到的次序，不能换成新对象。
         slot = next((p for p in self._photos_list if isinstance(p, dict) and p.get("id") == pid), None)
+        filled = False
         if slot is not None and isinstance(photo_entry, dict):
             slot.update(photo_entry)
-            item.fill_thumbnail_from_photo(slot)
+            filled = item.fill_thumbnail_from_photo(slot)
         else:
-            item.fill_thumbnail_from_photo(photo_entry)
+            filled = item.fill_thumbnail_from_photo(photo_entry)
+        if filled or item.has_thumbnail():
+            self._placeholder_ids.discard(pid)
         return True
+
+    def pending_thumbnail_ids(self):
+        """还停在空窗口上的格子（占位没收到图，或收到的条目里没有缩略图）。"""
+        return [pid for pid, item in self._item_widgets.items() if not item.has_thumbnail()]
 
     def has_photo(self, pid) -> bool:
         return bool(pid) and pid in self._item_widgets
@@ -2056,6 +2133,8 @@ class FilmstripWidget(QWidget):
         """Update thumbnail for specific photo item."""
         if photo_id in self._item_widgets:
             self._item_widgets[photo_id].set_thumbnail(pixmap)
+            if pixmap and not pixmap.isNull():
+                self._placeholder_ids.discard(photo_id)
 
     def update_photo_data(self, photo_id, photo_data):
         """Update photo metadata and tooltip for specific photo item."""

@@ -669,6 +669,40 @@ class BatchImportWorker(QThread):
         self.importFinished.emit(int(loaded_count or 0))
 
 
+class ThumbPrimeWorker(QThread):
+    """给底片栏第一格先抓一张内嵌 JPEG。
+
+    第一张在导入/恢复 worker 里走"全分辨率优先"，实测 1.5-3 s 才回来，而这一格正好是
+    用户第一眼盯的位置 —— 空上几秒看起来就是"第一张缩略图坏了"。内嵌 JPEG 本身不贵，
+    但 `extract_fast_thumbnail` 要开 rawpy（实测 190 ms），不能放主线程。
+    """
+    primed = Signal(str, object)   # photo_id, rgb uint8
+
+    def __init__(self, photo_id, path, parent=None):
+        super().__init__(parent)
+        self._pid = photo_id
+        self._path = path
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
+
+    def run(self):
+        # 只跑 15 ms 的一件小事，但导入/恢复那几条解码线程会把 CPU 吃满 —— 实测不提高
+        # 优先级时这一格要 1.5 s 才亮，提上去就是几十毫秒（给用户第一眼的位置用）。
+        try:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetThreadPriority(kernel32.GetCurrentThread(), 1)   # ABOVE_NORMAL
+        except Exception:
+            pass
+        try:
+            th = session_cache_manager.extract_fast_thumbnail(self._path)
+        except Exception:
+            th = None
+        if th is not None and not self._stopped:
+            self.primed.emit(self._pid, th)
+
+
 class ThumbGradeWorker(QThread):
     """导入期把 `.sdc` 缩略图的 3D LUT 现烤挪出主线程。
 
@@ -2847,7 +2881,7 @@ class DarkroomMainWindow(QMainWindow):
         self._import_lock_time = time.time()
         self._set_import_hq_suspend(True)
         self._set_cancel_chip(True, "恢复")
-        self._seed_restore_placeholders(existing_files)
+        self._seed_restore_placeholders(existing_files, active_file)
 
         target_path = active_file if (active_file and active_file in existing_files) else existing_files[0]
         self._target_initial_active_path = target_path
@@ -2984,6 +3018,7 @@ class DarkroomMainWindow(QMainWindow):
                 self._is_importing = False
                 self._set_import_hq_suspend(False, hold=(total_files > 1))
                 self._set_cancel_chip(False)
+                self._sync_filmstrip_thumbnails("恢复收尾")
                 if session_name:
                     if path_updated:
                         self.set_app_status(f"会话已恢复：{session_name}（{total_files} 张），底片路径已更新", spinning=False, timeout_ms=3000)
@@ -10534,8 +10569,57 @@ aspect_ratio=self._lens_frame_aspect(photo),
             strip.append_placeholders(entries)
         except Exception as ex:
             logger.warning(f"Placeholder seeding failed: {ex}")
+            return
+        # 解析内嵌 JPEG 要 15-30 ms，别和"摆 40 个格子"叠在同一帧里 —— 挪到下一轮事件循环，
+        # 用户看到的是格子先排好、紧接着第一格亮起来。
+        try:
+            QTimer.singleShot(0, lambda s=strip, e=entries[0]: self._prime_first_placeholder(s, e))
+        except Exception:
+            self._prime_first_placeholder(strip, entries[0])
 
-    def _seed_restore_placeholders(self, files):
+    def _prime_first_placeholder(self, strip, entry):
+        """第一格先挂上内嵌 JPEG（在后台抓，主线程只做一次换图）。
+
+        worker 里第一张走的是"全分辨率优先"（要给画布用），实测 1.5-3 s 才回来，而这一格
+        正好是用户第一眼盯的位置 —— 前面几秒就它一个是空的，看起来就是"第一张坏了"。
+        """
+        if not entry or not entry.get("path"):
+            return
+        pid = entry.get("id")
+        if not pid:
+            return
+        try:
+            if getattr(self, "_thumb_prime_worker", None) is not None:
+                old = self._thumb_prime_worker
+                self._thumb_prime_worker = None
+                try:
+                    old.primed.disconnect()
+                except Exception:
+                    pass
+                if old.isRunning():
+                    old.stop()
+                    return          # 上一张还在抓，让位，别开两条 rawpy
+            w = ThumbPrimeWorker(pid, entry["path"], parent=self)
+            w.primed.connect(self._on_prime_thumbnail)
+            self._thumb_prime_worker = w
+            w.start()
+        except Exception as ex:
+            logger.debug(f"Prime first placeholder failed: {ex}")
+
+    def _on_prime_thumbnail(self, pid, rgb):
+        strip = getattr(self, "filmstrip", None)
+        if strip is None or rgb is None:
+            return
+        try:
+            strip.fill_placeholder(pid, {
+                "id": pid,
+                "thumbnail_rgb": rgb,
+                "raw_thumbnail_rgb": rgb,
+            })
+        except Exception as ex:
+            logger.debug(f"Prime fill failed: {ex}")
+
+    def _seed_restore_placeholders(self, files, active_path=None):
         """恢复会话也先把格子按顺序摆出来（id 规则与 SessionRestoreWorker 一致）。"""
         strip = getattr(self, "filmstrip", None)
         if strip is None or not files:
@@ -10550,6 +10634,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
             strip.append_placeholders(entries)
         except Exception as ex:
             logger.warning(f"Restore placeholder seeding failed: {ex}")
+            return
+        # 恢复时活动那张排在最前面（或用户指定的那张），同样先挂内嵌 JPEG。
+        first = next((e for e in entries if e.get("path") == active_path), entries[0] if entries else None)
+        if first is not None:
+            try:
+                QTimer.singleShot(0, lambda s=strip, e=first: self._prime_first_placeholder(s, e))
+            except Exception:
+                self._prime_first_placeholder(strip, first)
 
     def _enqueue_restore_photo(self, idx, entry):
         self._queue_ui_work(functools.partial(self._on_restore_photo_ready, idx, entry))
@@ -10928,7 +11020,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # Defensive check: ensure photo_entry ID is strictly unique
         existing_ids = {p["id"] for p in self.photos if p and "id" in p}
         pid = photo_entry.get("id")
-        if not pid or pid in existing_ids:
+        # 这一格是不是我们自己刚摆的占位？是的话 id 必须保留 —— 改名会让
+        # `fill_placeholder` 找不到格子，那张图就被追加到底片栏末尾，前面留一个黑格。
+        seeded_placeholder = bool(
+            pid and pid not in existing_ids
+            and getattr(self, "filmstrip", None) is not None
+            and self.filmstrip.has_photo(pid)
+        )
+        if (not pid or pid in existing_ids) and not seeded_placeholder:
             base_pid = pid or f"photo_{len(self.photos)}_{os.path.basename(photo_entry.get('path', ''))}"
             unique_pid = base_pid
             counter = 1
@@ -11117,6 +11216,40 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if p.get("is_dirty") or p.get("is_edited"):
                 self.filmstrip.set_photo_dirty(p["id"], True)
 
+    def _sync_filmstrip_thumbnails(self, why=""):
+        """收尾兜底：底片栏里还停在空窗口的格子，从 `self.photos` 再取一次图。
+
+        为什么需要：占位格只有"收到的条目里带缩略图"才会亮，而首图常常是**未缓存**的那张
+        （要等后台解码），只要有一条路没把图补回去，那格就永远黑着 —— 用户看到的就是
+        "第一张缩略图坏了"。这里统一扫一遍，顺便记一条日志，方便下次直接看到是哪种情况。
+        """
+        strip = getattr(self, "filmstrip", None)
+        if strip is None:
+            return
+        try:
+            pending = strip.pending_thumbnail_ids()
+        except Exception:
+            return
+        if not pending:
+            return
+        by_id = {p.get("id"): p for p in self.photos if isinstance(p, dict)}
+        fixed = 0
+        for pid in pending:
+            entry = by_id.get(pid)
+            if entry is None:
+                continue
+            try:
+                if strip.fill_placeholder(pid, entry):
+                    fixed += 1
+            except Exception as ex:
+                logger.debug(f"fill placeholder failed for {pid}: {ex}")
+        left = strip.pending_thumbnail_ids()
+        if left:
+            logger.info(f"[filmstrip] {why or '收尾'}: 仍有 {len(left)} 格没有缩略图 "
+                        f"（{', '.join(str(x) for x in left[:4])}）")
+        elif fixed:
+            logger.info(f"[filmstrip] {why or '收尾'}: 补回 {fixed} 格缩略图")
+
     def _on_all_photos_imported(self, total_loaded):
         if getattr(self, "_import_worker", None):
             try:
@@ -11142,6 +11275,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._pending_import_queue = []
         self._set_cancel_chip(False)
         self._pending_session_map = None
+        self._sync_filmstrip_thumbnails("导入收尾")
         self.canvas.set_has_library_photos(bool(self.photos))
         self._update_recent_menu()
         target_path = getattr(self, "_target_initial_active_path", None)
@@ -11444,6 +11578,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._is_importing = False
         self._set_import_hq_suspend(False, hold=(len(self.photos) > 1))
         self._set_cancel_chip(False)
+        self._sync_filmstrip_thumbnails("恢复收尾")
         # 首图还停在占位缩略图上，把完整链补上（用户这会儿已经能随便点了）。
         if getattr(self, "_deferred_switch_id", None):
             QTimer.singleShot(IMPORT_DEFERRED_SWITCH_DELAY_MS, self._activate_deferred_photo)
@@ -14819,6 +14954,10 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 self._thumb_grade_worker_ref.stop()
                 self._safely_terminate_worker(self._thumb_grade_worker_ref, wait_ms=1000)
                 self._thumb_grade_worker_ref = None
+            if getattr(self, "_thumb_prime_worker", None) is not None:
+                self._thumb_prime_worker.stop()
+                self._safely_terminate_worker(self._thumb_prime_worker, wait_ms=1000)
+                self._thumb_prime_worker = None
             if hasattr(self, '_single_photo_loader') and self._single_photo_loader:
                 self._safely_terminate_worker(self._single_photo_loader, wait_ms=1000)
                 self._single_photo_loader = None
