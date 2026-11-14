@@ -2983,11 +2983,9 @@ class DarkroomMainWindow(QMainWindow):
                     self._cards_debounce_timer.start(100)
                 self._schedule_histogram_update()
 
-            # Ensure filmstrip jumps smoothly to the focus photo upon session restore
-            if target_id and hasattr(self.filmstrip, 'scroll_to_photo'):
-                self.filmstrip.scroll_to_photo(target_id, animate=False, force_center=True)
-                QTimer.singleShot(60, lambda: self.filmstrip.scroll_to_photo(target_id, animate=False, force_center=True))
-                QTimer.singleShot(260, lambda: self.filmstrip.scroll_to_photo(target_id, animate=False, force_center=True))
+            # 底片栏**不**跳到最后停留的那张：恢复过程是从左往右一格格长出来的，一上来就
+            # 居中到中间某格，用户看到的是"从那一格开始、左边全空"。让他自己点/滚时再跟。
+            self.filmstrip.set_autoscroll_enabled(True)
 
             # Trigger a post-animation polish pass once FadingStackedWidget transition reaches 100%
             QTimer.singleShot(280, lambda: (
@@ -10642,6 +10640,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 QTimer.singleShot(0, lambda s=strip, e=first: self._prime_first_placeholder(s, e))
             except Exception:
                 self._prime_first_placeholder(strip, first)
+        # 恢复期间不许自动滚动：光标会定在用户上次停留的那张，一旦自动居中，用户看到的
+        # 就是"底片栏从中间那格开始"，左边一片空白。等他自己点/滚，或者恢复完再说。
+        try:
+            strip.set_autoscroll_enabled(False)
+            QTimer.singleShot(0, strip.scroll_to_start)
+        except Exception:
+            pass
 
     def _enqueue_restore_photo(self, idx, entry):
         self._queue_ui_work(functools.partial(self._on_restore_photo_ready, idx, entry))
@@ -11006,10 +11011,25 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return  # 用户在导入期间已经自己点了别的照片
         if not any(p and p.get("id") == pid for p in self.photos):
             return
+        strip = getattr(self, "filmstrip", None)
+        prev_autoscroll = None
+        if strip is not None:
+            # 这一次切图不是为了"带用户去看"，别让它把底片栏从左边第一格拽走。
+            try:
+                prev_autoscroll = getattr(strip, "_autoscroll_enabled", True)
+                strip.set_autoscroll_enabled(False)
+            except Exception:
+                prev_autoscroll = None
         try:
             self.on_switch_photo(pid, force=True)
         except Exception as ex:
             logger.error(f"Deferred first-photo switch failed: {ex}", exc_info=True)
+        finally:
+            if strip is not None and prev_autoscroll is not None:
+                try:
+                    strip.set_autoscroll_enabled(prev_autoscroll)
+                except Exception:
+                    pass
         # 完整链会 `invalidate_hq_preview()` 把 hold 清掉；这里再压一次，别让 2.2 s 的
         # 全分辨率读回紧跟着导入结束砸下来（用户这会儿正在翻底片条）。
         canvas = getattr(self, "canvas", None)

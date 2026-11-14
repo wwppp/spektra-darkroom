@@ -728,6 +728,9 @@ class FilmstripWidget(QWidget):
         self._photos_list = []
         # 已经按最终顺序摆好、但缩略图还没到的格子（导入/恢复时先占位，见图一个个变亮）。
         self._placeholder_ids = set()
+        # 导入/恢复期间关掉"跟着活动照片滚"：会话恢复会把光标定在用户上次停留的那张，
+        # 一旦自动居中，用户看到的就是"底片栏从中间那格开始"，左边一片空白。
+        self._autoscroll_enabled = True
         self._active_id = None
         self._selection_anchor_id = None
         self._selected_ids = set()
@@ -1677,6 +1680,7 @@ class FilmstripWidget(QWidget):
 
     def wheelEvent(self, event):
         """Enable horizontal scrolling via standard mouse wheel over the filmstrip."""
+        self._autoscroll_enabled = True      # 用户自己动手了，恢复"跟着活动照片滚"
         self._cancel_pending_scroll_timers()
         delta = event.angleDelta().y() or event.angleDelta().x()
         if delta != 0:
@@ -2072,6 +2076,7 @@ class FilmstripWidget(QWidget):
             w.update()
 
     def _on_item_clicked(self, photo_id, event):
+        self._autoscroll_enabled = True      # 同上：用户点了某一格，之后就该跟着滚
         mods = event.modifiers()
         is_ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
         is_shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
@@ -2149,6 +2154,8 @@ class FilmstripWidget(QWidget):
         If force_center is True, or if the widget is outside the visible viewport,
         scroll it to the center smoothly or instantly.
         """
+        if not getattr(self, "_autoscroll_enabled", True):
+            return
         if not photo_id or photo_id not in self._item_widgets:
             return
 
@@ -2189,10 +2196,16 @@ class FilmstripWidget(QWidget):
         else:
             hbar.setValue(target_x)
 
+    def set_autoscroll_enabled(self, enabled: bool):
+        """导入/恢复期间关掉自动滚动（见 `_autoscroll_enabled`）。"""
+        self._autoscroll_enabled = bool(enabled)
+
     def scroll_to_active(self, animate=False, force_center=True):
         """Ensure active photo item is centered in view with multi-tick alignment."""
         if not self._active_id:
             return
+        # 显式要求"把当前这张滚进视野"（键盘 Home/End、右键菜单等）：这时候该跟了。
+        self._autoscroll_enabled = True
         self.scroll_to_photo(self._active_id, animate=animate, force_center=force_center)
         # Double-check calibration on next tick to guarantee perfection after Qt layout pass
         self._safe_single_shot(30, lambda: self.scroll_to_photo(self._active_id, animate=False, force_center=force_center))
