@@ -1,6 +1,7 @@
 import re
 import os
-from PySide6.QtCore import Qt, Signal, QPoint, QSize, QRect, QVariantAnimation, QEasingCurve, QEvent, QTimer
+from PySide6.QtCore import (Qt, Signal, QPoint, QPointF, QSize, QRect, QVariantAnimation,
+                            QEasingCurve, QEvent, QTimer)
 from PySide6.QtGui import QCursor, QFont, QIcon, QGuiApplication, QPainter, QColor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication, QListView, QStyledItemDelegate, QAbstractItemView, QStyle
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
 from core.path_utils import get_icon_path
 from ui.theme_manager import theme_manager
 from ui.smooth_scroll import WheelFollower
+from ui.touch_scroll import click_item, SLOP_PX as TOUCH_SLOP_PX, TAP_MS as TOUCH_TAP_MS
 
 
 class ScrubLabel(QLabel):
@@ -1114,10 +1116,50 @@ class DarkroomComboListView(QListView):
         # its rows are only 24 px tall.
         self._scroll = WheelFollower(self.verticalScrollBar(), self)
         self.delegate = None
+        # 一行上的手指：popup 是独立的顶层窗口，触摸不一定会走到 TouchPanFilter（有的机器
+        # 根本不把 TouchBegin 送给它），那条路上点击就整个丢了。这里自己留一份兜底：
+        # 轻点即选中，拖动即滚列表。
+        self._row_touch = None
+
+    def _touch_row_event(self, event, kind) -> bool:
+        pts = event.points()
+        if not pts:
+            return False
+        pos = QPointF(pts[0].position())
+        if kind == QEvent.Type.TouchBegin:
+            self._row_touch = [pos, pos, 0.0, event.timestamp()]
+            return True
+        state = self._row_touch
+        if state is None:
+            return False
+        origin, last, moved, press_ms = state
+        if kind == QEvent.Type.TouchUpdate:
+            dy = last.y() - pos.y()
+            state[2] = moved + abs(pos.x() - last.x()) + abs(pos.y() - last.y())
+            state[1] = pos
+            if state[2] > TOUCH_SLOP_PX:
+                sb = self.verticalScrollBar()
+                if dy and sb.maximum() > sb.minimum():
+                    sb.setValue(int(round(sb.value() + dy)))
+            return True
+        # TouchEnd / TouchCancel
+        self._row_touch = None
+        if kind == QEvent.Type.TouchEnd and moved <= TOUCH_SLOP_PX \
+                and event.timestamp() - press_ms <= TOUCH_TAP_MS:
+            index = self.indexAt(origin.toPoint())
+            if index.isValid():
+                click_item(self.viewport(), origin)
+            return True
+        return True
 
     def viewportEvent(self, event):
-        if event.type() == QEvent.Type.ToolTip:
+        kind = event.type()
+        if kind == QEvent.Type.ToolTip:
             return True
+        if kind in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
+                    QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            if self._touch_row_event(event, kind):
+                return True
         return super().viewportEvent(event)
 
     def event(self, event):
@@ -1133,7 +1175,13 @@ class DarkroomComboListView(QListView):
         if sb.maximum() <= 0:
             event.ignore()
             return
-        self._scroll.add(-(delta / 120.0) * 72.0)
+        # A touchpad flick reverses on the spot; a notched wheel keeps the additive
+        # semantics (see WheelFollower.add).
+        try:
+            continuous = event.phase() != Qt.ScrollPhase.NoScrollPhase
+        except AttributeError:
+            continuous = False
+        self._scroll.add(-(delta / 120.0) * 72.0, allow_reverse_takeover=continuous)
         event.accept()
 
     def mouseMoveEvent(self, event):

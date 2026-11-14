@@ -780,6 +780,31 @@ class CAEstimateWorker(QThread):
             self.caReady.emit(self.photo_id, res)
 
 
+def _make_thread_low_priority():
+    """A callable that drops the *calling* thread to below-normal priority, once.
+
+    Decoding RAW is a long C loop.  Sixteen of those at normal priority starve the GUI
+    thread on every repaint: the main thread is technically alive but cannot get a time
+    slice, so the status bar's cancel button reads as dead.  Threads are pooled, so the
+    flag lives on a thread-local.
+    """
+    state = threading.local()
+    THREAD_PRIORITY_BELOW_NORMAL = -1
+
+    def apply():
+        if getattr(state, "done", False):
+            return
+        state.done = True
+        try:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetThreadPriority(kernel32.GetCurrentThread(),
+                                       THREAD_PRIORITY_BELOW_NORMAL)
+        except Exception:
+            pass
+
+    return apply
+
+
 class SlotDecodeWorker(QThread):
     """Background worker for session restoration: decodes uncached photos directly
     into pre-allocated slot indices, streaming thumbnail pixmaps without affecting list order.
@@ -809,13 +834,18 @@ class SlotDecodeWorker(QThread):
         except Exception:
             preview_max_edge = 2048
 
-        max_workers = min(16, max(4, os.cpu_count() or 4))
+        # 这个池子和导入是同一件事（解 RAW），并发也该一致：16 个线程会把每一核都占满，
+        # 主线程连一次重绘都要排队，"取消导入"于是看着像点不动。3 个线程足够喂满磁盘，
+        # 又留得出余量给 UI。
+        max_workers = min(3, max(2, (os.cpu_count() or 4) // 2))
         total_items = len(self.uncached_items)
         done_count = 0
+        low_priority = _make_thread_low_priority()
 
         def _decode(slot_idx, file_path):
             if self._stopped:
                 return slot_idx, None
+            low_priority()
             try:
                 entry = self.engine.decode_photo_data(file_path, preview_max_edge=preview_max_edge, is_first=False, fast_thumbnail=True)
                 if entry and entry.get("success"):
@@ -2841,10 +2871,19 @@ class DarkroomMainWindow(QMainWindow):
                 self.photos[target_idx] = target_entry
             target_id = target_entry.get("id")
             if target_id:
-                try:
-                    self.on_switch_photo(target_id)
-                except Exception as e:
-                    logger.error(f"Immediate active photo activation failed: {e}", exc_info=True)
+                th = target_entry.get("raw_thumbnail_rgb")
+                if th is None:
+                    th = target_entry.get("thumbnail_rgb")
+                # 恢复会话先铺缩略图占位。完整链一次 1.4-2.2 s（33³ LUT 现烘 + 全分辨率
+                # 纹理上传），正好压在用户最想点"取消"的那几秒上；占位是 0 ms，完整链
+                # 等恢复收尾再跑（用户已经接受了导入期的"先粗糙后精细"）。
+                if th is not None and hasattr(self.canvas, "set_placeholder_image"):
+                    self._show_import_placeholder(target_entry)
+                else:
+                    try:
+                        self.on_switch_photo(target_id)
+                    except Exception as e:
+                        logger.error(f"Immediate active photo activation failed: {e}", exc_info=True)
             self._update_window_title()
 
         def _on_progress(current, total):
@@ -2879,7 +2918,13 @@ class DarkroomMainWindow(QMainWindow):
                     self.filmstrip.set_photo_dirty(entry["id"], True)
 
             # Force activation of target photo so filmstrip, canvas, sidebar, cards, and histogram are all completely initialized
-            if target_id and not already_loaded:
+            deferred_pending = bool(getattr(self, "_deferred_switch_id", None))
+            if deferred_pending:
+                # 首图现在是占位缩略图（见 _on_active_photo_ready）。还有未缓存的槽位要解
+                # 就把完整链留到 _on_all_slots_decoded，否则现在就补上。
+                if not uncached_slots:
+                    QTimer.singleShot(IMPORT_DEFERRED_SWITCH_DELAY_MS, self._activate_deferred_photo)
+            elif target_id and not already_loaded:
                 try:
                     self.on_switch_photo(target_id, force=True)
                 except Exception as e:
@@ -11310,15 +11355,16 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._set_import_hq_suspend(False, hold=(len(self.photos) > 1))
         if hasattr(self, "btn_cancel_import"):
             self.btn_cancel_import.setVisible(False)
+        # 首图还停在占位缩略图上，把完整链补上（用户这会儿已经能随便点了）。
+        if getattr(self, "_deferred_switch_id", None):
+            QTimer.singleShot(IMPORT_DEFERRED_SWITCH_DELAY_MS, self._activate_deferred_photo)
         sess_name = os.path.basename(self._current_session_path) if getattr(self, "_current_session_path", None) else ""
         if sess_name:
             self.set_app_status(f"会话已恢复：{sess_name}（{len(self.photos)} 张）", spinning=False, timeout_ms=3000)
         else:
             self.set_app_status(f"底片库已就绪（{len(self.photos)} 张）", spinning=False, timeout_ms=2500)
-        try:
-            session_cache_manager.prune_cache_if_needed()
-        except Exception:
-            pass
+        # 修剪要遍历整个缓存目录（实测 351-487 ms），别压在恢复完成的当口。
+        self._run_cache_maintenance("prune", session_cache_manager.prune_cache_if_needed)
 
     def _sort_photos_by(self, sort_key):
         """Sort photos in filmstrip and session by criteria:

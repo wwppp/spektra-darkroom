@@ -285,19 +285,32 @@ class TouchPanFilter(QObject):
     # -- taps -------------------------------------------------------------------------------
     def _click_at(self, position: QPointF) -> None:
         """Replay a tap as a click on whatever child the finger is over."""
-        point = QPoint(int(position.x()), int(position.y()))
-        # An item view (a combo's list, a table) has no child widgets: the click goes to the
-        # viewport, whose own handler picks the item by position.
-        target = self._viewport.childAt(point) or self._viewport
-        if not target.isEnabled():
-            return
-        local = target.mapFrom(self._viewport, point)
-        global_pos = target.mapToGlobal(local)
-        for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
-            event = QMouseEvent(kind, QPointF(local), QPointF(global_pos),
-                                Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
-                                Qt.KeyboardModifier.NoModifier)
-            QApplication.sendEvent(target, event)
+        click_item(self._viewport, position)
+
+
+def click_item(viewport, position) -> bool:
+    """Send a press/release pair at ``position`` (viewport coordinates of ``viewport``).
+
+    An item view (a combo's list, a table) has no child widgets: the click goes to the
+    viewport, whose own handler picks the item by position.  Shared with the popup list's
+    own touch handling -- a drop-down can miss the pan filter entirely (it is a separate
+    top-level window, and some panels never deliver TouchBegin to it), and then a finger
+    on a row would select nothing at all.
+    """
+    if viewport is None:
+        return False
+    point = QPoint(int(position.x()), int(position.y()))
+    target = viewport.childAt(point) or viewport
+    if not target.isEnabled():
+        return False
+    local = target.mapFrom(viewport, point)
+    global_pos = target.mapToGlobal(local)
+    for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+        event = QMouseEvent(kind, QPointF(local), QPointF(global_pos),
+                            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                            Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(target, event)
+    return True
 
 
 def install_touch_scroll(area: QAbstractScrollArea | None) -> TouchPanFilter | None:

@@ -46,6 +46,13 @@ CANVAS_GLIDE_MAX_FRAME_FRAC = 0.40
 # reads as a regular chequerboard instead of grain.  See the grain_field coordinate note.
 MAX_ZOOM_OVER_100 = 2.0
 
+# One touch frame may change the pinch scale by at most this much.  Touch panels deliver
+# 60-120 updates per second, so 15% per frame still lets a real gesture reach any zoom
+# quickly (four frames double it) while a finger landing or leaving -- which momentarily
+# halves the measured distance -- cannot slam the view into the zoom limits.
+TOUCH_PINCH_MIN_STEP = 0.87
+TOUCH_PINCH_MAX_STEP = 1.15
+
 # Truncation of the fitted exponential disc, in mean free paths. 8 keeps 99.95%
 # of a true 2D exponential; larger values compensate for collapsing each group's
 # multi-exponential PSF onto a single one.
@@ -1821,6 +1828,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self._touch_pan_active = False
         self._touch_last_pos = None
+        # 上一帧两指的间距。捏合必须逐帧用 *相邻两帧的比值* 去乘 zoom：拿「当前间距 /
+        # 按下时的间距」每帧乘一次，等于把 (cur/start)^n 叠上去，一个 10% 的位移配二十个
+        # 事件就能放大 6 倍 —— 用户看到的是"轻轻一碰就到最大/最小"。
+        self._touch_pinch_dist = None
 
         # Parameters
         self.params = {
@@ -3887,6 +3898,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             pts = e.touchPoints()
             self._touch_pan_active = len(pts) == 1
             self._touch_last_pos = pts[0].position() if pts else None
+            self._touch_pinch_dist = None
             e.accept()
             return True
         if t == QEvent.Type.TouchUpdate:
@@ -3895,19 +3907,34 @@ class DarkroomGLCanvas(QOpenGLWidget):
             if n >= 2:
                 self._touch_pan_active = False
                 p0, p1 = pts[0], pts[1]
-                d0 = p0.startPos() - p0.position()
-                d1 = p1.startPos() - p1.position()
-                dist0 = max(1e-3, float(d0.manhattanLength()))
-                dist1 = max(1e-3, float(d1.manhattanLength()))
-                w0, w1 = dist1 / (dist0 + dist1), dist0 / (dist0 + dist1)
-                cx = p0.position().x() * w0 + p1.position().x() * w1
-                cy = p0.position().y() * w0 + p1.position().y() * w1
-                sd0 = max(1e-3, float((p0.startPos() - p1.startPos()).manhattanLength()))
-                sd1 = max(1e-3, float((p0.position() - p1.position()).manhattanLength()))
-                self._zoom_at(sd1 / sd0, cx, cy)
+                # 锚点就是两指中点。旧代码按"每根手指离按下位置多远"给中点加权，手指
+                # 一抖权重就跳，画面在缩放的同时还会左右漂。
+                cx = (p0.position().x() + p1.position().x()) * 0.5
+                cy = (p0.position().y() + p1.position().y()) * 0.5
+                dx = p1.position().x() - p0.position().x()
+                dy = p1.position().y() - p0.position().y()
+                dist = math.hypot(dx, dy)
+                prev = self._touch_pinch_dist
+                if prev is None:
+                    # 第二根手指才落下时，第一个 Update 也要能算出比值 —— 基准取手指落下
+                    # 那一刻的间距（Qt 记在 startPos 里），否则这一帧的位移会被白丢。
+                    sx = p1.startPos().x() - p0.startPos().x()
+                    sy = p1.startPos().y() - p0.startPos().y()
+                    start_dist = math.hypot(sx, sy)
+                    prev = start_dist if start_dist > 1.0 else None
+                self._touch_pinch_dist = dist
+                # 只乘「这一帧相对上一帧」的比值，累积起来才等于 cur/start；单帧再夹一刀，
+                # 免得手指突然离开/多落一根造成一次跳变。
+                if prev is not None and prev > 1.0 and dist > 1.0:
+                    factor = dist / prev
+                    factor = max(TOUCH_PINCH_MIN_STEP, min(TOUCH_PINCH_MAX_STEP, factor))
+                    if abs(factor - 1.0) > 1e-4:
+                        self._zoom_at(factor, cx, cy)
                 e.accept()
                 return True
             if n == 1 and self._touch_pan_active and self._touch_last_pos is not None:
+                # 松开一根手指后继续拖：清掉捏合基准，否则下一帧都会拿旧间距当基准。
+                self._touch_pinch_dist = None
                 pos = pts[0].position()
                 delta = pos - self._touch_last_pos
                 self._touch_last_pos = pos
@@ -3925,6 +3952,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if t == QEvent.Type.TouchEnd:
             self._touch_pan_active = False
             self._touch_last_pos = None
+            self._touch_pinch_dist = None
             e.accept()
             return True
         return super().event(e)
