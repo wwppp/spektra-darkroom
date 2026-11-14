@@ -516,8 +516,6 @@ class BatchImportWorker(QThread):
         max_workers = min(3, max(2, (os.cpu_count() or 4) // 2))
         logger.info(f"BatchImportWorker starting with {max_workers} worker threads for {total} files")
 
-        results = {}
-        next_to_emit = 0
         loaded_count = 0
 
         def _decode_item(idx, file_path):
@@ -644,7 +642,6 @@ class BatchImportWorker(QThread):
             if first_entry is not None and not self._stopped:
                 loaded_count += 1
                 self.photoLoaded.emit(first_entry, loaded_count, total)
-            next_to_emit = 1
 
         # 2. Execute remaining files concurrently with paced emission so the GUI thread stays 60 FPS responsive
         if total > 1 and not self._stopped:
@@ -654,27 +651,15 @@ class BatchImportWorker(QThread):
                     if self._stopped:
                         break
                     idx, entry = future.result()
-                    results[idx] = entry
-
-                    # In-order streaming emission so filmstrip keeps exact file sequence
-                    while next_to_emit in results:
-                        emit_entry = results.pop(next_to_emit)
-                        if emit_entry is not None:
-                            loaded_count += 1
-                            self.photoLoaded.emit(emit_entry, loaded_count, total)
-                            if loaded_count % 4 == 0:
-                                time.sleep(0.004)
-                        next_to_emit += 1
-
-        # Drain any remaining results
-        while next_to_emit in results and not self._stopped:
-            emit_entry = results.pop(next_to_emit)
-            if emit_entry is not None:
-                loaded_count += 1
-                self.photoLoaded.emit(emit_entry, loaded_count, total)
-                if loaded_count % 4 == 0:
-                    time.sleep(0.004)
-            next_to_emit += 1
+                    # 不保序发射。底片栏的格子已经按文件顺序摆好了（append_placeholders），
+                    # 主线程按 id 原地填图，所以"到货顺序"不再影响显示顺序。以前为了保序
+                    # 在这里攒结果，只要有一张慢（实测偶发 1.5 s）后面的就全压着 —— 用户
+                    # 看到的是"两秒毫无变化，然后一下全出来"。
+                    if entry is not None and not self._stopped:
+                        loaded_count += 1
+                        self.photoLoaded.emit(entry, loaded_count, total)
+                        if loaded_count % 4 == 0:
+                            time.sleep(0.004)
 
         self._emit_import_finished(loaded_count)
         return loaded_count
@@ -877,6 +862,9 @@ class SessionRestoreWorker(QThread):
     - Zero GUI freezing during session transitions.
     """
     activePhotoReady = Signal(int, dict)       # target_idx, target_photo_entry
+    # 每处理完一张就发一张（乱序）。底片栏的格子已经按文件顺序摆好，收到就按 id 填，
+    # 所以恢复过程能像导入那样一张张长出来，而不是等 restoreFinished 一次性冒出来。
+    photoReady = Signal(int, dict)             # idx, photo_entry
     progress = Signal(int, int)                # current, total
     restoreFinished = Signal(list, list, str)  # all_photos, uncached_slots, target_path
     failed = Signal(str)
@@ -1163,6 +1151,7 @@ class SessionRestoreWorker(QThread):
 
             if not self._stopped:
                 self.activePhotoReady.emit(target_idx, target_entry)
+                self.photoReady.emit(target_idx, target_entry)
                 self.progress.emit(1, total_files)
 
             if total_files == 1:
@@ -1190,6 +1179,8 @@ class SessionRestoreWorker(QThread):
                         all_photos[idx] = entry
                         if is_uncached:
                             uncached_slots.append((idx, self.existing_files[idx]))
+                        if not self._stopped:
+                            self.photoReady.emit(idx, entry)
                     except Exception as e:
                         logger.warning(f"Error restoring photo at idx {idx}: {e}")
                     completed_count += 1
@@ -2313,6 +2304,23 @@ class StatusSlotWidget(QWidget):
         self.eff_info.setOpacity(1.0)
         self.eff_status.setOpacity(0.0)
         self._mode = "info"
+        self._apply_slot_hit_test("info")
+
+    def _apply_slot_hit_test(self, mode: str) -> None:
+        """Let only the visible layer take clicks.
+
+        Both layers are laid out over the same rectangle (StackAll), so the hidden one still
+        sits in the hit-test chain.  The cancel chip lives in the status layer: while the info
+        layer was accepting mouse events, a real click on the chip landed on the photo title
+        instead and nothing happened -- `QTest.mouseClick` sent the event straight to the
+        button, which is why it looked like it worked.
+        """
+        if hasattr(self, "w_info") and self.w_info is not None:
+            self.w_info.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+                                    mode != "info")
+        if hasattr(self, "w_status") and self.w_status is not None:
+            self.w_status.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+                                      mode != "status")
 
     def apply_theme(self, theme_name=None):
         """Repaint the status texts and the cancel-import chip for the active theme.
@@ -2386,6 +2394,8 @@ class StatusSlotWidget(QWidget):
         return self._mode
 
     def transition_to(self, target_mode: str, duration_ms: int = 180, on_finished=None):
+        # 命中测试跟着可见性走：否则隐藏那层会挡在按钮前面（见 _apply_slot_hit_test）。
+        self._apply_slot_hit_test(target_mode)
         if target_mode == self._mode and self._anim_group is None:
             if callable(on_finished):
                 on_finished()
@@ -2836,10 +2846,8 @@ class DarkroomMainWindow(QMainWindow):
         self._is_importing = True
         self._import_lock_time = time.time()
         self._set_import_hq_suspend(True)
-        # 恢复会话不给"取消"按钮：这里的主线程被解码/布局占着，按钮即使显示了也点不动
-        # （实测用户点了没反应），摆一个按不下去的按钮比不摆更糟。导入那条路仍然保留。
-        if hasattr(self, "btn_cancel_import"):
-            self.btn_cancel_import.setVisible(False)
+        self._set_cancel_chip(True, "恢复")
+        self._seed_restore_placeholders(existing_files)
 
         target_path = active_file if (active_file and active_file in existing_files) else existing_files[0]
         self._target_initial_active_path = target_path
@@ -2911,8 +2919,13 @@ class DarkroomMainWindow(QMainWindow):
                 and (target_entry or {}).get("float_img") is not None
             )
 
-            # Populate filmstrip with full session photos
-            self.filmstrip.set_photos(self.photos, target_id)
+            # 底片栏在恢复过程中已经按占位顺序一张张长好了（photoReady），这里只补漏 +
+            # 定光标。别再用 set_photos：那会重建所有格子，用户刚看着长出来的会闪一下。
+            missing = [p for p in self.photos if p and not self.filmstrip.has_photo(p.get("id"))]
+            if missing:
+                self.filmstrip.append_photos_batch(missing)
+            if target_id:
+                self.filmstrip.set_active_photo(target_id)
 
             # Mark dirty/edited badges
             for entry in self.photos:
@@ -2955,9 +2968,7 @@ class DarkroomMainWindow(QMainWindow):
             if uncached_slots:
                 self._is_importing = True
                 self._import_lock_time = time.time()
-                # 同上：这一段是恢复流程的延续，按钮在这里同样按不动，不显示。
-                if hasattr(self, "btn_cancel_import"):
-                    self.btn_cancel_import.setVisible(False)
+                self._set_cancel_chip(True, "恢复")
                 self.set_app_status(f"正在恢复底片库（0/{len(uncached_slots)}）…", spinning=True, timeout_ms=0)
                 self._reset_import_delivery()
                 self._slot_decode_worker = SlotDecodeWorker(uncached_slots, self.engine, parent=self)
@@ -2972,8 +2983,7 @@ class DarkroomMainWindow(QMainWindow):
                     return
                 self._is_importing = False
                 self._set_import_hq_suspend(False, hold=(total_files > 1))
-                if hasattr(self, "btn_cancel_import"):
-                    self.btn_cancel_import.setVisible(False)
+                self._set_cancel_chip(False)
                 if session_name:
                     if path_updated:
                         self.set_app_status(f"会话已恢复：{session_name}（{total_files} 张），底片路径已更新", spinning=False, timeout_ms=3000)
@@ -2990,10 +3000,10 @@ class DarkroomMainWindow(QMainWindow):
                 return
             self._is_importing = False
             self._set_import_hq_suspend(False, hold=False)
-            if hasattr(self, "btn_cancel_import"):
-                self.btn_cancel_import.setVisible(False)
+            self._set_cancel_chip(False)
             self.set_app_status(f"载入会话失败：{err_msg}", spinning=False, timeout_ms=4000)
 
+        worker.photoReady.connect(self._enqueue_restore_photo)
         worker.activePhotoReady.connect(_on_active_photo_ready)
         worker.progress.connect(_on_progress)
         worker.restoreFinished.connect(_on_restore_finished)
@@ -6259,6 +6269,14 @@ class DarkroomMainWindow(QMainWindow):
         Item 7: Support Left / Right arrow keys to step previous / next photo in filmstrip.
         Support Home / End keys to navigate to first / last photo in filmstrip.
         """
+        # Esc 中止导入/恢复。放在最前面，因为导入期间焦点可能在任意控件上，而按钮本身
+        # 会被主线程的卡顿拖慢；键盘事件只要窗口还活着就一定到得了。
+        if event.key() == Qt.Key.Key_Escape and getattr(self, "_is_importing", False):
+            if not self._stale_import_lock():
+                self._cancel_active_import(notify_user=True)
+                event.accept()
+                return
+
         focus_w = QApplication.focusWidget()
         from PySide6.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox
         is_typing = isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox))
@@ -10496,6 +10514,57 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if os.path.exists(file_path):
             self._import_files_list([file_path])
 
+    def _seed_import_placeholders(self, paths, start_idx):
+        """先把这一批的格子按顺序摆进底片栏，缩略图等解码回来原地填。
+
+        worker 的解码是乱序完成的、发射必须保序才能保持文件顺序，只要有一张慢（实测偶发
+        1.5 s）整条栏就僵在"只有一两张"，然后突然全冒出来。先摆格子以后，用户看到的是
+        一排灰格逐个变亮 —— 顺序还天然是对的。
+        """
+        strip = getattr(self, "filmstrip", None)
+        if strip is None or not paths:
+            return
+        entries = [{
+            "id": f"photo_{start_idx + i}_{os.path.basename(p)}",
+            "filename": os.path.basename(p),
+            "path": p,
+            "rating": 0,
+        } for i, p in enumerate(paths)]
+        try:
+            strip.append_placeholders(entries)
+        except Exception as ex:
+            logger.warning(f"Placeholder seeding failed: {ex}")
+
+    def _seed_restore_placeholders(self, files):
+        """恢复会话也先把格子按顺序摆出来（id 规则与 SessionRestoreWorker 一致）。"""
+        strip = getattr(self, "filmstrip", None)
+        if strip is None or not files:
+            return
+        entries = [{
+            "id": f"photo_{i}_{os.path.basename(p)}",
+            "filename": os.path.basename(p),
+            "path": p,
+            "rating": 0,
+        } for i, p in enumerate(files)]
+        try:
+            strip.append_placeholders(entries)
+        except Exception as ex:
+            logger.warning(f"Restore placeholder seeding failed: {ex}")
+
+    def _enqueue_restore_photo(self, idx, entry):
+        self._queue_ui_work(functools.partial(self._on_restore_photo_ready, idx, entry))
+
+    def _on_restore_photo_ready(self, idx, entry):
+        """worker 每解完一张就填一格 —— 恢复期间底片栏是一张张长出来的。"""
+        if 0 <= idx < len(self.photos):
+            self.photos[idx] = entry
+        pid = (entry or {}).get("id")
+        strip = getattr(self, "filmstrip", None)
+        if not pid or strip is None:
+            return
+        if not strip.fill_placeholder(pid, entry):
+            strip.append_photos_batch([entry])
+
     def _import_files_list(self, file_paths):
         if hasattr(self, "_pending_startup_restore_timer") and self._pending_startup_restore_timer is not None:
             self._pending_startup_restore_timer.stop()
@@ -10575,8 +10644,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         config_manager.add_recent_files(new_paths)
 
         # 3. Ensure cancel button is visible
-        if hasattr(self, "btn_cancel_import"):
-            self.btn_cancel_import.setVisible(True)
+        self._set_cancel_chip(True, "导入")
 
         # 4. Check if an import or restore worker is actively running
         active_worker_running = (
@@ -10616,6 +10684,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         start_idx = max(getattr(self, "_photo_id_counter", 0), len(self.photos))
         self._photo_id_counter = start_idx + len(new_paths)
 
+        self._seed_import_placeholders(new_paths, start_idx)
         self._import_filmstrip_buffer = []
         self._reset_import_delivery()
         self._set_import_hq_suspend(True)
@@ -10637,10 +10706,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         self._is_importing = True
         self._import_lock_time = time.time()
-        if hasattr(self, "btn_cancel_import"):
-            self.btn_cancel_import.setVisible(True)
+        self._set_cancel_chip(True, "导入")
 
         logger.info(f"Import queue: starting next batch with {len(next_batch)} files (start_idx={start_idx})")
+        self._seed_import_placeholders(next_batch, start_idx)
         self._reset_import_delivery()
         self._set_import_hq_suspend(True)
         self._import_worker = BatchImportWorker(next_batch, self.engine, start_idx=start_idx, parent=self)
@@ -11071,8 +11140,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._is_importing = False
         self._current_import_batch = []
         self._pending_import_queue = []
-        if hasattr(self, "btn_cancel_import"):
-            self.btn_cancel_import.setVisible(False)
+        self._set_cancel_chip(False)
         self._pending_session_map = None
         self.canvas.set_has_library_photos(bool(self.photos))
         self._update_recent_menu()
@@ -11182,6 +11250,20 @@ aspect_ratio=self._lens_frame_aspect(photo),
             pass
         return None
 
+    def _set_cancel_chip(self, visible, what="导入"):
+        """状态栏那颗"取消"胶囊：导入和恢复会话共用，文案跟着阶段走。
+
+        恢复会话也要能中止（几秒到一分钟），所以两条路都显示它。可点性靠
+        StatusSlotWidget._apply_slot_hit_test 保证 —— 光 setVisible 是不够的，
+        被隐藏层挡住时真实鼠标根本到不了。
+        """
+        btn = getattr(self, "btn_cancel_import", None)
+        if btn is None:
+            return
+        btn.setText(f"✕ 取消{what}")
+        btn.setToolTip(f"中断当前{what}（Esc）")
+        btn.setVisible(bool(visible))
+
     def _cancel_active_import(self, notify_user=True):
         """Forcefully cancels active batch import worker or slot decode worker, freeing CPU and memory."""
         was_importing = getattr(self, "_is_importing", False) or bool(getattr(self, "_pending_import_queue", None))
@@ -11251,8 +11333,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             except Exception:
                 pass
         self.canvas.set_has_library_photos(bool(self.photos))
-        if hasattr(self, "btn_cancel_import"):
-            self.btn_cancel_import.setVisible(False)
+        self._set_cancel_chip(False)
         self.restore_default_status()
         if notify_user and was_importing:
             self.set_app_status("已取消导入", timeout_ms=3000)
@@ -11327,6 +11408,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
             else:
                 self.engine.session_photos.append(ep_dict)
 
+        # 这一张刚解出来：底片栏那格换成真图（占位阶段它是灰的）。
+        try:
+            self.filmstrip.fill_placeholder(photo.get("id"), photo)
+        except Exception:
+            pass
+
         # If current active photo was uncached and just completed, refresh canvas display
         if self.active_photo_id == photo["id"]:
             if photo.get("float_img") is not None:
@@ -11356,8 +11443,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         self._is_importing = False
         self._set_import_hq_suspend(False, hold=(len(self.photos) > 1))
-        if hasattr(self, "btn_cancel_import"):
-            self.btn_cancel_import.setVisible(False)
+        self._set_cancel_chip(False)
         # 首图还停在占位缩略图上，把完整链补上（用户这会儿已经能随便点了）。
         if getattr(self, "_deferred_switch_id", None):
             QTimer.singleShot(IMPORT_DEFERRED_SWITCH_DELAY_MS, self._activate_deferred_photo)

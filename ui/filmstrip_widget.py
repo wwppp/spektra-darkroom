@@ -256,6 +256,35 @@ class FilmstripItemWidget(QFrame):
             )
             self.update()
 
+    def fill_thumbnail_from_photo(self, photo_entry) -> bool:
+        """占位格拿到真图后原地换图 —— 不重建 widget，列表顺序和滚动位置都不动。
+
+        缩略图可能比照片晚到（导入/恢复都是先有元数据再有图），原地换图是唯一不会让
+        底片栏跳一下的做法。
+        """
+        if not photo_entry:
+            return False
+        if isinstance(self.photo_data, dict):
+            self.photo_data.update(photo_entry)
+            source = self.photo_data
+        else:
+            self.photo_data = photo_entry
+            source = photo_entry
+        rgb = None
+        for key in ("raw_thumbnail_rgb", "thumbnail_rgb", "raw_thumbnail"):
+            cand = source.get(key)
+            if cand is not None and isinstance(cand, np.ndarray) and cand.size > 0 and is_valid_thumbnail(cand):
+                rgb = cand
+                break
+        if rgb is None:
+            return False
+        rgb_c = np.ascontiguousarray(rgb, dtype=np.uint8)
+        h, w, c = rgb_c.shape
+        qimg = QImage(rgb_c.data, w, h, w * c, QImage.Format.Format_RGB888).copy()
+        self.set_thumbnail(QPixmap.fromImage(qimg))
+        self.update_photo_data(source)
+        return True
+
     def set_active(self, is_active):
         if self.is_active != is_active:
             self.is_active = is_active
@@ -638,6 +667,8 @@ class FilmstripWidget(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._item_widgets = {}
         self._photos_list = []
+        # 已经按最终顺序摆好、但缩略图还没到的格子（导入/恢复时先占位，见图一个个变亮）。
+        self._placeholder_ids = set()
         self._active_id = None
         self._selection_anchor_id = None
         self._selected_ids = set()
@@ -1614,6 +1645,7 @@ class FilmstripWidget(QWidget):
             self.scroll_layout.removeWidget(w)
             w.deleteLater()
         self._item_widgets.clear()
+        self._placeholder_ids.clear()
 
         # Update count
         self.count_label.setText(f"{len(photos)} 张")
@@ -1752,6 +1784,69 @@ class FilmstripWidget(QWidget):
         if is_active:
             self.selectionChanged.emit(list(self._selected_ids))
 
+    def append_placeholders(self, entries):
+        """按最终顺序先把格子摆出来（缩略图留空），随后用 ``fill_placeholder`` 逐个填图。
+
+        为什么要先摆：worker 的解码是乱序完成的，发射必须保序才能让底片栏顺序正确，于是
+        只要有一张慢（实测偶发 1.5 s），整条栏就停在"只有一两张"然后突然全出现 —— 看起来
+        像完全卡死。先摆格子就没有这个问题：用户看到的是灰格一个个变亮，顺序天然正确。
+        """
+        if not entries:
+            return
+        self._cancel_pending_scroll_timers()
+        if getattr(self, "_empty_lbl", None) is not None:
+            self.scroll_layout.removeWidget(self._empty_lbl)
+            self._empty_lbl.deleteLater()
+            self._empty_lbl = None
+
+        container = self.scroll_content if getattr(self, "scroll_content", None) else self
+        container.setUpdatesEnabled(False)
+        try:
+            item_w, item_h = self._compute_item_dimensions()
+            for entry in entries:
+                pid = entry.get("id")
+                if not pid or pid in self._item_widgets:
+                    continue
+                self._photos_list.append(entry)
+                item = FilmstripItemWidget(entry, is_active=False, is_selected=False,
+                                           target_w=item_w, target_h=item_h, parent=container)
+                item.clicked.connect(self._on_item_clicked)
+                item.removeRequested.connect(self.photoRemoved.emit)
+                item.contextMenuRequested.connect(self._show_context_menu)
+                item.ratingChanged.connect(self._on_item_rating_changed)
+                self._item_widgets[pid] = item
+                idx = max(0, len(self._item_widgets) - 1)
+                self.scroll_layout.insertWidget(idx, item, 0, Qt.AlignmentFlag.AlignVCenter)
+                self._placeholder_ids.add(pid)
+        finally:
+            container.setUpdatesEnabled(True)
+
+        self._update_content_geometry()
+        self.count_label.setText(f"{len(self._photos_list)} 张")
+
+    def fill_placeholder(self, pid, photo_entry) -> bool:
+        """把某一格换成这张照片（占位→真图，或解码补上来的新缩略图），次序不变。"""
+        if not pid:
+            return False
+        self._placeholder_ids.discard(pid)
+        item = self._item_widgets.get(pid)
+        if item is None:
+            return False
+        # 复用同一个 dict：`_photos_list` 的次序就是用户看到的次序，不能换成新对象。
+        slot = next((p for p in self._photos_list if isinstance(p, dict) and p.get("id") == pid), None)
+        if slot is not None and isinstance(photo_entry, dict):
+            slot.update(photo_entry)
+            item.fill_thumbnail_from_photo(slot)
+        else:
+            item.fill_thumbnail_from_photo(photo_entry)
+        return True
+
+    def has_photo(self, pid) -> bool:
+        return bool(pid) and pid in self._item_widgets
+
+    def placeholder_count(self) -> int:
+        return len(self._placeholder_ids)
+
     def append_photos_batch(self, photos_list, active_id=None):
         """Efficiently appends a batch of photo entries in a single layout transaction,
         disabling layout updates during insertion to avoid layout thrashing.
@@ -1769,11 +1864,15 @@ class FilmstripWidget(QWidget):
         try:
             item_w, item_h = self._compute_item_dimensions()
             for photo in photos_list:
+                pid = photo.get("id")
+                # 这一格是占位摆好的：就地填图，别在后面再插一份（顺序会错）。
+                if pid and pid in self._placeholder_ids:
+                    self.fill_placeholder(pid, photo)
+                    continue
                 # 按 id 判重 —— dict 的 `==` 会碰上 ndarray 值，见 `append_photo` 的注释。
-                if not any(p.get("id") == photo.get("id") for p in self._photos_list):
+                if not any(p.get("id") == pid for p in self._photos_list):
                     self._photos_list.append(photo)
 
-                pid = photo["id"]
                 if pid in self._item_widgets:
                     continue
 
