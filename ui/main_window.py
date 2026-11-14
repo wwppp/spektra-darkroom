@@ -2983,9 +2983,11 @@ class DarkroomMainWindow(QMainWindow):
                     self._cards_debounce_timer.start(100)
                 self._schedule_histogram_update()
 
-            # 底片栏**不**跳到最后停留的那张：恢复过程是从左往右一格格长出来的，一上来就
-            # 居中到中间某格，用户看到的是"从那一格开始、左边全空"。让他自己点/滚时再跟。
-            self.filmstrip.set_autoscroll_enabled(True)
+            # 底片栏**不**在恢复过程中跟随：那样一打开就居中到上次停留的那张，左边全空。
+            # 等这轮彻底加载完再滚过去（见 `_scroll_to_active_after_restore`）。
+            if not uncached_slots:
+                self._scroll_to_active_after_restore(
+                    320 + (IMPORT_DEFERRED_SWITCH_DELAY_MS if getattr(self, "_deferred_switch_id", None) else 0))
 
             # Trigger a post-animation polish pass once FadingStackedWidget transition reaches 100%
             QTimer.singleShot(280, lambda: (
@@ -11582,6 +11584,31 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if getattr(self, "_is_importing", False):
             self.set_app_status(f"正在恢复底片库（{curr}/{total}）…", spinning=True, timeout_ms=0)
 
+    def _scroll_to_active_after_restore(self, delay_ms=300):
+        """恢复/导入收尾后，把底片栏滚到当前那张。
+
+        恢复期间故意不跟随（否则一打开就居中到上次停留的那张，左边全空），等**加载完**
+        再滚过去。用户中途自己点过/滚过就不抢他的位置 —— 那时 `_autoscroll_enabled`
+        已经被输入事件打开。
+        """
+        strip = getattr(self, "filmstrip", None)
+        if strip is None:
+            return
+
+        def _go():
+            pid = getattr(self, "active_photo_id", None)
+            if not pid or getattr(self, "_is_importing", False):
+                return
+            if getattr(strip, "_autoscroll_enabled", True):
+                return          # 用户自己动过手，别抢
+            strip.set_autoscroll_enabled(True)
+            try:
+                strip.scroll_to_photo(pid, animate=True, force_center=True)
+            except Exception as ex:
+                logger.debug(f"Post-restore scroll failed: {ex}")
+
+        QTimer.singleShot(int(delay_ms), _go)
+
     def _on_all_slots_decoded(self):
         if getattr(self, "_slot_decode_worker", None):
             try:
@@ -11602,6 +11629,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # 首图还停在占位缩略图上，把完整链补上（用户这会儿已经能随便点了）。
         if getattr(self, "_deferred_switch_id", None):
             QTimer.singleShot(IMPORT_DEFERRED_SWITCH_DELAY_MS, self._activate_deferred_photo)
+        # 全部解完 = 这一轮加载结束，这时候才把底片栏滚到当前那张。
+        self._scroll_to_active_after_restore(
+            320 + (IMPORT_DEFERRED_SWITCH_DELAY_MS if getattr(self, "_deferred_switch_id", None) else 0))
         sess_name = os.path.basename(self._current_session_path) if getattr(self, "_current_session_path", None) else ""
         if sess_name:
             self.set_app_status(f"会话已恢复：{sess_name}（{len(self.photos)} 张）", spinning=False, timeout_ms=3000)
