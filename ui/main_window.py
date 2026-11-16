@@ -768,8 +768,8 @@ RESTORE_RELEASE_STALL_MS = 250.0
 _AUTO_CA_KEYS = ("auto_ca_r", "auto_ca_b", "auto_ca_scale_r", "auto_ca_scale_b")
 
 # Status-line copy shared by several call sites (see docs/status-text-inventory.md §5).
-STATUS_IMPORTING = "正在导入底片（{cur}/{tot}）…"
-STATUS_LOSSY_SKIPPED = "已跳过 {n} 个有损压缩文件（JPG/WebP），仅支持 RAW 与无损图像"
+STATUS_IMPORTING = t("正在导入底片（{cur}/{tot}）…")
+STATUS_LOSSY_SKIPPED = t("已跳过 {n} 个有损压缩文件（JPG/WebP），仅支持 RAW 与无损图像")
 
 
 class CAEstimateWorker(QThread):
@@ -1432,11 +1432,11 @@ class FilmGridCard(QFrame):
         "fujifilm_velvia_100": "Velvia 100",
         "fujifilm_provia_100f": "Provia 100F",
         "kodak_ektachrome_100": "Ektachrome 100",
-        "kodak_2383": "2383 电影放映",
-        "kodak_portra_endura": "Portra 展览相纸",
-        "fujifilm_crystal_archive_typeii": "水晶二代相纸",
-        "kodak_ultra_endura": "Ultra 高反差相纸",
-        "fujifilm_eterna_cp": "Eterna CP 发行",
+        "kodak_2383": t("2383 电影放映"),
+        "kodak_portra_endura": t("Portra 展览相纸"),
+        "fujifilm_crystal_archive_typeii": t("水晶二代相纸"),
+        "kodak_ultra_endura": t("Ultra 高反差相纸"),
+        "fujifilm_eterna_cp": t("Eterna CP 发行"),
         "fujifilm_eterna_cp_3521xd": "Eterna CP 3521XD",
         "kodak_exr_5386": "Vision 5386",
         "agfa_cp30": "Agfa CP30"
@@ -1904,17 +1904,17 @@ class FilmGridCard(QFrame):
         elif event.button() == Qt.MouseButton.RightButton:
             menu = QMenu(self)
             menu.setStyleSheet(get_darkroom_menu_style())
-            act_apply = menu.addAction("应用预设")
+            act_apply = menu.addAction(t("应用预设"))
             act_apply.triggered.connect(lambda: (self.highlight_now(), self.selected.emit(self.stock_id)))
 
             menu.addSeparator()
 
             # Submenu: 整理排列 (regardless of clicking on blank or card)
-            sort_menu = menu.addMenu("整理排列")
+            sort_menu = menu.addMenu(t("整理排列"))
             sort_menu.setStyleSheet(get_darkroom_menu_style())
-            act_by_name = sort_menu.addAction("按名称排序 (A-Z)")
+            act_by_name = sort_menu.addAction(t("按名称排序 (A-Z)"))
             act_by_name.triggered.connect(lambda: self.sortRequested.emit(self.stock_type, "name"))
-            act_by_time = sort_menu.addAction("按添加时间排序 (最新在前)")
+            act_by_time = sort_menu.addAction(t("按添加时间排序 (最新在前)"))
             act_by_time.triggered.connect(lambda: self.sortRequested.emit(self.stock_type, "time"))
 
             menu.exec(event.globalPosition().toPoint())
@@ -1972,28 +1972,28 @@ class CompactExifWidget(QWidget):
 
         self.labels = {}
         fields = [
-            ("拍摄日期", "capture_time"),
-            ("分辨率", "resolution"),
-            ("大小", "file_size"),
-            ("相机制造商", "camera_make"),
-            ("相机型号", "camera_model"),
-            ("相机序列号", "serial_number"),
-            ("镜头制造商", "lens_make"),
-            ("镜头型号", "lens_model"),
-            ("白平衡", "white_balance"),
-            ("ISO 速度", "iso"),
-            ("光圈值", "aperture"),
-            ("曝光时间", "shutter_speed"),
-            ("曝光补偿", "exposure_bias"),
-            ("曝光程序", "exposure_program"),
-            ("测光模式", "metering_mode"),
-            ("闪光灯", "flash"),
-            ("焦距", "focal_length"),
-            ("35mm 焦距", "focal_length_35mm"),
-            ("作者", "artist"),
-            ("版权", "copyright"),
-            ("GPS 坐标", "gps_coords"),
-            ("GPS 基准", "gps_datum"),
+            (t("拍摄日期"), "capture_time"),
+            (t("分辨率"), "resolution"),
+            (t("大小"), "file_size"),
+            (t("相机制造商"), "camera_make"),
+            (t("相机型号"), "camera_model"),
+            (t("相机序列号"), "serial_number"),
+            (t("镜头制造商"), "lens_make"),
+            (t("镜头型号"), "lens_model"),
+            (t("白平衡"), "white_balance"),
+            (t("ISO 速度"), "iso"),
+            (t("光圈值"), "aperture"),
+            (t("曝光时间"), "shutter_speed"),
+            (t("曝光补偿"), "exposure_bias"),
+            (t("曝光程序"), "exposure_program"),
+            (t("测光模式"), "metering_mode"),
+            (t("闪光灯"), "flash"),
+            (t("焦距"), "focal_length"),
+            (t("35mm 焦距"), "focal_length_35mm"),
+            (t("作者"), "artist"),
+            (t("版权"), "copyright"),
+            (t("GPS 坐标"), "gps_coords"),
+            (t("GPS 基准"), "gps_datum"),
         ]
 
         for row, (label_text, key) in enumerate(fields):
@@ -2361,10 +2361,10 @@ class StatusSlotWidget(QWidget):
         self.status_label.setStyleSheet("QLabel#status_label { color: #94a3b8; font-size: 11px; }")
         l_status.addWidget(self.status_label)
 
-        self.btn_cancel_import = QPushButton("✕ 取消导入")
+        self.btn_cancel_import = QPushButton(t("✕ 取消导入"))
         self.btn_cancel_import.setVisible(False)
         self.btn_cancel_import.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_cancel_import.setToolTip("中断当前批量导入")
+        self.btn_cancel_import.setToolTip(t("中断当前批量导入"))
         l_status.addWidget(self.btn_cancel_import)
         self.apply_theme()
         theme_manager.themeChanged.connect(self.apply_theme)
@@ -2923,7 +2923,7 @@ class DarkroomMainWindow(QMainWindow):
         self._is_importing = True
         self._import_lock_time = time.time()
         self._set_import_hq_suspend(True)
-        self._set_cancel_chip(True, "恢复")
+        self._set_cancel_chip(True, t("恢复"))
         self._seed_restore_placeholders(existing_files, active_file)
 
         target_path = active_file if (active_file and active_file in existing_files) else existing_files[0]
@@ -2933,9 +2933,9 @@ class DarkroomMainWindow(QMainWindow):
         self.stack.setCurrentIndexAnimated(1, duration_ms=250)
         self.btn_title_export.setVisible(True)
         if session_name:
-            self.set_app_status(f"正在载入会话：{session_name}…", spinning=True, timeout_ms=0)
+            self.set_app_status(t('正在载入会话：{session_name}…', session_name=session_name), spinning=True, timeout_ms=0)
         else:
-            self.set_app_status("正在载入会话…", spinning=True, timeout_ms=0)
+            self.set_app_status(t("正在载入会话…"), spinning=True, timeout_ms=0)
 
         # 2. Launch background worker
         worker = SessionRestoreWorker(
@@ -2977,7 +2977,7 @@ class DarkroomMainWindow(QMainWindow):
             if getattr(self, "_session_restore_worker", None) != worker:
                 return
             if getattr(self, "_is_importing", False):
-                self.set_app_status(f"正在载入会话（{current}/{total}）…", spinning=True, timeout_ms=0)
+                self.set_app_status(t('正在载入会话（{current}/{total}）…', current=current, total=total), spinning=True, timeout_ms=0)
 
         def _on_restore_finished(all_photos, uncached_slots, final_target_path):
             if getattr(self, "_session_restore_worker", None) != worker:
@@ -3052,8 +3052,8 @@ class DarkroomMainWindow(QMainWindow):
             if uncached_slots:
                 self._is_importing = True
                 self._import_lock_time = time.time()
-                self._set_cancel_chip(True, "恢复")
-                self.set_app_status(f"正在恢复底片库（0/{len(uncached_slots)}）…", spinning=True, timeout_ms=0)
+                self._set_cancel_chip(True, t("恢复"))
+                self.set_app_status(t('正在恢复底片库（0/{uncached_slots_count}）…', uncached_slots_count=len(uncached_slots)), spinning=True, timeout_ms=0)
                 self._reset_import_delivery()
                 self._slot_decode_worker = SlotDecodeWorker(uncached_slots, self.engine, parent=self)
                 # 16 个解码线程一秒能吐上百条，和导入一样必须按帧投放；收尾也排队，
@@ -3068,14 +3068,14 @@ class DarkroomMainWindow(QMainWindow):
                 self._is_importing = False
                 self._set_import_hq_suspend(False, hold=(total_files > 1))
                 self._set_cancel_chip(False)
-                self._sync_filmstrip_thumbnails("恢复收尾")
+                self._sync_filmstrip_thumbnails(t("恢复收尾"))
                 if session_name:
                     if path_updated:
-                        self.set_app_status(f"会话已恢复：{session_name}（{total_files} 张），底片路径已更新", spinning=False, timeout_ms=3000)
+                        self.set_app_status(t('会话已恢复：{session_name}（{total_files} 张），底片路径已更新', session_name=session_name, total_files=total_files), spinning=False, timeout_ms=3000)
                     else:
-                        self.set_app_status(f"会话已恢复：{session_name}（{total_files} 张）", spinning=False, timeout_ms=2500)
+                        self.set_app_status(t('会话已恢复：{session_name}（{total_files} 张）', session_name=session_name, total_files=total_files), spinning=False, timeout_ms=2500)
                 else:
-                    self.set_app_status(f"底片库已就绪（{total_files} 张）", spinning=False, timeout_ms=2500)
+                    self.set_app_status(t('底片库已就绪（{total_files} 张）', total_files=total_files), spinning=False, timeout_ms=2500)
 
         def _on_failed(err_msg):
             if getattr(self, "_session_restore_worker", None) != worker:
@@ -3086,7 +3086,7 @@ class DarkroomMainWindow(QMainWindow):
             self._is_importing = False
             self._set_import_hq_suspend(False, hold=False)
             self._set_cancel_chip(False)
-            self.set_app_status(f"载入会话失败：{err_msg}", spinning=False, timeout_ms=4000)
+            self.set_app_status(t('载入会话失败：{err_msg}', err_msg=err_msg), spinning=False, timeout_ms=4000)
 
         worker.photoReady.connect(self._enqueue_restore_photo)
         worker.activePhotoReady.connect(_on_active_photo_ready)
@@ -3569,14 +3569,14 @@ class DarkroomMainWindow(QMainWindow):
             shown = rejected_files[:6]
             lines.extend(f"  {os.path.basename(p)}" for p in shown)
             if len(rejected_files) > len(shown):
-                lines.append(f"  …另有 {len(rejected_files) - len(shown)} 个文件")
+                lines.append(t('  …另有 {v} 个文件', v=len(rejected_files) - len(shown)))
         if empty_dirs:
             for d in empty_dirs[:2]:
-                lines.append(f"  文件夹「{os.path.basename(d) or d}」里没有可导入的文件")
+                lines.append(t('  文件夹「{v}」里没有可导入的文件', v=os.path.basename(d) or d))
             if len(empty_dirs) > 2:
-                lines.append(f"  …另有 {len(empty_dirs) - 2} 个空文件夹")
-        return ("暗房只接受相机 RAW 与无损位图（PNG / TIFF）。\n\n"
-                + ("未导入：\n" + "\n".join(lines) if lines else "拖入的内容里没有可导入的文件。"))
+                lines.append(t('  …另有 {v} 个空文件夹', v=len(empty_dirs) - 2))
+        return (t("暗房只接受相机 RAW 与无损位图（PNG / TIFF）。\n\n")
+                + (t("未导入：\n") + "\n".join(lines) if lines else t("拖入的内容里没有可导入的文件。")))
 
     def _report_unsupported_drop(self, rejected_files, empty_dirs):
         """Tell the user why a drop did nothing.
@@ -3588,10 +3588,10 @@ class DarkroomMainWindow(QMainWindow):
 
         show_darkroom_info(
             self,
-            "不支持的文件",
-            "这些文件无法导入",
+            t("不支持的文件"),
+            t("这些文件无法导入"),
             self._unsupported_drop_message(rejected_files, empty_dirs),
-            ok_text="知道了",
+            ok_text=t("知道了"),
             badge_symbol="!",
             width=470,
         )
@@ -4086,7 +4086,7 @@ class DarkroomMainWindow(QMainWindow):
             self.lbl_title_export_icon.setPixmap(pix)
         self.lbl_title_export_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.lbl_title_export_text = QLabel("扫描")
+        self.lbl_title_export_text = QLabel(t("扫描"))
         self.lbl_title_export_text.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.lbl_title_export_text.setStyleSheet("background: transparent; border: none; color: #111113; font-weight: bold; font-size: 11px;")
         self.lbl_title_export_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -4162,12 +4162,12 @@ class DarkroomMainWindow(QMainWindow):
             lbl_icon.setPixmap(pix)
             drop_layout.addWidget(lbl_icon, 0, Qt.AlignmentFlag.AlignCenter)
 
-        self.lbl_drop = QLabel("点击或拖入照片 / RAW 负片文件")
+        self.lbl_drop = QLabel(t("点击或拖入照片 / RAW 负片文件"))
         self.lbl_drop.setStyleSheet(f"color: {theme_manager.color('text_primary')}; font-size: 16px; font-weight: 600;")
         self.lbl_drop.setAlignment(Qt.AlignmentFlag.AlignCenter)
         drop_layout.addWidget(self.lbl_drop)
 
-        self.lbl_sub = QLabel("支持格式: ARW · CR2 · CR3 · NEF · RAF · DNG · TIFF · PNG")
+        self.lbl_sub = QLabel(t("支持格式: ARW · CR2 · CR3 · NEF · RAF · DNG · TIFF · PNG"))
         self.lbl_sub.setStyleSheet(f"color: {theme_manager.color('text_muted')}; font-size: 12px;")
         self.lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         drop_layout.addWidget(self.lbl_sub)
@@ -4179,7 +4179,7 @@ class DarkroomMainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(16)
 
-        btn_import_file = QPushButton("导入文件")
+        btn_import_file = QPushButton(t("导入文件"))
         btn_import_file.setFixedSize(160, 38)
         btn_import_file.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_import_file.setStyleSheet("""
@@ -4201,7 +4201,7 @@ class DarkroomMainWindow(QMainWindow):
         btn_import_file.clicked.connect(self.action_open_files)
         btn_layout.addWidget(btn_import_file)
 
-        self.btn_import_folder = QPushButton("导入文件夹")
+        self.btn_import_folder = QPushButton(t("导入文件夹"))
         self.btn_import_folder.setFixedSize(160, 38)
         self.btn_import_folder.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_import_folder.setStyleSheet("""
@@ -4324,7 +4324,7 @@ class DarkroomMainWindow(QMainWindow):
 
         p_header = QHBoxLayout()
         p_header.setContentsMargins(4, 2, 4, 0)
-        self.lbl_paper_title = QLabel("放大相纸 (Papers)")
+        self.lbl_paper_title = QLabel(t("放大相纸 (Papers)"))
         self.lbl_paper_title.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold;")
         p_header.addWidget(self.lbl_paper_title)
         p_header.addStretch()
@@ -4436,7 +4436,7 @@ class DarkroomMainWindow(QMainWindow):
         self.export_status_container.setObjectName("export_status_container")
         self.export_status_container.setVisible(False)
         self.export_status_container.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.export_status_container.setToolTip("点击查看扫描队列详情（快捷键 Ctrl+J）")
+        self.export_status_container.setToolTip(t("点击查看扫描队列详情（快捷键 Ctrl+J）"))
         self.export_status_container.mousePressEvent = self._on_export_status_clicked
         export_layout = QHBoxLayout(self.export_status_container)
         export_layout.setContentsMargins(0, 0, 0, 0)
@@ -4498,7 +4498,7 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_crop.setIcon(get_icon("crop.png"))
         self.btn_crop.setIconSize(QSize(14, 14))
         self.btn_crop.setCheckable(True)
-        self.btn_crop.setToolTip("裁切与校平（快捷键 C）")
+        self.btn_crop.setToolTip(t("裁切与校平（快捷键 C）"))
         self.btn_crop.setStyleSheet(btn_style)
         self.btn_crop.clicked.connect(self.toggle_crop_mode)
         tb_layout.addWidget(self.btn_crop)
@@ -4518,7 +4518,7 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_split.setIcon(get_icon("compare.png"))
         self.btn_split.setIconSize(QSize(14, 14))
         self.btn_split.setCheckable(True)
-        self.btn_split.setToolTip("对比视图（快捷键 \\）：点击切换分屏对比")
+        self.btn_split.setToolTip(t("对比视图（快捷键 \\）：点击切换分屏对比"))
         self.btn_split.setStyleSheet(btn_style)
         self.btn_split.clicked.connect(self.toggle_split_view)
         tb_layout.addWidget(self.btn_split)
@@ -4528,7 +4528,7 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_fit.setIcon(get_icon("fit_window.png"))
         self.btn_fit.setIconSize(QSize(14, 14))
         self.btn_fit.setCheckable(True)
-        self.btn_fit.setToolTip("适应图像全貌（快捷键 Ctrl+0）")
+        self.btn_fit.setToolTip(t("适应图像全貌（快捷键 Ctrl+0）"))
         self.btn_fit.setStyleSheet(btn_style)
         self.btn_fit.clicked.connect(self._on_btn_fit_clicked)
         tb_layout.addWidget(self.btn_fit)
@@ -4538,7 +4538,7 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_100.setIcon(get_icon("zoom_100.png"))
         self.btn_100.setIconSize(QSize(14, 14))
         self.btn_100.setCheckable(True)
-        self.btn_100.setToolTip("1:1 实际像素（快捷键 Ctrl+1）")
+        self.btn_100.setToolTip(t("1:1 实际像素（快捷键 Ctrl+1）"))
         self.btn_100.setStyleSheet(btn_style)
         self.btn_100.clicked.connect(self._on_btn_100_clicked)
         tb_layout.addWidget(self.btn_100)
@@ -4887,7 +4887,7 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, "film_header"):
             self.film_header.set_title_count(visible_count, total_count)
         elif hasattr(self, "lbl_film_title"):
-            self.lbl_film_title.setText(f"胶卷型号 ({visible_count}/{total_count} 卷)")
+            self.lbl_film_title.setText(t('胶卷型号 ({visible_count}/{total_count} 卷)', visible_count=visible_count, total_count=total_count))
 
         self.reflow_grids()
         if hasattr(self, '_film_filter_debounce_timer'):
@@ -4906,7 +4906,7 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self, 'film_header'):
             self.film_header.set_title_count(len(self.film_cards), len(self.film_cards))
         elif hasattr(self, 'lbl_film_title'):
-            self.lbl_film_title.setText(f"胶卷型号 ({len(self.film_cards)} 卷)")
+            self.lbl_film_title.setText(t('胶卷型号 ({v} 卷)', v=len(self.film_cards)))
         self.reflow_grids()
 
     def _populate_paper_grid(self):
@@ -4919,7 +4919,7 @@ class DarkroomMainWindow(QMainWindow):
             card.sibling_cards = self.paper_cards
             self.paper_cards[item["id"]] = card
         if hasattr(self, 'lbl_paper_title'):
-            self.lbl_paper_title.setText(f"放大相纸 ({len(self.paper_cards)} 张)")
+            self.lbl_paper_title.setText(t('放大相纸 ({v} 张)', v=len(self.paper_cards)))
         self.reflow_grids()
 
     def _on_auto_exposure(self):
@@ -4956,12 +4956,12 @@ class DarkroomMainWindow(QMainWindow):
             except Exception:
                 pass
         if abs(ev) < 1e-4:
-            self.set_app_status("测光建议 0 EV，无需调整", timeout_ms=2500)
+            self.set_app_status(t("测光建议 0 EV，无需调整"), timeout_ms=2500)
             return
         ev = max(-3.0, min(3.0, ev))
         self.slider_ev.setValue(ev)
         self._on_slider_committed()
-        self.set_app_status(f"已按测光建议设置曝光 {ev:+.2f} EV", timeout_ms=2500)
+        self.set_app_status(t('已按测光建议设置曝光 {ev:+.2f} EV', ev=ev), timeout_ms=2500)
 
     def _init_exposure_section(self):
         self.sec_exposure = AccordionSection(t("场景曝光 (Exposure)"))
@@ -5073,7 +5073,7 @@ class DarkroomMainWindow(QMainWindow):
         self.sidebar_layout.addWidget(self.sec_exposure)
 
     def _init_optics_section(self):
-        self.sec_optics = AccordionSection("光学 (Optics)")
+        self.sec_optics = AccordionSection(t("光学 (Optics)"))
         self.sec_optics.resetClicked.connect(lambda: self.reset_track("optics"))
 
         # 1. Segmented Tabs: [ 配置文件 ] [ 手动 ]
@@ -5083,14 +5083,14 @@ class DarkroomMainWindow(QMainWindow):
         tab_layout.setContentsMargins(0, 0, 0, 0)
         tab_layout.setSpacing(4)
 
-        self.btn_lens_tab_profile = QPushButton("配置文件")
+        self.btn_lens_tab_profile = QPushButton(t("配置文件"))
         self.btn_lens_tab_profile.setObjectName("lensTabBtn")
         self.btn_lens_tab_profile.setCheckable(True)
         self.btn_lens_tab_profile.setChecked(True)
         self.btn_lens_tab_profile.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_lens_tab_profile.setFixedHeight(26)
 
-        self.btn_lens_tab_manual = QPushButton("手动")
+        self.btn_lens_tab_manual = QPushButton(t("手动"))
         self.btn_lens_tab_manual.setObjectName("lensTabBtn")
         self.btn_lens_tab_manual.setCheckable(True)
         self.btn_lens_tab_manual.setChecked(False)
@@ -5113,10 +5113,10 @@ class DarkroomMainWindow(QMainWindow):
         # row is now a single line that says what happened.
         chk_layout = QHBoxLayout()
         chk_layout.setContentsMargins(0, 2, 0, 2)
-        self.chk_remove_ca = QCheckBox("删除色差")
+        self.chk_remove_ca = QCheckBox(t("删除色差"))
         self.chk_remove_ca.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.chk_remove_ca.setToolTip("校正横向色差（紫边/绿边）。\n"
-                                      "系数由画面自动测量（LCP 未提供色差模型时）")
+        self.chk_remove_ca.setToolTip(t("校正横向色差（紫边/绿边）。\n"
+                                      "系数由画面自动测量（LCP 未提供色差模型时）"))
         self.chk_remove_ca.toggled.connect(self._on_lens_remove_ca_toggled)
         chk_layout.addWidget(self.chk_remove_ca)
 
@@ -5141,27 +5141,27 @@ class DarkroomMainWindow(QMainWindow):
 
         chk_prof_layout = QHBoxLayout()
         chk_prof_layout.setContentsMargins(0, 2, 0, 2)
-        self.chk_lens_profile_enabled = QCheckBox("使用配置文件校正")
+        self.chk_lens_profile_enabled = QCheckBox(t("使用配置文件校正"))
         self.chk_lens_profile_enabled.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chk_lens_profile_enabled.toggled.connect(self._on_lens_profile_enabled_toggled)
         chk_prof_layout.addWidget(self.chk_lens_profile_enabled)
         profile_layout.addLayout(chk_prof_layout)
 
         self.combo_lens_setup = ComboBoxRow(
-            "来源",
+            t("来源"),
             [
-                ("默认 (自动读取 EXIF)", "auto"),
-                ("自定", "custom"),
-                ("内置 (RAW 内)", "builtin"),
+                (t("默认 (自动读取 EXIF)"), "auto"),
+                (t("自定"), "custom"),
+                (t("内置 (RAW 内)"), "builtin"),
             ],
             default_val="auto",
-            tooltip="校正配置来源：自动读取 EXIF、手动选取，"
-                    "或使用 RAW 内嵌校正表（索尼 ARW）"
+            tooltip=t("校正配置来源：自动读取 EXIF、手动选取，"
+                    "或使用 RAW 内嵌校正表（索尼 ARW）")
         )
         self.combo_lens_setup.valueChanged.connect(self._on_lens_setup_changed)
         profile_layout.addWidget(self.combo_lens_setup)
 
-        self.lbl_profile_header = QLabel("镜头配置文件")
+        self.lbl_profile_header = QLabel(t("镜头配置文件"))
         self.lbl_profile_header.setObjectName("subSectionHeader")
         profile_layout.addWidget(self.lbl_profile_header)
 
@@ -5170,52 +5170,52 @@ class DarkroomMainWindow(QMainWindow):
         db = LCPDatabase.get_instance()
         db.index_installed_profiles()
         makes = db.get_available_makes()
-        make_items = [("无", "")] + [(m, m) for m in makes]
+        make_items = [(t("无"), "")] + [(m, m) for m in makes]
 
         self.combo_lens_make = ComboBoxRow(
-            "制造商",
+            t("制造商"),
             make_items,
             default_val="",
-            tooltip="镜头制造商品牌"
+            tooltip=t("镜头制造商品牌")
         )
         self.combo_lens_make.valueChanged.connect(self._on_lens_make_changed)
         profile_layout.addWidget(self.combo_lens_make)
 
         self.combo_lens_model = ComboBoxRow(
-            "型号",
-            [("无", "")],
+            t("型号"),
+            [(t("无"), "")],
             default_val="",
-            tooltip="具体镜头型号"
+            tooltip=t("具体镜头型号")
         )
         self.combo_lens_model.valueChanged.connect(self._on_lens_model_changed)
         profile_layout.addWidget(self.combo_lens_model)
 
         self.combo_lens_profile = ComboBoxRow(
-            "配置文件",
-            [("无", ""), ("[+ 添加配置文件 (.lcp)...]", "__import_lcp__")],
+            t("配置文件"),
+            [(t("无"), ""), (t("[+ 添加配置文件 (.lcp)...]"), "__import_lcp__")],
             default_val="",
-            tooltip="匹配的镜头校正配置文件（.lcp）"
+            tooltip=t("匹配的镜头校正配置文件（.lcp）")
         )
         self.combo_lens_profile.valueChanged.connect(self._on_lens_profile_changed)
         profile_layout.addWidget(self.combo_lens_profile)
 
-        self.lbl_amount_header = QLabel("校正量")
+        self.lbl_amount_header = QLabel(t("校正量"))
         self.lbl_amount_header.setObjectName("subSectionHeader")
         profile_layout.addWidget(self.lbl_amount_header)
 
         self.slider_lens_distortion = AdobeScrubSlider(
-            "扭曲度", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            t("扭曲度"), -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
             has_center_detent=True,
-            tooltip="畸变校正量（0 为配置文件原值，向左减弱，向右增强）"
+            tooltip=t("畸变校正量（0 为配置文件原值，向左减弱，向右增强）")
         )
         self.slider_lens_distortion.valueChanged.connect(lambda v: self._on_lens_amount_changed("profile_distortion", v))
         self.slider_lens_distortion.sliderReleased.connect(self._on_slider_committed)
         profile_layout.addWidget(self.slider_lens_distortion)
 
         self.slider_lens_vignette = AdobeScrubSlider(
-            "晕影", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            t("晕影"), -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
             has_center_detent=True,
-            tooltip="暗角补偿量（0 为配置文件原值，负值加深，正值消除）"
+            tooltip=t("暗角补偿量（0 为配置文件原值，负值加深，正值消除）")
         )
         self.slider_lens_vignette.valueChanged.connect(lambda v: self._on_lens_amount_changed("profile_vignette", v))
         self.slider_lens_vignette.sliderReleased.connect(self._on_slider_committed)
@@ -5233,31 +5233,31 @@ class DarkroomMainWindow(QMainWindow):
         manual_layout.setSpacing(4)
 
         self.slider_manual_distortion = AdobeScrubSlider(
-            "扭曲度", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            t("扭曲度"), -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
             has_center_detent=True,
-            tooltip="手动几何畸变校正：负值校正枕形畸变，正值校正桶形畸变"
+            tooltip=t("手动几何畸变校正：负值校正枕形畸变，正值校正桶形畸变")
         )
         self.slider_manual_distortion.valueChanged.connect(lambda v: self._on_lens_amount_changed("manual_distortion", v))
         self.slider_manual_distortion.sliderReleased.connect(self._on_slider_committed)
         manual_layout.addWidget(self.slider_manual_distortion)
 
-        self.lbl_vignette_header = QLabel("晕影")
+        self.lbl_vignette_header = QLabel(t("晕影"))
         self.lbl_vignette_header.setObjectName("subSectionHeader")
         manual_layout.addWidget(self.lbl_vignette_header)
 
         self.slider_manual_vignette_amount = AdobeScrubSlider(
-            "数量", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            t("数量"), -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
             has_center_detent=True,
-            tooltip="暗角补偿强度：0 为无调整，负值加深暗角，正值增亮边缘"
+            tooltip=t("暗角补偿强度：0 为无调整，负值加深暗角，正值增亮边缘")
         )
         self.slider_manual_vignette_amount.valueChanged.connect(lambda v: self._on_lens_amount_changed("manual_vignette_amount", v))
         self.slider_manual_vignette_amount.sliderReleased.connect(self._on_slider_committed)
         manual_layout.addWidget(self.slider_manual_vignette_amount)
 
         self.slider_manual_vignette_midpoint = AdobeScrubSlider(
-            "中点", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            t("中点"), -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
             has_center_detent=True,
-            tooltip="暗角羽化中点：0 为标准，负值向中心收紧，正值向边缘扩散"
+            tooltip=t("暗角羽化中点：0 为标准，负值向中心收紧，正值向边缘扩散")
         )
         self.slider_manual_vignette_midpoint.valueChanged.connect(lambda v: self._on_lens_amount_changed("manual_vignette_midpoint", v))
         self.slider_manual_vignette_midpoint.sliderReleased.connect(self._on_slider_committed)
@@ -5273,44 +5273,44 @@ class DarkroomMainWindow(QMainWindow):
         self.optics_section_divider.setFixedHeight(1)
         self.sec_optics.addWidget(self.optics_section_divider)
 
-        self.lbl_diff_header = QLabel("柔光滤镜仿真")
+        self.lbl_diff_header = QLabel(t("柔光滤镜仿真"))
         self.lbl_diff_header.setObjectName("subSectionHeader")
         self.sec_optics.addWidget(self.lbl_diff_header)
 
         self.combo_diffusion = ComboBoxRow(
-            "柔光镜型号",
+            t("柔光镜型号"),
             [
-                ("无", "none"),
-                ("黑柔", "black_pro_mist"),
-                ("白柔", "pro_mist"),
-                ("微光", "glimmerglass"),
-                ("电影漫射", "cinebloom"),
+                (t("无"), "none"),
+                (t("黑柔"), "black_pro_mist"),
+                (t("白柔"), "pro_mist"),
+                (t("微光"), "glimmerglass"),
+                (t("电影漫射"), "cinebloom"),
             ],
             default_val="none",
-            tooltip="电影柔光镜仿真：高光周围形成漫射晕开"
+            tooltip=t("电影柔光镜仿真：高光周围形成漫射晕开")
         )
         self.combo_diffusion.valueChanged.connect(lambda v: self._on_combo_changed("diffusion_family", v))
         self.sec_optics.addWidget(self.combo_diffusion)
 
         self.combo_diff_strength = ComboBoxRow(
-            "柔光挡位",
+            t("柔光挡位"),
             [
-                ("1/8 档", 0.125),
-                ("1/4 档", 0.25),
-                ("1/2 档", 0.5),
-                ("1 档", 1.0),
-                ("2 档", 2.0),
+                (t("1/8 档"), 0.125),
+                (t("1/4 档"), 0.25),
+                (t("1/2 档"), 0.5),
+                (t("1 档"), 1.0),
+                (t("2 档"), 2.0),
             ],
             default_val=0.125,
-            tooltip="柔光镜散射密度（1/8～2 档）"
+            tooltip=t("柔光镜散射密度（1/8～2 档）")
         )
         self.combo_diff_strength.valueChanged.connect(lambda v: self._on_combo_changed("diffusion_strength", v))
         self.slider_diff_strength = self.combo_diff_strength  # Backward compatibility alias
         self.sec_optics.addWidget(self.combo_diff_strength)
 
         self.slider_diff_warmth = AdobeScrubSlider(
-            "光晕冷暖偏置", -1.5, 1.5, 0.0, step=0.05, unit="", decimals=2,
-            tooltip="柔光光晕冷暖：正值偏暖金，负值偏冷青",
+            t("光晕冷暖偏置"), -1.5, 1.5, 0.0, step=0.05, unit="", decimals=2,
+            tooltip=t("柔光光晕冷暖：正值偏暖金，负值偏冷青"),
             track_gradient=[(0.0, QColor("#60a5fa")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#fb923c"))],
             has_center_detent=True
         )
@@ -5326,25 +5326,25 @@ class DarkroomMainWindow(QMainWindow):
         self.sidebar_layout.addWidget(self.sec_optics)
 
     DIR_UNAVAILABLE_TEXT = {
-        "bypass": "当前为数码原片旁通模式，DIR 不可用",
-        "positive": "当前为反转正片，DIR 不可用",
-        "bw": "当前为黑白胶卷，DIR 不可用",
-        "no_data": "该胶卷档案未提供 DIR 数据",
+        "bypass": t("当前为数码原片旁通模式，DIR 不可用"),
+        "positive": t("当前为反转正片，DIR 不可用"),
+        "bw": t("当前为黑白胶卷，DIR 不可用"),
+        "no_data": t("该胶卷档案未提供 DIR 数据"),
     }
 
     def _init_chemistry_section(self):
-        self.sec_chemistry = AccordionSection("胶片化学 (DIR)")
+        self.sec_chemistry = AccordionSection(t("胶片化学 (DIR)"))
         self.sec_chemistry.resetClicked.connect(lambda: self.reset_track("chemistry"))
 
         # 迫冲显影 sits here rather than with the print controls because it *is* film chemistry:
         # it rewrites the stock's characteristic curve and base fog, so it invalidates the LUT
         # exactly like the DIR sliders do.
         self.combo_push = ComboBoxRow(
-            "迫冲显影",
-            [("标准冲洗 (0)", 0)],
+            t("迫冲显影"),
+            [(t("标准冲洗 (0)"), 0)],
             default_val=0,
-            tooltip="按胶卷的迫冲表改变特性曲线与灰雾：+1 档相当于提高一档感光度，"
-                    "反差上升，暗部颗粒变粗"
+            tooltip=t("按胶卷的迫冲表改变特性曲线与灰雾：+1 档相当于提高一档感光度，"
+                    "反差上升，暗部颗粒变粗")
         )
         self.combo_push.valueChanged.connect(lambda v: self._on_combo_changed("push_ev", v))
         self.sec_chemistry.addWidget(self.combo_push)
@@ -5354,12 +5354,12 @@ class DarkroomMainWindow(QMainWindow):
         # happens before the film ever reaches the tank.  Linking them by default made every push
         # silently darken the frame -- the curve only gives back a fraction of the missing light --
         # so the link is now explicit and off by default.
-        self.chk_push_under = QCheckBox("模拟欠曝（曝光随档位下调）")
+        self.chk_push_under = QCheckBox(t("模拟欠曝（曝光随档位下调）"))
         self.chk_push_under.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chk_push_under.setToolTip(
-            "勾选后，选 +N 档会同时把场景曝光下调 N EV，即完整的「欠曝 N 档再迫冲」。\n"
+            t("勾选后，选 +N 档会同时把场景曝光下调 N EV，即完整的「欠曝 N 档再迫冲」。\n"
             "显影只能补回一部分（0.2～0.6 EV/档），画面仍比标准冲洗更暗、反差更大。\n"
-            "不勾选时只更换显影曲线，曝光不动")
+            "不勾选时只更换显影曲线，曝光不动"))
         self.chk_push_under.toggled.connect(self._on_push_underexpose_toggled)
         self.chk_push_under.setStyleSheet(get_standard_checkbox_style())
         self.sec_chemistry.addWidget(self.chk_push_under)
@@ -5375,8 +5375,8 @@ class DarkroomMainWindow(QMainWindow):
         # spektrafilm 那边的 dir_interlayer / dir_samelayer 也只是 dir_amount 的乘数。
         # 所以三个滑块合并成一个「总量」，另两个键保留在参数里固定为 1.0（旧文件仍可读）。
         self.slider_dir_amount = AdobeScrubSlider(
-            "DIR 总量", 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="显影抑制剂强度：中性灰不受影响，只改变有色彩差异处的密度分离"
+            t("DIR 总量"), 0.0, 1.8, 1.0, step=0.05, unit="", decimals=2,
+            tooltip=t("显影抑制剂强度：中性灰不受影响，只改变有色彩差异处的密度分离")
         )
         self.slider_dir_amount.valueChanged.connect(lambda v: self._on_slider_live("dir_amount", v))
         self.slider_dir_amount.sliderReleased.connect(self._on_slider_committed)
@@ -5387,39 +5387,39 @@ class DarkroomMainWindow(QMainWindow):
         self._update_chemistry_ui_state()
 
     def _init_enlarger_section(self):
-        self.sec_enlarger = AccordionSection("放大机与相纸显影")
+        self.sec_enlarger = AccordionSection(t("放大机与相纸显影"))
         self.sec_enlarger.resetClicked.connect(lambda: self.reset_track("enlarger"))
 
         # 相纸：从左侧卡片墙挪到这里，下拉框选择（与光源下拉同一套行组件）
         paper_items = [(item.get("name") or item["id"], item["id"]) for item in self.engine.get_paper_stocks()]
         self.combo_paper = ComboBoxRow(
-            "相纸",
+            t("相纸"),
             paper_items,
             default_val=getattr(self, "current_paper_stock", "none"),
-            tooltip="相纸型号：决定染色层光谱响应与密度曲线。选「胶片直扫」则跳过印相，输出负像"
+            tooltip=t("相纸型号：决定染色层光谱响应与密度曲线。选「胶片直扫」则跳过印相，输出负像")
         )
         self.combo_paper.valueChanged.connect(self._on_paper_combo_changed)
         self.sec_enlarger.addWidget(self.combo_paper)
 
         self.combo_illuminant = ComboBoxRow(
-            "光源光谱",
+            t("光源光谱"),
             [
-                ("TH-KG3 卤素暗房灯 (3400K)", "TH-KG3"),
-                ("TH-KG3-L 放大机镜头透过", "TH-KG3-L"),
-                ("T 传统白炽灯泡 (Incandescent)", "T"),
-                ("D65 标准日光 (6500K)", "D65"),
-                ("D50 印刷标准看样 (5000K)", "D50"),
-                ("A 标准钨丝光源 (2856K)", "A"),
+                (t("TH-KG3 卤素暗房灯 (3400K)"), "TH-KG3"),
+                (t("TH-KG3-L 放大机镜头透过"), "TH-KG3-L"),
+                (t("T 传统白炽灯泡 (Incandescent)"), "T"),
+                (t("D65 标准日光 (6500K)"), "D65"),
+                (t("D50 印刷标准看样 (5000K)"), "D50"),
+                (t("A 标准钨丝光源 (2856K)"), "A"),
             ],
             default_val="TH-KG3",
-            tooltip="放大机光源：光谱分布决定相纸感光层响应"
+            tooltip=t("放大机光源：光谱分布决定相纸感光层响应")
         )
         self.combo_illuminant.valueChanged.connect(lambda v: self._on_combo_changed("enlarger_illuminant", v))
         self.sec_enlarger.addWidget(self.combo_illuminant)
 
         self.slider_magenta = AdobeScrubSlider(
-            "品红 / 绿色", -35.0, 35.0, 0.0, step=0.5, unit="", decimals=1,
-            tooltip="品红（M）：左偏品红，右偏绿",
+            t("品红 / 绿色"), -35.0, 35.0, 0.0, step=0.5, unit="", decimals=1,
+            tooltip=t("品红（M）：左偏品红，右偏绿"),
             track_gradient=[(0.0, QColor("#f43f5e")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#10b981"))],
             has_center_detent=True
         )
@@ -5428,8 +5428,8 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_enlarger.addWidget(self.slider_magenta)
 
         self.slider_yellow = AdobeScrubSlider(
-            "黄色 / 蓝色", -35.0, 35.0, 0.0, step=0.5, unit="", decimals=1,
-            tooltip="黄色（Y）：左偏黄，右偏蓝",
+            t("黄色 / 蓝色"), -35.0, 35.0, 0.0, step=0.5, unit="", decimals=1,
+            tooltip=t("黄色（Y）：左偏黄，右偏蓝"),
             track_gradient=[(0.0, QColor("#eab308")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#38bdf8"))],
             has_center_detent=True
         )
@@ -5438,8 +5438,8 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_enlarger.addWidget(self.slider_yellow)
 
         self.slider_cyan = AdobeScrubSlider(
-            "青色 / 红色", -35.0, 35.0, 0.0, step=0.5, unit="", decimals=1,
-            tooltip="青色（C）：左偏青，右偏红",
+            t("青色 / 红色"), -35.0, 35.0, 0.0, step=0.5, unit="", decimals=1,
+            tooltip=t("青色（C）：左偏青，右偏红"),
             track_gradient=[(0.0, QColor("#06b6d4")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#f87171"))],
             has_center_detent=True
         )
@@ -5451,9 +5451,9 @@ class DarkroomMainWindow(QMainWindow):
         # a pushed frame brighter again (scene exposure would cancel the underexposure and turn the
         # recipe into plain over-development), so it has to have the room to do that.
         self.slider_print_exp = AdobeScrubSlider(
-            "相纸曝光", 0.25, 4.0, 1.0, step=0.02, unit="x", decimals=2,
-            tooltip="相纸曝光：整体显影浓度（0.25x～4x，约 ±2 档）。\n"
-                    "迫冲后提亮用这一档，不要动场景曝光，否则抵消欠曝",
+            t("相纸曝光"), 0.25, 4.0, 1.0, step=0.02, unit="x", decimals=2,
+            tooltip=t("相纸曝光：整体显影浓度（0.25x～4x，约 ±2 档）。\n"
+                    "迫冲后提亮用这一档，不要动场景曝光，否则抵消欠曝"),
             track_gradient=[(0.0, QColor("#14161d")), (1.0, QColor("#f1f5f9"))],
             has_center_detent=True
         )
@@ -5462,33 +5462,33 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_enlarger.addWidget(self.slider_print_exp)
 
         self.slider_preflash_camera = AdobeScrubSlider(
-            "胶片预闪", 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
-            tooltip="在显影前给底片叠加一层均匀曝光（相对计量中灰）。\n"
-                    "只抬暗部趾部、几乎不动高光，用来把死黑拉出细节；与下面的相纸预闪是两回事"
+            t("胶片预闪"), 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
+            tooltip=t("在显影前给底片叠加一层均匀曝光（相对计量中灰）。\n"
+                    "只抬暗部趾部、几乎不动高光，用来把死黑拉出细节；与下面的相纸预闪是两回事")
         )
         self.slider_preflash_camera.valueChanged.connect(lambda v: self._on_slider_live("pre_flash_camera", v))
         self.slider_preflash_camera.sliderReleased.connect(self._on_slider_committed)
         self.sec_enlarger.addWidget(self.slider_preflash_camera)
 
         self.slider_preflash = AdobeScrubSlider(
-            "相纸预闪", 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
-            tooltip="在相纸曝光域叠加微量基础底光，柔化高光反差并保留亮部层次"
+            t("相纸预闪"), 0.0, 0.25, 0.0, step=0.01, unit="", decimals=2,
+            tooltip=t("在相纸曝光域叠加微量基础底光，柔化高光反差并保留亮部层次")
         )
         self.slider_preflash.valueChanged.connect(lambda v: self._on_slider_live("pre_flash", v))
         self.slider_preflash.sliderReleased.connect(self._on_slider_committed)
         self.sec_enlarger.addWidget(self.slider_preflash)
 
         self.slider_morph_gamma = AdobeScrubSlider(
-            "显影形态反差", 0.70, 1.30, 1.0, step=0.02, unit="", decimals=2,
-            tooltip="相纸显影斜率：决定画面反差"
+            t("显影形态反差"), 0.70, 1.30, 1.0, step=0.02, unit="", decimals=2,
+            tooltip=t("相纸显影斜率：决定画面反差")
         )
         self.slider_morph_gamma.valueChanged.connect(lambda v: self._on_slider_live("morph_gamma", v))
         self.slider_morph_gamma.sliderReleased.connect(self._on_slider_committed)
         self.sec_enlarger.addWidget(self.slider_morph_gamma)
 
         self.slider_exhaustion = AdobeScrubSlider(
-            "显影液疲劳度", 0.0, 1.00, 0.0, step=0.02, unit="", decimals=2,
-            tooltip="显影液疲劳：对相纸肩部做轻微塑形"
+            t("显影液疲劳度"), 0.0, 1.00, 0.0, step=0.02, unit="", decimals=2,
+            tooltip=t("显影液疲劳：对相纸肩部做轻微塑形")
         )
         self.slider_exhaustion.valueChanged.connect(lambda v: self._on_slider_live("developer_exhaustion", v))
         self.slider_exhaustion.sliderReleased.connect(self._on_slider_committed)
@@ -5501,7 +5501,7 @@ class DarkroomMainWindow(QMainWindow):
         self.sidebar_layout.addWidget(self.sec_enlarger)
 
     def _init_halation_section(self):
-        self.sec_halation = AccordionSection("物理光晕 (Halation)")
+        self.sec_halation = AccordionSection(t("物理光晕 (Halation)"))
         self.sec_halation.resetClicked.connect(lambda: self.reset_track("halation"))
 
         # The track is the engine's own: Stops about the stock's authored look, -6..+6,
@@ -5509,13 +5509,13 @@ class DarkroomMainWindow(QMainWindow):
         # multiple (`halation_amount`), so exports, the GPU chain and old sessions are
         # untouched -- this row only changes what the number means to a photographer.
         self.slider_halation_amount = AdobeScrubSlider(
-            "光晕档位", HALATION_OFF_STOPS, HALATION_MAX_STOPS, 0.0, step=0.05,
+            t("光晕档位"), HALATION_OFF_STOPS, HALATION_MAX_STOPS, 0.0, step=0.05,
             unit=" EV", decimals=2,
-            tooltip="相对该卷本征返光比例的档位（引擎的 halationAmount）。\n"
+            tooltip=t("相对该卷本征返光比例的档位（引擎的 halationAmount）。\n"
                     "0 = 这支卷自己的标定值；上端 +6 档 = 64 倍，下端为关闭。\n"
                     "光环亮度按返回光占直射光的比例 s/(1+s) 饱和：往右推是越来越厚，"
                     "但不会无限亮；半径由片基厚度决定，不随档位变。\n"
-                    "去掉 remjet 的 CineStill 通常在 +2 ~ +4 档才接近实拍观感",
+                    "去掉 remjet 的 CineStill 通常在 +2 ~ +4 档才接近实拍观感"),
             track_gradient=[(0.0, QColor("#111317")), (0.5, QColor("#5a6170")),
                             (1.0, QColor("#ffb37a"))],
             has_center_detent=True
@@ -5527,8 +5527,8 @@ class DarkroomMainWindow(QMainWindow):
 
         # 下线入口（见类顶 HALATION_SPATIAL_UI_ENABLED）：参数仍然存在，只是没人能改。
         self.slider_halation_spatial_scale = AdobeScrubSlider(
-            "光晕空间尺度", 0.1, 3.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="光晕扩散核的空间尺度倍率"
+            t("光晕空间尺度"), 0.1, 3.0, 1.0, step=0.05, unit="x", decimals=2,
+            tooltip=t("光晕扩散核的空间尺度倍率")
         )
         self.slider_halation_spatial_scale.valueChanged.connect(lambda v: self._on_slider_live("halation_spatial_scale", v))
         self.slider_halation_spatial_scale.sliderReleased.connect(self._on_slider_committed)
@@ -5537,19 +5537,19 @@ class DarkroomMainWindow(QMainWindow):
             self.slider_halation_spatial_scale.setVisible(False)
 
         self.slider_scatter_amount = AdobeScrubSlider(
-            "乳剂内散射强度", 0.0, 2.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="前向光散射（Light Wrap）强度。\n"
-                    "散射核尺寸取引擎标定值；现有胶卷档案均未提供实测散射数据"
+            t("乳剂内散射强度"), 0.0, 2.0, 1.0, step=0.05, unit="x", decimals=2,
+            tooltip=t("前向光散射（Light Wrap）强度。\n"
+                    "散射核尺寸取引擎标定值；现有胶卷档案均未提供实测散射数据")
         )
         self.slider_scatter_amount.valueChanged.connect(lambda v: self._on_slider_live("scatter_amount", v))
         self.slider_scatter_amount.sliderReleased.connect(self._on_slider_committed)
         self.sec_halation.addWidget(self.slider_scatter_amount)
 
         self.slider_boost_ev = AdobeScrubSlider(
-            "高光能量重建", 0.0, 4.0, 0.0, step=0.05, unit=" EV", decimals=2,
-            tooltip="把画面最亮像素再抬高 N 档后交给光晕/散射，重建被扫描截断的高光能量。\n"
+            t("高光能量重建"), 0.0, 4.0, 0.0, step=0.05, unit=" EV", decimals=2,
+            tooltip=t("把画面最亮像素再抬高 N 档后交给光晕/散射，重建被扫描截断的高光能量。\n"
                     "保护点在中灰以上 4 档：常规曝光的底片整幅最大值达不到该点，滑块不生效；"
-                    "需强过曝或 +EV 曝光补偿后才生效"
+                    "需强过曝或 +EV 曝光补偿后才生效")
         )
         self.slider_boost_ev.valueChanged.connect(lambda v: self._on_slider_live("boost_ev", v))
         self.slider_boost_ev.sliderReleased.connect(self._on_slider_committed)
@@ -5575,13 +5575,13 @@ class DarkroomMainWindow(QMainWindow):
           相乘（黑白卷档案已强制 0，滑块随黑白胶卷自动禁用）。
         颗粒在 LUT 之外（shader 域），拖动只走 uniform，不触发 LUT 重烘焙。
         """
-        self.sec_grain = AccordionSection("银盐颗粒 (Grain)")
+        self.sec_grain = AccordionSection(t("银盐颗粒 (Grain)"))
         self.sec_grain.resetClicked.connect(lambda: self.reset_track("grain"))
 
         self.slider_grain_strength = AdobeScrubSlider(
-            "颗粒强度", 0.0, 3.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="颗粒强度：1.0 为 gold200 标定参考，0 无颗粒，2.0 噪声幅度加倍。\n"
-                    "速率与倍率平方反比，倍率越高颗粒越细密"
+            t("颗粒强度"), 0.0, 3.0, 1.0, step=0.05, unit="x", decimals=2,
+            tooltip=t("颗粒强度：1.0 为 gold200 标定参考，0 无颗粒，2.0 噪声幅度加倍。\n"
+                    "速率与倍率平方反比，倍率越高颗粒越细密")
         )
         self.slider_grain_strength.valueChanged.connect(
             lambda v: self._on_slider_live("grain", round(0.4 / (v * v), 6) if v > 1e-3 else 0.0))
@@ -5589,18 +5589,18 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_grain.addWidget(self.slider_grain_strength)
 
         self.slider_grain_size = AdobeScrubSlider(
-            "颗粒大小", 0.5, 2.0, 1.0, step=0.05, unit="x", decimals=2,
-            tooltip="颗粒空间尺度：缩放整个颗粒图案，团簇随倍率变化。\n"
-                    "1.0 为档案标定几何；噪声幅度由「颗粒强度」控制"
+            t("颗粒大小"), 0.5, 2.0, 1.0, step=0.05, unit="x", decimals=2,
+            tooltip=t("颗粒空间尺度：缩放整个颗粒图案，团簇随倍率变化。\n"
+                    "1.0 为档案标定几何；噪声幅度由「颗粒强度」控制")
         )
         self.slider_grain_size.valueChanged.connect(lambda v: self._on_slider_live("grain_size", v))
         self.slider_grain_size.sliderReleased.connect(self._on_slider_committed)
         self.sec_grain.addWidget(self.slider_grain_size)
 
         self.slider_grain_colour = AdobeScrubSlider(
-            "彩色颗粒", 0.0, 1.0, 1.0, step=0.05, unit="", decimals=2,
-            tooltip="彩色颗粒混合：1.0 为档案标定（三染料云独立），0 为共用亮度颗粒（类似黑白）。\n"
-                    "黑白胶卷无效"
+            t("彩色颗粒"), 0.0, 1.0, 1.0, step=0.05, unit="", decimals=2,
+            tooltip=t("彩色颗粒混合：1.0 为档案标定（三染料云独立），0 为共用亮度颗粒（类似黑白）。\n"
+                    "黑白胶卷无效")
         )
         self.slider_grain_colour.valueChanged.connect(lambda v: self._on_slider_live("grain_colour", v))
         self.slider_grain_colour.sliderReleased.connect(self._on_slider_committed)
@@ -5609,10 +5609,10 @@ class DarkroomMainWindow(QMainWindow):
         # 实验：扫描仪读出噪声。默认 0 = 完全关闭，现有出图逐字节不变；用户手动拉才触发。
         # 与乳剂颗粒是独立噪声源（暗部不再干净），只走 shader uniform，不进 LUT 缓存 key。
         self.slider_scan_noise = AdobeScrubSlider(
-            "扫描噪声 (实验)", 0.0, 1.0, 0.0, step=0.01, unit="", decimals=2,
-            tooltip="模拟欠曝底片被强行扫描提亮时放大的读出噪声。\n"
+            t("扫描噪声 (实验)"), 0.0, 1.0, 0.0, step=0.01, unit="", decimals=2,
+            tooltip=t("模拟欠曝底片被强行扫描提亮时放大的读出噪声。\n"
                     "0 = 关闭；拉起后暗部出现颗粒，亮部影响很小；配合「黑场」抬灰即发灰的冲扫件。\n"
-                    "仅在 GPU 预览与 GPU 导出生效，CPU 导出不含颗粒。"
+                    "仅在 GPU 预览与 GPU 导出生效，CPU 导出不含颗粒。")
         )
         self.slider_scan_noise.valueChanged.connect(lambda v: self._on_slider_live("scan_noise", v))
         self.slider_scan_noise.sliderReleased.connect(self._on_slider_committed)
@@ -5625,46 +5625,46 @@ class DarkroomMainWindow(QMainWindow):
 
     def _init_menu_and_actions(self):
         # 1. File Menu
-        file_menu = self.menu_bar.addMenu("文件 (F)")
+        file_menu = self.menu_bar.addMenu(t("文件 (F)"))
         
-        self.act_open_file = QAction("导入底片...", self)
+        self.act_open_file = QAction(t("导入底片..."), self)
         self.act_open_file.setIcon(get_icon("open_file.png"))
         self.act_open_file.setShortcut(QKeySequence("Ctrl+O"))
         self.act_open_file.triggered.connect(self.action_open_files)
         file_menu.addAction(self.act_open_file)
 
-        self.act_open_folder = QAction("导入文件夹...", self)
+        self.act_open_folder = QAction(t("导入文件夹..."), self)
         self.act_open_folder.setIcon(get_icon("open_folder.png"))
         self.act_open_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
         self.act_open_folder.triggered.connect(self.action_open_folder)
         file_menu.addAction(self.act_open_folder)
 
-        self.act_open_session = QAction("打开会话工程 (.sdss)...", self)
+        self.act_open_session = QAction(t("打开会话工程 (.sdss)..."), self)
         self.act_open_session.setIcon(get_icon("open_session.png"))
         self.act_open_session.triggered.connect(self.action_open_session)
         file_menu.addAction(self.act_open_session)
 
         # Recent Sessions Submenu (Item 8 & 11)
-        self.recent_menu = file_menu.addMenu("最近会话")
+        self.recent_menu = file_menu.addMenu(t("最近会话"))
         self._update_recent_menu()
 
         file_menu.addSeparator()
 
         # Item 9: Session Save & Save As
-        self.act_save_session = QAction("保存当前会话 (.sdss)", self)
+        self.act_save_session = QAction(t("保存当前会话 (.sdss)"), self)
         self.act_save_session.setIcon(get_icon("save.png"))
         self.act_save_session.setShortcut(QKeySequence("Ctrl+S"))
         self.act_save_session.setEnabled(False)
         self.act_save_session.triggered.connect(self.action_save_session)
         file_menu.addAction(self.act_save_session)
 
-        self.act_save_session_as = QAction("另存为会话文件 (.sdss)...", self)
+        self.act_save_session_as = QAction(t("另存为会话文件 (.sdss)..."), self)
         self.act_save_session_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.act_save_session_as.setEnabled(False)
         self.act_save_session_as.triggered.connect(self.action_save_session_as)
         file_menu.addAction(self.act_save_session_as)
 
-        self.act_close_session = QAction("关闭当前会话", self)
+        self.act_close_session = QAction(t("关闭当前会话"), self)
         self.act_close_session.setShortcut(QKeySequence("Ctrl+W"))
         self.act_close_session.triggered.connect(self.action_close_session)
         self.act_close_session.setEnabled(False)
@@ -5673,25 +5673,25 @@ class DarkroomMainWindow(QMainWindow):
         file_menu.addSeparator()
 
         # Item 4: Quick Export with last settings
-        self.act_quick_export = QAction("快速扫描 (上次参数)", self)
+        self.act_quick_export = QAction(t("快速扫描 (上次参数)"), self)
         self.act_quick_export.setIcon(get_icon("quick_export.png"))
         self.act_quick_export.setShortcut(QKeySequence("Ctrl+Shift+E"))
         self.act_quick_export.triggered.connect(lambda: self.action_quick_export())
         self.act_quick_export.setEnabled(False)
         file_menu.addAction(self.act_quick_export)
 
-        self.act_export = QAction("扫描...", self)
+        self.act_export = QAction(t("扫描..."), self)
         self.act_export.setIcon(get_icon("export.png"))
         self.act_export.setShortcut(QKeySequence("Ctrl+E"))
         self.act_export.triggered.connect(self.action_export_image)
         self.act_export.setEnabled(False)
         file_menu.addAction(self.act_export)
 
-        act_queue = QAction("扫描队列管理...", self)
+        act_queue = QAction(t("扫描队列管理..."), self)
         act_queue.triggered.connect(self.open_export_queue_dialog)
         file_menu.addAction(act_queue)
 
-        self.act_export_lut = QAction("导出 3D LUT (.cube)...", self)
+        self.act_export_lut = QAction(t("导出 3D LUT (.cube)..."), self)
         self.act_export_lut.triggered.connect(self.action_export_darkroom_lut)
         self.act_export_lut.setEnabled(False)
         file_menu.addAction(self.act_export_lut)
@@ -5700,31 +5700,31 @@ class DarkroomMainWindow(QMainWindow):
 
         # 维护入口。A1 之前改中性滤色或修档案都靠手工删 %LOCALAPPDATA%，很容易把「缓存没清」
         # 当成「代码没生效」。这里给一个正经按钮，只删这两个目录，不做通配删除。
-        self.act_rebuild_caches = QAction("重建渲染缓存...", self)
+        self.act_rebuild_caches = QAction(t("重建渲染缓存..."), self)
         self.act_rebuild_caches.setToolTip(
-            "删除 LUT 与颗粒瓦片缓存，下次渲染重建。改动档案或印片滤色后使用"
+            t("删除 LUT 与颗粒瓦片缓存，下次渲染重建。改动档案或印片滤色后使用")
         )
         self.act_rebuild_caches.triggered.connect(self.rebuild_render_caches)
         file_menu.addAction(self.act_rebuild_caches)
 
         file_menu.addSeparator()
 
-        act_exit = QAction("退出", self)
+        act_exit = QAction(t("退出"), self)
         act_exit.setShortcut(QKeySequence("Ctrl+Q"))
         act_exit.triggered.connect(self.close)
         file_menu.addAction(act_exit)
 
         # 2. Edit Menu (Item 5: Simplified concise labels, 13px icons)
-        edit_menu = self.menu_bar.addMenu("编辑 (E)")
+        edit_menu = self.menu_bar.addMenu(t("编辑 (E)"))
         self.edit_menu = edit_menu
         
-        self.act_undo = QAction("撤销", self)
+        self.act_undo = QAction(t("撤销"), self)
         self.act_undo.setIcon(get_icon("undo.png"))
         self.act_undo.setShortcut(QKeySequence("Ctrl+Z"))
         self.act_undo.triggered.connect(self.undo)
         edit_menu.addAction(self.act_undo)
 
-        self.act_redo = QAction("重做", self)
+        self.act_redo = QAction(t("重做"), self)
         self.act_redo.setIcon(get_icon("redo.png"))
         self.act_redo.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
         self.act_redo.triggered.connect(self.redo)
@@ -5732,7 +5732,7 @@ class DarkroomMainWindow(QMainWindow):
 
         edit_menu.addSeparator()
 
-        self.act_crop = QAction("裁切", self)
+        self.act_crop = QAction(t("裁切"), self)
         self.act_crop.setIcon(get_icon("crop.png"))
         self.act_crop.setShortcut(QKeySequence("C"))
         self.act_crop.triggered.connect(self.toggle_crop_mode)
@@ -5740,46 +5740,46 @@ class DarkroomMainWindow(QMainWindow):
 
         edit_menu.addSeparator()
 
-        self.act_copy_params = QAction("复制所有参数", self)
+        self.act_copy_params = QAction(t("复制所有参数"), self)
         self.act_copy_params.setShortcut(QKeySequence("Ctrl+C"))
         self.act_copy_params.triggered.connect(self.action_copy_params)
         edit_menu.addAction(self.act_copy_params)
 
-        self.act_paste_params = QAction("粘贴所有参数", self)
+        self.act_paste_params = QAction(t("粘贴所有参数"), self)
         self.act_paste_params.setShortcut(QKeySequence("Ctrl+V"))
         self.act_paste_params.triggered.connect(self.action_paste_params)
         edit_menu.addAction(self.act_paste_params)
 
-        self.act_select_all = QAction("全选底片", self)
+        self.act_select_all = QAction(t("全选底片"), self)
         self.act_select_all.setShortcut(QKeySequence("Ctrl+A"))
         self.act_select_all.triggered.connect(self.action_select_all_photos)
         edit_menu.addAction(self.act_select_all)
 
-        self.act_invert_selection = QAction("反选底片", self)
+        self.act_invert_selection = QAction(t("反选底片"), self)
         self.act_invert_selection.setShortcut(QKeySequence("Ctrl+Shift+I"))
         self.act_invert_selection.triggered.connect(self.action_invert_selection)
         edit_menu.addAction(self.act_invert_selection)
 
         edit_menu.addSeparator()
 
-        self.act_reset_all = QAction("重置所有参数", self)
+        self.act_reset_all = QAction(t("重置所有参数"), self)
         self.act_reset_all.setIcon(get_icon("reset.png"))
         self.act_reset_all.setShortcut(QKeySequence("Ctrl+R"))
         self.act_reset_all.triggered.connect(self.reset_all_params)
         edit_menu.addAction(self.act_reset_all)
 
-        self.act_clear_crop = QAction("清除裁切", self)
+        self.act_clear_crop = QAction(t("清除裁切"), self)
         self.act_clear_crop.triggered.connect(self.action_clear_active_crop)
         edit_menu.addAction(self.act_clear_crop)
 
-        self.act_clear_sdc = QAction("删除暗房配置 (.sdc)", self)
+        self.act_clear_sdc = QAction(t("删除暗房配置 (.sdc)"), self)
         self.act_clear_sdc.setShortcut(QKeySequence("Ctrl+Alt+R"))
         self.act_clear_sdc.triggered.connect(self.action_clear_sdc_active)
         edit_menu.addAction(self.act_clear_sdc)
 
         edit_menu.addSeparator()
 
-        self.act_prefs = QAction("首选项...", self)
+        self.act_prefs = QAction(t("首选项..."), self)
         self.act_prefs.setIcon(get_icon("preferences.png"))
         self.act_prefs.setShortcut(QKeySequence("Ctrl+,"))
         self.act_prefs.triggered.connect(self.open_preferences)
@@ -5788,16 +5788,16 @@ class DarkroomMainWindow(QMainWindow):
         edit_menu.aboutToShow.connect(self._update_menu_actions_state)
 
         # 3. View Menu
-        view_menu = self.menu_bar.addMenu("视图 (V)")
+        view_menu = self.menu_bar.addMenu(t("视图 (V)"))
         self.view_menu = view_menu
         
-        self.act_fit_img = QAction("适应图像", self)
+        self.act_fit_img = QAction(t("适应图像"), self)
         self.act_fit_img.setIcon(get_icon("fit_window.png"))
         self.act_fit_img.setShortcut(QKeySequence("Ctrl+0"))
         self.act_fit_img.triggered.connect(self.canvas.fit_to_view)
         view_menu.addAction(self.act_fit_img)
 
-        self.act_compare = QAction("对比\t\\", self)
+        self.act_compare = QAction(t("对比\t\\"), self)
         self.act_compare.setIcon(get_icon("compare.png"))
         self.act_compare.triggered.connect(self.toggle_split_view)
         view_menu.addAction(self.act_compare)
@@ -5806,12 +5806,12 @@ class DarkroomMainWindow(QMainWindow):
         # render policy, not a view action).  Only the resample kernel is pinned here.
         self._hq_resample = self._HQ_RESAMPLE
 
-        self.act_fit_win = QAction("适应窗口", self)
+        self.act_fit_win = QAction(t("适应窗口"), self)
         self.act_fit_win.setIcon(get_icon("fit_window.png"))
         self.act_fit_win.triggered.connect(self.canvas.fit_to_view)
         view_menu.addAction(self.act_fit_win)
 
-        self.act_100 = QAction("1:1 实际像素", self)
+        self.act_100 = QAction(t("1:1 实际像素"), self)
         self.act_100.setIcon(get_icon("zoom_100.png"))
         self.act_100.setShortcut(QKeySequence("Ctrl+1"))
         self.act_100.triggered.connect(self.canvas.set_zoom_100)
@@ -5834,7 +5834,7 @@ class DarkroomMainWindow(QMainWindow):
                     out.append(seq)
             return out
 
-        self.act_zoom_in = QAction("放大", self)
+        self.act_zoom_in = QAction(t("放大"), self)
         self.act_zoom_in.setShortcuts(_seqs(
             QKeySequence.StandardKey.ZoomIn,
             "Ctrl+=",            # plain "=" -- what people actually press
@@ -5844,7 +5844,7 @@ class DarkroomMainWindow(QMainWindow):
         view_menu.addAction(self.act_zoom_in)
         self.addAction(self.act_zoom_in)
 
-        self.act_zoom_out = QAction("缩小", self)
+        self.act_zoom_out = QAction(t("缩小"), self)
         self.act_zoom_out.setShortcuts(_seqs(
             QKeySequence.StandardKey.ZoomOut,
             "Ctrl+Shift+-",      # the keyboard's "-" with Shift, and numpad minus
@@ -5860,9 +5860,9 @@ class DarkroomMainWindow(QMainWindow):
         # triggered/toggled —— 用户按住想"保持开启"，实际看到的是每秒几十次开关。
         # QShortcut 可以 setAutoRepeat(False)，按住只发一次；菜单里的快捷键文字用
         # tab 手写在文本里（Qt 会把 tab 后半段右对齐渲染成快捷键列）。
-        self.act_proof = QAction("校样\tCtrl+Shift+Y", self)
+        self.act_proof = QAction(t("校样\tCtrl+Shift+Y"), self)
         self.act_proof.setCheckable(True)
-        self.act_proof.setStatusTip("按选定的输出色彩空间模拟显示")
+        self.act_proof.setStatusTip(t("按选定的输出色彩空间模拟显示"))
         self.act_proof.toggled.connect(self._on_proof_toggled)
         view_menu.addAction(self.act_proof)
         self._sc_proof = QShortcut(QKeySequence("Ctrl+Shift+Y"), self)
@@ -5870,9 +5870,9 @@ class DarkroomMainWindow(QMainWindow):
         self._sc_proof.setContext(Qt.ShortcutContext.WindowShortcut)
         self._sc_proof.activated.connect(self.act_proof.toggle)
 
-        self.act_proof_warn = QAction("色域警告\tCtrl+Alt+Y", self)
+        self.act_proof_warn = QAction(t("色域警告\tCtrl+Alt+Y"), self)
         self.act_proof_warn.setCheckable(True)
-        self.act_proof_warn.setStatusTip("把超出校样色域的像素叠成品红")
+        self.act_proof_warn.setStatusTip(t("把超出校样色域的像素叠成品红"))
         self.act_proof_warn.toggled.connect(self._on_proof_warn_toggled)
         view_menu.addAction(self.act_proof_warn)
         self._sc_proof_warn = QShortcut(QKeySequence("Ctrl+Alt+Y"), self)
@@ -5880,7 +5880,7 @@ class DarkroomMainWindow(QMainWindow):
         self._sc_proof_warn.setContext(Qt.ShortcutContext.WindowShortcut)
         self._sc_proof_warn.activated.connect(self.act_proof_warn.toggle)
 
-        self.act_proof_setup = QAction("校样设置…", self)
+        self.act_proof_setup = QAction(t("校样设置…"), self)
         self.act_proof_setup.triggered.connect(self.open_proof_setup)
         view_menu.addAction(self.act_proof_setup)
 
@@ -5889,11 +5889,11 @@ class DarkroomMainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
-        self.menu_star_filter = view_menu.addMenu("星标筛选")
+        self.menu_star_filter = view_menu.addMenu(t("星标筛选"))
         self.menu_star_filter.setStyleSheet(get_darkroom_menu_style())
         self.star_filter_actions = {}
         for key, text in [
-            ("all", "全部"),
+            ("all", t("全部")),
             ("separator", ""),
             ("5", "★★★★★"),
             ("4", "★★★★"),
@@ -5901,7 +5901,7 @@ class DarkroomMainWindow(QMainWindow):
             ("2", "★★"),
             ("1", "★"),
             ("separator", ""),
-            ("0", "无评分"),
+            ("0", t("无评分")),
         ]:
             if key == "separator":
                 self.menu_star_filter.addSeparator()
@@ -5914,7 +5914,7 @@ class DarkroomMainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
-        self.act_reset_layout = QAction("恢复默认布局", self)
+        self.act_reset_layout = QAction(t("恢复默认布局"), self)
         self.act_reset_layout.setShortcut(QKeySequence("Ctrl+Shift+R"))
         self.act_reset_layout.triggered.connect(self.reset_default_layout)
         view_menu.addAction(self.act_reset_layout)
@@ -5923,8 +5923,8 @@ class DarkroomMainWindow(QMainWindow):
         self._update_menu_actions_state()
 
         # 4. Help Menu (Item 8: Version in About)
-        help_menu = self.menu_bar.addMenu("帮助 (H)")
-        act_about = QAction("关于 SpektraDarkroom", self)
+        help_menu = self.menu_bar.addMenu(t("帮助 (H)"))
+        act_about = QAction(t("关于 SpektraDarkroom"), self)
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
 
@@ -6046,13 +6046,13 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, "filmstrip"):
                 counts = self.filmstrip.get_filter_counts()
                 labels_map = {
-                    "all": f"全部（{counts['all']}张）",
-                    "5": f"★★★★★（{counts['5']}张）",
-                    "4": f"★★★★（{counts['4']}张）",
-                    "3": f"★★★（{counts['3']}张）",
-                    "2": f"★★（{counts['2']}张）",
-                    "1": f"★（{counts['1']}张）",
-                    "0": f"无评分（{counts['0']}张）",
+                    "all": t('全部（{counts_all}张）', counts_all=counts['all']),
+                    "5": t('★★★★★（{counts_5}张）', counts_5=counts['5']),
+                    "4": t('★★★★（{counts_4}张）', counts_4=counts['4']),
+                    "3": t('★★★（{counts_3}张）', counts_3=counts['3']),
+                    "2": t('★★（{counts_2}张）', counts_2=counts['2']),
+                    "1": t('★（{counts_1}张）', counts_1=counts['1']),
+                    "0": t('无评分（{counts_0}张）', counts_0=counts['0']),
                 }
                 for k, act in getattr(self, "star_filter_actions", {}).items():
                     if k in labels_map:
@@ -6095,7 +6095,7 @@ class DarkroomMainWindow(QMainWindow):
         self.recent_menu.clear()
         recent_sessions = config_manager.get_recent_sessions()
         if not recent_sessions:
-            act_none = self.recent_menu.addAction("暂无最近会话")
+            act_none = self.recent_menu.addAction(t("暂无最近会话"))
             act_none.setEnabled(False)
             return
 
@@ -6105,7 +6105,7 @@ class DarkroomMainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, p=path: self._open_recent_session(p))
 
         self.recent_menu.addSeparator()
-        act_clear = self.recent_menu.addAction("清除最近记录")
+        act_clear = self.recent_menu.addAction(t("清除最近记录"))
         act_clear.triggered.connect(lambda: (config_manager.clear_recent_sessions(), self._update_recent_menu()))
 
     def _open_recent_session(self, path):
@@ -6167,7 +6167,7 @@ class DarkroomMainWindow(QMainWindow):
             return
 
         is_temp = getattr(self, "_is_temp_session", False)
-        session_name = os.path.basename(self._current_session_path) if (self._current_session_path and not is_temp) else "未命名会话"
+        session_name = os.path.basename(self._current_session_path) if (self._current_session_path and not is_temp) else t("未命名会话")
         dirty_flag = "*" if getattr(self, "_session_is_dirty", False) else ""
         display_title = f"{dirty_flag}{session_name}"
 
@@ -6200,7 +6200,7 @@ class DarkroomMainWindow(QMainWindow):
         count = len(selected_ids)
         if count > 1:
             self._is_multi_selecting = True
-            self.set_app_status(f"已选择 {count} 张底片", spinning=False, timeout_ms=0)
+            self.set_app_status(t('已选择 {count} 张底片', count=count), spinning=False, timeout_ms=0)
         else:
             if getattr(self, "_is_multi_selecting", False):
                 self._is_multi_selecting = False
@@ -6254,7 +6254,7 @@ class DarkroomMainWindow(QMainWindow):
                     photo["is_dirty"] = False
                 self.filmstrip.set_photo_dirty(self.active_photo_id, False)
             self._update_window_title()
-            self.set_app_status(f"已保存更改：{os.path.basename(self._current_photo_path)}", timeout_ms=4000)
+            self.set_app_status(t('已保存更改：{v}', v=os.path.basename(self._current_photo_path)), timeout_ms=4000)
 
     def _on_backslash_timeout(self):
         if getattr(self, "_backslash_pressed", False):
@@ -6496,16 +6496,17 @@ class DarkroomMainWindow(QMainWindow):
                 self._is_importing = False
             else:
                 is_import_msg = any(text.startswith(prefix) for prefix in [
-                    "正在导入", "导入底片", "正在恢复", "底片库", "会话底片库", "已导入", "已取消",
-                    "正在载入", "载入会话", "载入底片", "会话已恢复", "会话",
-                    "已跳过", "所选",
-                    "正在保存会话"
+                    t("正在导入"), t("导入底片"), t("正在恢复"), t("底片库"), t("会话底片库"), t("已导入"), t("已取消"),
+                    t("正在载入"), t("载入会话"), t("载入底片"), t("会话已恢复"), t("会话"),
+                    t("已跳过"), t("所选"),
+                    t("正在保存会话")
                 ])
                 if not is_import_msg:
                     return
         # Lock status during multi-selection so photo click doesn't wipe selection count
         if getattr(self, "_is_multi_selecting", False) and not spinning:
-            if not text.startswith(("已选择", "已选中", "已全选")):
+            # 前缀比对必须用**译文**：text 是已经过 t() 的界面文案。
+            if not text.startswith(tuple(t(s) for s in ("已选择", "已选中", "已全选"))):
                 return
 
         if hasattr(self, "_status_timer"):
@@ -6587,17 +6588,17 @@ class DarkroomMainWindow(QMainWindow):
         if state == "busy":
             self.export_spinner.start()
             self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
-            self.export_status_container.setToolTip("正在后台扫描，点击查看扫描队列（快捷键 Ctrl+J）")
+            self.export_status_container.setToolTip(t("正在后台扫描，点击查看扫描队列（快捷键 Ctrl+J）"))
         elif state == "success":
             self.export_spinner.stop()
             self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #f59e0b; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
-            self.export_status_container.setToolTip("扫描完成，点击查看扫描队列（快捷键 Ctrl+J）")
+            self.export_status_container.setToolTip(t("扫描完成，点击查看扫描队列（快捷键 Ctrl+J）"))
             # Permanent display on success as requested by user
             timeout_ms = 0
         elif state == "error":
             self.export_spinner.stop()
             self.lbl_export_status.setStyleSheet("QLabel#lbl_export_status { color: #ef4444; font-size: 11px; text-decoration: underline; background: transparent; border: none; }")
-            self.export_status_container.setToolTip("扫描出错，点击查看扫描队列（快捷键 Ctrl+J）")
+            self.export_status_container.setToolTip(t("扫描出错，点击查看扫描队列（快捷键 Ctrl+J）"))
             if timeout_ms <= 0:
                 timeout_ms = 6000
 
@@ -6629,17 +6630,17 @@ class DarkroomMainWindow(QMainWindow):
         """Item 8: Live status updater for background export queue in right capsule."""
         if active_count > 0:
             done_count = total_count - active_count
-            self._set_export_status(f"扫描中 ({done_count + 1}/{total_count})", state="busy")
+            self._set_export_status(t('扫描中 ({v}/{total_count})', v=done_count + 1, total_count=total_count), state="busy")
         else:
             if total_count > 0:
-                self._set_export_status(f"扫描完成 ({total_count}/{total_count})", state="success", timeout_ms=0)
+                self._set_export_status(t('扫描完成 ({total_count}/{total_count2})', total_count=total_count, total_count2=total_count), state="success", timeout_ms=0)
             else:
                 self._set_export_status("", state="idle")
 
     def action_save_session(self):
         """Item 9 & 11: Saves current editing session (.sdss). Returns True if saved."""
         if not self.photos and not self._current_session_path:
-            self.set_app_status("底片库为空，无需保存", timeout_ms=3000)
+            self.set_app_status(t("底片库为空，无需保存"), timeout_ms=3000)
             return False
 
         if not self._current_session_path or getattr(self, "_is_temp_session", False):
@@ -6650,7 +6651,7 @@ class DarkroomMainWindow(QMainWindow):
     def action_save_session_as(self):
         """Item 9 & 11: Prompts user to select a .sdss file path and saves session. Returns True if saved."""
         if not self.photos and not self._current_session_path:
-            self.set_app_status("底片库为空，无需保存", timeout_ms=3000)
+            self.set_app_status(t("底片库为空，无需保存"), timeout_ms=3000)
             return False
 
         # Item 1: Suggest title session name rather than single image filename
@@ -6659,13 +6660,13 @@ class DarkroomMainWindow(QMainWindow):
             if not default_name.lower().endswith(".sdss"):
                 default_name = f"{default_name}.sdss"
         else:
-            default_name = "未命名会话.sdss"
+            default_name = t("未命名会话.sdss")
 
         last_d = config_manager.get_last_dialog_dir("session")
         initial_p = os.path.join(last_d, default_name) if last_d else default_name
 
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "保存当前暗房会话工程", initial_p, "SpektraDarkroom 会话工程 (*.sdss);;所有文件 (*.*)"
+            self, t("保存当前暗房会话工程"), initial_p, t("SpektraDarkroom 会话工程 (*.sdss);;所有文件 (*.*)")
         )
         if file_path:
             config_manager.set_last_dialog_dir("session", file_path)
@@ -6768,12 +6769,12 @@ class DarkroomMainWindow(QMainWindow):
             logger.warning(f"Error auto-saving temporary session: {e}")
 
     def _do_save_session(self, file_path):
-        self.set_app_status("正在保存会话…", spinning=True)
+        self.set_app_status(t("正在保存会话…"), spinning=True)
         try:
             return self._write_session(file_path)
         except Exception as e:
             logger.error(f"Failed to save session {file_path}: {e}")
-            self.set_app_status(f"会话保存失败：{e}", timeout_ms=4000)
+            self.set_app_status(t('会话保存失败：{e}', e=e), timeout_ms=4000)
             return False
 
     def _write_session(self, file_path):
@@ -6856,7 +6857,7 @@ class DarkroomMainWindow(QMainWindow):
         ok = session_cache_manager.save_session_file(file_path, session_data)
         if ok:
             fn = os.path.basename(file_path)
-            self.set_app_status(f"会话已保存：{fn}", timeout_ms=3000)
+            self.set_app_status(t('会话已保存：{fn}', fn=fn), timeout_ms=3000)
             self._session_is_dirty = False
             self._is_temp_session = False
             self._update_window_title()
@@ -6865,7 +6866,7 @@ class DarkroomMainWindow(QMainWindow):
             self._update_recent_menu()
             return True
         else:
-            self.set_app_status("会话保存失败：未能写入会话文件", timeout_ms=4000)
+            self.set_app_status(t("会话保存失败：未能写入会话文件"), timeout_ms=4000)
             return False
 
     def _close_needs_prompt(self) -> bool:
@@ -6886,7 +6887,7 @@ class DarkroomMainWindow(QMainWindow):
         """
         if not self._close_needs_prompt():
             return True
-        sess_name = os.path.basename(self._current_session_path) if self._current_session_path else "未命名会话"
+        sess_name = os.path.basename(self._current_session_path) if self._current_session_path else t("未命名会话")
         dialog = UnsavedSessionDialog(sess_name, self)
         res = dialog.exec()
         if res == UnsavedSessionDialog.CANCEL:
@@ -7021,7 +7022,7 @@ class DarkroomMainWindow(QMainWindow):
         # 6. Switch back to startup welcome screen
         self.stack.setCurrentIndexAnimated(0, duration_ms=250)
         self._update_window_title()
-        self.set_app_status("已关闭当前会话", timeout_ms=3000)
+        self.set_app_status(t("已关闭当前会话"), timeout_ms=3000)
 
     def action_open_session(self):
         """Loads and restores session from a .sdss file with dirty check."""
@@ -7029,7 +7030,7 @@ class DarkroomMainWindow(QMainWindow):
             return
         last_d = config_manager.get_last_dialog_dir("session")
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "打开暗房会话工程", last_d, "SpektraDarkroom 会话工程 (*.sdss);;所有文件 (*.*)"
+            self, t("打开暗房会话工程"), last_d, t("SpektraDarkroom 会话工程 (*.sdss);;所有文件 (*.*)")
         )
         if file_path:
             config_manager.set_last_dialog_dir("session", file_path)
@@ -7040,13 +7041,13 @@ class DarkroomMainWindow(QMainWindow):
 
     def _open_session_by_path(self, file_path):
         if not file_path or not os.path.exists(file_path):
-            self.set_app_status("载入会话失败：会话文件不存在", timeout_ms=4000)
+            self.set_app_status(t("载入会话失败：会话文件不存在"), timeout_ms=4000)
             return
 
-        self.set_app_status("正在载入会话…", spinning=True)
+        self.set_app_status(t("正在载入会话…"), spinning=True)
         session_data = session_cache_manager.load_session_file(file_path)
         if not session_data or "photos" not in session_data:
-            self.set_app_status("载入会话失败：会话文件已损坏", timeout_ms=4000)
+            self.set_app_status(t("载入会话失败：会话文件已损坏"), timeout_ms=4000)
             return
 
         from core.path_utils import normalize_path
@@ -7173,14 +7174,14 @@ class DarkroomMainWindow(QMainWindow):
                 except Exception as e:
                     logger.warning(f"Failed to update session file after removing offline media: {e}")
 
-                self.set_app_status(f"已从会话中移除 {len(unresolved_orig_paths)} 张脱机底片", timeout_ms=3000)
+                self.set_app_status(t('已从会话中移除 {unresolved_orig_paths_count} 张脱机底片', unresolved_orig_paths_count=len(unresolved_orig_paths)), timeout_ms=3000)
             else:
                 # User cancelled opening session
-                self.set_app_status("已取消载入会话", timeout_ms=2500)
+                self.set_app_status(t("已取消载入会话"), timeout_ms=2500)
                 return
 
         if not resolved_files and photo_entries:
-            self.set_app_status("载入会话失败：所有底片均已丢失且未关联", timeout_ms=4000)
+            self.set_app_status(t("载入会话失败：所有底片均已丢失且未关联"), timeout_ms=4000)
             return
 
         # Cancel any active imports from previous session immediately
@@ -7226,7 +7227,7 @@ class DarkroomMainWindow(QMainWindow):
         if not active_path or not os.path.exists(active_path):
             active_path = resolved_files[0] if resolved_files else None
 
-        fn = "未命名会话" if is_temp else os.path.basename(file_path)
+        fn = t("未命名会话") if is_temp else os.path.basename(file_path)
 
         if not is_temp:
             config_manager.add_recent_session(file_path)
@@ -7264,14 +7265,14 @@ class DarkroomMainWindow(QMainWindow):
                 self.filmstrip.set_photos([], None)
                 self.btn_title_export.setVisible(False)
                 self.thumb_controller.reset_all_cards_to_color_pills(self.film_cards, self.paper_cards)
-                self.set_app_status(f"会话已恢复：{fn}（空工程）", timeout_ms=2500)
+                self.set_app_status(t('会话已恢复：{fn}（空工程）', fn=fn), timeout_ms=2500)
                 self._update_window_title()
 
     def action_quick_export(self, target_ids=None):
         """Item 4: Quick export selected or active photo(s) using remembered last export settings."""
         last_cfg = config_manager.get_last_export_settings()
         if not last_cfg:
-            self.set_app_status("未记录上次扫描参数，请先执行一次常规扫描", timeout_ms=3000)
+            self.set_app_status(t("未记录上次扫描参数，请先执行一次常规扫描"), timeout_ms=3000)
             self.action_export_image()
             return
 
@@ -7399,10 +7400,10 @@ class DarkroomMainWindow(QMainWindow):
         if hasattr(self.export_queue, "enqueue_batch"):
             self.export_queue.enqueue_batch(new_tasks)
         else:
-            for t in new_tasks:
-                self.export_queue.enqueue(t)
+            for _task in new_tasks:
+                self.export_queue.enqueue(_task)
 
-        self._set_export_status(f"已加入扫描队列 ({enqueued_count} 张)", state="busy")
+        self._set_export_status(t('已加入扫描队列 ({enqueued_count} 张)', enqueued_count=enqueued_count), state="busy")
 
     def push_undo_state(self, action: str = None):
         state = {
@@ -7451,14 +7452,14 @@ class DarkroomMainWindow(QMainWindow):
     def undo(self):
         if getattr(self.canvas, "is_crop_editing", False):
             if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay.undo():
-                self.set_app_status("已撤销裁切", timeout_ms=2000)
+                self.set_app_status(t("已撤销裁切"), timeout_ms=2000)
             else:
-                self.set_app_status("已回到最初的裁切状态", timeout_ms=2000)
+                self.set_app_status(t("已回到最初的裁切状态"), timeout_ms=2000)
             self._update_menu_actions_state()
             return
 
         if len(self._undo_stack) <= 1:
-            self.set_app_status("已回到最初的历史状态", timeout_ms=2000)
+            self.set_app_status(t("已回到最初的历史状态"), timeout_ms=2000)
             return
 
         curr_state = self._undo_stack.pop()
@@ -7472,51 +7473,51 @@ class DarkroomMainWindow(QMainWindow):
 
         act = curr_state.get("action") or prev_state.get("action")
         if act == "clear_sdc":
-            self.set_app_status("已撤销删除暗房配置", timeout_ms=2000)
+            self.set_app_status(t("已撤销删除暗房配置"), timeout_ms=2000)
         elif act == "paste_params":
-            self.set_app_status("已撤销粘贴暗房配方", timeout_ms=2000)
+            self.set_app_status(t("已撤销粘贴暗房配方"), timeout_ms=2000)
         elif act == "clear_crop":
-            self.set_app_status("已撤销清除裁切", timeout_ms=2000)
+            self.set_app_status(t("已撤销清除裁切"), timeout_ms=2000)
         elif act in ("remove_photos", "delete_photos"):
-            self.set_app_status("已撤销移除底片", timeout_ms=2000)
+            self.set_app_status(t("已撤销移除底片"), timeout_ms=2000)
         elif act == "clear_photos":
-            self.set_app_status("已撤销清空底片库", timeout_ms=2000)
+            self.set_app_status(t("已撤销清空底片库"), timeout_ms=2000)
         elif act == "sort_photos":
-            self.set_app_status("已撤销底片排序", timeout_ms=2000)
+            self.set_app_status(t("已撤销底片排序"), timeout_ms=2000)
         elif act == "rate_photos":
-            self.set_app_status("已撤销底片评分", timeout_ms=2000)
+            self.set_app_status(t("已撤销底片评分"), timeout_ms=2000)
         elif act == "reset_all_params":
-            self.set_app_status("已撤销重置所有参数", timeout_ms=2000)
+            self.set_app_status(t("已撤销重置所有参数"), timeout_ms=2000)
         elif act == "reset_to_open":
-            self.set_app_status("已撤销恢复至原始底片", timeout_ms=2000)
+            self.set_app_status(t("已撤销恢复至原始底片"), timeout_ms=2000)
         elif act and act.startswith("reset_track_"):
             track_names = {
-                "exposure": "曝光",
-                "optics": "光学",
-                "chemistry": "化学",
-                "enlarger": "放大机",
-                "halation": "光晕",
-                "grain": "颗粒"
+                "exposure": t("曝光"),
+                "optics": t("光学"),
+                "chemistry": t("化学"),
+                "enlarger": t("放大机"),
+                "halation": t("光晕"),
+                "grain": t("颗粒")
             }
-            tname = track_names.get(act[12:], "模块")
-            self.set_app_status(f"已撤销重置{tname}模块", timeout_ms=2000)
+            tname = track_names.get(act[12:], t("模块"))
+            self.set_app_status(t('已撤销重置{tname}模块', tname=tname), timeout_ms=2000)
         elif act == "auto_meter":
-            self.set_app_status("已撤销基准测光", timeout_ms=2000)
+            self.set_app_status(t("已撤销基准测光"), timeout_ms=2000)
         else:
-            self.set_app_status("已撤销", timeout_ms=2000)
+            self.set_app_status(t("已撤销"), timeout_ms=2000)
         self._update_menu_actions_state()
 
     def redo(self):
         if getattr(self.canvas, "is_crop_editing", False):
             if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay.redo():
-                self.set_app_status("已重做裁切", timeout_ms=2000)
+                self.set_app_status(t("已重做裁切"), timeout_ms=2000)
             else:
-                self.set_app_status("已回到最新的裁切状态", timeout_ms=2000)
+                self.set_app_status(t("已回到最新的裁切状态"), timeout_ms=2000)
             self._update_menu_actions_state()
             return
 
         if not self._redo_stack:
-            self.set_app_status("已回到最新的历史状态", timeout_ms=2000)
+            self.set_app_status(t("已回到最新的历史状态"), timeout_ms=2000)
             return
 
         nxt_state = self._redo_stack.pop()
@@ -7525,38 +7526,38 @@ class DarkroomMainWindow(QMainWindow):
 
         act = nxt_state.get("action")
         if act == "clear_sdc":
-            self.set_app_status("已重做删除暗房配置", timeout_ms=2000)
+            self.set_app_status(t("已重做删除暗房配置"), timeout_ms=2000)
         elif act == "paste_params":
-            self.set_app_status("已重做粘贴暗房配方", timeout_ms=2000)
+            self.set_app_status(t("已重做粘贴暗房配方"), timeout_ms=2000)
         elif act == "clear_crop":
-            self.set_app_status("已重做清除裁切", timeout_ms=2000)
+            self.set_app_status(t("已重做清除裁切"), timeout_ms=2000)
         elif act in ("remove_photos", "delete_photos"):
-            self.set_app_status("已重做移除底片", timeout_ms=2000)
+            self.set_app_status(t("已重做移除底片"), timeout_ms=2000)
         elif act == "clear_photos":
-            self.set_app_status("已重做清空底片库", timeout_ms=2000)
+            self.set_app_status(t("已重做清空底片库"), timeout_ms=2000)
         elif act == "sort_photos":
-            self.set_app_status("已重做底片排序", timeout_ms=2000)
+            self.set_app_status(t("已重做底片排序"), timeout_ms=2000)
         elif act == "rate_photos":
-            self.set_app_status("已重做底片评分", timeout_ms=2000)
+            self.set_app_status(t("已重做底片评分"), timeout_ms=2000)
         elif act == "reset_all_params":
-            self.set_app_status("已重做重置所有参数", timeout_ms=2000)
+            self.set_app_status(t("已重做重置所有参数"), timeout_ms=2000)
         elif act == "reset_to_open":
-            self.set_app_status("已重做恢复至原始底片", timeout_ms=2000)
+            self.set_app_status(t("已重做恢复至原始底片"), timeout_ms=2000)
         elif act and act.startswith("reset_track_"):
             track_names = {
-                "exposure": "曝光",
-                "optics": "光学",
-                "chemistry": "化学",
-                "enlarger": "放大机",
-                "halation": "光晕",
-                "grain": "颗粒"
+                "exposure": t("曝光"),
+                "optics": t("光学"),
+                "chemistry": t("化学"),
+                "enlarger": t("放大机"),
+                "halation": t("光晕"),
+                "grain": t("颗粒")
             }
-            tname = track_names.get(act[12:], "模块")
-            self.set_app_status(f"已重做重置{tname}模块", timeout_ms=2000)
+            tname = track_names.get(act[12:], t("模块"))
+            self.set_app_status(t('已重做重置{tname}模块', tname=tname), timeout_ms=2000)
         elif act == "auto_meter":
-            self.set_app_status("已重做基准测光", timeout_ms=2000)
+            self.set_app_status(t("已重做基准测光"), timeout_ms=2000)
         else:
-            self.set_app_status("已重做", timeout_ms=2000)
+            self.set_app_status(t("已重做"), timeout_ms=2000)
         self._update_menu_actions_state()
 
     def _is_photo_edited(self, photo_entry=None) -> bool:
@@ -7683,7 +7684,7 @@ class DarkroomMainWindow(QMainWindow):
             sel_count = len(self.filmstrip.get_selected_photo_ids())
             if sel_count > 1:
                 self._is_multi_selecting = True
-                self.set_app_status(f"已选择 {sel_count} 张底片", timeout_ms=0)
+                self.set_app_status(t('已选择 {sel_count} 张底片', sel_count=sel_count), timeout_ms=0)
             elif sel_count == 1:
                 self._is_multi_selecting = False
                 self.restore_default_status()
@@ -7695,7 +7696,7 @@ class DarkroomMainWindow(QMainWindow):
             sel_count = len(self.filmstrip.get_selected_photo_ids())
             if sel_count > 1:
                 self._is_multi_selecting = True
-                self.set_app_status(f"已选择 {sel_count} 张底片", timeout_ms=0)
+                self.set_app_status(t('已选择 {sel_count} 张底片', sel_count=sel_count), timeout_ms=0)
             elif sel_count == 1:
                 self._is_multi_selecting = False
                 self.restore_default_status()
@@ -7711,7 +7712,7 @@ class DarkroomMainWindow(QMainWindow):
 
         target_p = next((p for p in self.photos if p and p.get("id") == target_id), None)
         if not target_p or not self._is_photo_edited(target_p):
-            self.set_app_status("当前底片为原生底片，没有可复制的暗房配方", timeout_ms=2500)
+            self.set_app_status(t("当前底片为原生底片，没有可复制的暗房配方"), timeout_ms=2500)
             return
 
         exif = target_p.get("meta") or target_p.get("exif") or {}
@@ -7761,8 +7762,8 @@ class DarkroomMainWindow(QMainWindow):
         }
         if hasattr(self, 'filmstrip'):
             self.filmstrip.set_can_paste(True)
-        film_desc = "数码原生" if film == "none" else f"胶卷 ({film})"
-        self.set_app_status(f"已复制暗房配方：{film_desc}", timeout_ms=2500)
+        film_desc = t("数码原生") if film == "none" else t('胶卷 ({film})', film=film)
+        self.set_app_status(t('已复制暗房配方：{film_desc}', film_desc=film_desc), timeout_ms=2500)
         self._update_menu_actions_state()
 
     def action_paste_params(self):
@@ -7772,7 +7773,7 @@ class DarkroomMainWindow(QMainWindow):
 
         copied = getattr(self, '_copied_darkroom_profile', None)
         if not copied or not copied.get("is_edited"):
-            self.set_app_status("剪贴板中没有可用的暗房配方", timeout_ms=2500)
+            self.set_app_status(t("剪贴板中没有可用的暗房配方"), timeout_ms=2500)
             return
 
         copied_film = copied["film"]
@@ -8010,7 +8011,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         }
         self._push_raw_state(post_state)
 
-        self.set_app_status(f"已应用暗房配方：{affected_count} 张底片", timeout_ms=3000)
+        self.set_app_status(t('已应用暗房配方：{affected_count} 张底片', affected_count=affected_count), timeout_ms=3000)
 
     def _apply_history_state(self, state):
         if not state:
@@ -8579,7 +8580,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 film, getattr(self, "current_paper_stock", "kodak_2383"),
                 getattr(self, "current_print_mode", "optical"), params)
         except Exception as exc:                    # noqa: BLE001 - never break a paint
-            print(f"[FFChain] 点式链获取失败: {exc}")
+            print(t('[FFChain] 点式链获取失败: {exc}', exc=exc))
             return None
 
     def _grain_bundle_for_current(self):
@@ -8609,7 +8610,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return eng.get_grain_bundle(film, getattr(self, "current_paper_stock", "kodak_2383"),
                                         17, params)
         except Exception as exc:                    # noqa: BLE001 - never break a paint
-            print(f"[SpektraGrain] 双立方体获取失败: {exc}")
+            print(t('[SpektraGrain] 双立方体获取失败: {exc}', exc=exc))
             return None
 
     def _ensure_lut_bake_bridge(self):
@@ -8870,7 +8871,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.canvas.params[k] = self.current_params[k]
         self._apply_lut(lut_3d)
         dur = (time.time() - t0) * 1000.0
-        self.set_app_status(f"LUT 烘焙完成（{dur:.0f} ms）", timeout_ms=2000)
+        self.set_app_status(t('LUT 烘焙完成（{dur:.0f} ms）', dur=dur), timeout_ms=2000)
 
     def _commit_lut_preview(self):
         """Finish a DIR / morph drag.
@@ -8941,7 +8942,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.canvas.update_params(exposure_ev=ev_val)
         self._on_slider_committed(action="auto_meter")
         base_ev = float(photo.get("base_ev", 0.0))
-        self.set_app_status(f"基准测光：18% 中灰（基准 {base_ev:+.2f} EV）", timeout_ms=2500)
+        self.set_app_status(t('基准测光：18% 中灰（基准 {base_ev:+.2f} EV）', base_ev=base_ev), timeout_ms=2500)
 
     def _get_track_defaults(self):
         # 基准白平衡以**这张照片**为准，不看滑块自己的 default_val：控件的默认值只在切图/
@@ -9053,7 +9054,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             lut_dir = str(get_user_lut_cache_dir())
             grain_dir = str(os.path.join(str(get_user_cache_dir()), "film_grain"))
         except Exception as exc:                       # noqa: BLE001
-            show_darkroom_info(self, "重建渲染缓存", "找不到缓存目录", str(exc), badge_symbol="!")
+            show_darkroom_info(self, t("重建渲染缓存"), t("找不到缓存目录"), str(exc), badge_symbol="!")
             return
 
         sizes = {}
@@ -9068,10 +9069,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         detail = "\n".join(f"  {os.path.basename(p)}: {s / 1024 / 1024:.1f} MB"
                            for p, s in sizes.items())
         if not show_darkroom_confirm(
-                self, "重建渲染缓存", "删除并重建渲染缓存",
-                f"将删除以下缓存（{total_mb:.0f} MB）：\n{detail}\n\n"
-                "下次渲染会重新烘焙，第一次会慢一些。",
-                confirm_text="删除并重建", cancel_text="取消",
+                self, t("重建渲染缓存"), t("删除并重建渲染缓存"),
+                t('将删除以下缓存（{total_mb:.0f} MB）：\n{detail}\n\n下次渲染会重新烘焙，第一次会慢一些。', total_mb=total_mb, detail=detail),
+                confirm_text=t("删除并重建"), cancel_text=t("取消"),
                 badge_symbol="!", is_danger=True):
             return
 
@@ -9098,10 +9098,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     cache.clear()
         if hasattr(self, "canvas"):
             self.canvas.update()
-        message = f"已删除 {removed} 个缓存文件。"
+        message = t('已删除 {removed} 个缓存文件。', removed=removed)
         if failed:
-            message += "\n以下文件删不掉（可能被占用）：\n" + "\n".join(failed[:8])
-        show_darkroom_info(self, "重建渲染缓存", "缓存已重建", message, badge_symbol="✓")
+            message += t("\n以下文件删不掉（可能被占用）：\n") + "\n".join(failed[:8])
+        show_darkroom_info(self, t("重建渲染缓存"), t("缓存已重建"), message, badge_symbol="✓")
 
     def reset_track(self, track_name):
         is_none = (getattr(self, "current_film_stock", "none") == "none")
@@ -9169,7 +9169,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if getattr(self.canvas, "is_crop_editing", False):
             if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
                 self.canvas.crop_overlay.reset_crop()
-                self.set_app_status("已重置裁切", timeout_ms=2000)
+                self.set_app_status(t("已重置裁切"), timeout_ms=2000)
             return
 
         self._sync_wb_slider_defaults()
@@ -9221,7 +9221,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if getattr(self.canvas, "is_crop_editing", False):
             if hasattr(self.canvas, "crop_overlay") and self.canvas.crop_overlay:
                 self.canvas.crop_overlay.reset_to_initial_state()
-                self.set_app_status("已恢复至打开时的裁切状态", timeout_ms=2000)
+                self.set_app_status(t("已恢复至打开时的裁切状态"), timeout_ms=2000)
         else:
             self.reset_to_open_state()
 
@@ -9334,7 +9334,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.filmstrip.set_photo_dirty(self.active_photo_id, False)
             self.filmstrip.set_photo_crop(self.active_photo_id, False)
 
-        self.set_app_status("已恢复至原始底片状态", timeout_ms=2000)
+        self.set_app_status(t("已恢复至原始底片状态"), timeout_ms=2000)
 
     def _push_speed_gain(self, stops):
         """EV the pushed curve actually gives back on this stock (0 when unknown)."""
@@ -9367,7 +9367,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         0.2-0.6 EV per stop, which is exactly why a pushed frame comes out darker.
         """
         if not stops:
-            return "该胶卷没有迫冲数据（材料上无通行迫冲表，或未收录）"
+            return t("该胶卷没有迫冲数据（材料上无通行迫冲表，或未收录）")
         engine = getattr(self, "engine", None)
         label = ""
         if engine is not None:
@@ -9385,9 +9385,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             # Nothing is applied on top of the measured curve any more: no lifted black, no
             # grain multiplier.  A pushed negative is denser, and both the tone and the grain
             # follow from that -- which is also why fotufilm can be used as a reference.
-            body = (f"当前：显影 +{current} 档，曝光不联动（只换特性曲线）\n"
-                    f"实测：显影补回约 {gain:.1f} EV，暗部更密、颗粒自然变粗\n"
-                    f"要模拟“欠曝 {current} 档再迫冲”请勾选「模拟欠曝」")
+            body = (t('当前：显影 +{current} 档，曝光不联动（只换特性曲线）\n实测：显影补回约 {gain:.1f} EV，暗部更密、颗粒自然变粗\n要模拟“欠曝 {current2} 档再迫冲”请勾选「模拟欠曝」', current=current, gain=gain, current2=current))
             return f"{label}\n{body}" if label else body
 
         exposure = float(self.current_params.get("exposure_ev", 0.0) or 0.0)
@@ -9400,13 +9398,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
         given_back = exposure - float(ref)
         underexposed = current - given_back
         if underexposed <= 0.0:
-            body = f"当前：欠曝 0 EV，显影 +{current} 档 —— 属过显影，不是迫冲"
+            body = t('当前：欠曝 0 EV，显影 +{current} 档 —— 属过显影，不是迫冲', current=current)
         else:
             net = max(0.0, underexposed - gain)
-            body = (f"当前：欠曝 {underexposed:.1f} EV，显影 +{current} 档"
-                    f"（实测补回 {gain:.1f} EV，净暗约 {net:.1f} 档）")
+            body = (t('当前：欠曝 {underexposed:.1f} EV，显影 +{current} 档（实测补回 {gain:.1f} EV，净暗约 {net:.1f} 档）', underexposed=underexposed, current=current, gain=gain, net=net))
             if abs(given_back) >= 0.05:
-                body += f"\n曝光已手动补回 {given_back:+.1f} EV"
+                body += t('\n曝光已手动补回 {given_back:+.1f} EV', given_back=given_back)
         return f"{label}\n{body}" if label else body
 
     def _apply_push_exposure_offset(self, dv):
@@ -9484,7 +9481,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         current = int(round(float(self.current_params.get("push_ev", 0) or 0)))
         if current not in stops:
             current = 0
-        combo.set_items([("标准冲洗 (0)", 0)] + [(f"+{s} 档", s) for s in stops],
+        combo.set_items([(t("标准冲洗 (0)"), 0)] + [(t('+{s} 档', s=s), s) for s in stops],
                         default_val=current)
         combo.setEnabled(bool(stops))
         combo.label.setEnabled(bool(stops))
@@ -9790,9 +9787,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if hasattr(self, 'btn_crop'):
             self.btn_crop.setChecked(True)
         if hasattr(self, 'act_crop'):
-            self.act_crop.setText("退出裁切")
+            self.act_crop.setText(t("退出裁切"))
         if hasattr(self, 'act_reset_to_open'):
-            self.act_reset_to_open.setText("重置为打开时状态")
+            self.act_reset_to_open.setText(t("重置为打开时状态"))
 
         # Mutual exclusion: Exit compare mode and disable compare buttons while in crop mode
         if self.current_params.get("view_mode", 0) != 0:
@@ -9819,9 +9816,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if hasattr(self, 'btn_crop'):
             self.btn_crop.setChecked(False)
         if hasattr(self, 'act_crop'):
-            self.act_crop.setText("裁切")
+            self.act_crop.setText(t("裁切"))
         if hasattr(self, 'act_reset_to_open'):
-            self.act_reset_to_open.setText("重置为打开状态")
+            self.act_reset_to_open.setText(t("重置为打开状态"))
 
         # Re-enable compare buttons
         if hasattr(self, 'btn_split'):
@@ -10133,7 +10130,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self._default_paper_timer.stop()
             n = getattr(self, "_default_paper_refreshed", 0)
             if n:
-                self.set_app_status(f"默认相纸已更新，{n} 张底片已更新", timeout_ms=3000)
+                self.set_app_status(t('默认相纸已更新，{n} 张底片已更新', n=n), timeout_ms=3000)
 
     def _photo_effective_paper(self, photo):
         """给某张照片算它实际该用的相纸（见 _effective_paper_for_photo + 显式标记）。
@@ -10302,8 +10299,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if push_undo:
             self.push_undo_state()
             self._save_current_photo_sdc()
-            film_desc = "无" if stock_id == "none" else f"{stock_id}"
-            self.set_app_status(f"胶卷：{film_desc}", timeout_ms=2500)
+            film_desc = t("无") if stock_id == "none" else f"{stock_id}"
+            self.set_app_status(t('胶卷：{film_desc}', film_desc=film_desc), timeout_ms=2500)
             # 跨链换纸一定要说出来：这一整轮 bug 的共同形状都是"静默换纸"（面板 A、出图 B），
             # 而用户看不出缩略图用的是哪张纸。恢复记忆时不提示 —— 那是用户自己的选择，
             # 面板已经显示回来了。
@@ -10314,7 +10311,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 now_label = FilmGridCard.CLEAN_NAMES.get(str(self.current_paper_stock),
                                                          str(self.current_paper_stock))
                 self.set_app_status(
-                    f"{prev_label} 只用于另一条链，已切到 {now_label}；切回原来的卷会自动恢复",
+                    t('{prev_label} 只用于另一条链，已切到 {now_label}；切回原来的卷会自动恢复', prev_label=prev_label, now_label=now_label),
                     timeout_ms=4500)
 
     def on_switch_print_mode(self, mode, push_undo=True):
@@ -10326,7 +10323,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if (mode == "optical" and mode != getattr(self, "current_print_mode", "optical")
                 and hasattr(self.engine, "is_positive_film")
                 and self.engine.is_positive_film(getattr(self, "current_film_stock", "none"))):
-            self.set_app_status("反转片直接查看，不经过相纸印相", timeout_ms=2500)
+            self.set_app_status(t("反转片直接查看，不经过相纸印相"), timeout_ms=2500)
             return
         if push_undo and mode != getattr(self, "current_print_mode", "optical"):
             self._mark_current_photo_dirty()
@@ -10362,8 +10359,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if push_undo:
             self.push_undo_state()
             self._save_current_photo_sdc()
-            mode_name = "相纸印相" if mode == "optical" else "胶片直扫"
-            self.set_app_status(f"印相模式：{mode_name}", timeout_ms=2500)
+            mode_name = t("相纸印相") if mode == "optical" else t("胶片直扫")
+            self.set_app_status(t('印相模式：{mode_name}', mode_name=mode_name), timeout_ms=2500)
 
     def on_switch_paper(self, stock_id, push_undo=True):
         if hasattr(self, "_hover_timer"):
@@ -10382,14 +10379,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 card.set_active(sid == stock_id)
             if hasattr(self, "combo_paper"):
                 self.combo_paper.set_value(stock_id)
-            self.set_app_status("反转片不使用相纸，当前选择已保留给负片", timeout_ms=2500)
+            self.set_app_status(t("反转片不使用相纸，当前选择已保留给负片"), timeout_ms=2500)
             return
 
         if stock_id not in ("", "none") and not self._paper_allowed_now(
                 stock_id, self.paper_cards.get(stock_id)):
             # 链条不支持这张纸：不动状态，只解释。卡片是置灰的，走到这里通常是会话/快捷键
             # 或旧配置，硬切过去只会让烘焙回落到另一条链。
-            self.set_app_status(f"{stock_id} 与当前胶卷不属同一条链，未切换", timeout_ms=2500)
+            self.set_app_status(t('{stock_id} 与当前胶卷不属同一条链，未切换', stock_id=stock_id), timeout_ms=2500)
             if hasattr(self, "combo_paper"):
                 self.combo_paper.set_value(getattr(self, "current_paper_stock", "none"))
             # 卡片在点击时已经把高亮挪过去了（FilmGridCard.highlight_now，为了不等烘焙），
@@ -10448,8 +10445,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if push_undo:
             self.push_undo_state()
             self._save_current_photo_sdc()
-            mode_desc = "胶片直扫" if stock_id == "none" else f"{stock_id}"
-            self.set_app_status(f"相纸：{mode_desc}", timeout_ms=2500)
+            mode_desc = t("胶片直扫") if stock_id == "none" else f"{stock_id}"
+            self.set_app_status(t('相纸：{mode_desc}', mode_desc=mode_desc), timeout_ms=2500)
 
     def _on_paper_combo_changed(self, paper_id):
         """右侧“相纸”下拉框：与旧卡片墙走同一条切换路径。"""
@@ -10471,20 +10468,20 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if hasattr(self, 'btn_split'):
             self.btn_split.setChecked(mode != 0)
             if mode == 0:
-                self.btn_split.setToolTip("对比视图（快捷键 \\）：点击切换分屏对比")
+                self.btn_split.setToolTip(t("对比视图（快捷键 \\）：点击切换分屏对比"))
             elif mode == 1:
-                self.btn_split.setToolTip("对比视图（快捷键 \\）：分屏对比中，再次点击切换为左右双屏")
+                self.btn_split.setToolTip(t("对比视图（快捷键 \\）：分屏对比中，再次点击切换为左右双屏"))
             elif mode == 2:
-                self.btn_split.setToolTip("对比视图（快捷键 \\）：左右双屏中，再次点击恢复编辑")
+                self.btn_split.setToolTip(t("对比视图（快捷键 \\）：左右双屏中，再次点击恢复编辑"))
             elif mode == 3:
-                self.btn_split.setToolTip("对比视图：正在查看原始图像（松开恢复）")
+                self.btn_split.setToolTip(t("对比视图：正在查看原始图像（松开恢复）"))
 
     def _on_compare_long_press_start(self):
         if not self._current_photo_path:
             return
         self._saved_view_mode_before_long_press = self.canvas.params.get("view_mode", 0)
         self.set_view_mode(3)
-        self.set_app_status("原片对比（松开恢复）", timeout_ms=0)
+        self.set_app_status(t("原片对比（松开恢复）"), timeout_ms=0)
 
     def _on_compare_long_press_end(self):
         if hasattr(self, "_saved_view_mode_before_long_press"):
@@ -10514,11 +10511,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.canvas.set_hq_preview(want, resample=self._hq_resample)
         if announce:
             if not want:
-                self.set_app_status("高质量预览：关", timeout_ms=2200)
+                self.set_app_status(t("高质量预览：关"), timeout_ms=2200)
             elif self.canvas._hq_fit_view():
-                self.set_app_status("高质量预览：开 · 按导出分辨率渲染后缩小", timeout_ms=2200)
+                self.set_app_status(t("高质量预览：开 · 按导出分辨率渲染后缩小"), timeout_ms=2200)
             else:
-                self.set_app_status("高质量预览：开 · 回到「适应窗口」才生效", timeout_ms=2600)
+                self.set_app_status(t("高质量预览：开 · 回到「适应窗口」才生效"), timeout_ms=2600)
         return want
 
     def _apply_display_cm_pref(self):
@@ -10554,9 +10551,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         st = self.canvas.set_proof(on=bool(on))
         if on:
             self._sync_export_colorspace(st)
-            self.set_app_status(f"校样：{st.canonical_target()}", timeout_ms=1500)
+            self.set_app_status(t('校样：{v}', v=st.canonical_target()), timeout_ms=1500)
         else:
-            self.set_app_status("校样已关闭", timeout_ms=1200)
+            self.set_app_status(t("校样已关闭"), timeout_ms=1200)
 
     def _on_proof_warn_toggled(self, on: bool):
         self.canvas.set_proof(warn=bool(on))
@@ -10608,11 +10605,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         new = self.canvas.set_proof(target=colorspace)
         if new.canonical_target() != st.canonical_target():
             self._sync_proof_actions()
-            self.set_app_status(f"校样跟随导出：{new.canonical_target()}", timeout_ms=1800)
+            self.set_app_status(t('校样跟随导出：{v}', v=new.canonical_target()), timeout_ms=1800)
 
     def toggle_split_view(self):
         if not self._is_photo_edited():
-            self.set_app_status("原生未调色底片无前后对比", timeout_ms=1500)
+            self.set_app_status(t("原生未调色底片无前后对比"), timeout_ms=1500)
             return
         curr_mode = self.canvas.params.get("view_mode", 0)
         if curr_mode == 3:
@@ -10662,7 +10659,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         filt = FILE_DIALOG_IMAGE_FILTER
         last_d = config_manager.get_last_dialog_dir("photo")
         # Decouple native dialog parent from frameless HWND to prevent ghost window artifacts
-        files, _ = QFileDialog.getOpenFileNames(None, "导入照片 / RAW 底片", last_d, filt)
+        files, _ = QFileDialog.getOpenFileNames(None, t("导入照片 / RAW 底片"), last_d, filt)
         if files:
             config_manager.set_last_dialog_dir("photo", files[0])
             QTimer.singleShot(20, lambda fl=list(files): self._import_files_list(fl))
@@ -10670,7 +10667,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
     def action_open_folder(self):
         last_d = config_manager.get_last_dialog_dir("photo")
         # Decouple native dialog parent from frameless HWND to prevent ghost window artifacts
-        folder = QFileDialog.getExistingDirectory(None, "选择导入照片文件夹", last_d)
+        folder = QFileDialog.getExistingDirectory(None, t("选择导入照片文件夹"), last_d)
         if folder:
             config_manager.set_last_dialog_dir("photo", folder)
             QTimer.singleShot(20, lambda f=folder: self._scan_and_import_folder(f))
@@ -10697,8 +10694,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         else:
             # Silent by policy: no dialog for rejected formats, only a status-bar note.
             self.set_app_status(
-                f"所选文件夹内 {skipped_lossy} 个文件均为有损压缩（JPG/WebP），未导入" if skipped_lossy
-                else "所选文件夹内未找到受支持的图像文件",
+                t('所选文件夹内 {skipped_lossy} 个文件均为有损压缩（JPG/WebP），未导入', skipped_lossy=skipped_lossy) if skipped_lossy
+                else t("所选文件夹内未找到受支持的图像文件"),
                 timeout_ms=4000,
             )
 
@@ -10876,11 +10873,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if dup_names:
             if not new_paths:
                 logger.info(f"All {len(dup_names)} selected files are already in library")
-                self.set_app_status(f"所选 {len(dup_names)} 张底片已在底片库中，无需重复导入", timeout_ms=3000)
+                self.set_app_status(t('所选 {dup_names_count} 张底片已在底片库中，无需重复导入', dup_names_count=len(dup_names)), timeout_ms=3000)
                 return
             else:
                 logger.info(f"Skipping {len(dup_names)} duplicate files already in library")
-                self.set_app_status(f"已跳过 {len(dup_names)} 张重复底片，正在导入新底片…", timeout_ms=3000)
+                self.set_app_status(t('已跳过 {dup_names_count} 张重复底片，正在导入新底片…', dup_names_count=len(dup_names)), timeout_ms=3000)
 
         if not new_paths:
             return
@@ -10903,7 +10900,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         config_manager.add_recent_files(new_paths)
 
         # 3. Ensure cancel button is visible
-        self._set_cancel_chip(True, "导入")
+        self._set_cancel_chip(True, t("导入"))
 
         # 4. Check if an import or restore worker is actively running
         active_worker_running = (
@@ -10965,7 +10962,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         self._is_importing = True
         self._import_lock_time = time.time()
-        self._set_cancel_chip(True, "导入")
+        self._set_cancel_chip(True, t("导入"))
 
         logger.info(f"Import queue: starting next batch with {len(next_batch)} files (start_idx={start_idx})")
         self._seed_import_placeholders(next_batch, start_idx)
@@ -11115,9 +11112,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self, "_thumb_grade_worker_ref", None) is not None else 0
             if left <= 0:
                 done = getattr(self, "_import_session_completed", len(self.photos))
-                self.set_app_status(f"已导入 {done} 张底片", spinning=False, timeout_ms=3000)
+                self.set_app_status(t('已导入 {done} 张底片', done=done), spinning=False, timeout_ms=3000)
             else:
-                self.set_app_status(f"正在补齐缩略图（剩余 {left} 张）…", spinning=True, timeout_ms=0)
+                self.set_app_status(t('正在补齐缩略图（剩余 {left} 张）…', left=left), spinning=True, timeout_ms=0)
 
     def _should_defer_first_switch(self):
         """批量导入才延后首图，单张打开照旧（否则打开一张也要等导入"结束"才出图）。"""
@@ -11462,7 +11459,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._pending_import_queue = []
         self._set_cancel_chip(False)
         self._pending_session_map = None
-        self._sync_filmstrip_thumbnails("导入收尾")
+        self._sync_filmstrip_thumbnails(t("导入收尾"))
         self.canvas.set_has_library_photos(bool(self.photos))
         self._update_recent_menu()
         target_path = getattr(self, "_target_initial_active_path", None)
@@ -11473,7 +11470,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.on_switch_photo(target_entry["id"])
 
         completed_count = getattr(self, "_import_session_completed", len(self.photos))
-        self.set_app_status(f"已导入 {completed_count} 张底片", spinning=False, timeout_ms=3000)
+        self.set_app_status(t('已导入 {completed_count} 张底片', completed_count=completed_count), spinning=False, timeout_ms=3000)
         self._set_import_hq_suspend(False, hold=(completed_count > 1))
 
         # 首图还停在导入期铺的内嵌 JPEG 上，现在才跑完整链（一次 0.3-1.9 s）。
@@ -11571,7 +11568,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             pass
         return None
 
-    def _set_cancel_chip(self, visible, what="导入"):
+    def _set_cancel_chip(self, visible, what=t("导入")):
         """状态栏那颗"取消"胶囊：导入和恢复会话共用，文案跟着阶段走。
 
         恢复会话也要能中止（几秒到一分钟），所以两条路都显示它。可点性靠
@@ -11581,8 +11578,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         btn = getattr(self, "btn_cancel_import", None)
         if btn is None:
             return
-        btn.setText(f"✕ 取消{what}")
-        btn.setToolTip(f"中断当前{what}（Esc）")
+        btn.setText(t('✕ 取消{what}', what=what))
+        btn.setToolTip(t('中断当前{what}（Esc）', what=what))
         btn.setVisible(bool(visible))
 
     def _cancel_active_import(self, notify_user=True):
@@ -11657,7 +11654,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._set_cancel_chip(False)
         self.restore_default_status()
         if notify_user and was_importing:
-            self.set_app_status("已取消导入", timeout_ms=3000)
+            self.set_app_status(t("已取消导入"), timeout_ms=3000)
 
     def _on_slot_photo_decoded(self, slot_idx, decoded_entry):
         if slot_idx < 0 or slot_idx >= len(self.photos):
@@ -11747,7 +11744,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
     def _on_slot_decode_progress(self, curr, total):
         if getattr(self, "_is_importing", False):
-            self.set_app_status(f"正在恢复底片库（{curr}/{total}）…", spinning=True, timeout_ms=0)
+            self.set_app_status(t('正在恢复底片库（{curr}/{total}）…', curr=curr, total=total), spinning=True, timeout_ms=0)
 
     def _scroll_to_active_after_restore(self, delay_ms=300):
         """恢复/导入收尾后，把底片栏滚到当前那张。
@@ -11790,7 +11787,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._is_importing = False
         self._set_import_hq_suspend(False, hold=(len(self.photos) > 1))
         self._set_cancel_chip(False)
-        self._sync_filmstrip_thumbnails("恢复收尾")
+        self._sync_filmstrip_thumbnails(t("恢复收尾"))
         # 首图还停在占位缩略图上，把完整链补上（用户这会儿已经能随便点了）。
         if getattr(self, "_deferred_switch_id", None):
             QTimer.singleShot(IMPORT_DEFERRED_SWITCH_DELAY_MS, self._activate_deferred_photo)
@@ -11799,9 +11796,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             320 + (IMPORT_DEFERRED_SWITCH_DELAY_MS if getattr(self, "_deferred_switch_id", None) else 0))
         sess_name = os.path.basename(self._current_session_path) if getattr(self, "_current_session_path", None) else ""
         if sess_name:
-            self.set_app_status(f"会话已恢复：{sess_name}（{len(self.photos)} 张）", spinning=False, timeout_ms=3000)
+            self.set_app_status(t('会话已恢复：{sess_name}（{v} 张）', sess_name=sess_name, v=len(self.photos)), spinning=False, timeout_ms=3000)
         else:
-            self.set_app_status(f"底片库已就绪（{len(self.photos)} 张）", spinning=False, timeout_ms=2500)
+            self.set_app_status(t('底片库已就绪（{v} 张）', v=len(self.photos)), spinning=False, timeout_ms=2500)
         # 修剪要遍历整个缓存目录（实测 351-487 ms），别压在恢复完成的当口。
         self._run_cache_maintenance("prune", session_cache_manager.prune_cache_if_needed)
 
@@ -11882,16 +11879,16 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         if sort_key in ("time_asc", "exif_asc"):
             self.photos.sort(key=_get_photo_timestamp)
-            msg = "底片已按拍摄时间 (从早到晚) 排序"
+            msg = t("底片已按拍摄时间 (从早到晚) 排序")
         elif sort_key in ("time_desc", "exif_desc"):
             self.photos.sort(key=_get_photo_timestamp, reverse=True)
-            msg = "底片已按拍摄时间 (从晚到早) 排序"
+            msg = t("底片已按拍摄时间 (从晚到早) 排序")
         elif sort_key == "name_asc":
             self.photos.sort(key=lambda p: (p.get("filename") or "").lower() if p else "")
-            msg = "底片已按名称 (A 到 Z) 排序"
+            msg = t("底片已按名称 (A 到 Z) 排序")
         elif sort_key == "name_desc":
             self.photos.sort(key=lambda p: (p.get("filename") or "").lower() if p else "", reverse=True)
-            msg = "底片已按名称 (Z 到 A) 排序"
+            msg = t("底片已按名称 (Z 到 A) 排序")
         elif sort_key == "import":
             def _get_id_idx(p):
                 if not p:
@@ -11904,7 +11901,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     pass
                 return 0
             self.photos.sort(key=_get_id_idx)
-            msg = "底片已恢复初始导入顺序"
+            msg = t("底片已恢复初始导入顺序")
         else:
             return
 
@@ -11966,13 +11963,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if hasattr(self, "filmstrip"):
                 counts = self.filmstrip.get_filter_counts()
                 labels_map = {
-                    "all": f"全部（{counts['all']}张）",
-                    "5": f"★★★★★（{counts['5']}张）",
-                    "4": f"★★★★（{counts['4']}张）",
-                    "3": f"★★★（{counts['3']}张）",
-                    "2": f"★★（{counts['2']}张）",
-                    "1": f"★（{counts['1']}张）",
-                    "0": f"无评分（{counts['0']}张）",
+                    "all": t('全部（{counts_all}张）', counts_all=counts['all']),
+                    "5": t('★★★★★（{counts_5}张）', counts_5=counts['5']),
+                    "4": t('★★★★（{counts_4}张）', counts_4=counts['4']),
+                    "3": t('★★★（{counts_3}张）', counts_3=counts['3']),
+                    "2": t('★★（{counts_2}张）', counts_2=counts['2']),
+                    "1": t('★（{counts_1}张）', counts_1=counts['1']),
+                    "0": t('无评分（{counts_0}张）', counts_0=counts['0']),
                 }
             for k, act in self.star_filter_actions.items():
                 if k in labels_map:
@@ -12027,9 +12024,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         cnt = len(photo_ids)
         stars_str = "★" * clean_r + "☆" * (5 - clean_r)
         if clean_r > 0:
-            msg = f"已评为 {stars_str}（{cnt} 张底片）" if cnt > 1 else f"已评为 {stars_str}"
+            msg = t('已评为 {stars_str}（{cnt} 张底片）', stars_str=stars_str, cnt=cnt) if cnt > 1 else t('已评为 {stars_str}', stars_str=stars_str)
         else:
-            msg = f"已清除评级（{cnt} 张底片）" if cnt > 1 else "已清除评级"
+            msg = t('已清除评级（{cnt} 张底片）', cnt=cnt) if cnt > 1 else t("已清除评级")
         self.set_app_status(msg, timeout_ms=3000)
 
     def action_set_active_rating(self, rating: int):
@@ -12144,13 +12141,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         """Returns (available: bool, reason: str) for the enlarger & paper development section."""
         film = getattr(self, "current_film_stock", "none")
         if film == "none":
-            return False, "当前为数码原片旁通模式，无需放大与相纸显影"
+            return False, t("当前为数码原片旁通模式，无需放大与相纸显影")
         if hasattr(self.engine, "is_positive_film") and self.engine.is_positive_film(film):
-            return False, "当前为反转正片，无放大机与相纸显影"
+            return False, t("当前为反转正片，无放大机与相纸显影")
         paper = getattr(self, "current_paper_stock", "none")
         pmode = getattr(self, "current_print_mode", "optical")
         if paper == "none" or pmode == "scan":
-            return False, "当前为胶片直扫（未反相），无放大机与相纸显影"
+            return False, t("当前为胶片直扫（未反相），无放大机与相纸显影")
         return True, ""
 
     def _enlarger_available(self) -> bool:
@@ -12163,13 +12160,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         is_none = (getattr(self, "current_film_stock", "none") == "none")
         if is_none:
             available = False
-            hint = "当前为数码原片旁通模式，无成色剂抑制化学"
+            hint = t("当前为数码原片旁通模式，无成色剂抑制化学")
         else:
             try:
                 available, reason = self.engine.dir_status(getattr(self, "current_film_stock", "none"))
             except Exception:
                 available, reason = True, ""
-            hint = "" if available else self.DIR_UNAVAILABLE_TEXT.get(reason, "当前胶卷未提供 DIR 数据")
+            hint = "" if available else self.DIR_UNAVAILABLE_TEXT.get(reason, t("当前胶卷未提供 DIR 数据"))
         for slider in (getattr(self, "slider_dir_amount", None),
                        getattr(self, "slider_dir_interlayer", None),
                        getattr(self, "slider_dir_samelayer", None)):
@@ -12208,8 +12205,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         except Exception:                              # noqa: BLE001
             pass
         if scope == "ffchain":
-            return "这张相纸只用于原生链（spektrafilm）；当前是 fotufilm 转换卷，改用点式链相纸"
-        return "这张相纸只有 fotufilm 点式链的表；当前是原生链胶卷，请改用原生相纸"
+            return t("这张相纸只用于原生链（spektrafilm）；当前是 fotufilm 转换卷，改用点式链相纸")
+        return t("这张相纸只有 fotufilm 点式链的表；当前是原生链胶卷，请改用原生相纸")
 
     def _refresh_paper_combo(self):
         """按当前卷重列相纸下拉框（只列能选的），保留仍在列表里的那个值。"""
@@ -12297,7 +12294,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         combo_format = getattr(self, "combo_format", None)
         if combo_format is not None:
             fmt_available = not is_none
-            fmt_hint = "当前处于数码原片旁通模式，无胶片画幅与银盐晶体尺度" if is_none else ""
+            fmt_hint = t("当前处于数码原片旁通模式，无胶片画幅与银盐晶体尺度") if is_none else ""
             combo_format.setEnabled(fmt_available)
             combo_format.setToolTip(getattr(combo_format, "default_tooltip", "") if fmt_available else fmt_hint)
             for child in [combo_format] + combo_format.findChildren(QWidget):
@@ -12355,16 +12352,16 @@ aspect_ratio=self._lens_frame_aspect(photo),
             cam_pf.setEnabled(not is_none)
             cam_pf.setToolTip(
                 getattr(cam_pf, "default_tooltip", "") if not is_none
-                else "当前为数码原片旁通模式：没有胶片介质，胶片预闪无效")
+                else t("当前为数码原片旁通模式：没有胶片介质，胶片预闪无效"))
         # fotufilm 点式链没有 morph / 显影衰竭这两个自由度（上游配置里根本没有这两类槽）。
         # 置灰并说明，而不是让它们看着能拖、实际什么都不做。
         if enlarger_available and self._on_ffchain_now():
             for slider, reason in (
-                    (getattr(self, 'slider_morph_gamma', None), "fotufilm 链不含形态学伽马"),
-                    (getattr(self, 'slider_exhaustion', None), "fotufilm 链不含显影衰竭")):
+                    (getattr(self, 'slider_morph_gamma', None), t("fotufilm 链不含形态学伽马")),
+                    (getattr(self, 'slider_exhaustion', None), t("fotufilm 链不含显影衰竭"))):
                 if slider is not None:
                     slider.setEnabled(False)
-                    slider.setToolTip(f"{reason}，切回 spektrafilm 链后生效")
+                    slider.setToolTip(t('{reason}，切回 spektrafilm 链后生效', reason=reason))
                 for child in [w] + w.findChildren(QWidget):
                     child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not enlarger_available)
 
@@ -12377,7 +12374,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # 5. 物理光晕 (Halation) - Only available with real film media
         sec_halation = getattr(self, "sec_halation", None)
         hal_available = not is_none
-        hal_hint = "" if hal_available else "当前为数码原片旁通模式，无片基背反射光晕"
+        hal_hint = "" if hal_available else t("当前为数码原片旁通模式，无片基背反射光晕")
         if sec_halation is not None and hasattr(sec_halation, "set_available"):
             sec_halation.set_available(hal_available, hal_hint)
             if not hal_available:
@@ -12398,7 +12395,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         # 6. 银盐颗粒 (Grain) - 旁通态不可用；彩色滑块在黑白胶卷上无意义（档案强制共用银影）
         sec_grain = getattr(self, "sec_grain", None)
         grain_available = not is_none
-        grain_hint = "" if grain_available else "当前为数码原片旁通模式，无银盐乳剂与颗粒"
+        grain_hint = "" if grain_available else t("当前为数码原片旁通模式，无银盐乳剂与颗粒")
         try:
             is_bw_film = (not is_none) and bool(self.engine.is_bw_stock(self.current_film_stock))
         except Exception:
@@ -12425,7 +12422,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             if not grain_available:
                 colour_slider.setToolTip(grain_hint)
             elif is_bw_film:
-                colour_slider.setToolTip("黑白胶卷只有单一银影，无彩色颗粒可调")
+                colour_slider.setToolTip(t("黑白胶卷只有单一银影，无彩色颗粒可调"))
             else:
                 colour_slider.setToolTip(getattr(colour_slider, "default_tooltip", ""))
             for child in [colour_slider] + colour_slider.findChildren(QWidget):
@@ -12440,12 +12437,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 if is_none:
                     card.setEnabled(pid == "none")
                     if pid != "none":
-                        card.setToolTip("数码原片旁通状态无需相纸印相")
+                        card.setToolTip(t("数码原片旁通状态无需相纸印相"))
                     else:
                         card.setToolTip(getattr(card, "original_tooltip", ""))
                 elif is_pos:
                     card.setEnabled(False)
-                    card.setToolTip("反转正片不经过相纸；当前选择保留，切回负片时继续使用")
+                    card.setToolTip(t("反转正片不经过相纸；当前选择保留，切回负片时继续使用"))
                 else:
                     # 两条链的相纸集合不通用（见 engine.paper_available）：没有（卷，纸）
                     # 配对表的纸在这里置灰，而不是让它落到另一条链上出图。
@@ -12473,8 +12470,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
             combo_paper.setEnabled(paper_ok)
             combo_paper.setToolTip(
                 getattr(combo_paper, "default_tooltip", "") if paper_ok
-                else ("反转正片不经过相纸；当前选择保留，切回负片时继续使用" if is_pos
-                      else "数码原片旁通模式无相纸印相环节")
+                else (t("反转正片不经过相纸；当前选择保留，切回负片时继续使用") if is_pos
+                      else t("数码原片旁通模式无相纸印相环节"))
             )
 
     def _update_diffusion_ui_state(self):
@@ -12485,16 +12482,16 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if hasattr(self, 'combo_diff_strength') and self.combo_diff_strength is not None:
             self.combo_diff_strength.setEnabled(not is_diff_none)
             if is_diff_none:
-                self.combo_diff_strength.setToolTip("选择柔光镜型号后可调节挡位")
+                self.combo_diff_strength.setToolTip(t("选择柔光镜型号后可调节挡位"))
             else:
-                self.combo_diff_strength.setToolTip(getattr(self.combo_diff_strength, "default_tooltip", "柔光镜散射密度（1/8～2 档）"))
+                self.combo_diff_strength.setToolTip(getattr(self.combo_diff_strength, "default_tooltip", t("柔光镜散射密度（1/8～2 档）")))
 
         if hasattr(self, 'slider_diff_warmth') and self.slider_diff_warmth is not None:
             self.slider_diff_warmth.setEnabled(not is_diff_none)
             if is_diff_none:
-                self.slider_diff_warmth.setToolTip("选择柔光镜型号后可调节冷暖偏置")
+                self.slider_diff_warmth.setToolTip(t("选择柔光镜型号后可调节冷暖偏置"))
             else:
-                self.slider_diff_warmth.setToolTip(getattr(self.slider_diff_warmth, "default_tooltip", "柔光光晕冷暖：正值偏暖金，负值偏冷青"))
+                self.slider_diff_warmth.setToolTip(getattr(self.slider_diff_warmth, "default_tooltip", t("柔光光晕冷暖：正值偏暖金，负值偏冷青")))
 
     @staticmethod
     def _lens_frame_aspect(photo):
@@ -12555,10 +12552,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if is_builtin and hasattr(self, 'combo_lens_make'):
             self._is_updating_sliders = True
             try:
-                self.combo_lens_make.set_items([("内置", "")], default_val="")
-                self.combo_lens_model.set_items([("内置", "")], default_val="")
+                self.combo_lens_make.set_items([(t("内置"), "")], default_val="")
+                self.combo_lens_model.set_items([(t("内置"), "")], default_val="")
                 self.combo_lens_profile.set_items(
-                    [("内置（RAW 内）", "@builtin")], default_val="@builtin")
+                    [(t("内置（RAW 内）"), "@builtin")], default_val="@builtin")
             finally:
                 self._is_updating_sliders = False
         if hasattr(self, 'slider_lens_distortion'):
@@ -12701,7 +12698,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         self.spinner_ca.stop()
         if no_image:
-            self.lbl_ca_status.setText("不可用")
+            self.lbl_ca_status.setText(t("不可用"))
             self.lbl_ca_status.setVisible(True)
             return
         if not all(k in lens_cfg for k in _AUTO_CA_KEYS):
@@ -12709,7 +12706,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             return
         shift = lens_cfg.get("auto_ca_shift") or (0.0, 0.0)
         if abs(float(shift[0])) < 0.05 and abs(float(shift[1])) < 0.05:
-            self.lbl_ca_status.setText("未找到")
+            self.lbl_ca_status.setText(t("未找到"))
             self.lbl_ca_status.setVisible(True)
         else:
             self.lbl_ca_status.setVisible(False)
@@ -12745,7 +12742,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             # and say "内置" rather than offering a list that cannot apply.
             lens_cfg["make"] = ""
             lens_cfg["model"] = ""
-            lens_cfg["profile_name"] = "内置（RAW 内）"
+            lens_cfg["profile_name"] = t("内置（RAW 内）")
             lens_cfg["profile_path"] = "@builtin"
         elif lens_cfg.get("profile_path") == "@builtin":
             # Leaving 内置: drop the pseudo-profile so nothing stale keeps being applied.
@@ -12781,7 +12778,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         db = LCPDatabase.get_instance()
         models = db.get_models_for_make(make) if make else []
         seen_models = set()
-        model_items = [("无", "")]
+        model_items = [(t("无"), "")]
         for m_name, _, _ in models:
             if m_name not in seen_models:
                 seen_models.add(m_name)
@@ -12790,7 +12787,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._is_updating_sliders = True
         try:
             self.combo_lens_model.set_items(model_items, default_val="")
-            self.combo_lens_profile.set_items([("无", ""), ("[+ 添加配置文件 (.lcp)...]", "__import_lcp__")], default_val="")
+            self.combo_lens_profile.set_items([(t("无"), ""), (t("[+ 添加配置文件 (.lcp)...]"), "__import_lcp__")], default_val="")
         finally:
             self._is_updating_sliders = False
 
@@ -12818,14 +12815,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
         from core.lens_correction import LCPDatabase
         db = LCPDatabase.get_instance()
         models = db.get_models_for_make(make) if make else []
-        prof_items = [("无", "")]
+        prof_items = [(t("无"), "")]
         matching_paths = []
         for m_name, p_display, p_path in models:
             if m_name == model_name:
                 prof_items.append((p_display, p_path))
                 matching_paths.append((p_display, p_path))
 
-        prof_items.append(("[+ 添加配置文件 (.lcp)...]", "__import_lcp__"))
+        prof_items.append((t("[+ 添加配置文件 (.lcp)...]"), "__import_lcp__"))
         self._is_updating_sliders = True
         try:
             def_path = ""
@@ -12889,9 +12886,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         last_d = config_manager.get_last_dialog_dir("lcp")
         f_path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择镜头校正配置文件 (.lcp)",
+            t("选择镜头校正配置文件 (.lcp)"),
             last_d,
-            "Adobe 镜头配置文件 (*.lcp);;所有文件 (*.*)"
+            t("Adobe 镜头配置文件 (*.lcp);;所有文件 (*.*)")
         )
         if not f_path:
             # Revert selection back to previous
@@ -12910,7 +12907,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         success, make, model_name, prof_display, dest_path = import_user_lcp_file(f_path, target_make=cur_make)
 
         if not success:
-            self._show_warning_dialog("导入失败", f"无法导入配置文件:\n{f_path}")
+            self._show_warning_dialog(t("导入失败"), t('无法导入配置文件:\n{f_path}', f_path=f_path))
             if hasattr(self, "combo_lens_profile"):
                 self._is_updating_sliders = True
                 try:
@@ -12938,7 +12935,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._save_current_photo_sdc()
         self.push_undo_state()
 
-        self.set_app_status(f"已导入镜头配置文件：{prof_display}", timeout_ms=4000)
+        self.set_app_status(t('已导入镜头配置文件：{prof_display}', prof_display=prof_display), timeout_ms=4000)
 
     def _on_lens_amount_changed(self, key, val):
         if getattr(self, "_is_updating_sliders", False) or getattr(self, "_is_switching_photo", False):
@@ -13006,15 +13003,15 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 lens_cfg["setup"] = "builtin"
                 if hasattr(self, 'combo_lens_setup'):
                     self.combo_lens_setup.set_value("builtin")
-                self.combo_lens_make.set_items([("内置", "")], default_val="")
-                self.combo_lens_model.set_items([("内置", "")], default_val="")
+                self.combo_lens_make.set_items([(t("内置"), "")], default_val="")
+                self.combo_lens_model.set_items([(t("内置"), "")], default_val="")
                 self.combo_lens_profile.set_items(
-                    [("内置（RAW 内）", "@builtin")], default_val="@builtin")
+                    [(t("内置（RAW 内）"), "@builtin")], default_val="@builtin")
                 return
 
             # 1. Populate makes
             makes = db.get_available_makes()
-            make_items = [("无", "")] + [(m, m) for m in makes]
+            make_items = [(t("无"), "")] + [(m, m) for m in makes]
             if make and make not in [m for _, m in make_items]:
                 make_items.append((make, make))
             self.combo_lens_make.set_items(make_items, default_val=make)
@@ -13022,7 +13019,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             # 2. Populate models
             models = db.get_models_for_make(make) if make else []
             seen_models = set()
-            model_items = [("无", "")]
+            model_items = [(t("无"), "")]
             for m_name, _, _ in models:
                 if m_name not in seen_models:
                     seen_models.add(m_name)
@@ -13032,14 +13029,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.combo_lens_model.set_items(model_items, default_val=model)
 
             # 3. Populate profiles
-            prof_items = [("无", "")]
+            prof_items = [(t("无"), "")]
             for m_name, p_name, p_p in models:
                 if m_name == model:
                     prof_items.append((p_name, p_p))
             if prof_path and prof_path not in [p for _, p in prof_items]:
-                p_display = lens_cfg.get("profile_name") or "已载入配置文件"
+                p_display = lens_cfg.get("profile_name") or t("已载入配置文件")
                 prof_items.append((p_display, prof_path))
-            prof_items.append(("[+ 添加配置文件 (.lcp)...]", "__import_lcp__"))
+            prof_items.append((t("[+ 添加配置文件 (.lcp)...]"), "__import_lcp__"))
             self.combo_lens_profile.set_items(prof_items, default_val=prof_path)
         finally:
             self._is_updating_sliders = False
@@ -13076,8 +13073,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         else:
             suspected_make = detect_lens_brand(lens_model, cam_make)
             lens_cfg["make"] = suspected_make or cam_make or ""
-            lens_cfg["model"] = lens_model or cam_model or "未找到匹配镜头"
-            lens_cfg["profile_name"] = "无配置文件"
+            lens_cfg["model"] = lens_model or cam_model or t("未找到匹配镜头")
+            lens_cfg["profile_name"] = t("无配置文件")
             lens_cfg["profile_path"] = ""
 
         if hasattr(self, 'combo_lens_make'):
@@ -13333,7 +13330,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     # 以前"有缓存"走的是同步 `get_photo_preview`（读 .npy 60-70 ms）+ 同步
                     # 上传，于是有缓存的切起来反而比没缓存的卡；现在两条路合成一条。
                     if not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False):
-                        self.set_app_status(f"正在解析 RAW：{fn}…", spinning=True, timeout_ms=0)
+                        self.set_app_status(t('正在解析 RAW：{fn}…', fn=fn), spinning=True, timeout_ms=0)
 
                     # Priority 2: Visual seamless placeholder in Direct sRGB Bypass mode (u_is_bypass = 2)
                     # Immediately present the bottom filmstrip or cached thumbnail with 0ms response,
@@ -13372,7 +13369,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 m_h = photo.get("height") or (photo.get("meta", {}).get("height") if isinstance(photo.get("meta"), dict) else None)
                 self.canvas.set_image(photo["float_img"], master_width=m_w, master_height=m_h, photo_id=photo_id)
                 if not getattr(self, "_is_multi_selecting", False):
-                    self.set_app_status(f"底片已载入：{fn}", spinning=False, timeout_ms=2000)
+                    self.set_app_status(t('底片已载入：{fn}', fn=fn), spinning=False, timeout_ms=2000)
 
             self._manage_photo_memory_lru(photo_id)
 
@@ -13529,7 +13526,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if not res or not res.get("success"):
             if self.active_photo_id == photo_id:
                 self.set_app_status(
-                    f"底片载入失败：{os.path.basename(photo_path)}", spinning=False, timeout_ms=4000)
+                    t('底片载入失败：{v}', v=os.path.basename(photo_path)), spinning=False, timeout_ms=4000)
             return
 
         float_img = res.get("float_img")
@@ -13540,7 +13537,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if float_img is None:
             if self.active_photo_id == photo_id:
                 self.set_app_status(
-                    f"底片载入失败：{os.path.basename(photo_path)}（无可用的预览数据）",
+                    t('底片载入失败：{v}（无可用的预览数据）', v=os.path.basename(photo_path)),
                     spinning=False, timeout_ms=4000)
             return
 
@@ -13665,7 +13662,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 self._upload_canvas_image(float_img, target_photo, photo_id)
             finally:
                 if not getattr(self, "_is_multi_selecting", False):
-                    self.set_app_status(f"底片已载入：{fn}", spinning=False, timeout_ms=2000)
+                    self.set_app_status(t('底片已载入：{fn}', fn=fn), spinning=False, timeout_ms=2000)
 
     def _card_paper_for(self, film, current_paper, default_papers=None):
         """这张胶卷卡片该配哪张纸：本卷用得了当前纸就用它，否则用这支卷所在链的默认纸。
@@ -13967,7 +13964,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
 
         recycled_ok = send_to_recycle_bin(files_to_recycle)
         if not recycled_ok:
-            self.set_app_status("删除失败：无法移入回收站", timeout_ms=3000)
+            self.set_app_status(t("删除失败：无法移入回收站"), timeout_ms=3000)
             return
 
         from core import session_cache_manager
@@ -14001,7 +13998,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         if not self._undo_stack and self.active_photo_id and getattr(self, "_active_photo_baseline_state", None):
             self._undo_stack = [self._active_photo_baseline_state]
         self._update_menu_actions_state()
-        self.set_app_status(f"已将 {count} 个文件移入回收站", timeout_ms=3000)
+        self.set_app_status(t('已将 {count} 个文件移入回收站', count=count), timeout_ms=3000)
 
     def action_clear_sdc_active(self):
         """Action handler for menu bar: Delete SDC sidecar recipe and revert photo(s) to pristine RAW."""
@@ -14212,9 +14209,9 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         self._save_auto_temp_session()
 
         if active_cleared and len(id_set) == 1:
-            self.set_app_status("已清除暗房配置，恢复为原生底片", timeout_ms=3000)
+            self.set_app_status(t("已清除暗房配置，恢复为原生底片"), timeout_ms=3000)
         else:
-            self.set_app_status(f"已清除 {len(id_set)} 张底片的暗房配置，恢复为原生底片", timeout_ms=3000)
+            self.set_app_status(t('已清除 {id_set_count} 张底片的暗房配置，恢复为原生底片', id_set_count=len(id_set)), timeout_ms=3000)
 
     def action_clear_active_crop(self):
         """Clear crop on the currently active photo or selected photo(s)."""
@@ -14422,7 +14419,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         self._push_raw_state(post_state)
 
         count = len(target_photos)
-        msg = "已清除裁切" if count == 1 else f"已清除 {count} 张底片的裁切"
+        msg = t("已清除裁切") if count == 1 else t('已清除 {count} 张底片的裁切', count=count)
         self.set_app_status(msg, timeout_ms=2000)
 
     def action_clear_photos(self, push_undo=True):
@@ -14722,7 +14719,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             allow_overwrite=bool(cfg.get("overwrite", True)))
         if out_path != _requested_path:
             self.set_app_status(
-                f"已另存为 {os.path.basename(out_path)}，未覆盖原始底片", timeout_ms=4000)
+                t('已另存为 {v}，未覆盖原始底片', v=os.path.basename(out_path)), timeout_ms=4000)
 
         pix = None
         thumb_arr = self._current_photo_thumb if is_active else (curr_p or {}).get("thumbnail_rgb")
@@ -14737,7 +14734,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         task = ExportTask(tid, os.path.basename(out_path),
                           src_path, out_path, export_params, thumbnail=pix)
         self.export_queue.enqueue(task)
-        self._set_export_status("已加入扫描队列，正在后台扫描...", state="busy")
+        self._set_export_status(t("已加入扫描队列，正在后台扫描..."), state="busy")
 
     def action_export_darkroom_lut(self):
         """Export full darkroom physical color profile into standard 3D .cube LUT."""
@@ -14745,7 +14742,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         last_d = config_manager.get_last_dialog_dir("lut")
         initial_p = os.path.join(last_d, suggested_name) if last_d else suggested_name
         out_file, _ = QFileDialog.getSaveFileName(
-            self, "导出当前暗房 3D LUT", initial_p, "3D LUT (*.cube)"
+            self, t("导出当前暗房 3D LUT"), initial_p, "3D LUT (*.cube)"
         )
         if not out_file:
             return
@@ -14756,9 +14753,9 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         lut_params["paper_stock"] = self.current_paper_stock
         try:
             self.engine.export_lut(lut_params, out_file, lut_size=33)
-            self._show_info_dialog("导出完成", f"当前暗房完整 3D LUT 已成功烘焙导出至:\n{out_file}")
+            self._show_info_dialog(t("导出完成"), t('当前暗房完整 3D LUT 已成功烘焙导出至:\n{out_file}', out_file=out_file))
         except Exception as e:
-            self._show_warning_dialog("导出失败", f"导出 3D LUT 失败: {e}")
+            self._show_warning_dialog(t("导出失败"), t('导出 3D LUT 失败: {e}', e=e))
 
     def _batch_export_photos(self, photo_ids):
         """Batch export multiple photos with background export queue.
@@ -14803,8 +14800,8 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             except Exception:
                 mb = QMessageBox(self)
                 mb.setWindowIcon(self.windowIcon())
-                mb.setWindowTitle("路径无效")
-                mb.setText("无法访问或创建所选的批量导出目标文件夹。")
+                mb.setWindowTitle(t("路径无效"))
+                mb.setText(t("无法访问或创建所选的批量导出目标文件夹。"))
                 mb.setIcon(QMessageBox.Icon.Warning)
                 mb.exec()
                 return
@@ -14935,15 +14932,15 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         if hasattr(self.export_queue, "enqueue_batch"):
             self.export_queue.enqueue_batch(new_tasks)
         else:
-            for t in new_tasks:
-                self.export_queue.enqueue(t)
+            for _task in new_tasks:
+                self.export_queue.enqueue(_task)
 
         if missing_count:
             self._set_export_status(
-                f"已将 {enqueued_count} 张底片加入扫描队列（{missing_count} 张已不在底片库中，已跳过）",
+                t('已将 {enqueued_count} 张底片加入扫描队列（{missing_count} 张已不在底片库中，已跳过）', enqueued_count=enqueued_count, missing_count=missing_count),
                 state="busy")
         else:
-            self._set_export_status(f"已将 {enqueued_count} 张底片加入扫描队列", state="busy")
+            self._set_export_status(t('已将 {enqueued_count} 张底片加入扫描队列', enqueued_count=enqueued_count), state="busy")
 
     def _show_info_dialog(self, title, text):
         show_dark_message_box(self, title, text, QMessageBox.Icon.Information,
@@ -14968,11 +14965,11 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
-        sort_menu = menu.addMenu("整理排列")
+        sort_menu = menu.addMenu(t("整理排列"))
         sort_menu.setStyleSheet(get_darkroom_menu_style())
-        act_by_name = sort_menu.addAction("按名称排序 (A-Z)")
+        act_by_name = sort_menu.addAction(t("按名称排序 (A-Z)"))
         act_by_name.triggered.connect(lambda: self._sort_and_reflow_stocks("film", "name"))
-        act_by_time = sort_menu.addAction("按添加时间排序 (最新在前)")
+        act_by_time = sort_menu.addAction(t("按添加时间排序 (最新在前)"))
         act_by_time.triggered.connect(lambda: self._sort_and_reflow_stocks("film", "time"))
 
         menu.exec(global_pos)
@@ -14983,11 +14980,11 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
-        sort_menu = menu.addMenu("整理排列")
+        sort_menu = menu.addMenu(t("整理排列"))
         sort_menu.setStyleSheet(get_darkroom_menu_style())
-        act_by_name = sort_menu.addAction("按名称排序 (A-Z)")
+        act_by_name = sort_menu.addAction(t("按名称排序 (A-Z)"))
         act_by_name.triggered.connect(lambda: self._sort_and_reflow_stocks("paper", "name"))
-        act_by_time = sort_menu.addAction("按添加时间排序 (最新在前)")
+        act_by_time = sort_menu.addAction(t("按添加时间排序 (最新在前)"))
         act_by_time.triggered.connect(lambda: self._sort_and_reflow_stocks("paper", "time"))
 
         menu.exec(global_pos)
@@ -15047,7 +15044,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                             m_h = photo.get("height") or (photo.get("meta", {}).get("height") if isinstance(photo.get("meta"), dict) else None)
                             self.canvas.set_image(photo["float_img"], master_width=m_w, master_height=m_h, reset_zoom=False)
                             self._update_photo_info_display()
-                            self.set_app_status("已按首选项重新载入全尺寸纹理", timeout_ms=3000)
+                            self.set_app_status(t("已按首选项重新载入全尺寸纹理"), timeout_ms=3000)
             if hasattr(self, 'canvas'):
                 self.canvas.update()
 

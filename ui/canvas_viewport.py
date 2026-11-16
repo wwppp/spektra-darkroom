@@ -3891,8 +3891,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # touch stream rather than through QPinchGesture so behaviour does not
         # depend on the platform gesture recognizer (Windows precision touchpads
         # deliver palm/rejection noise that the recognizer drops frames for).
-        t = e.type()
-        if t == QEvent.Type.TouchBegin:
+        ev_type = e.type()
+        if ev_type == QEvent.Type.TouchBegin:
             self.begin_interaction()
             self._zoom_glide.stop()
             pts = e.touchPoints()
@@ -3901,7 +3901,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self._touch_pinch_dist = None
             e.accept()
             return True
-        if t == QEvent.Type.TouchUpdate:
+        if ev_type == QEvent.Type.TouchUpdate:
             pts = e.touchPoints()
             n = len(pts)
             if n >= 2:
@@ -3949,7 +3949,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 return True
             e.accept()
             return True
-        if t == QEvent.Type.TouchEnd:
+        if ev_type == QEvent.Type.TouchEnd:
             self._touch_pan_active = False
             self._touch_last_pos = None
             self._touch_pinch_dist = None
