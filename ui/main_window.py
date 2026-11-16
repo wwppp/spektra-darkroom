@@ -8890,8 +8890,17 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.set_app_status(f"基准测光：18% 中灰（基准 {base_ev:+.2f} EV）", timeout_ms=2500)
 
     def _get_track_defaults(self):
-        def_temp = getattr(self.slider_temp, "default_val", 5500.0) if hasattr(self, 'slider_temp') else 5500.0
-        def_tint = getattr(self.slider_tint, "default_val", 1.0) if hasattr(self, 'slider_tint') else 1.0
+        # 基准白平衡以**这张照片**为准，不看滑块自己的 default_val：控件的默认值只在切图/
+        # 解码两个时点被写一次，任何一条没走到就会停留在构造时的 5500 K，于是"色温 5750
+        # 对默认 5500"被判成改过 —— 场景曝光那节的 ⟳ 常亮，点一下还会把色温打到 5500。
+        def_temp = getattr(self, "_active_base_temp", None)
+        def_tint = getattr(self, "_active_base_tint", None)
+        if def_temp is None:
+            def_temp = self.current_params.get("base_temp", 5500.0)
+        if def_tint is None:
+            def_tint = self.current_params.get("base_tint", 1.0)
+        def_temp = float(def_temp or 5500.0)
+        def_tint = float(def_tint or 1.0)
         return {
             "exposure": {
                 "exposure_ev": 0.0, "highlights": 0.0, "shadows": 0.0, "black_lift": 0.0,
@@ -9109,6 +9118,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.set_app_status("已重置裁切", timeout_ms=2000)
             return
 
+        self._sync_wb_slider_defaults()
         defaults = self._get_track_defaults()
         all_defs = {}
         for d in defaults.values():
@@ -9227,6 +9237,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             "scan" if str(self.current_paper_stock or "none") in ("none", "") else "optical")
         self.current_params["print_mode"] = self.current_print_mode
 
+        self._sync_wb_slider_defaults()
         defaults = self._get_track_defaults()
         all_defs = {}
         for d in defaults.values():
@@ -9574,6 +9585,91 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._update_stock_mode_ui()
         self._update_active_thumbnails()
         self._refresh_card_previews()
+
+    def _sync_wb_slider_defaults(self):
+        """把色温/色调滑块的"默认值"重挂到当前照片的基准白平衡。
+
+        这两个 default_val 是双击复位与分区 ⟳ 的落点，而它们只在切图/解码两个时点被写过。
+        任何一条没走到，滑块就会停在构造时的 5500 K：5750 K 的基准被判成"改过"，⟳ 常亮，
+        点一下色温就掉到 5500（与 base_temp 分叉）。
+        """
+        base_t = getattr(self, "_active_base_temp", None)
+        base_i = getattr(self, "_active_base_tint", None)
+        if base_t is None:
+            base_t = self.current_params.get("base_temp", 5500.0)
+        if base_i is None:
+            base_i = self.current_params.get("base_tint", 1.0)
+        for widget, val in ((getattr(self, "slider_temp", None), float(base_t or 5500.0)),
+                            (getattr(self, "slider_tint", None), float(base_i or 1.0))):
+            if widget is not None:
+                try:
+                    widget.set_default_value(val)
+                except Exception:
+                    pass
+
+    def _photo_master_size(self, photo):
+        """这张照片的 master 尺寸（宽, 高）—— 画布靠它换算 1:1 与裁切比例。"""
+        if not isinstance(photo, dict):
+            return None, None
+        meta = photo.get("meta") if isinstance(photo.get("meta"), dict) else {}
+        m_w = photo.get("width") or meta.get("width")
+        m_h = photo.get("height") or meta.get("height")
+        return m_w, m_h
+
+    def _upload_canvas_image(self, float_img, photo, photo_id):
+        """把一张 RAW 预览交给画布。异常只记录，不往上抛。"""
+        if float_img is None or not hasattr(self, "canvas"):
+            return False
+        m_w, m_h = self._photo_master_size(photo)
+        try:
+            self.canvas.set_image(float_img, master_width=m_w, master_height=m_h,
+                                  reset_zoom=False, photo_id=photo_id)
+            return True
+        except Exception as ex:
+            logger.error(f"Uploading photo {photo_id} to canvas failed: {ex}", exc_info=True)
+            return False
+
+    def _ensure_real_canvas_image(self):
+        """画布若停在相机内嵌 JPEG 占位图上，换成真正的 RAW 预览。
+
+        占位贴图走 ``u_is_bypass = 2``，像素就是相机拍的那张 JPEG；而对比视图的"原图"
+        和编辑画面共用同一张贴图（``u_raw_image`` 就是 ``_image_tex_id``）。所以画布一旦
+        停在占位图上，"删除暗房配置后重置到的是内嵌 jpg"和"对比原图是内嵌 jpg"是同一个
+        病根 —— 参数改完没人重新贴图。删除暗房配置、进对比视图前都调一次。
+        """
+        canvas = getattr(self, "canvas", None)
+        if canvas is None or not getattr(canvas, "_has_image", False):
+            return False
+        if not getattr(canvas, "_is_placeholder", False):
+            return False
+        # 下面可能出现"重走一次切图"，那条路自己会再进来一次 —— 用个旗标挡住。
+        if getattr(self, "_ensuring_real_image", False):
+            return False
+        self._ensuring_real_image = True
+        try:
+            return self._ensure_real_canvas_image_inner(canvas)
+        finally:
+            self._ensuring_real_image = False
+
+    def _ensure_real_canvas_image_inner(self, canvas):
+        photo = self._active_photo()
+        if not photo:
+            return False
+        pid = photo.get("id")
+        float_img = photo.get("float_img")
+        if float_img is None:
+            try:
+                float_img = session_cache_manager.get_photo_preview(photo.get("path"))
+            except Exception:
+                float_img = None
+            if float_img is not None:
+                photo["float_img"] = float_img
+        if float_img is None:
+            # 连缓存预览都没有：让它重走一次切图，占位图先留着（不闪黑），解码完自己换。
+            self.on_switch_photo(pid, force=True)
+            return True
+        logger.info(f"Canvas was showing the embedded JPEG placeholder; re-uploading RAW for {pid}")
+        return self._upload_canvas_image(float_img, photo, pid)
 
     def toggle_crop_mode(self):
         if not hasattr(self, 'canvas') or not self.canvas._has_image:
@@ -10310,6 +10406,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.on_switch_paper(paper_id)
 
     def set_view_mode(self, mode):
+        # 对比视图的"原图"读的就是画布当前这张贴图。画布若还停在相机内嵌 JPEG 占位图上，
+        # 两边都会是那张 jpg —— 进对比前先把真 RAW 补上。
+        if mode:
+            try:
+                self._ensure_real_canvas_image()
+            except Exception as ex:
+                logger.warning(f"Preparing RAW for compare view failed: {ex}")
         self.canvas.set_view_mode(mode)
         if hasattr(self, 'btn_split'):
             self.btn_split.setChecked(mode != 0)
@@ -13437,20 +13540,27 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     self._active_base_tint = float(exif_meta.get("tint", 1.0))
                     self.current_params["base_temp"] = self._active_base_temp
                     self.current_params["base_tint"] = self._active_base_tint
+                    # 滑块的"默认值"永远等于这张照片的基准白平衡，和 custom_wb 无关：
+                    # custom_wb 只决定要不要把基准写进 current_params（用户手调过就别覆盖），
+                    # 不该决定双击 / 分区重置的落点。这两行曾经被套在下面那个分支里，于是
+                    # .sdc 存过 custom_wb=True 的照片永远停在构造时的 5500 K —— 场景曝光那节
+                    # 的 ⟳ 一直亮着，点一下色温从 5750 掉到 5500，和 base_temp 分叉。
+                    if hasattr(self, "slider_temp"):
+                        self.slider_temp.set_default_value(self._active_base_temp)
+                    if hasattr(self, "slider_tint"):
+                        self.slider_tint.set_default_value(self._active_base_tint)
                     if not self.current_params.get("custom_wb", False):
                         if "color_temp" not in self.current_params or self.current_params.get("color_temp") == 5500.0:
                             self.current_params["color_temp"] = self._active_base_temp
                         if "tint" not in self.current_params or self.current_params.get("tint") == 1.0:
                             self.current_params["tint"] = self._active_base_tint
                         if hasattr(self, "slider_temp"):
-                            self.slider_temp.set_default_value(self._active_base_temp)
                             self._is_updating_sliders = True
                             try:
                                 self.slider_temp.set_value(self.current_params["color_temp"])
                             finally:
                                 self._is_updating_sliders = False
                         if hasattr(self, "slider_tint"):
-                            self.slider_tint.set_default_value(self._active_base_tint)
                             self._is_updating_sliders = True
                             try:
                                 self.slider_tint.set_value(self.current_params["tint"])
@@ -13471,9 +13581,7 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
 
                 self._sync_canvas_params()
 
-                m_w = target_photo.get("width") or (target_photo.get("meta", {}).get("width") if isinstance(target_photo.get("meta"), dict) else None) if target_photo else None
-                m_h = target_photo.get("height") or (target_photo.get("meta", {}).get("height") if isinstance(target_photo.get("meta"), dict) else None) if target_photo else None
-                self.canvas.set_image(float_img, master_width=m_w, master_height=m_h, reset_zoom=False, photo_id=photo_id)
+                self._upload_canvas_image(float_img, target_photo, photo_id)
 
                 self._manage_photo_memory_lru(photo_id)
 
@@ -13489,6 +13597,10 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                 self._update_photo_info_display()
             except Exception as e:
                 logger.error(f"Error updating GUI for loaded photo {photo_id}: {e}")
+                # EXIF / 镜头识别那段一旦抛异常，上面这行 set_image 就被跳过了：状态栏会写
+                # "底片已载入"，画布上却还留着相机内嵌 JPEG 占位图（bypass=2），于是删配置
+                # 重置出来的是 jpg、对比视图的"原图"也是 jpg。这里补一次上传。
+                self._upload_canvas_image(float_img, target_photo, photo_id)
             finally:
                 if not getattr(self, "_is_multi_selecting", False):
                     self.set_app_status(f"底片已载入：{fn}", spinning=False, timeout_ms=2000)
@@ -13960,8 +14072,22 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             self.current_paper_stock = reset_paper
             self.current_print_mode = reset_mode
 
-            base_temp = float(getattr(self, "_active_base_temp", 5500.0))
-            base_tint = float(getattr(self, "_active_base_tint", 1.0))
+            base_temp = float(getattr(self, "_active_base_temp", 5500.0) or 5500.0)
+            base_tint = float(getattr(self, "_active_base_tint", 1.0) or 1.0)
+            # 以文件里的 EXIF 为准：`_active_base_temp` 在"切图时 exif 还没解析出来"那条路上
+            # 会停在 5500，而照片条目里的 color_temp 才是这张底片的真实基准。
+            _ap_exif = None
+            _ap = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
+            if isinstance(_ap, dict) and isinstance(_ap.get("exif"), dict):
+                _ap_exif = _ap["exif"]
+            if _ap_exif:
+                if _ap_exif.get("color_temp"):
+                    base_temp = float(_ap_exif["color_temp"])
+                if _ap_exif.get("tint"):
+                    base_tint = float(_ap_exif["tint"])
+            self._active_base_temp = base_temp
+            self._active_base_tint = base_tint
+            self._sync_wb_slider_defaults()
             defaults = self.get_default_params(base_temp, base_tint)
             self.current_params.clear()
             self.current_params.update(defaults)
@@ -13995,6 +14121,9 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
             self._update_all_sliders_from_params()
             self._update_reset_buttons_state()
             self._sync_full_params_to_pipeline(fit_crop_if_changed=True)
+            # 参数变了不代表贴图换了：画布上如果是相机内嵌 JPEG 占位图，它不会被任何人换掉，
+            # 于是"清完配置"看到的仍是那张 jpg（对比视图的"原图"也是同一张）。
+            self._ensure_real_canvas_image()
             self._update_window_title()
 
             for sid, card in self.film_cards.items():
