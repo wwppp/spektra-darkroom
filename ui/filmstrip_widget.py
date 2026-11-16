@@ -1116,8 +1116,10 @@ class FilmstripWidget(QWidget):
         self.scroll_layout = QHBoxLayout(self.scroll_content)
         # 左右留白必须对称：内容宽一直按 `16 + 格宽 + 间距` 算，以前这 16 px 全留在右边，
         # 左边缘却是 0 —— 首格贴着边框、末格后面空一大块，整条底片看着像整体左移了一截。
-        # 现在左右各 16（原来右侧那一整块），首末两格的留白一致。
-        self.scroll_layout.setContentsMargins(16, 0, 16, 0)
+        # 左右留白对齐**视觉上的**上下留白：格子按 `avail_h - 24` 算，但视口还要让出
+        # 一条横向滚动条，实测内容高 118 / 格高 108 → 上下各 5 px，跟格间距 6 基本一致。
+        # 所以左右也用 6，不再留 16 那一大截。
+        self.scroll_layout.setContentsMargins(6, 0, 6, 0)
         self.scroll_layout.setSpacing(6)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
@@ -1582,8 +1584,8 @@ class FilmstripWidget(QWidget):
         else:
             if end_stretch is not None:
                 end_stretch.changeSize(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-            # 32 = 左右各 16 的留白（见 scroll_layout 的 contentsMargins）
-            total_w = 32 + visible_count * item_w + max(0, visible_count - 1) * 6
+            # 12 = 左右各 6 的留白（见 scroll_layout 的 contentsMargins，与上下 5-6 px 对齐）
+            total_w = 12 + visible_count * item_w + max(0, visible_count - 1) * 6
             self.scroll_content.setMinimumWidth(total_w)
             self.scroll_layout.invalidate()
             self.scroll_layout.activate()
