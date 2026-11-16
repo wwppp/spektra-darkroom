@@ -59,6 +59,7 @@ from core.format_constants import (
     is_lossy_image
 )
 from core.version import get_app_title, get_full_version_info
+from core.i18n import t
 from core.app_core import SpektraEngine
 from core.halation_model import (
     HALATION_MAX_STOPS,
@@ -4963,12 +4964,12 @@ class DarkroomMainWindow(QMainWindow):
         self.set_app_status(f"已按测光建议设置曝光 {ev:+.2f} EV", timeout_ms=2500)
 
     def _init_exposure_section(self):
-        self.sec_exposure = AccordionSection("场景曝光 (Exposure)")
+        self.sec_exposure = AccordionSection(t("场景曝光 (Exposure)"))
         self.sec_exposure.resetClicked.connect(lambda: self.reset_track("exposure"))
 
         self.slider_ev = AdobeScrubSlider(
-            "曝光", -3.0, 3.0, 0.0, step=0.05, unit=" EV", decimals=2,
-            tooltip="线性增减场景总进光量 (EV)",
+            t("曝光"), -3.0, 3.0, 0.0, step=0.05, unit=" EV", decimals=2,
+            tooltip=t("线性增减场景总进光量 (EV)"),
             track_gradient=[(0.0, QColor("#111317")), (0.5, QColor("#5a6170")), (1.0, QColor("#f8fafc"))],
             has_center_detent=True
         )
@@ -4982,7 +4983,7 @@ class DarkroomMainWindow(QMainWindow):
         # Compact "AU" chip in the exposure slider's header row (user request: the old
         # full-width row button was oversized on tablets).
         self.btn_auto_ev = QPushButton("AU")
-        self.btn_auto_ev.setToolTip("自动曝光（AU）：按 18% 中灰测光建议设置曝光，不改动其他参数")
+        self.btn_auto_ev.setToolTip(t("自动曝光（AU）：按 18% 中灰测光建议设置曝光，不改动其他参数"))
         self.btn_auto_ev.setFixedSize(30, 18)
         self.btn_auto_ev.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_auto_ev.setStyleSheet("""
@@ -5007,8 +5008,8 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_ev.add_header_widget(self.btn_auto_ev)
 
         self.slider_highlights = AdobeScrubSlider(
-            "高光", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
-            tooltip="高光强光区域场景线性滚降压缩或提亮",
+            t("高光"), -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            tooltip=t("高光强光区域场景线性滚降压缩或提亮"),
             track_gradient=[(0.0, QColor("#1e293b")), (0.5, QColor("#64748b")), (1.0, QColor("#f1f5f9"))],
             has_center_detent=True
         )
@@ -5017,8 +5018,8 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_exposure.addWidget(self.slider_highlights)
 
         self.slider_shadows = AdobeScrubSlider(
-            "阴影", -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
-            tooltip="深层暗部阶调平滑提亮或下压，保护纯黑底阶",
+            t("阴影"), -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
+            tooltip=t("深层暗部阶调平滑提亮或下压，保护纯黑底阶"),
             track_gradient=[(0.0, QColor("#090a0f")), (0.5, QColor("#475569")), (1.0, QColor("#94a3b8"))],
             has_center_detent=True
         )
@@ -5027,9 +5028,8 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_exposure.addWidget(self.slider_shadows)
 
         self.slider_black_lift = AdobeScrubSlider(
-            "黑场", -0.25, 0.25, 0.0, step=0.01, unit="", decimals=2,
-            tooltip="黑场标定：向左扣除片基灰雾、压实纯黑，向右抬高黑位。"
-                    "作用在 LUT 之后的显示域",
+            t("黑场"), -0.25, 0.25, 0.0, step=0.01, unit="", decimals=2,
+            tooltip=t("黑场标定：向左扣除片基灰雾、压实纯黑，向右抬高黑位。作用在 LUT 之后的显示域"),
             has_center_detent=True
         )
         self.slider_black_lift.valueChanged.connect(lambda v: self._on_slider_live("black_lift", v))
@@ -5037,8 +5037,8 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_exposure.addWidget(self.slider_black_lift)
 
         self.slider_temp = AdobeScrubSlider(
-            "色温", 2500, 9500, 5500, step=25, unit=" K", decimals=0,
-            tooltip="调节场景相关色温 (CCT)，左偏冷蓝，右偏暖黄",
+            t("色温"), 2500, 9500, 5500, step=25, unit=" K", decimals=0,
+            tooltip=t("调节场景相关色温 (CCT)，左偏冷蓝，右偏暖黄"),
             track_gradient=[(0.0, QColor("#3b82f6")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#f59e0b"))],
             has_center_detent=True
         )
@@ -5047,8 +5047,8 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_exposure.addWidget(self.slider_temp)
 
         self.slider_tint = AdobeScrubSlider(
-            "色调", 0.70, 1.30, 1.0, step=0.01, unit="", decimals=2,
-            tooltip="微调洋红与绿色光色平衡 (Tint)，左偏品红，右偏绿色",
+            t("色调"), 0.70, 1.30, 1.0, step=0.01, unit="", decimals=2,
+            tooltip=t("微调洋红与绿色光色平衡 (Tint)，左偏品红，右偏绿色"),
             track_gradient=[(0.0, QColor("#ec4899")), (0.5, QColor("#cbd5e1")), (1.0, QColor("#10b981"))],
             has_center_detent=True
         )
@@ -5057,15 +5057,15 @@ class DarkroomMainWindow(QMainWindow):
         self.sec_exposure.addWidget(self.slider_tint)
 
         self.combo_format = ComboBoxRow(
-            "画幅规格",
+            t("画幅规格"),
             [
-                ("35mm 标准全画幅", 35.0),
-                ("16mm 独立电影卷", 16.0),
-                ("120 中画幅 (6x6)", 60.0),
-                ("4x5 大画幅", 100.0),
+                (t("35mm 标准全画幅"), 35.0),
+                (t("16mm 独立电影卷"), 16.0),
+                (t("120 中画幅 (6x6)"), 60.0),
+                (t("4x5 大画幅"), 100.0),
             ],
             default_val=35.0,
-            tooltip="底片画幅尺寸，影响银盐晶体与微米级弥散圈物理相对尺度"
+            tooltip=t("底片画幅尺寸，影响银盐晶体与微米级弥散圈物理相对尺度")
         )
         self.combo_format.valueChanged.connect(lambda v: self._on_combo_changed("film_format_mm", v))
         self.sec_exposure.addWidget(self.combo_format)

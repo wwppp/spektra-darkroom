@@ -1,0 +1,22 @@
+{
+  "场景曝光 (Exposure)": "Scene Exposure (Exposure)",
+  "曝光": "Exposure",
+  "线性增减场景总进光量 (EV)": "Scale the scene's total light linearly (EV)",
+  "自动曝光（AU）：按 18% 中灰测光建议设置曝光，不改动其他参数": "Auto exposure (AU): apply the 18% grey metering suggestion to exposure only",
+  "高光": "Highlights",
+  "高光强光区域场景线性滚降压缩或提亮": "Compress (roll off) or lift the highlight region in scene-linear",
+  "阴影": "Shadows",
+  "深层暗部阶调平滑提亮或下压，保护纯黑底阶": "Lift or deepen the deep-shadow tones while keeping true black",
+  "黑场": "Black Point",
+  "黑场标定：向左扣除片基灰雾、压实纯黑，向右抬高黑位。作用在 LUT 之后的显示域": "Black-point calibration: left removes base fog and crushes to true black, right raises the black level. Applied in display space, after the LUT.",
+  "色温": "Temperature",
+  "调节场景相关色温 (CCT)，左偏冷蓝，右偏暖黄": "Scene correlated colour temperature (CCT); left is cooler, right is warmer",
+  "色调": "Tint",
+  "微调洋红与绿色光色平衡 (Tint)，左偏品红，右偏绿色": "Fine-tune the magenta/green balance; left is magenta, right is green",
+  "画幅规格": "Film Format",
+  "35mm 标准全画幅": "35mm Full Frame",
+  "16mm 独立电影卷": "16mm Cinema",
+  "120 中画幅 (6x6)": "120 Medium Format (6x6)",
+  "4x5 大画幅": "4x5 Large Format",
+  "底片画幅尺寸，影响银盐晶体与微米级弥散圈物理相对尺度": "Negative format size; sets the physical scale of the silver crystals and the micron-level circle of confusion"
+}

@@ -22,6 +22,7 @@ from ui.window_utils import apply_dark_titlebar, show_dark_message_box, get_icon
 from ui.theme_manager import theme_manager
 from ui import ui_scale
 from core import config_manager
+from core import i18n
 from core import session_cache_manager
 
 
@@ -643,6 +644,22 @@ class PreferencesDialog(QDialog):
         r_font.addStretch(1)
         l_dr.addLayout(r_font)
 
+        # 界面语言：语言文件在 resources/i18n/<code>.json，切换后需要重启（文案在构造时
+        # 就烤进控件了，热切换要每个面板自己重建，见 docs/i18n-plan.md §7.5）
+        r_lang = QHBoxLayout()
+        lbl_lang = QLabel("界面语言:")
+        lbl_lang.setFixedWidth(100)
+        r_lang.addWidget(lbl_lang)
+        self.combo_language = QComboBox()
+        self.combo_language.setFixedWidth(180)
+        setup_solid_combobox(self.combo_language)
+        for _code, _name in i18n.available_languages().items():
+            self.combo_language.addItem(_name, _code)
+        self.combo_language.setToolTip("界面语言（切换后需重启软件生效）")
+        r_lang.addWidget(self.combo_language)
+        r_lang.addStretch(1)
+        l_dr.addLayout(r_lang)
+
         r_fmt = QHBoxLayout()
         lbl_fmt = QLabel("默认画幅:")
         lbl_fmt.setFixedWidth(100)
@@ -951,6 +968,9 @@ class PreferencesDialog(QDialog):
         idx_fs = self.combo_font_size.findData(ui_scale.current_key())
         self.combo_font_size.setCurrentIndex(idx_fs if idx_fs >= 0 else 0)
 
+        idx_lang = self.combo_language.findData(i18n.current_language())
+        self.combo_language.setCurrentIndex(idx_lang if idx_lang >= 0 else 0)
+
         self.btn_clean_cache.setEnabled(True)
         self.btn_clean_cache.setText("清理")
         self.btn_clean_sess.setEnabled(True)
@@ -1221,6 +1241,11 @@ class PreferencesDialog(QDialog):
         prefs["ui_font_size"] = font_key
         ui_scale.set_font_scale(font_key)
 
+        lang_code = self.combo_language.currentData() or i18n.SOURCE_LANGUAGE
+        lang_changed = (lang_code != i18n.current_language())
+        prefs["ui_language"] = lang_code
+        config_manager.set_preference("ui_language", lang_code)
+
         config_manager.save_config(cfg)
         # 默认相纸变了：让主窗口重刷那些"没选过相纸"的底片（缩略图 + 当前照片的 LUT）。
         # 两条链各刷各的 —— 一次只改一边时，另一边的照片不该被重刷（那张纸对它们没意义）。
@@ -1236,5 +1261,7 @@ class PreferencesDialog(QDialog):
                     self._parent_window.on_default_ffchain_paper_changed()
             except Exception:
                 pass
+        if lang_changed:
+            show_darkroom_info(self, "界面语言", "界面语言已保存，重启软件后生效。")
         self.accept()
 

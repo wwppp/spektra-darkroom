@@ -385,6 +385,10 @@ def main():
     engine = SpektraEngine(resources_dir=resources_dir)
     startup_log("engine created")
 
+    # 界面语言要在建任何控件之前定下来：文案是构造时取一次的（见 core/i18n.py）。
+    from core.i18n import current_language
+    startup_log(f"i18n language: {current_language()}")
+
     # Check CLI arguments for .sdss session file or image files passed via OS association
     target_session = None
     target_files = []
