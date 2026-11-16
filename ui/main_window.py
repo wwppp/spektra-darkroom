@@ -896,8 +896,9 @@ class SessionRestoreWorker(QThread):
     - Zero GUI freezing during session transitions.
     """
     activePhotoReady = Signal(int, dict)       # target_idx, target_photo_entry
-    # 每处理完一张就发一张（乱序）。底片栏的格子已经按文件顺序摆好，收到就按 id 填，
-    # 所以恢复过程能像导入那样一张张长出来，而不是等 restoreFinished 一次性冒出来。
+    # 每处理完一张就发一张，但**按 idx 顺序放行**：解码是并发的、完成顺序随机，直接
+    # 发出去底片栏就会中间先开几个洞、后面才补上。worker 里用 ready 表攒着，队首到了
+    # 才 emit，底片栏才是从左往右一格一格长出来。
     photoReady = Signal(int, dict)             # idx, photo_entry
     progress = Signal(int, int)                # current, total
     restoreFinished = Signal(list, list, str)  # all_photos, uncached_slots, target_path
@@ -1198,6 +1199,21 @@ class SessionRestoreWorker(QThread):
             remaining_indices = [i for i in range(total_files) if i != target_idx]
             max_workers = min(8, max(2, (os.cpu_count() or 4)))
             completed_count = 1
+            # 已拿到结果的格子，按 idx 按放行 —— 恢复会话必须**从左往右**一格一格亮。
+            # `as_completed` 是乱序的：解码快的那几张先回来，底片栏中间就先开几个洞，后面
+            # 才补上（用户看到的是"未按顺序加载"）。所以这里攒着，只有队首到了才放行。
+            ready = {target_idx: target_entry}
+            next_idx = 0
+
+            def _release_in_order():
+                nonlocal next_idx
+                while next_idx in ready:
+                    idx_ = next_idx
+                    entry_ = ready.pop(next_idx)
+                    next_idx += 1
+                    if idx_ == target_idx or entry_ is None or self._stopped:
+                        continue          # 活动照片已经优先发过一次了
+                    self.photoReady.emit(idx_, entry_)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_map = {
@@ -1213,10 +1229,11 @@ class SessionRestoreWorker(QThread):
                         all_photos[idx] = entry
                         if is_uncached:
                             uncached_slots.append((idx, self.existing_files[idx]))
-                        if not self._stopped:
-                            self.photoReady.emit(idx, entry)
                     except Exception as e:
                         logger.warning(f"Error restoring photo at idx {idx}: {e}")
+                        entry = None
+                    ready[idx] = entry
+                    _release_in_order()
                     completed_count += 1
                     if completed_count % 5 == 0 or completed_count == total_files:
                         self.progress.emit(completed_count, total_files)
