@@ -23,13 +23,14 @@ from ui.theme_manager import theme_manager
 from ui import ui_scale
 from core import config_manager
 from core import i18n
+from core.i18n import t
 from core import session_cache_manager
 
 
 class PreferencesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("首选项")
+        self.setWindowTitle(t("首选项"))
         # 480, not 460: the 暗房与工作流 tab gained the 负片默认相纸 row and was 20px over
         # the old height, which silently squeezed the bottom rows together.
         # 520, not 480: 2026-11-13 拆成「原生卷默认纸 / 转换卷默认纸」两行后，这个 tab 又高了
@@ -555,21 +556,21 @@ class PreferencesDialog(QDialog):
         l_ren.setSpacing(14)
 
         r_hw = QHBoxLayout()
-        lbl_hw = QLabel("硬件加速:")
+        lbl_hw = QLabel(t("硬件加速:"))
         lbl_hw.setFixedWidth(100)
         r_hw.addWidget(lbl_hw)
         self.combo_hw_accel = QComboBox()
         self.combo_hw_accel.setFixedWidth(180)
         setup_solid_combobox(self.combo_hw_accel)
-        self.combo_hw_accel.addItem("关闭", "off")
-        self.combo_hw_accel.addItem("视口与缩略图", "preview_only")
-        self.combo_hw_accel.addItem("全局", "global")
+        self.combo_hw_accel.addItem(t("关闭"), "off")
+        self.combo_hw_accel.addItem(t("视口与缩略图"), "preview_only")
+        self.combo_hw_accel.addItem(t("全局"), "global")
         r_hw.addWidget(self.combo_hw_accel)
         r_hw.addStretch(1)
         l_ren.addLayout(r_hw)
 
         r_res = QHBoxLayout()
-        lbl_res = QLabel("预览分辨率:")
+        lbl_res = QLabel(t("预览分辨率:"))
         lbl_res.setFixedWidth(100)
         r_res.addWidget(lbl_res)
         self.combo_preview_res = QComboBox()
@@ -578,25 +579,25 @@ class PreferencesDialog(QDialog):
         self.combo_preview_res.addItem("1080P", 1440)
         self.combo_preview_res.addItem("2K", 2048)
         self.combo_preview_res.addItem("4K", 3840)
-        self.combo_preview_res.addItem("全分辨率", 0)
+        self.combo_preview_res.addItem(t("全分辨率"), 0)
         r_res.addWidget(self.combo_preview_res)
         r_res.addStretch(1)
         l_ren.addLayout(r_res)
 
         # 「高质量预览」开关从视图菜单挪到这里：它是一次几秒的重建，属于渲染策略，
         # 不该混在视图菜单的缩放/对比项里；默认关，打开才有代价。
-        self.chk_hq_export_preview = QCheckBox("高质量预览（按导出分辨率渲染）")
+        self.chk_hq_export_preview = QCheckBox(t("高质量预览（按导出分辨率渲染）"))
         self.chk_hq_export_preview.setChecked(False)
-        self.chk_hq_export_preview.setToolTip("开启后性能会下降，但预览会更准")
+        self.chk_hq_export_preview.setToolTip(t("开启后性能会下降，但预览会更准"))
         l_ren.addWidget(self.chk_hq_export_preview)
 
         # 「工作色彩空间」下拉框已删：它没有任何读写接线，而且我们本来就不存在
         # "可切换的工作空间"（内部固定 ProPhoto → Rec.2020，出口固定线性 P3）。
         # 真正可切的是**显示端**用哪个 profile —— 所以这里换成一个真开关。
-        self.chk_viewport_cm = QCheckBox("视口色彩管理（按显示器 profile 校正颜色）")
+        self.chk_viewport_cm = QCheckBox(t("视口色彩管理（按显示器 profile 校正颜色）"))
         self.chk_viewport_cm.setToolTip(
-            "开启后视口按当前显示器的 ICC 输出，广色域屏上不再偏艳；\n"
-            "关闭则固定按 sRGB 直出（与旧版一致）。系统已开启自动色彩管理（ACM）时此项不生效。"
+            t("开启后视口按当前显示器的 ICC 输出，广色域屏上不再偏艳；\n"
+            "关闭则固定按 sRGB 直出（与旧版一致）。系统已开启自动色彩管理（ACM）时此项不生效。")
         )
         l_ren.addWidget(self.chk_viewport_cm)
 
@@ -607,7 +608,7 @@ class PreferencesDialog(QDialog):
         self.chk_viewport_cm.toggled.connect(self._refresh_viewport_cm_status)
 
         l_ren.addStretch()
-        self.tabs.addTab(tab_render, "图像与渲染")
+        self.tabs.addTab(tab_render, t("图像与渲染"))
 
         # Tab 2: 暗房与工作流
         tab_darkroom = QWidget()
@@ -616,22 +617,22 @@ class PreferencesDialog(QDialog):
         l_dr.setSpacing(14)
 
         r_theme = QHBoxLayout()
-        lbl_theme = QLabel("界面主题:")
+        lbl_theme = QLabel(t("界面主题:"))
         lbl_theme.setFixedWidth(100)
         r_theme.addWidget(lbl_theme)
         self.combo_ui_theme = QComboBox()
         self.combo_ui_theme.setFixedWidth(180)
         setup_solid_combobox(self.combo_ui_theme)
-        self.combo_ui_theme.addItem("浅色", "light")
-        self.combo_ui_theme.addItem("深色", "dark")
-        self.combo_ui_theme.addItem("跟随系统", "system")
+        self.combo_ui_theme.addItem(t("浅色"), "light")
+        self.combo_ui_theme.addItem(t("深色"), "dark")
+        self.combo_ui_theme.addItem(t("跟随系统"), "system")
         r_theme.addWidget(self.combo_ui_theme)
         r_theme.addStretch(1)
         l_dr.addLayout(r_theme)
 
         # 界面字体大小：全局缩放，只放大字号，不动间距与控件尺寸
         r_font = QHBoxLayout()
-        lbl_font = QLabel("字体大小:")
+        lbl_font = QLabel(t("字体大小:"))
         lbl_font.setFixedWidth(100)
         r_font.addWidget(lbl_font)
         self.combo_font_size = QComboBox()
@@ -639,7 +640,7 @@ class PreferencesDialog(QDialog):
         setup_solid_combobox(self.combo_font_size)
         for _key in ("small", "medium", "large"):
             self.combo_font_size.addItem(ui_scale.LABELS[_key], _key)
-        self.combo_font_size.setToolTip("界面文字大小（只影响字号，不改变控件与间距）")
+        self.combo_font_size.setToolTip(t("界面文字大小（只影响字号，不改变控件与间距）"))
         r_font.addWidget(self.combo_font_size)
         r_font.addStretch(1)
         l_dr.addLayout(r_font)
@@ -647,7 +648,7 @@ class PreferencesDialog(QDialog):
         # 界面语言：语言文件在 resources/i18n/<code>.json，切换后需要重启（文案在构造时
         # 就烤进控件了，热切换要每个面板自己重建，见 docs/i18n-plan.md §7.5）
         r_lang = QHBoxLayout()
-        lbl_lang = QLabel("界面语言:")
+        lbl_lang = QLabel(t("界面语言:"))
         lbl_lang.setFixedWidth(100)
         r_lang.addWidget(lbl_lang)
         self.combo_language = QComboBox()
@@ -655,13 +656,13 @@ class PreferencesDialog(QDialog):
         setup_solid_combobox(self.combo_language)
         for _code, _name in i18n.available_languages().items():
             self.combo_language.addItem(_name, _code)
-        self.combo_language.setToolTip("界面语言（切换后需重启软件生效）")
+        self.combo_language.setToolTip(t("界面语言（切换后需重启软件生效）"))
         r_lang.addWidget(self.combo_language)
         r_lang.addStretch(1)
         l_dr.addLayout(r_lang)
 
         r_fmt = QHBoxLayout()
-        lbl_fmt = QLabel("默认画幅:")
+        lbl_fmt = QLabel(t("默认画幅:"))
         lbl_fmt.setFixedWidth(100)
         r_fmt.addWidget(lbl_fmt)
         self.combo_default_fmt = QComboBox()
@@ -680,14 +681,14 @@ class PreferencesDialog(QDialog):
         # 2026-11-13：两条链的相纸集合只有 4 张交集，一个默认值必然有一边越界（越界就会
         # 静默换纸），所以拆成两条链各一个。
         r_dpaper = QHBoxLayout()
-        lbl_dpaper = QLabel("原生卷默认纸:")
+        lbl_dpaper = QLabel(t("原生卷默认纸:"))
         lbl_dpaper.setFixedWidth(100)
         r_dpaper.addWidget(lbl_dpaper)
         self.combo_default_paper = QComboBox()
         self.combo_default_paper.setFixedWidth(180)
         setup_solid_combobox(self.combo_default_paper)
         # 底片直扫（不印相）也是合法默认值：新底片先看原始负像，这是出厂默认。
-        self.combo_default_paper.addItem("胶片直扫", "none")
+        self.combo_default_paper.addItem(t("胶片直扫"), "none")
         papers = []
         try:
             papers = list(self._engine.get_paper_stocks()) if self._engine is not None else []
@@ -704,11 +705,11 @@ class PreferencesDialog(QDialog):
                 continue
             self.combo_default_paper.addItem(item.get("name") or pid, pid)
         if self.combo_default_paper.count() == 0:
-            self.combo_default_paper.addItem("未载入相纸资源", None)
+            self.combo_default_paper.addItem(t("未载入相纸资源"), None)
             self.combo_default_paper.setEnabled(False)
         self.combo_default_paper.setToolTip(
-            "原生卷（spektrafilm 链）的默认相纸：新导入的底片与未手动选过相纸的底片用它"
-            "（缩略图同步）；选「胶片直扫」则先看未反相的负像")
+            t("原生卷（spektrafilm 链）的默认相纸：新导入的底片与未手动选过相纸的底片用它"
+            "（缩略图同步）；选「胶片直扫」则先看未反相的负像"))
         r_dpaper.addWidget(self.combo_default_paper)
         r_dpaper.addStretch(1)
         l_dr.addLayout(r_dpaper)
@@ -716,7 +717,7 @@ class PreferencesDialog(QDialog):
         # 转换卷（fotufilm 点式链）的默认纸。转换卷一导入就是要印相的，所以这里不提供
         # 「胶片直扫」；可选项只有点式链真有表的那几张。
         r_fpaper = QHBoxLayout()
-        lbl_fpaper = QLabel("转换卷默认纸:")
+        lbl_fpaper = QLabel(t("转换卷默认纸:"))
         lbl_fpaper.setFixedWidth(100)
         r_fpaper.addWidget(lbl_fpaper)
         self.combo_default_ffchain_paper = QComboBox()
@@ -730,20 +731,20 @@ class PreferencesDialog(QDialog):
                 continue
             self.combo_default_ffchain_paper.addItem(item.get("name") or pid, pid)
         if self.combo_default_ffchain_paper.count() == 0:
-            self.combo_default_ffchain_paper.addItem("未载入相纸资源", None)
+            self.combo_default_ffchain_paper.addItem(t("未载入相纸资源"), None)
             self.combo_default_ffchain_paper.setEnabled(False)
         self.combo_default_ffchain_paper.setToolTip(
-            "转换卷（fotufilm 点式链，含 CineStill / UltraMax 等）的默认相纸："
-            "只列出这条链真正有表的纸")
+            t("转换卷（fotufilm 点式链，含 CineStill / UltraMax 等）的默认相纸："
+            "只列出这条链真正有表的纸"))
         r_fpaper.addWidget(self.combo_default_ffchain_paper)
         r_fpaper.addStretch(1)
         l_dr.addLayout(r_fpaper)
 
-        self.chk_restore_last_files = QCheckBox("启动时打开上次工程")
+        self.chk_restore_last_files = QCheckBox(t("启动时打开上次工程"))
         self.chk_restore_last_files.setChecked(True)
         l_dr.addWidget(self.chk_restore_last_files)
 
-        self.chk_restore_geo = QCheckBox("记住窗口位置与布局")
+        self.chk_restore_geo = QCheckBox(t("记住窗口位置与布局"))
         self.chk_restore_geo.setChecked(True)
         l_dr.addWidget(self.chk_restore_geo)
 
@@ -755,7 +756,7 @@ class PreferencesDialog(QDialog):
 
         r_assoc = QHBoxLayout()
         r_assoc.setSpacing(10)
-        lbl_assoc_info = QLabel("文件关联:")
+        lbl_assoc_info = QLabel(t("文件关联:"))
         lbl_assoc_info.setObjectName("lblAssocTitle")
         r_assoc.addWidget(lbl_assoc_info, 1)
 
@@ -774,23 +775,23 @@ class PreferencesDialog(QDialog):
 
         r_lens = QHBoxLayout()
         r_lens.setSpacing(10)
-        lbl_lens_info = QLabel("镜头配置文件:")
+        lbl_lens_info = QLabel(t("镜头配置文件:"))
         lbl_lens_info.setObjectName("lblLensTitle")
         r_lens.addWidget(lbl_lens_info, 1)
 
-        self.btn_import_acr = QPushButton("从 ACR 导入镜头库")
-        self.btn_import_acr.setToolTip("从 Adobe Camera Raw 克隆镜头库到本地用户目录（%APPDATA%\\SpektraDarkroom\\LensProfiles）")
+        self.btn_import_acr = QPushButton(t("从 ACR 导入镜头库"))
+        self.btn_import_acr.setToolTip(t("从 Adobe Camera Raw 克隆镜头库到本地用户目录（%APPDATA%\\SpektraDarkroom\\LensProfiles）"))
         self.btn_import_acr.clicked.connect(self._on_import_acr_clicked)
         r_lens.addWidget(self.btn_import_acr)
 
-        self.btn_open_lens_dir = QPushButton("打开镜头库文件夹")
-        self.btn_open_lens_dir.setToolTip("在资源管理器中打开镜头配置目录")
+        self.btn_open_lens_dir = QPushButton(t("打开镜头库文件夹"))
+        self.btn_open_lens_dir.setToolTip(t("在资源管理器中打开镜头配置目录"))
         self.btn_open_lens_dir.clicked.connect(self._on_open_lens_dir_clicked)
         r_lens.addWidget(self.btn_open_lens_dir)
         l_dr.addLayout(r_lens)
 
         l_dr.addStretch()
-        self.tabs.addTab(tab_darkroom, "暗房与工作流")
+        self.tabs.addTab(tab_darkroom, t("暗房与工作流"))
 
         # Tab 3: 性能与缓存
         tab_cache = QWidget()
@@ -804,17 +805,17 @@ class PreferencesDialog(QDialog):
 
         r_dir_hdr = QHBoxLayout()
         r_dir_hdr.setSpacing(10)
-        lbl_dir = QLabel("缓存目录:")
+        lbl_dir = QLabel(t("缓存目录:"))
         lbl_dir.setFixedWidth(100)
         r_dir_hdr.addWidget(lbl_dir)
 
-        self.btn_change_cache_dir = QPushButton("更改...")
-        self.btn_change_cache_dir.setToolTip("选择新的缓存存储目录")
+        self.btn_change_cache_dir = QPushButton(t("更改..."))
+        self.btn_change_cache_dir.setToolTip(t("选择新的缓存存储目录"))
         self.btn_change_cache_dir.clicked.connect(self._on_change_cache_dir_clicked)
         r_dir_hdr.addWidget(self.btn_change_cache_dir)
 
-        self.btn_reset_cache_dir = QPushButton("默认")
-        self.btn_reset_cache_dir.setToolTip("恢复为系统默认缓存目录 (%LOCALAPPDATA%/SpektraDarkroom)")
+        self.btn_reset_cache_dir = QPushButton(t("默认"))
+        self.btn_reset_cache_dir.setToolTip(t("恢复为系统默认缓存目录 (%LOCALAPPDATA%/SpektraDarkroom)"))
         self.btn_reset_cache_dir.clicked.connect(self._on_reset_cache_dir_clicked)
         r_dir_hdr.addWidget(self.btn_reset_cache_dir)
 
@@ -837,7 +838,7 @@ class PreferencesDialog(QDialog):
         self.txt_cache_dir = self.lbl_cache_dir
 
         r_max_size = QHBoxLayout()
-        lbl_max_size = QLabel("缓存容量上限:")
+        lbl_max_size = QLabel(t("缓存容量上限:"))
         lbl_max_size.setFixedWidth(100)
         r_max_size.addWidget(lbl_max_size)
         self.combo_cache_max_size = QComboBox()
@@ -848,56 +849,56 @@ class PreferencesDialog(QDialog):
         self.combo_cache_max_size.addItem("2 GB", 2.0)
         self.combo_cache_max_size.addItem("5 GB", 5.0)
         self.combo_cache_max_size.addItem("10 GB", 10.0)
-        self.combo_cache_max_size.addItem("不限制", 0.0)
+        self.combo_cache_max_size.addItem(t("不限制"), 0.0)
         r_max_size.addWidget(self.combo_cache_max_size)
         r_max_size.addStretch(1)
         l_ca.addLayout(r_max_size)
 
         r_interval = QHBoxLayout()
-        lbl_interval = QLabel("自动清理周期:")
+        lbl_interval = QLabel(t("自动清理周期:"))
         lbl_interval.setFixedWidth(100)
         r_interval.addWidget(lbl_interval)
         self.combo_clean_interval = QComboBox()
         self.combo_clean_interval.setFixedWidth(180)
         setup_solid_combobox(self.combo_clean_interval)
-        self.combo_clean_interval.addItem("7 天", 7)
-        self.combo_clean_interval.addItem("10 天", 10)
-        self.combo_clean_interval.addItem("15 天", 15)
-        self.combo_clean_interval.addItem("30 天", 30)
-        self.combo_clean_interval.addItem("从不", 0)
+        self.combo_clean_interval.addItem(t("7 天"), 7)
+        self.combo_clean_interval.addItem(t("10 天"), 10)
+        self.combo_clean_interval.addItem(t("15 天"), 15)
+        self.combo_clean_interval.addItem(t("30 天"), 30)
+        self.combo_clean_interval.addItem(t("从不"), 0)
         r_interval.addWidget(self.combo_clean_interval)
         r_interval.addStretch(1)
         l_ca.addLayout(r_interval)
 
         r_cache = QHBoxLayout()
-        self.lbl_cache_size = QLabel("LUT 缓存: 计算中...")
+        self.lbl_cache_size = QLabel(t("LUT 缓存: 计算中..."))
         r_cache.addWidget(self.lbl_cache_size, 1)
-        self.btn_clean_cache = QPushButton("清理")
+        self.btn_clean_cache = QPushButton(t("清理"))
         self.btn_clean_cache.clicked.connect(self._clean_lut_cache)
         r_cache.addWidget(self.btn_clean_cache)
         l_ca.addLayout(r_cache)
 
         r_sess = QHBoxLayout()
-        self.lbl_sess_cache_size = QLabel("底片缓存: 计算中...")
+        self.lbl_sess_cache_size = QLabel(t("底片缓存: 计算中..."))
         r_sess.addWidget(self.lbl_sess_cache_size, 1)
-        self.btn_clean_sess = QPushButton("清理")
+        self.btn_clean_sess = QPushButton(t("清理"))
         self.btn_clean_sess.clicked.connect(self._clean_sess_cache)
         r_sess.addWidget(self.btn_clean_sess)
         l_ca.addLayout(r_sess)
 
         l_ca.addStretch()
-        self.tabs.addTab(tab_cache, "性能与缓存")
+        self.tabs.addTab(tab_cache, t("性能与缓存"))
 
         layout.addWidget(self.tabs, 1)
 
         # Footer Buttons
         footer = QHBoxLayout()
         footer.addStretch()
-        btn_cancel = QPushButton("取消")
+        btn_cancel = QPushButton(t("取消"))
         btn_cancel.clicked.connect(self.reject)
         footer.addWidget(btn_cancel)
 
-        btn_save = QPushButton("保存", objectName="btnSave")
+        btn_save = QPushButton(t("保存"), objectName="btnSave")
         btn_save.clicked.connect(self._save_preferences)
         footer.addWidget(btn_save)
 
@@ -972,16 +973,16 @@ class PreferencesDialog(QDialog):
         self.combo_language.setCurrentIndex(idx_lang if idx_lang >= 0 else 0)
 
         self.btn_clean_cache.setEnabled(True)
-        self.btn_clean_cache.setText("清理")
+        self.btn_clean_cache.setText(t("清理"))
         self.btn_clean_sess.setEnabled(True)
-        self.btn_clean_sess.setText("清理")
+        self.btn_clean_sess.setText(t("清理"))
         self._refresh_cache_size()
 
     def _update_assoc_button(self):
         is_dark = theme_manager.is_dark()
         if config_manager.is_sdss_file_associated():
-            self.btn_assoc.setText("取消关联")
-            self.btn_assoc.setToolTip("清除注册表中的 .sdss 文件关联")
+            self.btn_assoc.setText(t("取消关联"))
+            self.btn_assoc.setToolTip(t("清除注册表中的 .sdss 文件关联"))
             bg = "#2a1619" if is_dark else "#fee2e2"
             border = "#7f1d1d" if is_dark else "#fca5a5"
             fg = "#f87171" if is_dark else "#b91c1c"
@@ -1008,8 +1009,8 @@ class PreferencesDialog(QDialog):
                 }}
             """)
         else:
-            self.btn_assoc.setText("关联 .sdss")
-            self.btn_assoc.setToolTip("关联 .sdss 文件，支持双击直接打开")
+            self.btn_assoc.setText(t("关联 .sdss"))
+            self.btn_assoc.setToolTip(t("关联 .sdss 文件，支持双击直接打开"))
             bg = "#1e202a" if is_dark else "#ffffff"
             border = "#3d4255" if is_dark else "#cbd5e1"
             fg = "#f59e0b" if is_dark else "#d97706"
@@ -1049,7 +1050,7 @@ class PreferencesDialog(QDialog):
         try:
             os.startfile(d)
         except Exception as e:
-            show_dark_message_box(self, "打开文件夹失败", f"无法打开目录:\n{d}\n{e}")
+            show_dark_message_box(self, t("打开文件夹失败"), t("无法打开目录:\n{path}\n{err}", path=d, err=e))
 
     def _on_change_cache_dir_clicked(self):
         from PySide6.QtWidgets import QFileDialog
@@ -1086,19 +1087,19 @@ class PreferencesDialog(QDialog):
         if not acr_dirs:
             show_darkroom_info(
                 self,
-                title="未检测到 ACR 镜头库",
+                title=t("未检测到 ACR 镜头库"),
                 heading="未检测到系统 ACR 镜头库",
                 description="未在系统中检测到 Adobe Camera Raw / Lightroom 镜头配置文件目录。\n\n"
                             "提示：您可以免费安装官方 Adobe DNG Converter 即可自动获取数千款官方镜头库，\n"
                             "或直接点击【打开镜头库文件夹】手动放入第三方/厂商提供的 .lcp 文件。",
-                ok_text="知道了",
+                ok_text=t("知道了"),
                 badge_symbol="!"
             )
             return
 
         confirmed = show_darkroom_confirm(
             self,
-            title="确认导入镜头库",
+            title=t("确认导入镜头库"),
             heading="导入 Adobe Camera Raw 镜头库",
             description="是否立即将系统 Adobe Camera Raw 镜头配置文件克隆至本软件的本地用户库？\n\n"
                         "导入后即使卸载 Adobe 软件亦可完全独立离线使用该镜头库。",
@@ -1113,30 +1114,28 @@ class PreferencesDialog(QDialog):
         from PySide6.QtWidgets import QApplication
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.btn_import_acr.setEnabled(False)
-        self.btn_import_acr.setText("正在导入...")
+        self.btn_import_acr.setText(t("正在导入..."))
         QApplication.processEvents()
 
         try:
             copied, skipped = copy_system_acr_profiles_to_user_dir()
             QApplication.restoreOverrideCursor()
-            self.btn_import_acr.setText("从 ACR 导入镜头库")
+            self.btn_import_acr.setText(t("从 ACR 导入镜头库"))
             self.btn_import_acr.setEnabled(True)
             show_darkroom_info(
                 self,
-                title="导入完成",
-                heading="镜头库导入成功",
-                description=f"镜头库已成功同步至本地用户目录！\n\n"
-                            f"• 已导入文件: {copied} 个\n"
-                            f"• 已存在跳过: {skipped} 个\n\n"
-                            f"存放位置:\n{get_user_lcp_directory()}",
-                ok_text="完成",
+                title=t("导入完成"),
+                heading=t("镜头库导入成功"),
+                description=t("镜头库已成功同步至本地用户目录！\n\n• 已导入文件: {copied} 个\n• 已存在跳过: {skipped} 个\n\n存放位置:\n{path}",
+                              copied=copied, skipped=skipped, path=get_user_lcp_directory()),
+                ok_text=t("完成"),
                 badge_symbol="✓"
             )
         except Exception as e:
             QApplication.restoreOverrideCursor()
-            self.btn_import_acr.setText("从 ACR 导入镜头库")
+            self.btn_import_acr.setText(t("从 ACR 导入镜头库"))
             self.btn_import_acr.setEnabled(True)
-            show_darkroom_info(self, "导入发生异常", "导入镜头库失败", f"导入过程中发生错误:\n{e}", ok_text="确定", badge_symbol="!")
+            show_darkroom_info(self, t("导入发生异常"), t("导入镜头库失败"), t("导入过程中发生错误:\n{err}", err=e), ok_text=t("确定"), badge_symbol="!")
 
     def _refresh_cache_size(self):
         try:
@@ -1148,15 +1147,15 @@ class PreferencesDialog(QDialog):
                 if os.path.isdir(d):
                     total_bytes += sum(os.path.getsize(os.path.join(d, f)) for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
             sz_mb = total_bytes / (1024.0 * 1024.0)
-            self.lbl_cache_size.setText(f"LUT 缓存: {sz_mb:.1f} MB")
+            self.lbl_cache_size.setText(t("LUT 缓存: {size:.1f} MB", size=sz_mb))
         except Exception:
-            self.lbl_cache_size.setText("LUT 缓存: 0.0 MB")
+            self.lbl_cache_size.setText(t("LUT 缓存: 0.0 MB"))
 
         try:
             sess_mb = session_cache_manager.get_cache_size_mb()
-            self.lbl_sess_cache_size.setText(f"底片缓存: {sess_mb:.1f} MB")
+            self.lbl_sess_cache_size.setText(t("底片缓存: {size:.1f} MB", size=sess_mb))
         except Exception:
-            self.lbl_sess_cache_size.setText("底片缓存: 0.0 MB")
+            self.lbl_sess_cache_size.setText(t("底片缓存: 0.0 MB"))
 
     def _clean_lut_cache(self):
         try:
@@ -1168,7 +1167,7 @@ class PreferencesDialog(QDialog):
                 os.makedirs(u_cache, exist_ok=True)
             self._refresh_cache_size()
             self.btn_clean_cache.setEnabled(False)
-            self.btn_clean_cache.setText("已清理")
+            self.btn_clean_cache.setText(t("已清理"))
         except Exception:
             pass
 
@@ -1177,7 +1176,7 @@ class PreferencesDialog(QDialog):
             session_cache_manager.clear_cache()
             self._refresh_cache_size()
             self.btn_clean_sess.setEnabled(False)
-            self.btn_clean_sess.setText("已清理")
+            self.btn_clean_sess.setText(t("已清理"))
         except Exception:
             pass
 
@@ -1189,15 +1188,15 @@ class PreferencesDialog(QDialog):
             prof = dp.current()
             managed, why = dp.managed_default()
             if not self.chk_viewport_cm.isChecked():
-                text = f"已关闭：视口按 sRGB 直出（{why}）" if why else "已关闭：视口按 sRGB 直出"
+                text = t("已关闭：视口按 sRGB 直出（{why}）", why=why) if why else t("已关闭：视口按 sRGB 直出")
             elif why:
                 text = why
             elif prof.identity:
-                text = f"当前显示器：{prof.label}（无需转换）"
+                text = t("当前显示器：{label}（无需转换）", label=prof.label)
             else:
-                text = f"当前显示器：{prof.label}"
+                text = t("当前显示器：{label}", label=prof.label)
         except Exception as exc:  # noqa: BLE001 - 状态行不许把对话框弄挂
-            text = f"无法读取显示器 profile（{exc.__class__.__name__}）"
+            text = t("无法读取显示器 profile（{err}）", err=exc.__class__.__name__)
         self.lbl_viewport_cm.setText(text)
 
     def _save_preferences(self):
@@ -1262,6 +1261,6 @@ class PreferencesDialog(QDialog):
             except Exception:
                 pass
         if lang_changed:
-            show_darkroom_info(self, "界面语言", "界面语言已保存，重启软件后生效。")
+            show_darkroom_info(self, t("界面语言"), t("界面语言已保存，重启软件后生效。"))
         self.accept()
 
