@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from core.path_utils import get_resource_dir
 from ui.window_utils import apply_dark_titlebar
 from ui.theme_manager import theme_manager
+from core.i18n import t
 
 
 class UnsavedSessionDialog(QDialog):
@@ -21,7 +22,7 @@ class UnsavedSessionDialog(QDialog):
 
     def __init__(self, session_name="未命名会话", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("未保存的会话")
+        self.setWindowTitle(t("未保存的会话"))
         self.setFixedSize(450, 185)
         self.setModal(True)
         self.action_result = self.CANCEL
@@ -162,12 +163,12 @@ class UnsavedSessionDialog(QDialog):
         text_layout.setSpacing(6)
 
         title_col = "#f8fafc" if is_dark else "#0f172a"
-        title_lbl = QLabel("未保存的会话")
+        title_lbl = QLabel(t("未保存的会话"))
         title_lbl.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {title_col};")
         text_layout.addWidget(title_lbl)
 
         desc_col = "#94a3b8" if is_dark else "#475569"
-        desc_lbl = QLabel(f"会话「{session_name}」有尚未保存的修改。\n是否在退出前保存当前会话工程？")
+        desc_lbl = QLabel(t("会话「{name}」有尚未保存的修改。\n是否在退出前保存当前会话工程？", name=session_name))
         desc_lbl.setStyleSheet(f"font-size: 12px; color: {desc_col}; line-height: 1.4;")
         desc_lbl.setWordWrap(True)
         text_layout.addWidget(desc_lbl)
@@ -180,17 +181,17 @@ class UnsavedSessionDialog(QDialog):
         footer.setSpacing(10)
         footer.addStretch(1)
 
-        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel = QPushButton(t("取消"))
         self.btn_cancel.setFixedWidth(70)
         self.btn_cancel.clicked.connect(self._on_cancel)
         footer.addWidget(self.btn_cancel)
 
-        self.btn_discard = QPushButton("不保存直接退出", objectName="btnDiscard")
+        self.btn_discard = QPushButton(t("不保存直接退出"), objectName="btnDiscard")
         self.btn_discard.setFixedWidth(118)
         self.btn_discard.clicked.connect(self._on_discard)
         footer.addWidget(self.btn_discard)
 
-        self.btn_save = QPushButton("保存", objectName="btnSave")
+        self.btn_save = QPushButton(t("保存"), objectName="btnSave")
         self.btn_save.setFixedWidth(75)
         self.btn_save.setDefault(True)
         self.btn_save.clicked.connect(self._on_save)

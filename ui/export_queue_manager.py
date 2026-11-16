@@ -987,15 +987,15 @@ class ExportQueueDialog(QDialog):
         show_done_cards = bool(done) and (self._history_expanded or not fold_visible)
 
         widgets = []
-        for t in active + failed:
-            widgets.append(self._cards[t.task_id]["card"])
+        for _task in active + failed:
+            widgets.append(self._cards[_task.task_id]["card"])
         if done:
             widgets.append(self._history_sep)
             if fold_visible:
                 widgets.append(self._fold_row)
             if show_done_cards:
-                for t in done:
-                    widgets.append(self._cards[t.task_id]["card"])
+                for _task in done:
+                    widgets.append(self._cards[_task.task_id]["card"])
 
         managed = [w for d in self._cards.values() for w in (d.get("card"),)]
         managed += [self._history_sep, self._fold_row]

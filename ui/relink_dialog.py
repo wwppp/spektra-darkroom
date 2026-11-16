@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from core.path_utils import get_resource_dir, normalize_path
 from ui.window_utils import apply_dark_titlebar
 from ui.theme_manager import theme_manager
+from core.i18n import t
 
 
 class RelinkMediaDialog(QDialog):
@@ -28,7 +29,7 @@ class RelinkMediaDialog(QDialog):
 
     def __init__(self, missing_entries, total_photos_count=0, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("底片脱机 — 重新关联媒体文件")
+        self.setWindowTitle(t("底片脱机 — 重新关联媒体文件"))
         self.setFixedSize(740, 480)
         self.setModal(True)
 
@@ -77,15 +78,16 @@ class RelinkMediaDialog(QDialog):
 
         text_layout = QVBoxLayout()
         text_layout.setSpacing(3)
-        lbl_title = QLabel("检测到底片脱机 (媒体文件丢失)")
+        lbl_title = QLabel(t("检测到底片脱机 (媒体文件丢失)"))
         lbl_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #f59e0b;")
         text_layout.addWidget(lbl_title)
 
         missing_cnt = len(self.missing_entries)
         desc_col = "#94a3b8" if is_dark else "#475569"
         lbl_desc = QLabel(
-            f"会话共记录 {self.total_count} 张底片，其中 {missing_cnt} 张在原存储路径未找到。\n"
-            "若您已将底片文件夹移动至其他位置或驱动器，请指定底片所在文件夹执行自动级联重链。"
+            t("会话共记录 {total} 张底片，其中 {missing} 张在原存储路径未找到。\n"
+              "若您已将底片文件夹移动至其他位置或驱动器，请指定底片所在文件夹执行自动级联重链。",
+              total=self.total_count, missing=missing_cnt)
         )
         lbl_desc.setStyleSheet(f"font-size: 11px; color: {desc_col}; line-height: 1.4;")
         text_layout.addWidget(lbl_desc)
@@ -123,7 +125,7 @@ class RelinkMediaDialog(QDialog):
         btn_row.addWidget(self.lbl_status)
         btn_row.addStretch()
 
-        self.btn_browse = QPushButton("指定底片所在文件夹...")
+        self.btn_browse = QPushButton(t("指定底片所在文件夹..."))
         self.btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_browse.setStyleSheet("""
             QPushButton {
@@ -145,7 +147,7 @@ class RelinkMediaDialog(QDialog):
         self.btn_browse.clicked.connect(self._on_browse_folder)
         btn_row.addWidget(self.btn_browse)
 
-        self.btn_offline = QPushButton("保持脱机继续")
+        self.btn_offline = QPushButton(t("保持脱机继续"))
         self.btn_offline.setCursor(Qt.CursorShape.PointingHandCursor)
         if is_dark:
             self.btn_offline.setStyleSheet("""
@@ -180,7 +182,7 @@ class RelinkMediaDialog(QDialog):
         self.btn_offline.clicked.connect(self._on_keep_offline)
         btn_row.addWidget(self.btn_offline)
 
-        self.btn_remove = QPushButton("移除脱机底片")
+        self.btn_remove = QPushButton(t("移除脱机底片"))
         self.btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
         if is_dark:
             self.btn_remove.setStyleSheet("""
@@ -223,7 +225,7 @@ class RelinkMediaDialog(QDialog):
         self.btn_remove.clicked.connect(self._on_remove_offline)
         btn_row.addWidget(self.btn_remove)
 
-        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel = QPushButton(t("取消"))
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         if is_dark:
             self.btn_cancel.setStyleSheet("""
@@ -394,20 +396,20 @@ class RelinkMediaDialog(QDialog):
 
         total_missing = len(self.missing_entries)
         if relinked_count == total_missing:
-            self.lbl_status.setText(f"全部 {relinked_count} 张底片已成功重新关联！")
-            self.btn_browse.setText("确定载入")
+            self.lbl_status.setText(t("全部 {n} 张底片已成功重新关联！", n=relinked_count))
+            self.btn_browse.setText(t("确定载入"))
             self.btn_browse.clicked.disconnect()
             self.btn_browse.clicked.connect(self._on_confirm_relink)
         elif relinked_count > 0:
-            self.lbl_status.setText(f"已找到并关联 {relinked_count}/{total_missing} 张底片")
-            self.btn_browse.setText("继续载入已关联底片")
+            self.lbl_status.setText(t("已找到并关联 {done}/{total} 张底片", done=relinked_count, total=total_missing))
+            self.btn_browse.setText(t("继续载入已关联底片"))
             self.btn_browse.clicked.disconnect()
             self.btn_browse.clicked.connect(self._on_confirm_relink)
         else:
             QMessageBox.information(
                 self,
                 "未找到匹配底片",
-                f"在文件夹中未扫描到底片列表中对应的原始文件：\n{folder}\n请确认底片存放位置。"
+                t("在文件夹中未扫描到底片列表中对应的原始文件：\n{path}\n请确认底片存放位置。", path=folder)
             )
 
     def _on_confirm_relink(self):
@@ -431,7 +433,7 @@ class RelinkMediaDialog(QDialog):
             entry = self.missing_entries[row]
             fn = entry.get("filename", "底片")
             menu = QMenu(self)
-            act_remove = menu.addAction(f"从会话中移除「{fn}」")
+            act_remove = menu.addAction(t("从会话中移除「{name}」", name=fn))
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
             if action == act_remove:
                 removed_entry = self.missing_entries.pop(row)

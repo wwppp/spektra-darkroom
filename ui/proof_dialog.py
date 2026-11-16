@@ -24,6 +24,7 @@ from core import proof
 from core.path_utils import get_resource_dir
 from ui.theme_manager import theme_manager
 from ui.window_utils import apply_dark_titlebar
+from core.i18n import t
 
 
 class ProofSetupDialog(QDialog):
@@ -31,7 +32,7 @@ class ProofSetupDialog(QDialog):
 
     def __init__(self, settings: proof.ProofSettings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("校样设置")
+        self.setWindowTitle(t("校样设置"))
         self.setModal(True)
         self.setFixedWidth(430)
         self._initial = settings
@@ -50,30 +51,30 @@ class ProofSetupDialog(QDialog):
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(12)
 
-        self.chk_on = QCheckBox("启用校样")
+        self.chk_on = QCheckBox(t("启用校样"))
         self.chk_on.setChecked(self._initial.on)
-        self.chk_on.setToolTip("快捷键 Ctrl+Shift+Y")
+        self.chk_on.setToolTip(t("快捷键 Ctrl+Shift+Y"))
         root.addWidget(self.chk_on)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
         grid.setContentsMargins(20, 0, 0, 0)
-        lbl = QLabel("校样目标")
+        lbl = QLabel(t("校样目标"))
         grid.addWidget(lbl, 0, 0)
         self.combo_target = QComboBox()
-        for t in proof.TARGETS:
-            self.combo_target.addItem(t, t)
+        for _target in proof.TARGETS:
+            self.combo_target.addItem(_target, _target)
         idx = self.combo_target.findData(self._initial.canonical_target())
         self.combo_target.setCurrentIndex(max(0, idx))
-        self.combo_target.setToolTip("视口会显示「导出成这个色彩空间」的样子")
+        self.combo_target.setToolTip(t("视口会显示「导出成这个色彩空间」的样子"))
         grid.addWidget(self.combo_target, 0, 1)
         grid.setColumnStretch(1, 1)
         root.addLayout(grid)
 
-        self.chk_warn = QCheckBox("色域警告（超出目标色域的像素叠品红）")
+        self.chk_warn = QCheckBox(t("色域警告（超出目标色域的像素叠品红）"))
         self.chk_warn.setChecked(self._initial.warn)
-        self.chk_warn.setToolTip("快捷键 Ctrl+Alt+Y")
+        self.chk_warn.setToolTip(t("快捷键 Ctrl+Alt+Y"))
         root.addWidget(self.chk_warn)
 
         self.lbl_note = QLabel("")
@@ -84,10 +85,10 @@ class ProofSetupDialog(QDialog):
 
         btns = QHBoxLayout()
         btns.addStretch(1)
-        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel = QPushButton(t("取消"))
         self.btn_cancel.setFixedWidth(84)
         self.btn_cancel.clicked.connect(self.reject)
-        self.btn_ok = QPushButton("好")
+        self.btn_ok = QPushButton(t("好"))
         self.btn_ok.setFixedWidth(84)
         self.btn_ok.setDefault(True)
         self.btn_ok.clicked.connect(self._accept)
@@ -104,16 +105,16 @@ class ProofSetupDialog(QDialog):
         self.combo_target.setEnabled(on)
         self.chk_warn.setEnabled(on)
         if not on:
-            self.lbl_note.setText("校样关闭时，视口按显示器 profile 直接显示。")
+            self.lbl_note.setText(t("校样关闭时，视口按显示器 profile 直接显示。"))
             return
-        t = self.combo_target.currentData()
-        if t == "sRGB":
+        target = self.combo_target.currentData()
+        if target == "sRGB":
             self.lbl_note.setText(
-                "sRGB 是最常见的交付目标；超出它的颜色会被夹到边界（相对比色）。")
+                t("sRGB 是最常见的交付目标；超出它的颜色会被夹到边界（相对比色）。"))
         else:
             self.lbl_note.setText(
-                f"「{t}」的色域之外的像素会被夹到边界。与导出该色彩空间用的是同一组矩阵，"
-                "所以看到的和导出的一致。")
+                t("「{target}」色域之外的像素会被夹到边界。与导出该色彩空间用的是同一组矩阵，"
+                  "所以看到的和导出的一致。", target=target))
 
     def _apply_theme(self):
         if not theme_manager.is_dark():

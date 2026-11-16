@@ -15,12 +15,13 @@ from core.path_utils import get_resource_dir
 from ui.window_utils import apply_dark_titlebar
 from ui.theme_manager import theme_manager
 from core.version import get_full_version_info
+from core.i18n import t
 
 
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("关于 SpektraDarkroom")
+        self.setWindowTitle(t("关于 SpektraDarkroom"))
         self.setFixedSize(580, 640)
         self.setModal(True)
 
@@ -199,11 +200,12 @@ class AboutDialog(QDialog):
         lbl_name.setStyleSheet("color: #f59e0b; font-size: 16px; font-weight: bold; letter-spacing: 0.5px;")
         info_layout.addWidget(lbl_name)
 
-        lbl_build = QLabel(f"版本: {info['version']} (Build {info['build']})  |  发布时间: {info['release_date']}")
+        lbl_build = QLabel(t("版本：{version} (Build {build})  |  发布时间：{date}",
+                             version=info['version'], build=info['build'], date=info['release_date']))
         lbl_build.setStyleSheet("color: #64748b; font-size: 11px;")
         info_layout.addWidget(lbl_build)
 
-        lbl_engine = QLabel(f"加速引擎: {info['engine']}")
+        lbl_engine = QLabel(t("加速引擎：{engine}", engine=info['engine']))
         lbl_engine.setStyleSheet("color: #64748b; font-size: 11px;" if not is_dark else "color: #94a3b8; font-size: 11px;")
         info_layout.addWidget(lbl_engine)
 
@@ -268,7 +270,7 @@ class AboutDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
-        btn_close = QPushButton("确定")
+        btn_close = QPushButton(t("确定"))
         btn_close.setObjectName("btn_close")
         btn_close.clicked.connect(self.accept)
         btn_layout.addWidget(btn_close)

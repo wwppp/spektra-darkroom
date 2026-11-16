@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from core.path_utils import get_resource_dir
 from ui.window_utils import apply_dark_titlebar
 from ui.theme_manager import theme_manager
+from core.i18n import t
 
 
 class DeletePhotoConfirmDialog(QDialog):
@@ -24,7 +25,7 @@ class DeletePhotoConfirmDialog(QDialog):
 
     def __init__(self, target_names: Union[str, List[str]], parent=None):
         super().__init__(parent)
-        self.setWindowTitle("删除底片文件")
+        self.setWindowTitle(t("删除底片文件"))
         self.setFixedSize(450, 185)
         self.setModal(True)
         self.action_result = self.CANCELLED
@@ -160,16 +161,16 @@ class DeletePhotoConfirmDialog(QDialog):
         text_layout.setSpacing(6)
 
         title_col = "#f8fafc" if is_dark else "#0f172a"
-        title_lbl = QLabel("删除底片文件")
+        title_lbl = QLabel(t("删除底片文件"))
         title_lbl.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {title_col};")
         text_layout.addWidget(title_lbl)
 
         count = len(self.target_names)
         if count == 1:
             fn = self.target_names[0]
-            desc_text = f"确定要将底片文件 “{fn}” 移至回收站吗？\n此操作将从磁盘中删除该文件并从底片库中移除。"
+            desc_text = t("确定要将底片文件 “{name}” 移至回收站吗？\n此操作将从磁盘中删除该文件并从底片库中移除。", name=fn)
         else:
-            desc_text = f"确定要将选中的 {count} 个底片文件移至回收站吗？\n此操作将从磁盘中删除这些文件并从底片库中移除。"
+            desc_text = t("确定要将选中的 {n} 个底片文件移至回收站吗？\n此操作将从磁盘中删除这些文件并从底片库中移除。", n=count)
 
         desc_col = "#94a3b8" if is_dark else "#475569"
         desc_lbl = QLabel(desc_text)
@@ -185,12 +186,12 @@ class DeletePhotoConfirmDialog(QDialog):
         footer.setSpacing(10)
         footer.addStretch(1)
 
-        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel = QPushButton(t("取消"))
         self.btn_cancel.setFixedWidth(75)
         self.btn_cancel.clicked.connect(self._on_cancel)
         footer.addWidget(self.btn_cancel)
 
-        self.btn_delete = QPushButton("移至回收站", objectName="btnDelete")
+        self.btn_delete = QPushButton(t("移至回收站"), objectName="btnDelete")
         self.btn_delete.setFixedWidth(90)
         self.btn_delete.setDefault(True)
         self.btn_delete.clicked.connect(self._on_delete)

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from core.path_utils import get_icon_path
 from ui.theme_manager import theme_manager
 from ui.window_utils import get_icon
+from core.i18n import t
 
 
 class FlowLayout(QLayout):
@@ -138,13 +139,13 @@ class FilmFilterHeader(QWidget):
         self.main_layout.setSpacing(4)
 
         # Title Label
-        self.lbl_title = QLabel("胶卷型号")
+        self.lbl_title = QLabel(t("胶卷型号"))
         self.lbl_title.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: bold;")
 
         # Capsule Search Box
         self.search_box = QLineEdit()
         self.search_box.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.search_box.setPlaceholderText("搜索胶卷...")
+        self.search_box.setPlaceholderText(t("搜索胶卷..."))
         self.search_box.setClearButtonEnabled(True)
         self.search_box.setFixedHeight(22)
 
@@ -364,9 +365,9 @@ class FilmFilterHeader(QWidget):
         self._visible_count = visible_count
         self._total_count = total_count
         if visible_count == total_count:
-            self.lbl_title.setText(f"胶卷型号 ({total_count} 卷)")
+            self.lbl_title.setText(t("胶卷型号（{n} 卷）", n=total_count))
         else:
-            self.lbl_title.setText(f"胶卷型号 ({visible_count}/{total_count} 卷)")
+            self.lbl_title.setText(t("胶卷型号（{shown}/{total} 卷）", shown=visible_count, total=total_count))
 
     def hasHeightForWidth(self):
         return True
