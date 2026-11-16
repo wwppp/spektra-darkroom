@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap, QImage, QColor, QIcon, QFontMetrics
 
+from core.i18n import t
 from ui.window_utils import apply_dark_titlebar
 from ui.theme_manager import theme_manager
 from ui.smooth_scroll import SmoothScrollArea
@@ -602,9 +603,10 @@ class ExportQueueManager(QObject):
         running = next((t for t in active if t.status == "running"), None)
         total_active = len(active)
         if running:
-            self.status_updated.emit(f"正在扫描: {running.filename} (队列中剩余 {total_active - 1} 张)", True)
+            self.status_updated.emit(t("正在扫描：{name}（队列中剩余 {remaining} 张）",
+                                       name=running.filename, remaining=total_active - 1), True)
         else:
-            self.status_updated.emit(f"扫描排队中 ({total_active} 项待处理)...", True)
+            self.status_updated.emit(t("扫描排队中（{n} 项待处理）…", n=total_active), True)
 
     def close(self):
         self._is_active = False
@@ -626,7 +628,7 @@ class ExportQueueDialog(QDialog):
     def __init__(self, queue_mgr: ExportQueueManager, parent=None):
         super().__init__(parent)
         self.queue_mgr = queue_mgr
-        self.setWindowTitle("扫描队列管理")
+        self.setWindowTitle(t("扫描队列管理"))
         # 单张任务卡 86px + 8px 间距，太矮只能看到 3 张。给一个能放 5 张的默认高度，
         # 同时允许往上拉和往下收（最小 460 = 约 3.5 张）。
         self.setMinimumSize(680, 460)
@@ -794,13 +796,13 @@ class ExportQueueDialog(QDialog):
 
         # Header Bar
         hdr = QHBoxLayout()
-        title = QLabel("扫描队列")
+        title = QLabel(t("扫描队列"))
         title.setStyleSheet("font-size: 14px; font-weight: bold; color: #f59e0b;")
         hdr.addWidget(title)
         hdr.addStretch()
 
-        self.btn_cancel_all = QPushButton("全部取消")
-        self.btn_cancel_all.setToolTip("取消所有排队中与正在扫描的任务")
+        self.btn_cancel_all = QPushButton(t("全部取消"))
+        self.btn_cancel_all.setToolTip(t("取消所有排队中与正在扫描的任务"))
         if is_dark:
             self.btn_cancel_all.setStyleSheet("""
                 QPushButton {
@@ -838,8 +840,8 @@ class ExportQueueDialog(QDialog):
         self.btn_cancel_all.clicked.connect(self.queue_mgr.cancel_all)
         hdr.addWidget(self.btn_cancel_all)
 
-        self.btn_clear_hist = QPushButton("清除已完成")
-        self.btn_clear_hist.setToolTip("从列表中清除已完成或已取消的历史任务")
+        self.btn_clear_hist = QPushButton(t("清除已完成"))
+        self.btn_clear_hist.setToolTip(t("从列表中清除已完成或已取消的历史任务"))
         if is_dark:
             self.btn_clear_hist.setStyleSheet("""
                 QPushButton {
@@ -1008,7 +1010,8 @@ class ExportQueueDialog(QDialog):
 
         if fold_visible:
             self._fold_row.setText(
-                f"已完成 {len(done)} 条 · {'收起' if self._history_expanded else '展开'}")
+                t("已完成 {n} 条 · {action}", n=len(done),
+                  action=t("收起") if self._history_expanded else t("展开")))
 
         if at_top:
             bar.setValue(0)
@@ -1047,7 +1050,7 @@ class ExportQueueDialog(QDialog):
                 self._fold_row.hide()
 
                 if not self._empty_label:
-                    self._empty_label = QLabel("当前暂无扫描任务")
+                    self._empty_label = QLabel(t("当前暂无扫描任务"))
                     self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     self._empty_label.setStyleSheet("color: #64748b; font-size: 12px; padding: 40px;")
                     self.item_layout.insertWidget(0, self._empty_label)
@@ -1105,11 +1108,11 @@ class ExportQueueDialog(QDialog):
         btn_x = card_dict.get("btn_x")
 
         status_map = {
-            "queued": ("排队中", "#94a3b8"),
-            "running": ("扫描中...", "#f59e0b"),
-            "finished": ("已完成", "#f59e0b"),
-            "cancelled": ("已取消", "#64748b"),
-            "failed": (f"失败: {task.error_msg}", "#ef4444"),
+            "queued": (t("排队中"), "#94a3b8"),
+            "running": (t("扫描中..."), "#f59e0b"),
+            "finished": (t("已完成"), "#f59e0b"),
+            "cancelled": (t("已取消"), "#64748b"),
+            "failed": (t("失败：{err}", err=task.error_msg), "#ef4444"),
         }
         st_txt, st_col = status_map.get(task.status, (task.status, "#94a3b8"))
         if st_lbl:
@@ -1203,11 +1206,11 @@ class ExportQueueDialog(QDialog):
 
         # Status text
         status_map = {
-            "queued": ("排队中", "#94a3b8"),
-            "running": ("扫描中...", "#f59e0b"),
-            "finished": ("已完成", "#f59e0b"),
-            "cancelled": ("已取消", "#64748b"),
-            "failed": (f"失败: {task.error_msg}", "#ef4444"),
+            "queued": (t("排队中"), "#94a3b8"),
+            "running": (t("扫描中..."), "#f59e0b"),
+            "finished": (t("已完成"), "#f59e0b"),
+            "cancelled": (t("已取消"), "#64748b"),
+            "failed": (t("失败：{err}", err=task.error_msg), "#ef4444"),
         }
         st_txt, st_col = status_map.get(task.status, (task.status, "#94a3b8"))
         st_lbl = QLabel(st_txt)
@@ -1221,7 +1224,7 @@ class ExportQueueDialog(QDialog):
         elided_path = metrics.elidedText(path_text, Qt.TextElideMode.ElideMiddle, 460)
         path_lbl = QLabel(elided_path)
         path_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-        path_lbl.setToolTip(f"点击在文件资源管理器中定位:\n{path_text}")
+        path_lbl.setToolTip(t("点击在文件资源管理器里定位：\n{path}", path=path_text))
         path_color = "#94a3b8" if is_dark else "#64748b"
         path_lbl.setStyleSheet(f"""
             QLabel {{
@@ -1277,7 +1280,7 @@ class ExportQueueDialog(QDialog):
         # Cancel Button
         btn_x = QPushButton("✕")
         btn_x.setFixedSize(22, 22)
-        btn_x.setToolTip("取消该扫描任务")
+        btn_x.setToolTip(t("取消该扫描任务"))
         if is_dark:
             btn_x.setStyleSheet("""
                 QPushButton {

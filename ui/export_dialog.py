@@ -20,6 +20,7 @@ from core.path_utils import get_icon_path, get_resource_dir, normalize_path
 from ui.window_utils import setup_solid_combobox, apply_dark_titlebar, get_standard_checkbox_style
 from ui.theme_manager import theme_manager
 from core import config_manager
+from core.i18n import t
 
 
 # Output size presets. A preset pins the *long edge*; the short edge follows the source
@@ -232,7 +233,7 @@ class ExportSizeWidget(QWidget):
             edit = self.combo.lineEdit()
             if edit is not None:
                 edit.setValidator(QIntValidator(64, 30000, self))
-                edit.setPlaceholderText("长边 px")
+                edit.setPlaceholderText(t("长边 px"))
                 # A styled combo reserves the arrow through the drop-down subcontrol, which Qt
                 # then subtracts from the *left* padding of the editor. Pin the editor's own
                 # geometry so the digits start where the preset text starts.
@@ -563,7 +564,7 @@ class BaseExportDialog(QDialog):
         grid_top.setColumnStretch(3, 1)
 
         # Row 0: Format & Color Space
-        lbl_fmt = QLabel("文件格式:")
+        lbl_fmt = QLabel(t("文件格式:"))
         lbl_fmt.setFixedWidth(72)
         grid_top.addWidget(lbl_fmt, 0, 0)
 
@@ -575,7 +576,7 @@ class BaseExportDialog(QDialog):
         self.combo_format.addItem("PNG (*.png)", "png")
         grid_top.addWidget(self.combo_format, 0, 1)
 
-        lbl_cs = QLabel("色彩空间:")
+        lbl_cs = QLabel(t("色彩空间:"))
         lbl_cs.setFixedWidth(72)
         grid_top.addWidget(lbl_cs, 0, 2)
 
@@ -589,7 +590,7 @@ class BaseExportDialog(QDialog):
         grid_top.addWidget(self.combo_colorspace, 0, 3)
 
         # Row 1: Resolution (DPI) & Bit Depth
-        lbl_dpi = QLabel("输出分辨率:")
+        lbl_dpi = QLabel(t("输出分辨率:"))
         lbl_dpi.setFixedWidth(72)
         grid_top.addWidget(lbl_dpi, 1, 0)
 
@@ -601,7 +602,7 @@ class BaseExportDialog(QDialog):
         self.combo_dpi.setCurrentIndex(1)
         grid_top.addWidget(self.combo_dpi, 1, 1)
 
-        lbl_bit = QLabel("输出位深:")
+        lbl_bit = QLabel(t("输出位深:"))
         lbl_bit.setFixedWidth(72)
         grid_top.addWidget(lbl_bit, 1, 2)
 
@@ -611,7 +612,7 @@ class BaseExportDialog(QDialog):
 
         # Shared output-size row: every format can be scaled, so it sits above the format
         # pages instead of inside one of them.
-        lbl_size = QLabel("输出尺寸:")
+        lbl_size = QLabel(t("输出尺寸:"))
         lbl_size.setFixedWidth(72)
         self.lbl_output_size = lbl_size
         grid_top.addWidget(lbl_size, 2, 0)
@@ -619,15 +620,15 @@ class BaseExportDialog(QDialog):
         self.size_widget = ExportSizeWidget(self)
         grid_top.addWidget(self.size_widget, 2, 1)
 
-        lbl_sub = QLabel("色彩抽样:")
+        lbl_sub = QLabel(t("色彩抽样:"))
         lbl_sub.setFixedWidth(72)
         grid_top.addWidget(lbl_sub, 2, 2)
 
         self.combo_subsampling = QComboBox()
         setup_solid_combobox(self.combo_subsampling)
-        self.combo_subsampling.addItem("4:4:4 (无损色度)", "4:4:4")
-        self.combo_subsampling.addItem("4:2:2 (标准压缩)", "4:2:2")
-        self.combo_subsampling.addItem("4:2:0 (高压缩)", "4:2:0")
+        self.combo_subsampling.addItem(t("4:4:4 (无损色度)"), "4:4:4")
+        self.combo_subsampling.addItem(t("4:2:2 (标准压缩)"), "4:2:2")
+        self.combo_subsampling.addItem(t("4:2:0 (高压缩)"), "4:2:0")
         grid_top.addWidget(self.combo_subsampling, 2, 3)
 
         # No extra hint line: the resolved pixel size is folded into the size combo's own text,
@@ -635,20 +636,20 @@ class BaseExportDialog(QDialog):
         self.lbl_size_summary = None
 
         # Shared GPS Privacy Checkbox (Placed cleanly below path input in specific dialogs)
-        self.chk_strip_gps = QCheckBox("去除 GPS 位置隐私 (保护个人安全)")
+        self.chk_strip_gps = QCheckBox(t("去除 GPS 位置隐私 (保护个人安全)"))
         self.chk_strip_gps.setObjectName("chkStripGps")
         self.chk_strip_gps.setChecked(True)
-        self.chk_strip_gps.setToolTip("开启后将从导出文件的 EXIF 元数据中完全抹除 GPS 经纬度与海拔坐标，保留相机、镜头、光圈、快门与拍摄时间等专业参数。")
+        self.chk_strip_gps.setToolTip(t("开启后将从导出文件的 EXIF 元数据中完全抹除 GPS 经纬度与海拔坐标，保留相机、镜头、光圈、快门与拍摄时间等专业参数。"))
 
         # Shared overwrite policy: checked (default) replaces a same-name file; unchecked makes
         # the exporter append 1, 2, 3 ... instead of overwriting.
-        self.chk_overwrite = QCheckBox("替换重名文件")
+        self.chk_overwrite = QCheckBox(t("替换重名文件"))
         self.chk_overwrite.setObjectName("chkOverwrite")
         self.chk_overwrite.setChecked(True)
-        self.chk_overwrite.setToolTip("勾选时同目录同名文件直接覆盖；取消勾选则自动改名为 xxx_1、xxx_2 等，保留原文件。")
+        self.chk_overwrite.setToolTip(t("勾选时同目录同名文件直接覆盖；取消勾选则自动改名为 xxx_1、xxx_2 等，保留原文件。"))
 
         # Row 3: Format-Specific Settings (Directly in grid_top columns 0, 1, 2, 3)
-        self.lbl_format_opt1 = QLabel("画质档位:")
+        self.lbl_format_opt1 = QLabel(t("画质档位:"))
         self.lbl_format_opt1.setFixedWidth(72)
         grid_top.addWidget(self.lbl_format_opt1, 3, 0)
 
@@ -661,32 +662,32 @@ class BaseExportDialog(QDialog):
         for q, desc in EXPORT_QUALITY_LEVELS:
             self.combo_quality.addItem(f"{q} · {desc}", q)
         self.combo_quality.setCurrentIndex(self.combo_quality.findData(9))
-        self.combo_quality.setToolTip("JPEG 画质档位 1–10，数字越大画质越高、体积越大")
+        self.combo_quality.setToolTip(t("JPEG 画质档位 1–10，数字越大画质越高、体积越大"))
         self.stack_format_opt1.addWidget(self.combo_quality)
 
         # 1: TIFF Compression
         self.combo_tiff_comp = QComboBox()
         setup_solid_combobox(self.combo_tiff_comp)
-        self.combo_tiff_comp.addItem("LZW 压缩", "lzw")
+        self.combo_tiff_comp.addItem(t("LZW 压缩"), "lzw")
         self.combo_tiff_comp.addItem("Zip / Deflate", "deflate")
-        self.combo_tiff_comp.addItem("无压缩", "none")
+        self.combo_tiff_comp.addItem(t("无压缩"), "none")
         self.stack_format_opt1.addWidget(self.combo_tiff_comp)
 
         # 2: PNG Level
         self.combo_png_level = QComboBox()
         setup_solid_combobox(self.combo_png_level)
-        self.combo_png_level.addItem("标准 (Level 6)", 6)
-        self.combo_png_level.addItem("极限 (Level 9)", 9)
-        self.combo_png_level.addItem("快速 (Level 1)", 1)
+        self.combo_png_level.addItem(t("标准 (Level 6)"), 6)
+        self.combo_png_level.addItem(t("极限 (Level 9)"), 9)
+        self.combo_png_level.addItem(t("快速 (Level 1)"), 1)
         self.stack_format_opt1.addWidget(self.combo_png_level)
 
         # 3: JPEG XL Mode
         self.combo_jxl_mode = QComboBox()
         setup_solid_combobox(self.combo_jxl_mode)
-        self.combo_jxl_mode.addItem("高质量 (1.5)", "visual_15")
-        self.combo_jxl_mode.addItem("视觉无损 (1.0)", "visual_10")
-        self.combo_jxl_mode.addItem("高保真 (0.5)", "visual_05")
-        self.combo_jxl_mode.addItem("无损", "lossless")
+        self.combo_jxl_mode.addItem(t("高质量 (1.5)"), "visual_15")
+        self.combo_jxl_mode.addItem(t("视觉无损 (1.0)"), "visual_10")
+        self.combo_jxl_mode.addItem(t("高保真 (0.5)"), "visual_05")
+        self.combo_jxl_mode.addItem(t("无损"), "lossless")
         self.combo_jxl_mode.setCurrentIndex(self.combo_jxl_mode.findData("visual_10"))
         self.stack_format_opt1.addWidget(self.combo_jxl_mode)
 
@@ -701,10 +702,10 @@ class BaseExportDialog(QDialog):
         self.stack_format_opt2.setFixedHeight(26)
 
         # 0: JPEG Progressive
-        self.chk_progressive = QCheckBox("渐进式")
+        self.chk_progressive = QCheckBox(t("渐进式"))
         self.chk_progressive.setObjectName("chkProgressive")
         self.chk_progressive.setChecked(True)
-        self.chk_progressive.setToolTip("渐进式 JPEG 在下载过程中由模糊到清晰，文件体积略大")
+        self.chk_progressive.setToolTip(t("渐进式 JPEG 在下载过程中由模糊到清晰，文件体积略大"))
         self.stack_format_opt2.addWidget(self.chk_progressive)
 
         # 1: TIFF empty placeholder
@@ -716,9 +717,9 @@ class BaseExportDialog(QDialog):
         # 3: JPEG XL Effort
         self.combo_jxl_effort = QComboBox()
         setup_solid_combobox(self.combo_jxl_effort)
-        self.combo_jxl_effort.addItem("标准 (Effort 7)", 7)
-        self.combo_jxl_effort.addItem("极限 (9)", 9)
-        self.combo_jxl_effort.addItem("极速 (5)", 5)
+        self.combo_jxl_effort.addItem(t("标准 (Effort 7)"), 7)
+        self.combo_jxl_effort.addItem(t("极限 (9)"), 9)
+        self.combo_jxl_effort.addItem(t("极速 (5)"), 5)
         self.stack_format_opt2.addWidget(self.combo_jxl_effort)
 
         grid_top.addWidget(self.stack_format_opt2, 3, 3)
@@ -759,36 +760,36 @@ class BaseExportDialog(QDialog):
         self.combo_subsampling.setToolTip("" if fmt == "jpeg" else "色彩抽样仅对 JPEG 生效")
         # Stack pages: 0 JPEG, 1 TIFF, 2 PNG, 3 JPEG XL
         if fmt == "jpeg":
-            self.lbl_format_opt1.setText("画质档位:")
+            self.lbl_format_opt1.setText(t("画质档位:"))
             self.stack_format_opt1.setCurrentIndex(0)
             self.lbl_format_opt2.setText("")
             self.stack_format_opt2.setCurrentIndex(0)
-            self.combo_depth.addItem("8 位 (8-bit)", 8)
+            self.combo_depth.addItem(t("8 位 (8-bit)"), 8)
         elif fmt == "tiff":
-            self.lbl_format_opt1.setText("压缩算法:")
+            self.lbl_format_opt1.setText(t("压缩算法:"))
             self.stack_format_opt1.setCurrentIndex(1)
             self.lbl_format_opt2.setText("")
             self.stack_format_opt2.setCurrentIndex(1)
-            self.combo_depth.addItem("8 位 (8-bit)", 8)
-            self.combo_depth.addItem("16 位 (16-bit)", 16)
-            self.combo_depth.addItem("32 位浮点 (32-bit Float)", 32)
+            self.combo_depth.addItem(t("8 位 (8-bit)"), 8)
+            self.combo_depth.addItem(t("16 位 (16-bit)"), 16)
+            self.combo_depth.addItem(t("32 位浮点 (32-bit Float)"), 32)
             self.combo_depth.setCurrentIndex(1)
         elif fmt == "jxl":
-            self.lbl_format_opt1.setText("压缩模式:")
+            self.lbl_format_opt1.setText(t("压缩模式:"))
             self.stack_format_opt1.setCurrentIndex(3)
-            self.lbl_format_opt2.setText("编码精度:")
+            self.lbl_format_opt2.setText(t("编码精度:"))
             self.stack_format_opt2.setCurrentIndex(3)
-            self.combo_depth.addItem("8 位 (8-bit)", 8)
-            self.combo_depth.addItem("16 位 (16-bit)", 16)
-            self.combo_depth.addItem("32 位浮点 (32-bit Float)", 32)
+            self.combo_depth.addItem(t("8 位 (8-bit)"), 8)
+            self.combo_depth.addItem(t("16 位 (16-bit)"), 16)
+            self.combo_depth.addItem(t("32 位浮点 (32-bit Float)"), 32)
             self.combo_depth.setCurrentIndex(1)
         else:  # png
-            self.lbl_format_opt1.setText("压缩级别:")
+            self.lbl_format_opt1.setText(t("压缩级别:"))
             self.stack_format_opt1.setCurrentIndex(2)
             self.lbl_format_opt2.setText("")
             self.stack_format_opt2.setCurrentIndex(2)
-            self.combo_depth.addItem("8 位 (8-bit)", 8)
-            self.combo_depth.addItem("16 位 (16-bit)", 16)
+            self.combo_depth.addItem(t("8 位 (8-bit)"), 8)
+            self.combo_depth.addItem(t("16 位 (16-bit)"), 16)
 
     def _apply_last_settings(self):
         try:
@@ -1189,7 +1190,7 @@ class SingleExportDialog(BaseExportDialog):
 
     def __init__(self, default_file_path: str, parent=None, source_path: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("单片扫描")
+        self.setWindowTitle(t("单片扫描"))
 
         self._default_file_path = normalize_path(default_file_path) if default_file_path else ""
         # 源文件路径模式需要知道底片落在哪；缺省时按默认输出路径反推目录。
@@ -1211,7 +1212,7 @@ class SingleExportDialog(BaseExportDialog):
         row_path = QVBoxLayout()
         row_path.setContentsMargins(0, 2, 0, 0)
         row_path.setSpacing(3)
-        lbl_path = QLabel("输出位置:")
+        lbl_path = QLabel(t("输出位置:"))
         lbl_path.setStyleSheet("font-size: 12px; background: transparent;")
         row_path.addWidget(lbl_path)
 
@@ -1224,7 +1225,7 @@ class SingleExportDialog(BaseExportDialog):
         )
         path_box.addWidget(self.edit_path, 1)
 
-        btn_browse = QPushButton("浏览...")
+        btn_browse = QPushButton(t("浏览..."))
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse.clicked.connect(self._browse_save_path)
         path_box.addWidget(btn_browse)
@@ -1270,12 +1271,12 @@ class SingleExportDialog(BaseExportDialog):
         btn_row.setSpacing(10)
         btn_row.addStretch()
 
-        btn_cancel = QPushButton("取消")
+        btn_cancel = QPushButton(t("取消"))
         btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
 
-        btn_export = QPushButton("开始扫描")
+        btn_export = QPushButton(t("开始扫描"))
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.setStyleSheet("""
             QPushButton {
@@ -1408,9 +1409,9 @@ class BatchExportDialog(BaseExportDialog):
         # command used to swap in SingleExportDialog for a single selection, so the naming
         # fields silently changed meaning depending on how many frames were selected.
         if batch_count == 1:
-            self.setWindowTitle("扫描当前底片")
+            self.setWindowTitle(t("扫描当前底片"))
         else:
-            self.setWindowTitle(f"批量扫描：{self.batch_count}张")
+            self.setWindowTitle(t("批量扫描：{n} 张", n=self.batch_count))
 
         # Ensure directory only, never a file
         clean_dir = normalize_path(default_dir) if default_dir else ""
@@ -1442,44 +1443,44 @@ class BatchExportDialog(BaseExportDialog):
         # prefix/suffix pair. Same dialog, same position, so switching selection size no
         # longer changes what the fields mean without warning.
         if self.batch_count == 1:
-            lbl_name = QLabel("文件名:")
+            lbl_name = QLabel(t("文件名:"))
             lbl_name.setFixedWidth(72)
             self.grid_top.addWidget(lbl_name, 4, 0)
 
             self.edit_filename = QLineEdit(self._default_stem)
             self.edit_filename.setFixedHeight(26)
-            self.edit_filename.setPlaceholderText("留空则使用原文件名")
+            self.edit_filename.setPlaceholderText(t("留空则使用原文件名"))
             self.grid_top.addWidget(self.edit_filename, 4, 1, 1, 3)
 
             self.edit_prefix = None
             self.edit_suffix = None
 
-            lbl_hint = QLabel("扩展名随格式自动修正")
+            lbl_hint = QLabel(t("扩展名随格式自动修正"))
             lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
             self.grid_top.addWidget(lbl_hint, 5, 1, 1, 3)
         else:
-            lbl_pre = QLabel("文件前缀:")
+            lbl_pre = QLabel(t("文件前缀:"))
             lbl_pre.setFixedWidth(72)
             self.grid_top.addWidget(lbl_pre, 4, 0)
 
             self.edit_prefix = QLineEdit()
             self.edit_prefix.setFixedHeight(26)
-            self.edit_prefix.setPlaceholderText("无")
+            self.edit_prefix.setPlaceholderText(t("无"))
             self.grid_top.addWidget(self.edit_prefix, 4, 1)
 
-            lbl_suf = QLabel("文件后缀:")
+            lbl_suf = QLabel(t("文件后缀:"))
             lbl_suf.setFixedWidth(72)
             self.grid_top.addWidget(lbl_suf, 4, 2)
 
             self.edit_suffix = QLineEdit()
             self.edit_suffix.setFixedHeight(26)
-            self.edit_suffix.setPlaceholderText("无")
+            self.edit_suffix.setPlaceholderText(t("无"))
             self.grid_top.addWidget(self.edit_suffix, 4, 3)
 
             self.edit_filename = None
 
             # Row 5: Naming hint on next line
-            lbl_hint = QLabel("留空则保持原文件名输出")
+            lbl_hint = QLabel(t("留空则保持原文件名输出"))
             lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
             self.grid_top.addWidget(lbl_hint, 5, 1, 1, 3)
 
@@ -1487,7 +1488,7 @@ class BatchExportDialog(BaseExportDialog):
         row_path = QVBoxLayout()
         row_path.setContentsMargins(0, 2, 0, 0)
         row_path.setSpacing(3)
-        lbl_path = QLabel("输出位置:")
+        lbl_path = QLabel(t("输出位置:"))
         lbl_path.setStyleSheet("font-size: 12px; background: transparent;")
         row_path.addWidget(lbl_path)
 
@@ -1500,7 +1501,7 @@ class BatchExportDialog(BaseExportDialog):
         )
         path_box.addWidget(self.edit_path, 1)
 
-        btn_browse = QPushButton("浏览...")
+        btn_browse = QPushButton(t("浏览..."))
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse.clicked.connect(self._browse_save_dir)
         path_box.addWidget(btn_browse)
@@ -1533,12 +1534,12 @@ class BatchExportDialog(BaseExportDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
-        btn_cancel = QPushButton("取消")
+        btn_cancel = QPushButton(t("取消"))
         btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
 
-        btn_export = QPushButton(f"加入扫描队列 ({self.batch_count})")
+        btn_export = QPushButton(t("加入扫描队列 ({n})", n=self.batch_count))
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.setStyleSheet("""
             QPushButton {
@@ -1745,7 +1746,7 @@ class ExportProgressDialog(QDialog):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
-        self.lbl_title = QLabel("正在扫描...")
+        self.lbl_title = QLabel(t("正在扫描..."))
         self.lbl_title.setStyleSheet("font-weight: bold; color: #f59e0b; font-size: 13px;")
         layout.addWidget(self.lbl_title)
 
@@ -1755,11 +1756,11 @@ class ExportProgressDialog(QDialog):
         layout.addWidget(self.progress_bar)
 
         b_row = QHBoxLayout()
-        self.lbl_detail = QLabel("准备扫描...")
+        self.lbl_detail = QLabel(t("准备扫描..."))
         self.lbl_detail.setStyleSheet("color: #94a3b8; font-size: 11px;")
         b_row.addWidget(self.lbl_detail, 1)
 
-        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel = QPushButton(t("取消"))
         self.btn_cancel.setFixedSize(68, 26)
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel.clicked.connect(self._on_cancel_clicked)
@@ -1771,7 +1772,7 @@ class ExportProgressDialog(QDialog):
         apply_dark_titlebar(self)
 
     def _on_cancel_clicked(self):
-        self.lbl_detail.setText("正在取消扫描...")
+        self.lbl_detail.setText(t("正在取消扫描..."))
         self.btn_cancel.setEnabled(False)
         self.cancelRequested.emit()
         self.reject()
@@ -1854,7 +1855,7 @@ class BatchExportWorker(QThread):
                 break
             file_p = task["source_path"]
             fname = os.path.basename(file_p)
-            self.itemProgress.emit(i, total, f"扫描 ({i+1}/{total}): {fname}")
+            self.itemProgress.emit(i, total, t("扫描 ({done}/{total})：{name}", done=i + 1, total=total, name=fname))
             try:
                 fmt = task.get("format", "jpeg")
                 r = self.engine.render_full_res(
