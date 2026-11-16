@@ -163,6 +163,15 @@ def t(msgid, **kwargs):
     return _format(_lookup(msgid), kwargs)
 
 
+def label_width(zh_px, other_px):
+    """标签列的固定宽度：中文 3-4 字够用，拉丁文写同样的意思要长得多。
+
+    例：``"色温"`` 74 px 够，``"Temperature"`` 要 100 以上，否则被裁成
+    "Temperat…"。所有用到固定标签列的地方都走这里。
+    """
+    return zh_px if current_language() == SOURCE_LANGUAGE else other_px
+
+
 def t_plural(msgid, n, **kwargs):
     """单复数取词。JSON 里该条写成 ``["{n} photo", "{n} photos"]``。"""
     if _language is None:

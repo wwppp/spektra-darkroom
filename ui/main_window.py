@@ -59,6 +59,7 @@ from core.format_constants import (
     is_lossy_image
 )
 from core.version import get_app_title, get_full_version_info
+from core import i18n
 from core.i18n import t
 from core.app_core import SpektraEngine
 from core.halation_model import (
@@ -1998,7 +1999,7 @@ class CompactExifWidget(QWidget):
 
         for row, (label_text, key) in enumerate(fields):
             lbl_k = QLabel(label_text)
-            lbl_k.setFixedWidth(68)
+            lbl_k.setFixedWidth(68)          # 先给个中文宽度，行循环结束后统一按最宽的重设
             self.key_labels.append(lbl_k)
             lbl_v = QLabel("-")
             lbl_v.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -2007,6 +2008,15 @@ class CompactExifWidget(QWidget):
             grid.addWidget(lbl_k, row, 0)
             grid.addWidget(lbl_v, row, 1)
             self.labels[key] = lbl_v
+
+        # 标签列统一宽度 = 最长的那条（中文 68 起，拉丁文按实际文字量算，上限 150
+        # 以免挤掉数值列）。写死宽度在英文下会把 "Camera serial number" 裁掉。
+        if self.key_labels:
+            _fm = self.key_labels[0].fontMetrics()
+            _need = max(_fm.horizontalAdvance(_l.text()) for _l in self.key_labels)
+            _w = max(68, min(int(_need) + 8, 150))
+            for _l in self.key_labels:
+                _l.setFixedWidth(_w)
 
         self.scroll_area.setWidget(content)
         c_layout.addWidget(self.scroll_area, 1)

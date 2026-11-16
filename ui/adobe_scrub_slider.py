@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication, QListView, QStyledItemDelegate, QAbstractItemView, QStyle
 )
 
+from core import i18n as t_i18n
 from core.i18n import t
 from core.path_utils import get_icon_path
 from ui.theme_manager import theme_manager
@@ -1366,7 +1367,8 @@ class ComboBoxRow(QWidget):
         layout.setSpacing(8)
 
         self.label = QLabel(label_text)
-        self.label.setFixedWidth(74)
+        # 74 px 是按中文 3-4 字定的；英文标签（"Paper exposure"）会被裁掉
+        self.label.setFixedWidth(t_i18n.label_width(74, 118))
         self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         if self.default_tooltip:
             self.setToolTip(self.default_tooltip)
