@@ -35,6 +35,10 @@ GLIDE_FRAME_MS = 8        # integration frame; twice the display rate
 # 90 % at ~0.5 s instead of ~0.33 s -- because frames are the only unit the surface gives us.
 GLIDE_MAX_FRAME_FRAC = 0.24
 
+# 滚动面板边缘渐隐的进出时长。硬切（到边立刻不画）在滚到顶端/底端那一帧像闪了一下，
+# 160 ms 的线性补间足够看出"淡出"，又不会让阴影拖在已经不存在的边缘上。
+FADE_EDGE_MS = 160.0
+
 
 class _PixelSettleAnimation(QVariantAnimation):
     """Scroll-bar motion that does not stall for the last pixel.
@@ -612,6 +616,14 @@ class SmoothScrollArea(QScrollArea):
             self._overlay_state = state
             overlay.update()
 
+        # 边缘是否可见只更新目标值；淡入淡出由 overlay 自己的补间跑（见 set_edge）
+        if self.is_horizontal:
+            overlay.set_edge("left", bar.value() > 0)
+            overlay.set_edge("right", bar.value() < bar.maximum())
+        else:
+            overlay.set_edge("top", bar.value() > 0)
+            overlay.set_edge("bottom", bar.value() < bar.maximum())
+
     def _is_animating(self) -> bool:
         return (self._anim.state() == QAbstractAnimation.State.Running
                 or self._wheel.is_running())
@@ -724,6 +736,54 @@ class _ScrollEdgeOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # 边缘渐隐的透明度（0..1，每条边一个）。以前是"到边就画、不到边就不画"的硬切，
+        # 滚到顶端/底端的那一帧整条阴影突然消失，看着像闪了一下。现在改成补间：
+        # `_sync_overlay` 只更新目标值，这里按 FADE_EDGE_MS 线性追过去。
+        self._edge_alpha = {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
+        self._edge_target = dict(self._edge_alpha)
+        self._fade_clock = QElapsedTimer()
+        self._fade_timer = QTimer(self)
+        self._fade_timer.setInterval(16)
+        self._fade_timer.timeout.connect(self._tick_fade)
+
+    def set_edge(self, name, visible):
+        """Update one edge's visibility; its alpha eases there instead of snapping."""
+        target = 1.0 if visible else 0.0
+        if abs(self._edge_target.get(name, 0.0) - target) < 1e-6:
+            return
+        self._edge_target[name] = target
+        if not self.isVisible():
+            self._edge_alpha[name] = target      # 没显示就不动画，直接落位
+            return
+        if not self._fade_timer.isActive():
+            self._fade_clock.restart()
+            self._fade_timer.start()
+        self.update()
+
+    def _tick_fade(self):
+        dt = self._fade_clock.restart() / 1000.0
+        if dt <= 0:
+            return
+        step = dt / (FADE_EDGE_MS / 1000.0)
+        done = True
+        for name, target in self._edge_target.items():
+            cur = self._edge_alpha.get(name, 0.0)
+            if cur < target:
+                cur = min(target, cur + step)
+            elif cur > target:
+                cur = max(target, cur - step)
+            self._edge_alpha[name] = cur
+            if abs(cur - target) > 1e-6:
+                done = False
+        self.update()
+        if done:
+            self._fade_timer.stop()
+
+    def hideEvent(self, event):
+        self._fade_timer.stop()
+        for name, target in self._edge_target.items():
+            self._edge_alpha[name] = target
+        super().hideEvent(event)
 
     def paintEvent(self, event):
         if not getattr(self.scroll_area, 'enable_edge_fade', True):
@@ -756,30 +816,36 @@ class _ScrollEdgeOverlay(QWidget):
             ri = max(0, int(getattr(self.scroll_area, "_fade_inset_r", 0)))
             band_w = max(1, w - li - ri)
             radius = min(float(getattr(self.scroll_area, "_fade_radius", 0.0)), band_w / 2.0, fh / 2.0)
+            a_top = float(self._edge_alpha.get("top", 0.0))
+            a_bottom = float(self._edge_alpha.get("bottom", 0.0))
             if sb.maximum() > 0:
-                # Top edge indicator: if scrolled down from 0
-                if sb.value() > 0:
+                # Top edge indicator: fades in once scrolled down from 0
+                if a_top > 0.002:
                     grad_top = QLinearGradient(0, 0, 0, fh)
                     grad_top.setColorAt(0.0, fade_col)
                     grad_top.setColorAt(1.0, trans_col)
+                    painter.setOpacity(a_top)
                     if radius > 0:
                         path = QPainterPath()
                         path.addRoundedRect(QRectF(li, 0, band_w, fh), radius, radius)
                         painter.fillPath(path, QBrush(grad_top))
                     else:
                         painter.fillRect(QRectF(li, 0, band_w, fh), grad_top)
+                    painter.setOpacity(1.0)
 
-                # Bottom edge indicator: if not yet at maximum
-                if sb.value() < sb.maximum():
+                # Bottom edge indicator: fades out as it reaches the end
+                if a_bottom > 0.002:
                     grad_bottom = QLinearGradient(0, h - fh, 0, h)
                     grad_bottom.setColorAt(0.0, trans_col)
                     grad_bottom.setColorAt(1.0, fade_col)
+                    painter.setOpacity(a_bottom)
                     if radius > 0:
                         path = QPainterPath()
                         path.addRoundedRect(QRectF(li, h - fh, band_w, fh), radius, radius)
                         painter.fillPath(path, QBrush(grad_bottom))
                     else:
                         painter.fillRect(QRectF(li, h - fh, band_w, fh), grad_bottom)
+                    painter.setOpacity(1.0)
         else:
             sb = self.scroll_area.horizontalScrollBar()
             fade_w = 26.0
@@ -823,10 +889,15 @@ class _ScrollEdgeOverlay(QWidget):
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
                 painter.setClipPath(clip_path)
 
-                if sb.value() > 0:
+                a_left = float(self._edge_alpha.get("left", 0.0))
+                a_right = float(self._edge_alpha.get("right", 0.0))
+                if a_left > 0.002:
+                    painter.setOpacity(a_left)
                     painter.drawImage(QRectF(0.0, 0.0, fade_w, float(h)), self._left_fade_img)
-                if sb.value() < sb.maximum():
+                if a_right > 0.002:
+                    painter.setOpacity(a_right)
                     painter.drawImage(QRectF(float(w) - fade_w, 0.0, fade_w, float(h)), self._right_fade_img)
+                painter.setOpacity(1.0)
 
                 painter.restore()
         painter.end()
