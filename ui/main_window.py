@@ -1185,8 +1185,10 @@ class SessionRestoreWorker(QThread):
                 uncached_slots.append((target_idx, target_path))
 
             if not self._stopped:
+                # 只发 activePhotoReady（画布要立刻有图）。底片栏那格**不**抢跑：
+                # 早发一格 photoReady 就等于在活动照片的序号位置先点亮一格，左边还空着，
+                # 观感就是"从中间开始长"。它的格子等到按序放行轮到它时再填。
                 self.activePhotoReady.emit(target_idx, target_entry)
-                self.photoReady.emit(target_idx, target_entry)
                 self.progress.emit(1, total_files)
 
             if total_files == 1:
@@ -1211,8 +1213,8 @@ class SessionRestoreWorker(QThread):
                     idx_ = next_idx
                     entry_ = ready.pop(next_idx)
                     next_idx += 1
-                    if idx_ == target_idx or entry_ is None or self._stopped:
-                        continue          # 活动照片已经优先发过一次了
+                    if entry_ is None or self._stopped:
+                        continue
                     self.photoReady.emit(idx_, entry_)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -2972,6 +2974,13 @@ class DarkroomMainWindow(QMainWindow):
 
             # 底片栏在恢复过程中已经按占位顺序一张张长好了（photoReady），这里只补漏 +
             # 定光标。别再用 set_photos：那会重建所有格子，用户刚看着长出来的会闪一下。
+            # 注意占位格也算 has_photo —— 只有 1 张照片的会话根本不发 photoReady（worker
+            # 提前 return），所以还要把"仍在空窗口上"的格子按已有条目补一遍。
+            pending_ids = set(self.filmstrip.pending_thumbnail_ids())
+            for entry in self.photos:
+                pid = (entry or {}).get("id")
+                if pid and pid in pending_ids and self.filmstrip.has_photo(pid):
+                    self.filmstrip.fill_placeholder(pid, entry)
             missing = [p for p in self.photos if p and not self.filmstrip.has_photo(p.get("id"))]
             if missing:
                 self.filmstrip.append_photos_batch(missing)
@@ -10755,8 +10764,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
         except Exception as ex:
             logger.warning(f"Restore placeholder seeding failed: {ex}")
             return
-        # 恢复时活动那张排在最前面（或用户指定的那张），同样先挂内嵌 JPEG。
-        first = next((e for e in entries if e.get("path") == active_path), entries[0] if entries else None)
+        # 只给**第 1 格**挂内嵌 JPEG。以前挂的是"活动那张"，于是 t=0 时唯一亮着的格子
+        # 落在底片栏中间（活动照片的序号位置），左边全空 —— 用户读作"未按顺序加载，
+        # 中间先开了几格"。活动照片的图走画布（activePhotoReady → 占位贴图），底片栏
+        # 不抢跑，仍从左往右一格格亮。
+        first = entries[0] if entries else None
         if first is not None:
             try:
                 QTimer.singleShot(0, lambda s=strip, e=first: self._prime_first_placeholder(s, e))
