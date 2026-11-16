@@ -17,12 +17,6 @@ from ui.smooth_scroll import SmoothScrollArea
 
 _CROP_BADGE_PM = None
 
-# 底片栏的最小高度。曾经是 64 —— 那是"能塞进去"的下限，不是"能看"的下限：格子高
-# 只有 48 px 时，35mm 齿孔带（14% 高）、画面、文件名和星级全挤在一格里，看起来就是
-# 一排贴在一起的缩略图。分区布局又被写进 config（实测存成 [564, 64]），下次启动照样
-# 还原成 64。所以这里直接把下限抬到"一格里塞得下胶片框"的高度，由 QSplitter 强制执行。
-FILMSTRIP_MIN_HEIGHT = 132
-
 def _get_crop_badge_pixmap() -> QPixmap:
     global _CROP_BADGE_PM
     if _CROP_BADGE_PM is None:
@@ -727,7 +721,7 @@ class FilmstripWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(FILMSTRIP_MIN_HEIGHT)
+        self.setMinimumHeight(64)
         self.setMaximumHeight(260)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._item_widgets = {}
@@ -1710,9 +1704,7 @@ class FilmstripWidget(QWidget):
         self._base_selection = set(self._selected_ids)
 
         # Clear existing
-        for w in self._item_widgets.values():
-            self.scroll_layout.removeWidget(w)
-            w.deleteLater()
+        self._clear_layout_widgets()
         self._item_widgets.clear()
         self._placeholder_ids.clear()
 
@@ -1833,6 +1825,24 @@ class FilmstripWidget(QWidget):
             self._active_id = pid
             self._selected_ids = {pid}
 
+        # 这个 id 已经有格子了（预摆的占位格最常见）：原地填图，绝不能再插一份。
+        # 早先这里直接覆盖 `_item_widgets[pid]`，旧控件就留在布局里成了幽灵 —— 不显示，
+        # 但照样占一格宽，后面的格子被挤得没有间距、整体看着往右偏。
+        existing = self._item_widgets.get(pid)
+        if existing is not None:
+            if getattr(existing, "_pending", False):
+                existing.fill_thumbnail_from_photo(photo)
+                self._placeholder_ids.discard(pid)
+            try:
+                if is_active:
+                    existing.set_active(True)
+            except Exception:
+                pass
+            self._update_content_geometry()
+            if is_active:
+                self.selectionChanged.emit(list(self._selected_ids))
+            return
+
         container = self.scroll_content if (hasattr(self, 'scroll_content') and self.scroll_content) else self
         item = FilmstripItemWidget(photo, is_active=is_active, is_selected=is_active, target_w=item_w, target_h=item_h, parent=container)
         item.clicked.connect(self._on_item_clicked)
@@ -1846,6 +1856,25 @@ class FilmstripWidget(QWidget):
         self._update_content_geometry()
         if is_active:
             self.selectionChanged.emit(list(self._selected_ids))
+
+    def _clear_layout_widgets(self):
+        """把布局里所有格子控件摘掉（spacer 保留）。
+
+        不能只遍历 `_item_widgets`：取消导入、换卷等路径会让控件从字典里消失却留在布局里
+        （实测残留过一格 `photo_0_DSC03158.ARW`）。幽灵格子自己不画东西，但照样占一格宽，
+        于是后面的格子被压成没有间距、整体往右偏 —— 用户看到的是"挤在一起还居中"。
+        """
+        for i in range(self.scroll_layout.count() - 1, -1, -1):
+            item = self.scroll_layout.itemAt(i)
+            widget = item.widget() if item is not None else None
+            if widget is None:
+                continue                      # end stretch 之类的 spacer 留着
+            if widget is getattr(self, "_empty_lbl", None):
+                self._empty_lbl = None        # 会被一起删掉，别留悬空引用
+            self.scroll_layout.removeWidget(widget)
+            widget.setVisible(False)
+            widget.setParent(None)
+            widget.deleteLater()
 
     def _drop_empty_label(self):
         """把"底片槽路为空…"那行提示拿掉。

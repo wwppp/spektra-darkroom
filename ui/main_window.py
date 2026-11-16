@@ -4644,13 +4644,7 @@ class DarkroomMainWindow(QMainWindow):
             if hasattr(self, "left_splitter"):
                 win["splitter_left"] = [int(s) for s in self.left_splitter.sizes()]
             if hasattr(self, "center_splitter"):
-                center = [int(s) for s in self.center_splitter.sizes()]
-                fs = getattr(self, "filmstrip", None)
-                if fs is not None and len(center) == 2:
-                    # 别把"被压扁的底片栏"存下来：这条曾经把 64 px 写进 config，
-                    # 之后每次启动都还原成一排挤在一起的小缩略图。
-                    center[1] = max(center[1], int(fs.minimumHeight()))
-                win["splitter_center"] = center
+                win["splitter_center"] = [int(s) for s in self.center_splitter.sizes()]
             config_manager.save_config(cfg)
         except Exception as exc:
             logger.debug("splitter layout save failed: %s", exc)
@@ -4664,30 +4658,6 @@ class DarkroomMainWindow(QMainWindow):
             splitter = getattr(self, attr, None)
             if splitter is not None and key in win_cfg:
                 _restore_splitter_sizes(splitter, win_cfg[key])
-        self._clamp_filmstrip_pane()
-
-    def _clamp_filmstrip_pane(self):
-        """底片栏那一格不许被历史布局压到看不出胶片框。
-
-        旧版本的最小高度是 64，实测被写进 config（`splitter_center: [564, 64]`），于是
-        每次还原底片栏都只剩 64 px 高：格子 44×48，齿孔、画面、文件名、星级全叠在一格里，
-        看着就是一排挤在一起的缩略图。
-        """
-        splitter = getattr(self, "center_splitter", None)
-        fs = getattr(self, "filmstrip", None)
-        if splitter is None or fs is None or splitter.count() != 2:
-            return
-        sizes = splitter.sizes()
-        if len(sizes) != 2:
-            return
-        need = int(fs.minimumHeight())
-        top, bottom = int(sizes[0]), int(sizes[1])
-        if bottom >= need:
-            return
-        deficit = need - bottom
-        if top - deficit < 160:
-            return          # 窗口本身就矮：让 Qt 的最小尺寸约束去处理，别再抢画布
-        splitter.setSizes([top - deficit, need])
 
     def _sync_exif_max_height(self):
         """Pin the EXIF pane to the height of its rows (see CompactExifWidget.natural_height)."""
@@ -11172,6 +11142,11 @@ aspect_ratio=self._lens_frame_aspect(photo),
             canvas.rehold_hq_preview()
 
     def _on_single_photo_imported(self, photo_entry, current_idx, total_count):
+        # 取消导入 / 关闭会话之后，worker 里还有在途结果会继续投递进来。这时底片库是空的，
+        # 再往里塞格子就留下了"没有对应照片"的幽灵格：它不显示，但占一格宽，把后面的格子
+        # 挤成没有间距、整体还往右偏。
+        if not getattr(self, "_is_importing", False) and not self.photos:
+            return
         # Defensive check: ensure photo_entry ID is strictly unique
         existing_ids = {p["id"] for p in self.photos if p and "id" in p}
         pid = photo_entry.get("id")
