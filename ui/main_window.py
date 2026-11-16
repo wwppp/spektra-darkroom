@@ -141,8 +141,9 @@ PARAM_TOOLTIPS_ENABLED = False
 # 关闭窗口时在屏幕上多停的这一下（毫秒）。保存/销毁本来几百毫秒内就做完了，窗口在同一
 # 毫秒里隐藏，看起来"秒响应"；这个停留让关闭有一个可感知的过程。
 # 现在这一段是**真的占住 GUI 线程**（窗口不响应、指针转圈），所以时长按"看起来在处理"来定，
-# 不再按"动画"来定（用户 2026-11-10：先要 0.5-1 s，加到 1.4 s 后又说"转圈稍微长了点"）。
-CLOSE_DWELL_MS = 1100
+# 不再按"动画"来定（用户 2026-11-10：先要 0.5-1 s，加到 1.4 s 后说"转圈稍微长了点"，
+# 2026-11-16 又把它从 1.1 s 收到 0.5 s：还是嫌久）。
+CLOSE_DWELL_MS = 500
 
 
 # Opt-in window-frame diagnostics: set SPEKTRA_FRAME_DEBUG=1 to log every non-client message and
@@ -15119,8 +15120,8 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
 
         # Hold the window on screen for a beat before it vanishes. Nothing below is slow --
         # teardown hides the window in the same millisecond it starts -- so a close used to be
-        # instantaneous in a way that reads as "it did not even try to save"; a 0.7 s dwell is
-        # the price of the app looking like it shut down deliberately (asked for explicitly).
+        # instantaneous in a way that reads as "it did not even try to save"; the CLOSE_DWELL_MS
+        # dwell (0.5 s) is the price of the app looking like it shut down deliberately.
         # The dwell runs before the caption drop so the frame is still a normal window while it
         # waits; only the final close() reaches the teardown below.
         if not getattr(self, "_close_dwell_done", False):
