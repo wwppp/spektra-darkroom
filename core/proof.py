@@ -29,6 +29,7 @@ import numpy as np
 
 from . import colorspace as _cs
 from .display_profile import M_P3_TO_XYZ  # noqa: F401  （留作文档锚点，未直接使用）
+from core.i18n import t
 
 # 线性 P3 → 线性 sRGB。与 `ui/gl_ffchain.py::M_P3_TO_SRGB` 必须逐位一致：
 # 视口用这个数，导出用 `colorspace.MATRICES`，两边不同源就会出现「校样与导出差 1 级」。
@@ -63,7 +64,7 @@ class ProofSettings:
 
     @property
     def label(self) -> str:
-        return f"校样 · {self.canonical_target()}"
+        return t('校样 · {v}', v=self.canonical_target())
 
 
 def resolve_target(name: str) -> str:

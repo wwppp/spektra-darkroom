@@ -10656,7 +10656,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._update_zoom_buttons()
 
     def action_open_files(self):
-        filt = FILE_DIALOG_IMAGE_FILTER
+        # 过滤器串是**中文原文常量**（模块级 t() 会和 path_utils 撞循环导入），
+        # 所以只在调用点把每段的标签翻掉，扩展名列表原样保留。
+        filt = ";;".join(
+            (t(part.split(" (", 1)[0]) + " (" + part.split(" (", 1)[1]) if " (" in part else t(part)
+            for part in FILE_DIALOG_IMAGE_FILTER.split(";;")
+        )
         last_d = config_manager.get_last_dialog_dir("photo")
         # Decouple native dialog parent from frameless HWND to prevent ghost window artifacts
         files, _ = QFileDialog.getOpenFileNames(None, t("导入照片 / RAW 底片"), last_d, filt)

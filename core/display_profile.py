@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
+from core.i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -560,7 +561,7 @@ _EXPECTED_SIZES = {
 
 def _check_struct_sizes() -> None:
     bad = [
-        f"{name}={ctypes.sizeof(obj)}（应为 {want}）"
+        t('{name}={v}（应为 {want}）', name=name, v=ctypes.sizeof(obj), want=want)
         for name, (obj, want) in _EXPECTED_SIZES.items()
         if ctypes.sizeof(obj) != want
     ]

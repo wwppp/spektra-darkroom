@@ -37,6 +37,7 @@ a single frame and an unearned c1 just adds noise at the corners.
 from __future__ import annotations
 
 import numpy as np
+from core.i18n import t
 
 try:  # cv2 is a hard dependency of the pipeline; keep the import defensive anyway.
     import cv2
@@ -426,5 +427,4 @@ def describe(result: dict) -> str:
     """Human-readable one-liner for logs and the status label."""
     if not result or not result.get("applied"):
         return "自动色差: 未检出"
-    return (f"自动色差: R {result['r_shift_px']:+.2f}px / "
-            f"B {result['b_shift_px']:+.2f}px (置信度 {result['confidence']*100:.0f}%)")
+    return (t('自动色差: R {result_r_shift_px:+.2f}px / B {result_b_shift_px:+.2f}px (置信度 {v:.0f}%)', result_r_shift_px=result['r_shift_px'], result_b_shift_px=result['b_shift_px'], v=result['confidence']*100))

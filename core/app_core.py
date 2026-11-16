@@ -8,6 +8,7 @@ import collections
 import threading
 import uuid
 import numpy as np
+from .i18n import t
 from .raw_border import repair_demosaic_border
 import cv2
 import logging
@@ -230,9 +231,7 @@ def normalize_to_unit(rgb, source=""):
             return np.clip(arr / np.float32(scale), 0.0, 1.0)
         where = source or "该图像"
         raise UnsupportedInputRange(
-            f"{where} 含大于 1 的浮点数据（峰值 {peak:.3f}），"
-            "当前链路只接受 0–1 显示参考浮点、或 0–255/0–65535 整数定标的浮点；"
-            "场景线性 / HDR 浮点请先转换为 16 位整数或 0–1 浮点。"
+            t('{where} 含大于 1 的浮点数据（峰值 {peak:.3f}），当前链路只接受 0–1 显示参考浮点、或 0–255/0–65535 整数定标的浮点；场景线性 / HDR 浮点请先转换为 16 位整数或 0–1 浮点。', where=where, peak=peak)
         )
 
     if dt == np.uint8:
@@ -1409,7 +1408,7 @@ class SpektraEngine:
             table = push_model.load_table(self.resources_dir, film_stock) or {}
             entries = table.get("conditions", {}).values()
             measured = sum(1 for entry in entries if entry.get("basis") == "measured")
-            return max(stops), (f"实测 {measured} 档 / 共 {len(stops)} 档" if measured
+            return max(stops), (t('实测 {measured} 档 / 共 {stops_count} 档', measured=measured, stops_count=len(stops)) if measured
                                 else "估计曲线")
         return 0, "该胶卷无迫冲数据"
 
@@ -1931,7 +1930,7 @@ class SpektraEngine:
                 name_str = (meta.get("name") or info_obj.get("name")
                             or sid.replace("_", " ").title())
                 desc_str = (meta.get("desc") or info_obj.get("desc")
-                            or f"{name_str} 81波段全光谱物理档案")
+                            or t('{name_str} 81波段全光谱物理档案', name_str=name_str))
                 films.append({
                     "id": sid,
                     "name": name_str,
@@ -3791,7 +3790,7 @@ class SpektraEngine:
                                             meta["serial_number"] = str(raw_sn).strip().strip("\x00").strip()
                                         if meta["focal_length_35mm"] == "-":
                                             fl_35 = sub.get(0xa405)
-                                            if fl_35: meta["focal_length_35mm"] = f"{fl_35} 毫米"
+                                            if fl_35: meta["focal_length_35mm"] = t('{fl_35} 毫米', fl_35=fl_35)
                                         if meta["iso"] == "-":
                                             iso_v = sub.get(0x8827)
                                             if iso_v is not None: meta["iso"] = f"ISO-{iso_v}"
@@ -3802,15 +3801,15 @@ class SpektraEngine:
                                             et = sub.get(0x829a)
                                             if et is not None:
                                                 fv = float(et)
-                                                meta["shutter_speed"] = f"1/{int(round(1.0/fv))} 秒" if (fv < 1.0 and fv > 0) else f"{fv:.1f} 秒"
+                                                meta["shutter_speed"] = t('1/{v} 秒', v=int(round(1.0/fv))) if (fv < 1.0 and fv > 0) else t('{fv:.1f} 秒', fv=fv)
                                         if meta["focal_length"] == "-":
                                             fl = sub.get(0x920a)
-                                            if fl is not None: meta["focal_length"] = f"{int(round(float(fl)))} 毫米"
+                                            if fl is not None: meta["focal_length"] = t('{v} 毫米', v=int(round(float(fl))))
                                         if meta["exposure_bias"] == "-":
                                             eb = sub.get(0x9204)
                                             if eb is not None:
                                                 bias = float(eb)
-                                                meta["exposure_bias"] = f"{bias:+.1f} 档光圈" if bias != 0 else "0 档光圈"
+                                                meta["exposure_bias"] = t('{bias:+.1f} 档光圈', bias=bias) if bias != 0 else "0 档光圈"
                                         if meta["exposure_program"] == "-":
                                             ep = sub.get(0x8822)
                                             if ep is not None: meta["exposure_program"] = prog_map.get(int(ep), str(ep))
@@ -3838,7 +3837,7 @@ class SpektraEngine:
                                             c_str = f"{_format_gps_dms(lat, lat_ref)}, {_format_gps_dms(lon, lon_ref)}"
                                             if alt:
                                                 alt_val = alt[0]/float(alt[1]) if isinstance(alt, tuple) and alt[1] != 0 else float(alt)
-                                                c_str += f" (海拔 {int(round(alt_val))}m)"
+                                                c_str += t(' (海拔 {v}m)', v=int(round(alt_val)))
                                             meta["gps_coords"] = c_str
                                 except Exception:
                                     pass
@@ -3882,23 +3881,23 @@ class SpektraEngine:
                                 elif k in ('BodySerialNumber', 'CameraSerialNumber', 'SerialNumber', 0xa431) and meta["serial_number"] == "-":
                                     meta["serial_number"] = str(v).strip().strip("\x00")
                                 elif k in ('FocalLengthIn35mmFilm', 0xa405) and meta["focal_length_35mm"] == "-":
-                                    meta["focal_length_35mm"] = f"{v} 毫米"
+                                    meta["focal_length_35mm"] = t('{v} 毫米', v=v)
                                 elif k in ('FNumber', 0x829d) and meta["aperture"] == "-":
                                     num = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else v
                                     meta["aperture"] = f"f/{num:.1f}" if isinstance(num, (int, float)) else str(num)
                                 elif k in ('ExposureTime', 0x829a) and meta["shutter_speed"] == "-":
                                     if isinstance(v, tuple) and len(v) == 2 and v[1] != 0:
-                                        meta["shutter_speed"] = f"1/{int(v[1]/v[0])} 秒" if v[0] <= 1 else f"{v[0]/float(v[1]):.2f} 秒"
+                                        meta["shutter_speed"] = t('1/{v} 秒', v=int(v[1]/v[0])) if v[0] <= 1 else t('{v:.2f} 秒', v=v[0]/float(v[1]))
                                     else:
-                                        meta["shutter_speed"] = f"{v} 秒"
+                                        meta["shutter_speed"] = t('{v} 秒', v=v)
                                 elif k in ('ISOSpeedRatings', 'PhotographicSensitivity', 0x8827) and meta["iso"] == "-":
                                     meta["iso"] = f"ISO-{v}"
                                 elif k in ('FocalLength', 0x920a) and meta["focal_length"] == "-":
                                     num = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else v
-                                    meta["focal_length"] = f"{int(round(num))} 毫米" if isinstance(num, (int, float)) else str(num)
+                                    meta["focal_length"] = t('{v} 毫米', v=int(round(num))) if isinstance(num, (int, float)) else str(num)
                                 elif k in ('ExposureBiasValue', 0x9204) and meta["exposure_bias"] == "-":
                                     bias = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else float(v)
-                                    meta["exposure_bias"] = f"{bias:+.1f} 档光圈" if bias != 0 else "0 档光圈"
+                                    meta["exposure_bias"] = t('{bias:+.1f} 档光圈', bias=bias) if bias != 0 else "0 档光圈"
                                 elif k in ('ExposureProgram', 0x8822) and meta["exposure_program"] == "-":
                                     meta["exposure_program"] = prog_map.get(int(v), str(v))
                                 elif k in ('MeteringMode', 0x9207) and meta["metering_mode"] == "-":
@@ -3920,7 +3919,7 @@ class SpektraEngine:
                                 c_str = f"{_format_gps_dms(lat, lat_ref)}, {_format_gps_dms(lon, lon_ref)}"
                                 if alt:
                                     alt_val = alt[0]/float(alt[1]) if isinstance(alt, tuple) and alt[1] != 0 else float(alt)
-                                    c_str += f" (海拔 {int(round(alt_val))}m)"
+                                    c_str += t(' (海拔 {v}m)', v=int(round(alt_val)))
                                 meta["gps_coords"] = c_str
         except Exception:
             pass
@@ -3946,7 +3945,7 @@ class SpektraEngine:
                 if meta["serial_number"] == "-" and ("BodySerialNumber" in cr3_tags or "SerialNumber" in cr3_tags):
                     meta["serial_number"] = str(cr3_tags.get("BodySerialNumber") or cr3_tags.get("SerialNumber")).strip().strip("\x00")
                 if meta["focal_length_35mm"] == "-" and "FocalLengthIn35mmFilm" in cr3_tags:
-                    meta["focal_length_35mm"] = f"{cr3_tags['FocalLengthIn35mmFilm']} 毫米"
+                    meta["focal_length_35mm"] = t('{v} 毫米', v=cr3_tags['FocalLengthIn35mmFilm'])
                 if meta["aperture"] == "-" and "FNumber" in cr3_tags:
                     v = cr3_tags["FNumber"]
                     num = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else v
@@ -3954,20 +3953,20 @@ class SpektraEngine:
                 if meta["shutter_speed"] == "-" and "ExposureTime" in cr3_tags:
                     v = cr3_tags["ExposureTime"]
                     if isinstance(v, tuple) and len(v) == 2 and v[1] != 0:
-                        meta["shutter_speed"] = f"1/{int(v[1]/v[0])} 秒" if v[0] <= 1 else f"{v[0]/float(v[1]):.2f} 秒"
+                        meta["shutter_speed"] = t('1/{v} 秒', v=int(v[1]/v[0])) if v[0] <= 1 else t('{v:.2f} 秒', v=v[0]/float(v[1]))
                     else:
-                        meta["shutter_speed"] = f"{v} 秒"
+                        meta["shutter_speed"] = t('{v} 秒', v=v)
                 if meta["iso"] == "-" and ("ISOSpeedRatings" in cr3_tags or "PhotographicSensitivity" in cr3_tags):
                     iso_v = cr3_tags.get("ISOSpeedRatings") or cr3_tags.get("PhotographicSensitivity")
                     meta["iso"] = f"ISO-{iso_v}"
                 if meta["focal_length"] == "-" and "FocalLength" in cr3_tags:
                     v = cr3_tags["FocalLength"]
                     num = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else v
-                    meta["focal_length"] = f"{int(round(num))} 毫米" if isinstance(num, (int, float)) else str(num)
+                    meta["focal_length"] = t('{v} 毫米', v=int(round(num))) if isinstance(num, (int, float)) else str(num)
                 if meta["exposure_bias"] == "-" and "ExposureBiasValue" in cr3_tags:
                     v = cr3_tags["ExposureBiasValue"]
                     bias = v[0] / float(v[1]) if isinstance(v, tuple) and v[1] != 0 else float(v)
-                    meta["exposure_bias"] = f"{bias:+.1f} 档光圈" if bias != 0 else "0 档光圈"
+                    meta["exposure_bias"] = t('{bias:+.1f} 档光圈', bias=bias) if bias != 0 else "0 档光圈"
                 if meta["exposure_program"] == "-" and "ExposureProgram" in cr3_tags:
                     meta["exposure_program"] = prog_map.get(int(cr3_tags["ExposureProgram"]), str(cr3_tags["ExposureProgram"]))
                 if meta["metering_mode"] == "-" and "MeteringMode" in cr3_tags:
@@ -3998,25 +3997,25 @@ class SpektraEngine:
                             if dt_orig:
                                 meta["capture_time"] = str(dt_orig).strip()
                             for k, v in sub_exif.items():
-                                t = ExifTags.TAGS.get(k, str(k))
-                                if t == "LensModel" and meta["lens_model"] == "-": meta["lens_model"] = str(v).strip()
-                                elif t == "LensMake" and meta["lens_make"] == "-": meta["lens_make"] = str(v).strip()
-                                elif t in ("BodySerialNumber", "CameraSerialNumber", "SerialNumber") and meta["serial_number"] == "-": meta["serial_number"] = str(v).strip()
-                                elif t == "FocalLengthIn35mmFilm" and meta["focal_length_35mm"] == "-": meta["focal_length_35mm"] = f"{v} 毫米"
-                                elif t == "FNumber" and meta["aperture"] == "-": meta["aperture"] = f"f/{float(v):.1f}"
-                                elif t == "ExposureTime" and meta["shutter_speed"] == "-":
+                                _u3682 = ExifTags.TAGS.get(k, str(k))
+                                if _u3682 == "LensModel" and meta["lens_model"] == "-": meta["lens_model"] = str(v).strip()
+                                elif _u3682 == "LensMake" and meta["lens_make"] == "-": meta["lens_make"] = str(v).strip()
+                                elif _u3682 in ("BodySerialNumber", "CameraSerialNumber", "SerialNumber") and meta["serial_number"] == "-": meta["serial_number"] = str(v).strip()
+                                elif _u3682 == "FocalLengthIn35mmFilm" and meta["focal_length_35mm"] == "-": meta["focal_length_35mm"] = t('{v} 毫米', v=v)
+                                elif _u3682 == "FNumber" and meta["aperture"] == "-": meta["aperture"] = f"f/{float(v):.1f}"
+                                elif _u3682 == "ExposureTime" and meta["shutter_speed"] == "-":
                                     fv = float(v)
-                                    meta["shutter_speed"] = f"1/{int(round(1.0/fv))} 秒" if fv < 1.0 and fv > 0 else f"{fv:.1f} 秒"
-                                elif t in ("ISOSpeedRatings", "PhotographicSensitivity") and meta["iso"] == "-": meta["iso"] = f"ISO-{v}"
-                                elif t == "FocalLength" and meta["focal_length"] == "-": meta["focal_length"] = f"{int(round(float(v)))} 毫米"
-                                elif t == "ExposureBiasValue" and meta["exposure_bias"] == "-":
+                                    meta["shutter_speed"] = t('1/{v} 秒', v=int(round(1.0/fv))) if fv < 1.0 and fv > 0 else t('{fv:.1f} 秒', fv=fv)
+                                elif _u3682 in ("ISOSpeedRatings", "PhotographicSensitivity") and meta["iso"] == "-": meta["iso"] = f"ISO-{v}"
+                                elif _u3682 == "FocalLength" and meta["focal_length"] == "-": meta["focal_length"] = t('{v} 毫米', v=int(round(float(v))))
+                                elif _u3682 == "ExposureBiasValue" and meta["exposure_bias"] == "-":
                                     b = float(v)
-                                    meta["exposure_bias"] = f"{b:+.1f} 档光圈" if b != 0 else "0 档光圈"
-                                elif t == "ExposureProgram" and meta["exposure_program"] == "-":
+                                    meta["exposure_bias"] = t('{b:+.1f} 档光圈', b=b) if b != 0 else "0 档光圈"
+                                elif _u3682 == "ExposureProgram" and meta["exposure_program"] == "-":
                                     meta["exposure_program"] = prog_map.get(int(v), str(v))
-                                elif t == "MeteringMode" and meta["metering_mode"] == "-":
+                                elif _u3682 == "MeteringMode" and meta["metering_mode"] == "-":
                                     meta["metering_mode"] = meter_map.get(int(v), str(v))
-                                elif t == "Flash" and meta["flash"] == "-":
+                                elif _u3682 == "Flash" and meta["flash"] == "-":
                                     fst = int(v)
                                     meta["flash"] = "开启闪光" if (fst & 1) else ("无闪光，强制" if (fst & 16) else "无闪光")
                     except Exception:
@@ -4035,7 +4034,7 @@ class SpektraEngine:
                                 c_str = f"{_format_gps_dms(lat, lat_ref)}, {_format_gps_dms(lon, lon_ref)}"
                                 if alt:
                                     alt_val = alt[0]/float(alt[1]) if isinstance(alt, tuple) and alt[1] != 0 else float(alt)
-                                    c_str += f" (海拔 {int(round(alt_val))}m)"
+                                    c_str += t(' (海拔 {v}m)', v=int(round(alt_val)))
                                 meta["gps_coords"] = c_str
                     except Exception:
                         pass
@@ -4062,9 +4061,9 @@ class SpektraEngine:
                             if getattr(o, "shutter_speed", None) and meta["shutter_speed"] == "-":
                                 ss = float(o.shutter_speed)
                                 if ss > 0:
-                                    meta["shutter_speed"] = f"1/{int(round(1.0/ss))} 秒" if ss < 1.0 else f"{ss:.1f} 秒"
+                                    meta["shutter_speed"] = t('1/{v} 秒', v=int(round(1.0/ss))) if ss < 1.0 else t('{ss:.1f} 秒', ss=ss)
                             if getattr(o, "focal_length", None) and meta["focal_length"] == "-":
-                                meta["focal_length"] = f"{int(round(o.focal_length))} 毫米"
+                                meta["focal_length"] = t('{v} 毫米', v=int(round(o.focal_length)))
                             if getattr(o, "artist", None) and meta["artist"] == "-":
                                 meta["artist"] = str(o.artist).strip()
                             if getattr(o, "timestamp", None) and meta["capture_time"] == "-":
@@ -4211,7 +4210,7 @@ class SpektraEngine:
         """
         try:
             if not os.path.exists(file_path):
-                return {"success": False, "error": f"文件不存在: {file_path}"}
+                return {"success": False, "error": t('文件不存在: {file_path}', file_path=file_path)}
 
             ext = os.path.splitext(file_path)[1].lower()
             original_meta = {
@@ -4502,7 +4501,7 @@ class SpektraEngine:
                                 tif_arr = cv2.cvtColor(tif_arr, cv2.COLOR_RGBA2RGB)
                             rgb_raw = tif_arr
                         except Exception as e_tif:
-                            return {"success": False, "error": f"无法解码该图片文件: {e_tif}"}
+                            return {"success": False, "error": t('无法解码该图片文件: {e_tif}', e_tif=e_tif)}
                 else:
                     if len(img_bgr.shape) == 2:
                         img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
@@ -4599,7 +4598,7 @@ class SpektraEngine:
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return {"success": False, "error": f"解析图片或 RAW 发生错误: {str(e)}"}
+            return {"success": False, "error": t('解析图片或 RAW 发生错误: {v}', v=str(e))}
 
     def load_image(self, file_path):
         """Load RAW or high-fidelity image into float32 array for GPU texture."""
@@ -4612,7 +4611,7 @@ class SpektraEngine:
 
         res = self.decode_photo_data(file_path, preview_max_edge=max_edge, is_first=True)
         if not res or not res.get("success"):
-            return res or {"success": False, "error": f"无法载入文件: {file_path}"}
+            return res or {"success": False, "error": t('无法载入文件: {file_path}', file_path=file_path)}
 
         self.current_file_path = file_path
         self.original_meta = dict(res.get("exif") or {})
@@ -4798,7 +4797,7 @@ class SpektraEngine:
                         elif img_rgb.shape[2] == 4:
                             img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_RGBA2RGB)
                     except Exception as e_tif:
-                        raise ValueError(f"无法解码源图像: {e_tif}")
+                        raise ValueError(t('无法解码源图像: {e_tif}', e_tif=e_tif))
             else:
                 if len(img_bgr.shape) == 2:
                     img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
@@ -4970,7 +4969,7 @@ class SpektraEngine:
 
                 if diff_family != "none" and diff_strength > 0.001:
                     if progress_cb:
-                        progress_cb(40, f"正在进行光学柔光模拟 ({diff_family})...")
+                        progress_cb(40, t('正在进行光学柔光模拟 ({diff_family})...', diff_family=diff_family))
                     try:
                         linear_full = apply_diffusion_np(linear_full, diff_family, diff_strength, diff_warmth)
                     except Exception as e:
@@ -5008,7 +5007,7 @@ class SpektraEngine:
                 save_encoded_image(rendered_float, output_path, enc_params)
 
                 if progress_cb:
-                    progress_cb(100, f"成片扫描完成: {os.path.basename(output_path)}")
+                    progress_cb(100, t('成片扫描完成: {v}', v=os.path.basename(output_path)))
                 return {
                     "success": True,
                     "output_path": output_path,
@@ -5049,7 +5048,7 @@ class SpektraEngine:
             # 2. Optical Diffusion Filter (Aligned with Viewport Vogel Spiral/Gaussian bloom)
             if diff_family != "none" and diff_strength > 0.001:
                 if progress_cb:
-                    progress_cb(18, f"正在进行光学柔光印相模拟 ({diff_family})...")
+                    progress_cb(18, t('正在进行光学柔光印相模拟 ({diff_family})...', diff_family=diff_family))
                 try:
                     linear_full = apply_diffusion_np(linear_full, diff_family, diff_strength, diff_warmth)
                 except Exception as e:
@@ -5219,7 +5218,7 @@ class SpektraEngine:
                     completed += 1
                     if progress_cb:
                         pct = int(35 + (completed / float(len(chunks))) * 55)
-                        progress_cb(pct, f"正在进行多核并发高精度暗房印相 ({int(completed / float(len(chunks)) * 100)}%)...")
+                        progress_cb(pct, t('正在进行多核并发高精度暗房印相 ({v}%)...', v=int(completed / float(len(chunks)) * 100)))
                     time.sleep(0.001)
 
             if cancel_cb and cancel_cb():
@@ -5259,7 +5258,7 @@ class SpektraEngine:
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return {"success": False, "error": f"导出失败: {str(e)}"}
+            return {"success": False, "error": t('导出失败: {v}', v=str(e))}
 
     render_full_res = export_image
 

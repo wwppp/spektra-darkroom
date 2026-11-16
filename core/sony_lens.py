@@ -50,6 +50,7 @@ import struct
 from typing import Optional
 
 import numpy as np
+from core.i18n import t
 
 _SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 13: 4}
 
@@ -253,6 +254,4 @@ def describe(path: str) -> str:
     if not p:
         return "内置校正: 无"
     avail = "/".join(n for n, ok in p["available"].items() if ok) or "无"
-    return (f"内置校正: 畸变 k=({p['k1']:+.4f},{p['k2']:+.4f},{p['k3']:+.4f}) "
-            f"暗角 {p['vignette_amount']:+.3f} CA=({p['ca_r_scale']:+.5f},{p['ca_b_scale']:+.5f}) "
-            f"[{avail}]")
+    return (t('内置校正: 畸变 k=({p_k1:+.4f},{p_k2:+.4f},{p_k3:+.4f}) 暗角 {p_vignette_amount:+.3f} CA=({p_ca_r_scale:+.5f},{p_ca_b_scale:+.5f}) [{avail}]', p_k1=p['k1'], p_k2=p['k2'], p_k3=p['k3'], p_vignette_amount=p['vignette_amount'], p_ca_r_scale=p['ca_r_scale'], p_ca_b_scale=p['ca_b_scale'], avail=avail))
