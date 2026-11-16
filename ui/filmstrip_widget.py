@@ -1114,7 +1114,10 @@ class FilmstripWidget(QWidget):
         self.scroll_content = QWidget()
         self.scroll_content.setStyleSheet("background: transparent; border: none;")
         self.scroll_layout = QHBoxLayout(self.scroll_content)
-        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        # 左右留白必须对称：内容宽一直按 `16 + 格宽 + 间距` 算，以前这 16 px 全留在右边，
+        # 左边缘却是 0 —— 首格贴着边框、末格后面空一大块，整条底片看着像整体左移了一截。
+        # 现在左右各 16（原来右侧那一整块），首末两格的留白一致。
+        self.scroll_layout.setContentsMargins(16, 0, 16, 0)
         self.scroll_layout.setSpacing(6)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
@@ -1579,7 +1582,8 @@ class FilmstripWidget(QWidget):
         else:
             if end_stretch is not None:
                 end_stretch.changeSize(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-            total_w = 16 + visible_count * item_w + max(0, visible_count - 1) * 6
+            # 32 = 左右各 16 的留白（见 scroll_layout 的 contentsMargins）
+            total_w = 32 + visible_count * item_w + max(0, visible_count - 1) * 6
             self.scroll_content.setMinimumWidth(total_w)
             self.scroll_layout.invalidate()
             self.scroll_layout.activate()
@@ -2223,7 +2227,7 @@ class FilmstripWidget(QWidget):
             idx = next((i for i, p in enumerate(self._photos_list) if p.get("id") == photo_id), 0)
             if idx > 0:
                 item_w, _ = self._compute_item_dimensions()
-                w_x = idx * (item_w + 6)
+                w_x = self.scroll_layout.contentsMargins().left() + idx * (item_w + 6)
                 w_w = item_w
 
         cur_val = hbar.value()
