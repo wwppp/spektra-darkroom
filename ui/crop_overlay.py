@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QFrame, QSlider, QSizePolicy, QMenu, QLineEdit
 )
 
+from core.i18n import t
 from ui.theme_manager import theme_manager
 from ui.window_utils import get_icon
 from ui.accordion import AccordionSection
@@ -31,14 +32,14 @@ from ui.adobe_scrub_slider import AdobeScrubSlider, ComboBoxRow
 
 
 ASPECT_RATIOS = [
-    ("原始比例", "original"),
-    ("自由比例", "free"),
+    (t("原始比例"), "original"),
+    (t("自由比例"), "free"),
     ("1:1", "1:1"),
     ("4:5", "4:5"),
     ("3:2", "3:2"),
     ("16:9", "16:9"),
     ("2.39:1", "2.39:1"),
-    ("自定义...", "custom"),
+    (t("自定义..."), "custom"),
 ]
 
 
@@ -53,14 +54,14 @@ def _fmt_ratio(val: float) -> str:
         return "1" 
 
 GRID_TYPES = [
-    ("三分法则", 0),
-    ("黄金比例", 1),
-    ("对角", 2),
-    ("居中", 3),
-    ("三角形", 4),
-    ("黄金螺旋", 5),
-    ("密织校平网格", 6),
-    ("无参考线", 7),
+    (t("三分法则"), 0),
+    (t("黄金比例"), 1),
+    (t("对角"), 2),
+    (t("居中"), 3),
+    (t("三角形"), 4),
+    (t("黄金螺旋"), 5),
+    (t("密织校平网格"), 6),
+    (t("无参考线"), 7),
 ]
 
 
@@ -1874,28 +1875,28 @@ class CropOverlayWidget(QWidget):
         menu.setStyleSheet(get_darkroom_menu_style())
 
         # 1. Reset options
-        act_reset = menu.addAction("重置裁切")
+        act_reset = menu.addAction(t("重置裁切"))
         act_reset.setShortcut(QKeySequence("Ctrl+R"))
         act_reset.triggered.connect(self.reset_crop)
 
-        act_reset_all = menu.addAction("重置为打开时状态")
+        act_reset_all = menu.addAction(t("重置为打开时状态"))
         act_reset_all.setShortcut(QKeySequence("Ctrl+Alt+R"))
         act_reset_all.triggered.connect(self.reset_to_initial_state)
 
-        act_clear = menu.addAction("清除裁切")
+        act_clear = menu.addAction(t("清除裁切"))
         act_clear.triggered.connect(self.clear_crop_completely)
 
         menu.addSeparator()
 
         # 2. Aspect Ratio Presets
-        menu_presets = menu.addMenu("画幅预设")
+        menu_presets = menu.addMenu(t("画幅预设"))
         grp_ratio = QActionGroup(self)
         for label, mode in ASPECT_RATIOS:
             act_label = label
             if mode == "custom":
                 cw = getattr(self, "custom_ratio_w", 5.0)
                 ch = getattr(self, "custom_ratio_h", 7.0)
-                act_label = f"自定义 ({_fmt_ratio(cw)}:{_fmt_ratio(ch)})"
+                act_label = t('自定义 ({v}:{v2})', v=_fmt_ratio(cw), v2=_fmt_ratio(ch))
             act_r = menu_presets.addAction(act_label)
             act_r.setCheckable(True)
             if self.aspect_ratio_mode == mode:
@@ -1906,21 +1907,21 @@ class CropOverlayWidget(QWidget):
         menu.addSeparator()
 
         # 3. Swap Aspect Ratio
-        act_swap = menu.addAction("调换长宽比")
+        act_swap = menu.addAction(t("调换长宽比"))
         act_swap.setShortcut(QKeySequence("X"))
         act_swap.triggered.connect(self.flip_aspect_ratio)
 
         menu.addSeparator()
 
         # 4. Mask Opacity
-        menu_mask = menu.addMenu("裁切蒙版")
+        menu_mask = menu.addMenu(t("裁切蒙版"))
         grp_mask = QActionGroup(self)
         cur_alpha = getattr(self, "mask_alpha", 160)
         mask_options = [
-            ("100% 不透明度", 255),
-            ("80% 不透明度", 204),
-            ("50% 不透明度", 128),
-            ("20% 不透明度", 51),
+            (t("100% 不透明度"), 255),
+            (t("80% 不透明度"), 204),
+            (t("50% 不透明度"), 128),
+            (t("20% 不透明度"), 51),
         ]
         for m_lbl, m_alpha in mask_options:
             act_m = menu_mask.addAction(m_lbl)
@@ -1931,14 +1932,14 @@ class CropOverlayWidget(QWidget):
             grp_mask.addAction(act_m)
 
         # 5. Show Overlay / Guides
-        act_show_guides = menu.addAction("显示叠加")
+        act_show_guides = menu.addAction(t("显示叠加"))
         act_show_guides.setCheckable(True)
         act_show_guides.setChecked(getattr(self, "show_guides", True))
         act_show_guides.setShortcut(QKeySequence("V"))
         act_show_guides.triggered.connect(self.toggle_show_guides)
 
         # 6. Overlay Styles
-        menu_style = menu.addMenu("叠加样式")
+        menu_style = menu.addMenu(t("叠加样式"))
         grp_grid = QActionGroup(self)
         for g_label, g_val in GRID_TYPES:
             act_g = menu_style.addAction(g_label)
@@ -1949,7 +1950,7 @@ class CropOverlayWidget(QWidget):
             grp_grid.addAction(act_g)
 
         menu_style.addSeparator()
-        act_cycle = menu_style.addAction("循环切换裁剪重叠层")
+        act_cycle = menu_style.addAction(t("循环切换裁剪重叠层"))
         act_cycle.setShortcut(QKeySequence("Alt+V"))
         act_cycle.triggered.connect(self.cycle_grid_type)
 
@@ -2138,19 +2139,19 @@ class CropOverlayWidget(QWidget):
                 first = True
                 for kind, acx, acy, rx, ry in arcs:
                     for i in range(21):
-                        t = (math.pi / 2.0) * (i / 20.0)
+                        ang = (math.pi / 2.0) * (i / 20.0)
                         if kind == 'p0':
-                            u = acx - rx * math.cos(t)
-                            v = acy - ry * math.sin(t)
+                            u = acx - rx * math.cos(ang)
+                            v = acy - ry * math.sin(ang)
                         elif kind == 'p1':
-                            u = acx + rx * math.sin(t)
-                            v = acy - ry * math.cos(t)
+                            u = acx + rx * math.sin(ang)
+                            v = acy - ry * math.cos(ang)
                         elif kind == 'p2':
-                            u = acx + rx * math.cos(t)
-                            v = acy + ry * math.sin(t)
+                            u = acx + rx * math.cos(ang)
+                            v = acy + ry * math.sin(ang)
                         elif kind == 'p3':
-                            u = acx - rx * math.sin(t)
-                            v = acy + ry * math.cos(t)
+                            u = acx - rx * math.sin(ang)
+                            v = acy + ry * math.cos(ang)
                         pt = map_pt(u, v)
                         if first:
                             spiral_path.moveTo(pt)
@@ -2251,20 +2252,20 @@ class CropSidebarWidget(QFrame):
         layout.setSpacing(6)
 
         # 1. Section: 画幅比例 (AccordionSection)
-        self.sec_ratio = AccordionSection("画幅比例")
+        self.sec_ratio = AccordionSection(t("画幅比例"))
         self.sec_ratio.resetClicked.connect(self._on_reset_ratio)
 
         ratio_row = QHBoxLayout()
         ratio_row.setContentsMargins(0, 0, 0, 0)
         ratio_row.setSpacing(6)
 
-        self.combo_ratio = ComboBoxRow("画幅预设", ASPECT_RATIOS, default_val="original")
+        self.combo_ratio = ComboBoxRow(t("画幅预设"), ASPECT_RATIOS, default_val="original")
         self.combo_ratio.valueChanged.connect(self._on_ratio_changed)
         ratio_row.addWidget(self.combo_ratio, 1)
 
         self.btn_swap_aspect = QPushButton()
         self.btn_swap_aspect.setFixedSize(26, 26)
-        self.btn_swap_aspect.setToolTip("调换长宽比（快捷键 X）")
+        self.btn_swap_aspect.setToolTip(t("调换长宽比（快捷键 X）"))
         self.btn_swap_aspect.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_swap_aspect.clicked.connect(self.overlay.flip_aspect_ratio)
         ratio_row.addWidget(self.btn_swap_aspect)
@@ -2277,7 +2278,7 @@ class CropSidebarWidget(QFrame):
         custom_layout.setContentsMargins(0, 2, 0, 4)
         custom_layout.setSpacing(6)
 
-        self.lbl_custom_ratio = QLabel("自定义比例")
+        self.lbl_custom_ratio = QLabel(t("自定义比例"))
         self.lbl_custom_ratio.setFixedWidth(74)
         self.lbl_custom_ratio.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         custom_layout.addWidget(self.lbl_custom_ratio)
@@ -2285,7 +2286,7 @@ class CropSidebarWidget(QFrame):
         self.edit_ratio_w = QLineEdit("5")
         self.edit_ratio_w.setFixedHeight(24)
         self.edit_ratio_w.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.edit_ratio_w.setToolTip("宽度比（例如 5、65、16 或 2.39）")
+        self.edit_ratio_w.setToolTip(t("宽度比（例如 5、65、16 或 2.39）"))
 
         self.lbl_ratio_colon = QLabel(":")
         self.lbl_ratio_colon.setFixedWidth(8)
@@ -2294,12 +2295,12 @@ class CropSidebarWidget(QFrame):
         self.edit_ratio_h = QLineEdit("7")
         self.edit_ratio_h.setFixedHeight(24)
         self.edit_ratio_h.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.edit_ratio_h.setToolTip("高度比（例如 7、24、9 或 1）")
+        self.edit_ratio_h.setToolTip(t("高度比（例如 7、24、9 或 1）"))
 
-        self.btn_apply_custom = QPushButton("应用")
+        self.btn_apply_custom = QPushButton(t("应用"))
         self.btn_apply_custom.setFixedSize(42, 24)
         self.btn_apply_custom.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_apply_custom.setToolTip("应用自定义长宽比")
+        self.btn_apply_custom.setToolTip(t("应用自定义长宽比"))
 
         self.edit_ratio_w.returnPressed.connect(self._on_apply_custom_ratio)
         self.edit_ratio_h.returnPressed.connect(self._on_apply_custom_ratio)
@@ -2318,7 +2319,7 @@ class CropSidebarWidget(QFrame):
         layout.addWidget(self.sec_ratio)
 
         # 2. Section: 角度 (Item 6: Renamed to 角度, Item 7: Merged reference lines)
-        self.sec_angle = AccordionSection("角度")
+        self.sec_angle = AccordionSection(t("角度"))
         self.sec_angle.resetClicked.connect(self._on_reset_angle)
 
         # Item 8: 4 quick transform action buttons
@@ -2328,28 +2329,28 @@ class CropSidebarWidget(QFrame):
 
         self.btn_rot_left = QPushButton()
         self.btn_rot_left.setFixedSize(32, 28)
-        self.btn_rot_left.setToolTip("向左旋转 90°")
+        self.btn_rot_left.setToolTip(t("向左旋转 90°"))
         self.btn_rot_left.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_rot_left.clicked.connect(self.overlay.rotate_90_ccw)
         trans_layout.addWidget(self.btn_rot_left)
 
         self.btn_rot_right = QPushButton()
         self.btn_rot_right.setFixedSize(32, 28)
-        self.btn_rot_right.setToolTip("向右旋转 90°")
+        self.btn_rot_right.setToolTip(t("向右旋转 90°"))
         self.btn_rot_right.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_rot_right.clicked.connect(self.overlay.rotate_90_cw)
         trans_layout.addWidget(self.btn_rot_right)
 
         self.btn_flip_v = QPushButton()
         self.btn_flip_v.setFixedSize(32, 28)
-        self.btn_flip_v.setToolTip("上下翻转")
+        self.btn_flip_v.setToolTip(t("上下翻转"))
         self.btn_flip_v.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_flip_v.clicked.connect(self.overlay.toggle_flip_v)
         trans_layout.addWidget(self.btn_flip_v)
 
         self.btn_flip_h = QPushButton()
         self.btn_flip_h.setFixedSize(32, 28)
-        self.btn_flip_h.setToolTip("左右翻转")
+        self.btn_flip_h.setToolTip(t("左右翻转"))
         self.btn_flip_h.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_flip_h.clicked.connect(self.overlay.toggle_flip_h)
         trans_layout.addWidget(self.btn_flip_h)
@@ -2359,15 +2360,15 @@ class CropSidebarWidget(QFrame):
 
         # Angle scrub slider
         self.slider_angle = AdobeScrubSlider(
-            "角度", -45.0, 45.0, 0.0, step=0.1, unit="°", decimals=1,
-            tooltip="微调画面倾斜度（-45°～+45°），双击回零"
+            t("角度"), -45.0, 45.0, 0.0, step=0.1, unit="°", decimals=1,
+            tooltip=t("微调画面倾斜度（-45°～+45°），双击回零")
         )
         self.slider_angle.valueChanged.connect(self._on_slider_angle_changed)
         self.slider_angle.sliderReleased.connect(self._on_angle_committed)
         self.sec_angle.addWidget(self.slider_angle)
 
         # Item 7: Merged reference lines inside 角度 card
-        self.combo_grid = ComboBoxRow("参考线", GRID_TYPES, default_val=0)
+        self.combo_grid = ComboBoxRow(t("参考线"), GRID_TYPES, default_val=0)
         self.combo_grid.valueChanged.connect(self._on_grid_changed)
         self.sec_angle.addWidget(self.combo_grid)
 
@@ -2378,9 +2379,9 @@ class CropSidebarWidget(QFrame):
         btn_layout.setContentsMargins(0, 8, 0, 4)
         btn_layout.setSpacing(8)
 
-        self.btn_apply = QPushButton("裁切")
+        self.btn_apply = QPushButton(t("裁切"))
         self.btn_apply.setFixedHeight(32)
-        self.btn_apply.setToolTip("套用裁切并返回暗房面板（快捷键 Enter）")
+        self.btn_apply.setToolTip(t("套用裁切并返回暗房面板（快捷键 Enter）"))
         self.btn_apply.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_apply.setStyleSheet("""
             QPushButton {
@@ -2402,9 +2403,9 @@ class CropSidebarWidget(QFrame):
         self.btn_apply.clicked.connect(self.overlay.apply_crop)
         btn_layout.addWidget(self.btn_apply, 1)
 
-        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel = QPushButton(t("取消"))
         self.btn_cancel.setFixedHeight(32)
-        self.btn_cancel.setToolTip("放弃裁切修改（快捷键 Esc）")
+        self.btn_cancel.setToolTip(t("放弃裁切修改（快捷键 Esc）"))
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel.clicked.connect(self.overlay.cancel_crop)
         btn_layout.addWidget(self.btn_cancel, 1)
@@ -2604,7 +2605,7 @@ class CropSidebarWidget(QFrame):
         combo = self.combo_ratio.combo
         idx = combo.findData("custom")
         if idx >= 0:
-            combo.setItemText(idx, f"自定义 ({w_str}:{h_str})")
+            combo.setItemText(idx, t('自定义 ({w_str}:{h_str})', w_str=w_str, h_str=h_str))
 
     def _on_ratio_changed(self, val):
         if self._is_updating:

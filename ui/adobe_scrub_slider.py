@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QLineEdit, QPushButton, QSizePolicy, QComboBox, QApplication, QListView, QStyledItemDelegate, QAbstractItemView, QStyle
 )
 
+from core.i18n import t
 from core.path_utils import get_icon_path
 from ui.theme_manager import theme_manager
 from ui.smooth_scroll import WheelFollower
@@ -630,7 +631,7 @@ class ParamScrubSlider(QWidget):
         self.value_edit.setMinimumHeight(20)
         self.value_edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.value_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.value_edit.setToolTip("点击输入精确数值，Enter 确认")
+        self.value_edit.setToolTip(t("点击输入精确数值，Enter 确认"))
         self.value_edit.returnPressed.connect(self._on_text_edited)
         self.value_edit.editingFinished.connect(self._on_text_edited)
         header_layout.addWidget(self.value_edit)

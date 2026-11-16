@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 from core import sdc_manager
 from core import session_cache_manager
 from core.session_cache_manager import is_dummy_or_corrupted_thumbnail, is_valid_thumbnail
+from core.i18n import t
 from core.path_utils import get_icon_path, get_resource_dir
 from ui.window_utils import apply_dark_titlebar, get_darkroom_menu_style, get_icon
 from ui.theme_manager import theme_manager
@@ -33,7 +34,7 @@ class DuplicateFilesDialog(QDialog):
     def __init__(self, duplicate_names, parent=None):
         super().__init__(parent)
         self.duplicate_names = list(duplicate_names or [])
-        self.setWindowTitle("重复底片过滤提示")
+        self.setWindowTitle(t("重复底片过滤提示"))
         self.setFixedSize(540, 350)
         icon_path = os.path.join(get_resource_dir(), "app_icon.png")
         if os.path.exists(icon_path):
@@ -140,7 +141,7 @@ class DuplicateFilesDialog(QDialog):
 
         count = len(self.duplicate_names)
         head_col = "#f8fafc" if is_dark else "#0f172a"
-        lbl_head = QLabel(f"已自动跳过 {count} 个已在暗房底片库中的重复文件：")
+        lbl_head = QLabel(t('已自动跳过 {count} 个已在暗房底片库中的重复文件：', count=count))
         lbl_head.setStyleSheet(f"color: {head_col}; font-weight: bold; font-size: 13px;")
         hdr.addWidget(lbl_head, 1)
         layout.addLayout(hdr)
@@ -153,12 +154,12 @@ class DuplicateFilesDialog(QDialog):
 
         # Footer
         btn_box = QHBoxLayout()
-        lbl_hint = QLabel("底片库已保留原有底片，不会重复添加。")
+        lbl_hint = QLabel(t("底片库已保留原有底片，不会重复添加。"))
         lbl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
         btn_box.addWidget(lbl_hint)
         btn_box.addStretch()
 
-        btn_ok = QPushButton("确定")
+        btn_ok = QPushButton(t("确定"))
         btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_ok.clicked.connect(self.accept)
         btn_box.addWidget(btn_ok)
@@ -388,7 +389,7 @@ class FilmstripItemWidget(QFrame):
             except Exception:
                 pass
         size_txt = f"{w} × {h}" if (w > 0 and h > 0) else "—"
-        self.setToolTip(f"{self.filename}\n路径: {self.file_path}\n尺寸: {size_txt}")
+        self.setToolTip(t('{filename}\n路径: {file_path}\n尺寸: {size_txt}', filename=self.filename, file_path=self.file_path, size_txt=size_txt))
 
     def event(self, e):
         if e.type() == QEvent.Type.ToolTip:
@@ -838,16 +839,16 @@ class FilmstripWidget(QWidget):
     def set_rating_filter(self, filter_key: str):
         self._rating_filter = filter_key
         labels_map = {
-            "all": "★ 全部 ▾",
-            "5": "★ 5星 ▾",
-            "4": "★ 4星 ▾",
-            "3": "★ 3星 ▾",
-            "2": "★ 2星 ▾",
-            "1": "★ 1星 ▾",
-            "0": "★ 无评分 ▾"
+            "all": t("★ 全部 ▾"),
+            "5": t("★ 5星 ▾"),
+            "4": t("★ 4星 ▾"),
+            "3": t("★ 3星 ▾"),
+            "2": t("★ 2星 ▾"),
+            "1": t("★ 1星 ▾"),
+            "0": t("★ 无评分 ▾")
         }
         if hasattr(self, 'filter_btn'):
-            self.filter_btn.setText(labels_map.get(filter_key, "★ 筛选 ▾"))
+            self.filter_btn.setText(labels_map.get(filter_key, t("★ 筛选 ▾")))
             self.apply_theme()
 
         visible_pids = []
@@ -863,9 +864,9 @@ class FilmstripWidget(QWidget):
         total = len(self._photos_list)
         if hasattr(self, 'count_label'):
             if filter_key == "all":
-                self.count_label.setText(f"{total} 张")
+                self.count_label.setText(t('{total} 张', total=total))
             else:
-                self.count_label.setText(f"{len(visible_pids)}/{total} 张")
+                self.count_label.setText(t('{visible_pids_count}/{total} 张', visible_pids_count=len(visible_pids), total=total))
 
         # If current active photo is hidden by filter, auto switch to first visible photo
         if self._active_id not in visible_pids and visible_pids:
@@ -888,10 +889,10 @@ class FilmstripWidget(QWidget):
 
         total = len(self._photos_list)
         if self._rating_filter == "all":
-            self.count_label.setText(f"{total} 张")
+            self.count_label.setText(t('{total} 张', total=total))
         else:
             visible_cnt = sum(1 for p in self._photos_list if self._matches_filter(p.get("rating", 0), self._rating_filter))
-            self.count_label.setText(f"{visible_cnt}/{total} 张")
+            self.count_label.setText(t('{visible_cnt}/{total} 张', visible_cnt=visible_cnt, total=total))
             self._update_content_geometry()
 
     def set_photos_rating(self, photo_ids: list, rating: int):
@@ -907,10 +908,10 @@ class FilmstripWidget(QWidget):
 
         total = len(self._photos_list)
         if self._rating_filter == "all":
-            self.count_label.setText(f"{total} 张")
+            self.count_label.setText(t('{total} 张', total=total))
         else:
             visible_cnt = sum(1 for p in self._photos_list if self._matches_filter(p.get("rating", 0), self._rating_filter))
-            self.count_label.setText(f"{visible_cnt}/{total} 张")
+            self.count_label.setText(t('{visible_cnt}/{total} 张', visible_cnt=visible_cnt, total=total))
             self._update_content_geometry()
 
     def _on_item_rating_changed(self, photo_id: str, rating: int):
@@ -937,15 +938,15 @@ class FilmstripWidget(QWidget):
     def get_filter_menu_items(self) -> list:
         counts = self.get_filter_counts()
         return [
-            ("all", f"全部（{counts['all']}张）"),
+            ("all", t('全部（{counts_all}张）', counts_all=counts['all'])),
             ("separator", ""),
-            ("5", f"★★★★★（{counts['5']}张）"),
-            ("4", f"★★★★（{counts['4']}张）"),
-            ("3", f"★★★（{counts['3']}张）"),
-            ("2", f"★★（{counts['2']}张）"),
-            ("1", f"★（{counts['1']}张）"),
+            ("5", t('★★★★★（{counts_5}张）', counts_5=counts['5'])),
+            ("4", t('★★★★（{counts_4}张）', counts_4=counts['4'])),
+            ("3", t('★★★（{counts_3}张）', counts_3=counts['3'])),
+            ("2", t('★★（{counts_2}张）', counts_2=counts['2'])),
+            ("1", t('★（{counts_1}张）', counts_1=counts['1'])),
             ("separator", ""),
-            ("0", f"无评分（{counts['0']}张）"),
+            ("0", t('无评分（{counts_0}张）', counts_0=counts['0'])),
         ]
 
     def _show_filter_menu(self):
@@ -1123,7 +1124,7 @@ class FilmstripWidget(QWidget):
         self.scroll_layout.setSpacing(6)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描")
+        self._empty_lbl = QLabel(t("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描"))
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
         self.scroll_layout.addWidget(self._empty_lbl, 1, Qt.AlignmentFlag.AlignCenter)
@@ -1194,31 +1195,31 @@ class FilmstripWidget(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(0)
 
-        self.lbl_lib_title = QLabel("胶片库")
+        self.lbl_lib_title = QLabel(t("胶片库"))
         self.lbl_lib_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_lib_title.setStyleSheet("color: #71717a; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
         top_layout.addWidget(self.lbl_lib_title, 1)
 
-        self.count_label = QLabel("0 张")
+        self.count_label = QLabel(t("0 张"))
         self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.count_label.setStyleSheet("color: #f59e0b; font-size: 10px; font-weight: bold; padding: 0px; margin: 0px; border: none; background: transparent;")
         top_layout.addWidget(self.count_label, 1)
         action_layout.addWidget(self.top_box, 1)
 
         # Middle container: ★ 筛选 按钮 (位于张数与添加按钮之间，三等分高度)
-        self.filter_btn = QPushButton("★ 全部 ▾")
+        self.filter_btn = QPushButton(t("★ 全部 ▾"))
         self.filter_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.filter_btn.setToolTip("按底片星标评级筛选")
+        self.filter_btn.setToolTip(t("按底片星标评级筛选"))
         self.filter_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.filter_btn.clicked.connect(self._show_filter_menu)
         action_layout.addWidget(self.filter_btn, 1)
 
         # Lower container: ＋ 添加 按钮全部铺满 (三等分高度)
-        self.add_btn = QPushButton("＋ 添加")
+        self.add_btn = QPushButton(t("＋ 添加"))
         self.add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.add_btn.setToolTip("添加更多底片 / RAW 文件")
+        self.add_btn.setToolTip(t("添加更多底片 / RAW 文件"))
         self.add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.add_btn.clicked.connect(self.addRequested.emit)
         action_layout.addWidget(self.add_btn, 1)
@@ -1724,12 +1725,12 @@ class FilmstripWidget(QWidget):
         self._placeholder_ids.clear()
 
         # Update count
-        self.count_label.setText(f"{len(photos)} 张")
+        self.count_label.setText(t('{photos_count} 张', photos_count=len(photos)))
 
         if len(photos) == 0:
             self._cancel_pending_scroll_timers()
             if not hasattr(self, '_empty_lbl') or self._empty_lbl is None:
-                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描")
+                self._empty_lbl = QLabel(t("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描"))
                 self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
             if self.scroll_layout.indexOf(self._empty_lbl) == -1:
@@ -1831,7 +1832,7 @@ class FilmstripWidget(QWidget):
         # 批量导入时每张都会走到这里，所以那是必现崩溃，不是偶发。
         if not any(p.get("id") == photo.get("id") for p in self._photos_list):
             self._photos_list.append(photo)
-        self.count_label.setText(f"{len(self._photos_list)} 张")
+        self.count_label.setText(t('{v} 张', v=len(self._photos_list)))
 
         item_w, item_h = self._compute_item_dimensions()
         pid = photo["id"]
@@ -1948,7 +1949,7 @@ class FilmstripWidget(QWidget):
             container.setUpdatesEnabled(True)
 
         self._update_content_geometry()
-        self.count_label.setText(f"{len(self._photos_list)} 张")
+        self.count_label.setText(t('{v} 张', v=len(self._photos_list)))
 
     def fill_placeholder(self, pid, photo_entry) -> bool:
         """把某一格换成这张照片（占位→真图，或解码补上来的新缩略图），次序不变。
@@ -2029,7 +2030,7 @@ class FilmstripWidget(QWidget):
             container.setUpdatesEnabled(True)
 
         self._update_content_geometry()
-        self.count_label.setText(f"{len(self._photos_list)} 张")
+        self.count_label.setText(t('{v} 张', v=len(self._photos_list)))
         if active_id and active_id in self._item_widgets:
             self.selectionChanged.emit(list(self._selected_ids))
 
@@ -2044,12 +2045,12 @@ class FilmstripWidget(QWidget):
 
         self._photos_list = [p for p in self._photos_list if p.get("id") != photo_id]
         self._selected_ids.discard(photo_id)
-        self.count_label.setText(f"{len(self._photos_list)} 张")
+        self.count_label.setText(t('{v} 张', v=len(self._photos_list)))
 
         if len(self._photos_list) == 0:
             self._cancel_pending_scroll_timers()
             if not hasattr(self, '_empty_lbl') or self._empty_lbl is None:
-                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描")
+                self._empty_lbl = QLabel(t("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描"))
                 self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
             if self.scroll_layout.indexOf(self._empty_lbl) == -1:
@@ -2076,12 +2077,12 @@ class FilmstripWidget(QWidget):
             self._selected_ids.discard(pid)
 
         self._photos_list = [p for p in self._photos_list if p.get("id") not in id_set]
-        self.count_label.setText(f"{len(self._photos_list)} 张")
+        self.count_label.setText(t('{v} 张', v=len(self._photos_list)))
 
         if len(self._photos_list) == 0:
             self._cancel_pending_scroll_timers()
             if not hasattr(self, '_empty_lbl') or self._empty_lbl is None:
-                self._empty_lbl = QLabel("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描")
+                self._empty_lbl = QLabel(t("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描"))
                 self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._empty_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 500; border: none; background: transparent;")
             if self.scroll_layout.indexOf(self._empty_lbl) == -1:
@@ -2327,12 +2328,12 @@ class FilmstripWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
-        quick_label = "快速扫描 (上次参数)" if sel_count == 1 else f"快速扫描选中底片 ({sel_count} 张)"
+        quick_label = t("快速扫描 (上次参数)") if sel_count == 1 else t('快速扫描选中底片 ({sel_count} 张)', sel_count=sel_count)
         act_quick = menu.addAction(quick_label)
         act_quick.setIcon(get_icon("quick_export.png"))
         act_quick.triggered.connect(lambda: self.quickExportRequested.emit(list(self._selected_ids)))
 
-        export_label = f"扫描当前底片..." if sel_count == 1 else f"批量扫描选中底片 ({sel_count} 张)..."
+        export_label = t('扫描当前底片...') if sel_count == 1 else t('批量扫描选中底片 ({sel_count} 张)...', sel_count=sel_count)
         act_export = menu.addAction(export_label)
         act_export.setIcon(get_icon("dlg_export.png"))
         act_export.triggered.connect(lambda: self.batchExportRequested.emit(list(self._selected_ids)))
@@ -2340,22 +2341,22 @@ class FilmstripWidget(QWidget):
         target_photo = next((p for p in self._photos_list if p.get("id") == target_id), None)
         target_path = target_photo.get("path", "") if target_photo else ""
         if target_path:
-            act_reveal = menu.addAction("在文件资源管理器中显示")
+            act_reveal = menu.addAction(t("在文件资源管理器中显示"))
             act_reveal.triggered.connect(lambda checked=False, p=target_path: self._reveal_in_explorer(p))
 
         menu.addSeparator()
 
         # Submenu: 底片评级 (Rating)
         target_r = int(target_photo.get("rating", 0) or 0) if target_photo else 0
-        rate_menu = menu.addMenu("底片评级")
+        rate_menu = menu.addMenu(t("底片评级"))
         rate_menu.setStyleSheet(get_darkroom_menu_style())
         for r_val, r_text in [
-            (5, "★★★★★ 5 星\t5"),
-            (4, "★★★★☆ 4 星\t4"),
-            (3, "★★★☆☆ 3 星\t3"),
-            (2, "★★☆☆☆ 2 星\t2"),
-            (1, "★☆☆☆☆ 1 星\t1"),
-            (0, "清除评级\t0"),
+            (5, t("★★★★★ 5 星\t5")),
+            (4, t("★★★★☆ 4 星\t4")),
+            (3, t("★★★☆☆ 3 星\t3")),
+            (2, t("★★☆☆☆ 2 星\t2")),
+            (1, t("★☆☆☆☆ 1 星\t1")),
+            (0, t("清除评级\t0")),
         ]:
             act_r = rate_menu.addAction(r_text)
             if r_val == target_r:
@@ -2363,7 +2364,7 @@ class FilmstripWidget(QWidget):
             act_r.triggered.connect(lambda chk=False, r=r_val: self.batchPhotoRated.emit(list(self._selected_ids), r))
 
         # Submenu: 星标筛选 (Filter)
-        filter_menu = menu.addMenu("星标筛选")
+        filter_menu = menu.addMenu(t("星标筛选"))
         filter_menu.setStyleSheet(get_darkroom_menu_style())
         for key, text in self.get_filter_menu_items():
             if key == "separator":
@@ -2376,13 +2377,13 @@ class FilmstripWidget(QWidget):
 
         menu.addSeparator()
 
-        remove_label = "从底片库移除" if sel_count == 1 else f"从底片库移除 ({sel_count} 项)"
+        remove_label = t("从底片库移除") if sel_count == 1 else t('从底片库移除 ({sel_count} 项)', sel_count=sel_count)
         act_remove = menu.addAction(remove_label)
         act_remove.setIcon(get_icon("dlg_discard.png"))
         act_remove.setShortcut(QKeySequence("Delete"))
         act_remove.triggered.connect(lambda: self.photosRemoved.emit(list(self._selected_ids)))
 
-        delete_label = "删除文件" if sel_count == 1 else f"删除文件 ({sel_count} 项)"
+        delete_label = t("删除文件") if sel_count == 1 else t('删除文件 ({sel_count} 项)', sel_count=sel_count)
         act_delete = menu.addAction(delete_label)
         act_delete.setShortcut(QKeySequence("Shift+Delete"))
         act_delete.triggered.connect(lambda: self.photosDeleted.emit(list(self._selected_ids)))
@@ -2398,12 +2399,12 @@ class FilmstripWidget(QWidget):
             elif target_photo.get("film_profile", "none") != "none" or target_photo.get("paper_profile", "none") != "none":
                 target_edited = True
 
-        act_copy = menu.addAction("复制暗房配方")
+        act_copy = menu.addAction(t("复制暗房配方"))
         act_copy.setShortcut(QKeySequence("Ctrl+C"))
         act_copy.setEnabled(target_edited)
         act_copy.triggered.connect(lambda checked=False, pid=target_id: self.copyParamsRequested.emit(pid))
 
-        paste_label = "粘贴暗房配方" if sel_count <= 1 else f"粘贴暗房配方至选中底片 ({sel_count} 张)"
+        paste_label = t("粘贴暗房配方") if sel_count <= 1 else t('粘贴暗房配方至选中底片 ({sel_count} 张)', sel_count=sel_count)
         act_paste = menu.addAction(paste_label)
         act_paste.setShortcut(QKeySequence("Ctrl+V"))
         can_paste = bool(getattr(self, "_can_paste_params", False))
@@ -2421,7 +2422,7 @@ class FilmstripWidget(QWidget):
                 can_clear_sdc = True
                 break
 
-        sdc_label = "删除暗房配置 (.sdc)" if sel_count == 1 else f"删除暗房配置 (.sdc) ({sel_count} 项)"
+        sdc_label = t("删除暗房配置 (.sdc)") if sel_count == 1 else t('删除暗房配置 (.sdc) ({sel_count} 项)', sel_count=sel_count)
         act_clear_sdc = menu.addAction(sdc_label)
         act_clear_sdc.setIcon(get_icon("reset.png"))
         act_clear_sdc.setEnabled(can_clear_sdc)
@@ -2454,7 +2455,7 @@ class FilmstripWidget(QWidget):
                 can_clear_crop = True
                 break
 
-        crop_label = "清除裁切" if sel_count == 1 else f"清除裁切 ({sel_count} 项)"
+        crop_label = t("清除裁切") if sel_count == 1 else t('清除裁切 ({sel_count} 项)', sel_count=sel_count)
         act_clear_crop = menu.addAction(crop_label)
         act_clear_crop.setEnabled(can_clear_crop)
         act_clear_crop.triggered.connect(lambda: self.clearCropRequested.emit(list(self._selected_ids)))
@@ -2463,28 +2464,28 @@ class FilmstripWidget(QWidget):
 
         # Submenu: 整理底片 (the rating-filter submenu lives above, next to 底片评级 -- it used
         # to be duplicated here, which put two identical 星标筛选 entries in one menu)
-        sort_menu = menu.addMenu("整理底片")
+        sort_menu = menu.addMenu(t("整理底片"))
         sort_menu.setStyleSheet(get_darkroom_menu_style())
-        act_s1 = sort_menu.addAction("按拍摄时间升序 (旧 → 新)")
+        act_s1 = sort_menu.addAction(t("按拍摄时间升序 (旧 → 新)"))
         act_s1.triggered.connect(lambda: self.sortRequested.emit("time_asc"))
-        act_s2 = sort_menu.addAction("按拍摄时间降序 (新 → 旧)")
+        act_s2 = sort_menu.addAction(t("按拍摄时间降序 (新 → 旧)"))
         act_s2.triggered.connect(lambda: self.sortRequested.emit("time_desc"))
         sort_menu.addSeparator()
-        act_s3 = sort_menu.addAction("按文件名升序 (A → Z)")
+        act_s3 = sort_menu.addAction(t("按文件名升序 (A → Z)"))
         act_s3.triggered.connect(lambda: self.sortRequested.emit("name_asc"))
-        act_s4 = sort_menu.addAction("按文件名降序 (Z → A)")
+        act_s4 = sort_menu.addAction(t("按文件名降序 (Z → A)"))
         act_s4.triggered.connect(lambda: self.sortRequested.emit("name_desc"))
         sort_menu.addSeparator()
-        act_s5 = sort_menu.addAction("按导入添加顺序")
+        act_s5 = sort_menu.addAction(t("按导入添加顺序"))
         act_s5.triggered.connect(lambda: self.sortRequested.emit("import"))
 
         menu.addSeparator()
 
-        act_select_all = menu.addAction("全选所有底片")
+        act_select_all = menu.addAction(t("全选所有底片"))
         act_select_all.setShortcut(QKeySequence("Ctrl+A"))
         act_select_all.triggered.connect(self.select_all)
 
-        act_invert = menu.addAction("反选")
+        act_invert = menu.addAction(t("反选"))
         act_invert.setShortcut(QKeySequence("Ctrl+Shift+I"))
         act_invert.triggered.connect(self.invert_selection)
 
@@ -2508,14 +2509,14 @@ class FilmstripWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
-        act_add = menu.addAction("导入底片...")
+        act_add = menu.addAction(t("导入底片..."))
         act_add.setIcon(get_icon("dlg_import.png"))
         act_add.triggered.connect(self.addRequested.emit)
 
         menu.addSeparator()
 
         # Submenu: 星标筛选
-        filter_menu = menu.addMenu("星标筛选")
+        filter_menu = menu.addMenu(t("星标筛选"))
         filter_menu.setStyleSheet(get_darkroom_menu_style())
         filter_menu.setEnabled(bool(self._photos_list))
         for key, text in self.get_filter_menu_items():
@@ -2528,33 +2529,33 @@ class FilmstripWidget(QWidget):
             act_f.triggered.connect(lambda chk=False, k=key: self.set_rating_filter(k))
 
         # Submenu: 整理底片
-        sort_menu = menu.addMenu("整理底片")
+        sort_menu = menu.addMenu(t("整理底片"))
         sort_menu.setStyleSheet(get_darkroom_menu_style())
-        act_s1 = sort_menu.addAction("按拍摄时间升序 (旧 → 新)")
+        act_s1 = sort_menu.addAction(t("按拍摄时间升序 (旧 → 新)"))
         act_s1.triggered.connect(lambda: self.sortRequested.emit("time_asc"))
-        act_s2 = sort_menu.addAction("按拍摄时间降序 (新 → 旧)")
+        act_s2 = sort_menu.addAction(t("按拍摄时间降序 (新 → 旧)"))
         act_s2.triggered.connect(lambda: self.sortRequested.emit("time_desc"))
         sort_menu.addSeparator()
-        act_s3 = sort_menu.addAction("按文件名升序 (A → Z)")
+        act_s3 = sort_menu.addAction(t("按文件名升序 (A → Z)"))
         act_s3.triggered.connect(lambda: self.sortRequested.emit("name_asc"))
-        act_s4 = sort_menu.addAction("按文件名降序 (Z → A)")
+        act_s4 = sort_menu.addAction(t("按文件名降序 (Z → A)"))
         act_s4.triggered.connect(lambda: self.sortRequested.emit("name_desc"))
         sort_menu.addSeparator()
-        act_s5 = sort_menu.addAction("按导入添加顺序")
+        act_s5 = sort_menu.addAction(t("按导入添加顺序"))
         act_s5.triggered.connect(lambda: self.sortRequested.emit("import"))
 
         menu.addSeparator()
 
-        act_select_all = menu.addAction("全选所有底片")
+        act_select_all = menu.addAction(t("全选所有底片"))
         act_select_all.setShortcut(QKeySequence("Ctrl+A"))
         act_select_all.triggered.connect(self.select_all)
 
-        act_invert = menu.addAction("反选")
+        act_invert = menu.addAction(t("反选"))
         act_invert.setShortcut(QKeySequence("Ctrl+Shift+I"))
         act_invert.triggered.connect(self.invert_selection)
 
         if self._photos_list:
-            act_clear = menu.addAction("清空底片库")
+            act_clear = menu.addAction(t("清空底片库"))
             act_clear.setIcon(get_icon("dlg_discard.png"))
             act_clear.triggered.connect(self.clearRequested.emit)
 

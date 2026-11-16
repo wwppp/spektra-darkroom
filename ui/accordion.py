@@ -8,6 +8,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
 )
+from core.i18n import t
 from core.path_utils import get_icon_path
 from ui.theme_manager import theme_manager
 
@@ -58,7 +59,7 @@ class ParameterGroupCard(QWidget):
         self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.reset_btn.setFixedSize(20, 20)
         self.reset_btn.setIconSize(QSize(13, 13))
-        self.reset_btn.setToolTip("重置本节全部参数")
+        self.reset_btn.setToolTip(t("重置本节全部参数"))
         self._icon_reset_disabled = QIcon(get_icon_path("reset_disabled.png"))
         self._icon_reset_active = QIcon(get_icon_path("reset_active.png"))
         self.reset_btn.setIcon(self._icon_reset_disabled)
@@ -182,7 +183,7 @@ class ParameterGroupCard(QWidget):
         is_dark = theme_manager.is_dark()
         tt_ss = theme_manager.widget_tooltip_stylesheet()
         self.reset_btn.setIcon(self._icon_reset_active if enabled else self._icon_reset_disabled)
-        self.reset_btn.setToolTip("重置本节全部参数" if enabled else "本节参数均为默认值")
+        self.reset_btn.setToolTip(t("重置本节全部参数") if enabled else t("本节参数均为默认值"))
         if enabled:
             self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.reset_btn.setStyleSheet(f"""

@@ -12,6 +12,7 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtOpenGL import (
     QOpenGLShaderProgram, QOpenGLShader, QOpenGLBuffer, QOpenGLFramebufferObject
 )
+from core.i18n import t
 from core.path_utils import get_resource_dir
 from core import config_manager
 from core import proof
@@ -1382,10 +1383,10 @@ CANVAS_BG_COLORS = {
 }
 
 CANVAS_BG_NAMES = [
-    ("白色", "white"),
-    ("浅灰", "light_gray"),
-    ("深灰", "dark_gray"),
-    ("黑色", "black"),
+    (t("白色"), "white"),
+    (t("浅灰"), "light_gray"),
+    (t("深灰"), "dark_gray"),
+    (t("黑色"), "black"),
 ]
 
 
@@ -1882,7 +1883,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._last_mouse_pos = QPointF(0, 0)
 
         # Floating HUD Badges for Before / After Compare (Native QLabels immune to OpenGL texture corruption)
-        self.badge_before = QLabel("原片", self)
+        self.badge_before = QLabel(t("原片"), self)
         self.badge_before.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.badge_before.setStyleSheet("""
             QLabel {
@@ -1904,7 +1905,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self.crop_overlay = CropOverlayWidget(self, self)
         self.is_crop_editing = False
 
-        self.badge_after = QLabel("已修改", self)
+        self.badge_after = QLabel(t("已修改"), self)
         self.badge_after.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.badge_after.setStyleSheet("""
             QLabel {
@@ -1952,17 +1953,17 @@ class DarkroomGLCanvas(QOpenGLWidget):
             lbl_empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty_layout.addWidget(lbl_empty_icon, 0, Qt.AlignmentFlag.AlignCenter)
 
-        lbl_empty_title = QLabel("暂无打开的底片", self.empty_overlay)
+        lbl_empty_title = QLabel(t("暂无打开的底片"), self.empty_overlay)
         lbl_empty_title.setStyleSheet("color: #e2e8f0; font-size: 15px; font-weight: bold;")
         lbl_empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(lbl_empty_title)
 
-        lbl_empty_hint = QLabel("拖入照片 / RAW 负片，或点击下方按钮导入", self.empty_overlay)
+        lbl_empty_hint = QLabel(t("拖入照片 / RAW 负片，或点击下方按钮导入"), self.empty_overlay)
         lbl_empty_hint.setStyleSheet("color: #71717a; font-size: 12px;")
         lbl_empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(lbl_empty_hint)
 
-        btn_empty_import = QPushButton("＋ 导入底片...", self.empty_overlay)
+        btn_empty_import = QPushButton(t("＋ 导入底片..."), self.empty_overlay)
         btn_empty_import.setFixedSize(140, 32)
         btn_empty_import.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_empty_import.setStyleSheet("""
@@ -2561,7 +2562,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             b2_w, b2_h = 68, 26
             b1_x = int(max(img_vis_left_px + 12.0, min(self.width() - 140.0, split_x - b1_w - 12.0)))
             b2_x = int(max(80.0, min(img_vis_right_px - b2_w - 12.0, split_x + 12.0)))
-            self.badge_before.setText("原片")
+            self.badge_before.setText(t("原片"))
             self.badge_before.setGeometry(b1_x, 16, b1_w, b1_h)
             self.badge_after.setGeometry(b2_x, 16, b2_w, b2_h)
             self.badge_before.show()
@@ -2574,7 +2575,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             half_w = float(self.width()) / 2.0
             b1_x = int(half_w / 2.0 - b1_w / 2.0)
             b2_x = int(half_w + half_w / 2.0 - b2_w / 2.0)
-            self.badge_before.setText("原片")
+            self.badge_before.setText(t("原片"))
             self.badge_before.setGeometry(b1_x, 16, b1_w, b1_h)
             self.badge_after.setGeometry(b2_x, 16, b2_w, b2_h)
             self.badge_before.show()
@@ -2584,13 +2585,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         elif self.params.get("view_mode") == 3 and self._has_image and self.width() > 0:
             b1_w, b1_h = 56, 26
             b1_x = int(self.width() / 2.0 - b1_w / 2.0)
-            self.badge_before.setText("原片")
+            self.badge_before.setText(t("原片"))
             self.badge_before.setGeometry(b1_x, 16, b1_w, b1_h)
             self.badge_before.show()
             self.badge_before.raise_()
             self.badge_after.hide()
         else:
-            self.badge_before.setText("原片")
+            self.badge_before.setText(t("原片"))
             self.badge_before.hide()
             self.badge_after.hide()
 
@@ -2779,7 +2780,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         if not self._display_pref_on:
             self._display_profile = None
-            self._display_note = "首选项已关闭"
+            self._display_note = t("首选项已关闭")
             self._ffchain.set_display(None)
             _kick()
             return
@@ -2832,15 +2833,15 @@ class DarkroomGLCanvas(QOpenGLWidget):
     def display_color_management_status(self) -> str:
         """给首选项显示一行真实状态，别让用户对着一个开关猜。"""
         if not self._display_pref_on:
-            return "已关闭，视口按 sRGB 直出"
+            return t("已关闭，视口按 sRGB 直出")
         p = self._display_profile
         if p is None:
-            return self._display_note or "未接入"
+            return self._display_note or t("未接入")
         if self._display_note and self._display_note != p.label:
             return self._display_note
         if p.identity:
-            return "当前显示器 profile 即 sRGB，无需转换"
-        return f"已接管：{p.label}"
+            return t("当前显示器 profile 即 sRGB，无需转换")
+        return t('已接管：{label}', label=p.label)
 
     # --- P1 校样 ------------------------------------------------------------------------
     def proof_settings(self) -> "proof.ProofSettings":
@@ -2875,9 +2876,9 @@ class DarkroomGLCanvas(QOpenGLWidget):
         """菜单状态行 / 对话框用的一句话。"""
         p = self._proof
         if not p.on:
-            return "校样关闭"
-        tail = " · 色域警告" if p.warn else ""
-        return f"校样 · {p.canonical_target()}{tail}"
+            return t("校样关闭")
+        tail = t(" · 色域警告") if p.warn else ""
+        return t('校样 · {v}{tail}', v=p.canonical_target(), tail=tail)
 
     def _do_upload_lut(self, lut_array_3d):
         size = lut_array_3d.shape[0]
@@ -3342,7 +3343,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             ptr = GL.glMapBufferRange(GL.GL_PIXEL_PACK_BUFFER, 0, size, GL.GL_MAP_READ_BIT)
             if not ptr:
                 GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
-                raise RuntimeError("glMapBufferRange 返回空")
+                raise RuntimeError(t("glMapBufferRange 返回空"))
             try:
                 buf = (ctypes.c_ubyte * size).from_address(int(ptr))
                 rgba = np.frombuffer(buf, dtype=np.uint8).reshape((th, tw, 4))
@@ -3728,22 +3729,22 @@ class DarkroomGLCanvas(QOpenGLWidget):
         menu = QMenu(self)
         menu.setStyleSheet(get_darkroom_menu_style())
 
-        act_in = menu.addAction("放大 (Zoom In)")
+        act_in = menu.addAction(t("放大 (Zoom In)"))
         act_in.setIcon(get_icon("zoom_in.png"))
         act_in.setShortcut(QKeySequence("Ctrl++"))
         act_in.triggered.connect(self.zoom_in)
 
-        act_out = menu.addAction("缩小 (Zoom Out)")
+        act_out = menu.addAction(t("缩小 (Zoom Out)"))
         act_out.setIcon(get_icon("zoom_out.png"))
         act_out.setShortcut(QKeySequence("Ctrl+-"))
         act_out.triggered.connect(self.zoom_out)
 
-        act_fit = menu.addAction("适应图像 (Fit Image)")
+        act_fit = menu.addAction(t("适应图像 (Fit Image)"))
         act_fit.setIcon(get_icon("fit_window.png"))
         act_fit.setShortcut(QKeySequence("Ctrl+0"))
         act_fit.triggered.connect(self.fit_to_view)
 
-        act_100 = menu.addAction("1:1 实际像素 (100%)")
+        act_100 = menu.addAction(t("1:1 实际像素 (100%)"))
         act_100.setIcon(get_icon("zoom_100.png"))
         act_100.setShortcut(QKeySequence("Ctrl+1"))
         act_100.triggered.connect(self.set_zoom_100)
@@ -3760,7 +3761,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         can_reset = win.act_reset_all.isEnabled() if hasattr(win, 'act_reset_all') else getattr(self, "can_reset", False)
         can_compare = win.act_compare.isEnabled() if hasattr(win, 'act_compare') else getattr(self, "can_compare", False)
 
-        act_split = menu.addAction("原片前后对比")
+        act_split = menu.addAction(t("原片前后对比"))
         act_split.setIcon(get_icon("compare.png"))
         act_split.setShortcut(QKeySequence("\\"))
         act_split.setEnabled(can_compare)
@@ -3768,19 +3769,19 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         menu.addSeparator()
 
-        act_undo = menu.addAction("撤销 (Undo)")
+        act_undo = menu.addAction(t("撤销 (Undo)"))
         act_undo.setIcon(get_icon("undo.png"))
         act_undo.setShortcut(QKeySequence("Ctrl+Z"))
         act_undo.setEnabled(can_undo)
         act_undo.triggered.connect(self.requestUndo.emit)
 
-        act_redo = menu.addAction("重做 (Redo)")
+        act_redo = menu.addAction(t("重做 (Redo)"))
         act_redo.setIcon(get_icon("redo.png"))
         act_redo.setShortcut(QKeySequence("Ctrl+Y"))
         act_redo.setEnabled(can_redo)
         act_redo.triggered.connect(self.requestRedo.emit)
 
-        act_reset = menu.addAction("重置所有参数 (Reset All)")
+        act_reset = menu.addAction(t("重置所有参数 (Reset All)"))
         act_reset.setIcon(get_icon("reset.png"))
         act_reset.setShortcut(QKeySequence("Ctrl+R"))
         act_reset.setEnabled(can_reset)
@@ -3800,13 +3801,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 ang = float(crop_cfg.get("angle", 0.0))
                 if abs(cw - 1.0) > 0.001 or abs(ch - 1.0) > 0.001 or abs(cx) > 0.001 or abs(cy) > 0.001 or rot != 0 or abs(ang) > 0.01 or crop_cfg.get("flip_h") or crop_cfg.get("flip_v"):
                     has_active_crop = True
-        act_clear_crop = menu.addAction("清除裁切")
+        act_clear_crop = menu.addAction(t("清除裁切"))
         act_clear_crop.setEnabled(has_active_crop)
         act_clear_crop.triggered.connect(self.requestClearCrop.emit)
 
         menu.addSeparator()
 
-        menu_bg = menu.addMenu("背景颜色")
+        menu_bg = menu.addMenu(t("背景颜色"))
         menu_bg.setStyleSheet(get_darkroom_menu_style())
         bg_group = QActionGroup(self)
         bg_group.setExclusive(True)
@@ -3826,12 +3827,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         menu.addSeparator()
 
-        act_quick = menu.addAction("快速扫描 (上次参数)")
+        act_quick = menu.addAction(t("快速扫描 (上次参数)"))
         act_quick.setIcon(get_icon("quick_export.png"))
         act_quick.setShortcut(QKeySequence("Ctrl+Shift+E"))
         act_quick.triggered.connect(self.requestQuickExport.emit)
 
-        act_export = menu.addAction("扫描照片 (Scan)...")
+        act_export = menu.addAction(t("扫描照片 (Scan)..."))
         act_export.setIcon(get_icon("export.png"))
         act_export.setShortcut(QKeySequence("Ctrl+E"))
         act_export.triggered.connect(self.requestExport.emit)
@@ -4153,7 +4154,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
             key, _ = eng._lut_cache_key(film, paper, 17, params, pmode)
             return key
         except Exception as ex:      # noqa: BLE001 - a missing key must not break an export
-            print(f"[DarkroomGLCanvas] grain key 计算失败，退回纯 LUT: {ex}")
+            print(f'[DarkroomGLCanvas] grain key failed, falling back to LUT only: {ex}')
             return None
 
     def last_offscreen_source_space(self):
@@ -4187,8 +4188,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # black export; the tile renderer (with the 3-sigma overlap from
         # halation_model.halation_overlap_px) is the planned fix.
         if max(int(target_w), int(target_h)) > 16384:
-            message = (f"{target_w}×{target_h} 图像超出 GPU 纹理上限 16384 px，"
-                       f"已改用 CPU 导出（较慢，结果与画面一致）")
+            message = (t('{target_w}×{target_h} 图像超出 GPU 纹理上限 16384 px，已改用 CPU 导出（较慢，结果与画面一致）', target_w=target_w, target_h=target_h))
             print(f"[DarkroomGLCanvas] render_offscreen: {message}")
             self.gpuFallback.emit(message)
             return None
