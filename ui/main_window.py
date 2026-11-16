@@ -755,6 +755,9 @@ IMPORT_DRAIN_MAX_ITEMS = 12
 # 导入期首图只铺内嵌 JPEG，全分辨率链等导入结束再跑（那一次 1.4-1.9 s，见
 # `_show_import_placeholder`）；留一拍先让状态栏和底片条画出来。
 IMPORT_DEFERRED_SWITCH_DELAY_MS = 120
+# 恢复会话时底片栏的放行阀门：严格按 idx 放行会死等队首，而总有一张要 3-4 s（冷启动
+# 那次或没缓存那张）。等超过这个时长就把已到手的结果按序先放出去，那一格留洞后补。
+RESTORE_RELEASE_STALL_MS = 250.0
 
 
 # A measurement is only complete when all four keys are present: sidecars written before the
@@ -1201,21 +1204,39 @@ class SessionRestoreWorker(QThread):
             remaining_indices = [i for i in range(total_files) if i != target_idx]
             max_workers = min(8, max(2, (os.cpu_count() or 4)))
             completed_count = 1
-            # 已拿到结果的格子，按 idx 按放行 —— 恢复会话必须**从左往右**一格一格亮。
-            # `as_completed` 是乱序的：解码快的那几张先回来，底片栏中间就先开几个洞，后面
-            # 才补上（用户看到的是"未按顺序加载"）。所以这里攒着，只有队首到了才放行。
+            # 已拿到结果的格子，按 idx 放行 —— 恢复会话要**从左往右**一格一格亮。
+            # `as_completed` 是乱序的：解码快的那几张先回来，底片栏中间就先开几个洞。
+            # 但**不能死等队首**：实测总有一张（冷启动那次，或没缓存的）要 3-4 s，
+            # 严格按序的结果是"进度跑到 450/454、底片栏一格不动，最后一秒全亮"。
+            # 所以队首等超过 RESTORE_RELEASE_STALL_MS 就把已到手的按 idx 顺序先放出去，
+            # 那一格留个洞，等它回来再补 —— 观感是跟着进度实时长，偶尔晚一格。
             ready = {target_idx: target_entry}
-            next_idx = 0
+            released = set()
+            next_idx = [0]
+            head_since = [time.perf_counter()]
 
-            def _release_in_order():
-                nonlocal next_idx
-                while next_idx in ready:
-                    idx_ = next_idx
-                    entry_ = ready.pop(next_idx)
-                    next_idx += 1
-                    if entry_ is None or self._stopped:
-                        continue
+            def _emit_slot(idx_, entry_):
+                released.add(idx_)
+                if entry_ is not None and not self._stopped:
                     self.photoReady.emit(idx_, entry_)
+
+            def _release_in_order(flush=False):
+                while True:
+                    nxt = next_idx[0]
+                    if nxt in released:
+                        next_idx[0] = nxt + 1
+                        head_since[0] = time.perf_counter()
+                        continue
+                    if nxt in ready:
+                        entry_ = ready.pop(nxt)
+                        _emit_slot(nxt, entry_)
+                        next_idx[0] = nxt + 1
+                        head_since[0] = time.perf_counter()
+                        continue
+                    break
+                if flush:
+                    for idx_ in sorted(k for k in ready if k > next_idx[0]):
+                        _emit_slot(idx_, ready.pop(idx_))
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_map = {
@@ -1235,7 +1256,8 @@ class SessionRestoreWorker(QThread):
                         logger.warning(f"Error restoring photo at idx {idx}: {e}")
                         entry = None
                     ready[idx] = entry
-                    _release_in_order()
+                    stalled = (time.perf_counter() - head_since[0]) * 1000 >= RESTORE_RELEASE_STALL_MS
+                    _release_in_order(flush=stalled)
                     completed_count += 1
                     if completed_count % 5 == 0 or completed_count == total_files:
                         self.progress.emit(completed_count, total_files)
@@ -3067,7 +3089,12 @@ class DarkroomMainWindow(QMainWindow):
         worker.photoReady.connect(self._enqueue_restore_photo)
         worker.activePhotoReady.connect(_on_active_photo_ready)
         worker.progress.connect(_on_progress)
-        worker.restoreFinished.connect(_on_restore_finished)
+        # 收尾也必须排在投放队列后面：`restoreFinished` 是直连，worker 一跑完就到，
+        # 那时队列里通常还有几百条没投放。收尾先跑就会"进度到 454/454，底片栏一下全亮"，
+        # 后面的投放再一条条白白重填。
+        worker.restoreFinished.connect(
+            lambda all_photos, uncached, target: self._finalize_after_delivery(
+                functools.partial(_on_restore_finished, all_photos, uncached, target)))
         worker.failed.connect(_on_failed)
 
         if os.environ.get("FAST_TEST"):

@@ -196,7 +196,9 @@ class FilmstripItemWidget(QFrame):
         cur_h = target_h if (target_h and target_h > 0) else 82
         self.setFixedSize(cur_w, cur_h)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.update_tooltip()
+        # 造格子时**不读盘**（probe=False）：恢复 454 张会话要连造 454 个格子，
+        # 每个都 rawpy.imread() 一次尺寸就把主线程钉死好几秒。悬停时才真探测。
+        self.update_tooltip(probe=False)
         self._apply_theme_style()
         theme_manager.themeChanged.connect(self._apply_theme_style)
 
@@ -360,16 +362,22 @@ class FilmstripItemWidget(QFrame):
         if photo_data.get("path"):
             from core.path_utils import normalize_path
             self.file_path = normalize_path(photo_data["path"])
-        self.update_tooltip()
+        self.update_tooltip(probe=False)
 
     def _apply_theme_style(self, _theme=None):
         self.setStyleSheet(f"FilmstripItemWidget {{ background: transparent; border: none; }}\n{theme_manager.widget_tooltip_stylesheet()}")
 
-    def update_tooltip(self):
-        """Dynamically build tooltip ensuring resolution is accurate and never 0 x 0."""
-        w = int(self.photo_data.get("width", 0))
-        h = int(self.photo_data.get("height", 0))
-        if (w <= 0 or h <= 0) and self.file_path and os.path.isfile(self.file_path):
+    def update_tooltip(self, probe=False):
+        """Dynamically build tooltip ensuring resolution is accurate and never 0 x 0.
+
+        ``probe=False`` 时**不碰磁盘**：只在照片条目里已有尺寸时显示。原因见 __init__：
+        恢复 454 张会话要一次性造 454 个格子，每个都去 rawpy.imread() 读尺寸就是 454 次
+        打开 RAW，实测把主线程钉死 4 s（底片栏看着像"一直不动，最后一下全亮"）。
+        真正的探测留给 ``ToolTip`` 事件（用户真的悬停时才做一次）。
+        """
+        w = int(self.photo_data.get("width", 0) or 0)
+        h = int(self.photo_data.get("height", 0) or 0)
+        if probe and (w <= 0 or h <= 0) and self.file_path and os.path.isfile(self.file_path):
             try:
                 from core import session_cache_manager
                 dw, dh = session_cache_manager.get_image_dimensions(self.file_path)
@@ -379,11 +387,12 @@ class FilmstripItemWidget(QFrame):
                     self.photo_data["height"] = h
             except Exception:
                 pass
-        self.setToolTip(f"{self.filename}\n路径: {self.file_path}\n尺寸: {w} × {h}")
+        size_txt = f"{w} × {h}" if (w > 0 and h > 0) else "—"
+        self.setToolTip(f"{self.filename}\n路径: {self.file_path}\n尺寸: {size_txt}")
 
     def event(self, e):
         if e.type() == QEvent.Type.ToolTip:
-            self.update_tooltip()
+            self.update_tooltip(probe=True)
         return super().event(e)
 
     def mousePressEvent(self, event):
