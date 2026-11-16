@@ -17,6 +17,12 @@ from ui.smooth_scroll import SmoothScrollArea
 
 _CROP_BADGE_PM = None
 
+# 底片栏的最小高度。曾经是 64 —— 那是"能塞进去"的下限，不是"能看"的下限：格子高
+# 只有 48 px 时，35mm 齿孔带（14% 高）、画面、文件名和星级全挤在一格里，看起来就是
+# 一排贴在一起的缩略图。分区布局又被写进 config（实测存成 [564, 64]），下次启动照样
+# 还原成 64。所以这里直接把下限抬到"一格里塞得下胶片框"的高度，由 QSplitter 强制执行。
+FILMSTRIP_MIN_HEIGHT = 132
+
 def _get_crop_badge_pixmap() -> QPixmap:
     global _CROP_BADGE_PM
     if _CROP_BADGE_PM is None:
@@ -721,7 +727,7 @@ class FilmstripWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(64)
+        self.setMinimumHeight(FILMSTRIP_MIN_HEIGHT)
         self.setMaximumHeight(260)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._item_widgets = {}
