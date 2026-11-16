@@ -15040,6 +15040,12 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
         old_res = config_manager.get_preferences().get("preview_max_edge", 2048)
         dlg = PreferencesDialog(parent=self)
         if dlg.exec():
+            # 语言切换的提示放在**关窗之后**：在对话框里弹模态框会把 accept() 堵住
+            # （用户看到的就是"点保存没反应、也没有提示"）。
+            _notice = getattr(dlg, "_pending_notice", None)
+            if _notice:
+                from ui.confirm_dialog import show_darkroom_info
+                show_darkroom_info(self, *_notice, badge_symbol="✓")
             self._apply_hq_preview_pref(announce=True)
             self._apply_display_cm_pref()
             new_res = config_manager.get_preferences().get("preview_max_edge", 2048)

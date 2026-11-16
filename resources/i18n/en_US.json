@@ -811,5 +811,8 @@
   "所有支持的图像与 RAW 负片": "All supported images and RAW negatives",
   "相机 RAW 负片": "Camera RAW negatives",
   "无损位图": "Lossless bitmaps",
-  "所有文件": "All files"
+  "所有文件": "All files",
+  "界面语言已保存": "Interface language saved",
+  "重新启动 SpektraDarkroom 后生效。": "It takes effect after restarting SpektraDarkroom.",
+  "切换后需重启生效": "Restart to apply"
 }

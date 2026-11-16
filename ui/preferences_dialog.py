@@ -41,6 +41,8 @@ class PreferencesDialog(QDialog):
         # 相纸清单来自引擎；保存后要用主窗口把"没选过相纸"的照片重刷一遍。
         self._engine = getattr(parent, "engine", None)
         self._parent_window = parent
+        # 保存后要提示什么（只在语言真的变了时填），由 open_preferences() 负责弹
+        self._pending_notice = None
 
         is_dark = theme_manager.is_dark()
         self.setWindowIcon(get_icon("dlg_prefs.png", is_dark=is_dark))
@@ -652,12 +654,15 @@ class PreferencesDialog(QDialog):
         lbl_lang.setFixedWidth(100)
         r_lang.addWidget(lbl_lang)
         self.combo_language = QComboBox()
-        self.combo_language.setFixedWidth(180)
+        self.combo_language.setFixedWidth(150)
         setup_solid_combobox(self.combo_language)
         for _code, _name in i18n.available_languages().items():
             self.combo_language.addItem(_name, _code)
         self.combo_language.setToolTip(t("界面语言（切换后需重启软件生效）"))
         r_lang.addWidget(self.combo_language)
+        lbl_lang_hint = QLabel(t("切换后需重启生效"))
+        lbl_lang_hint.setStyleSheet("color:#8a90a3;")
+        r_lang.addWidget(lbl_lang_hint)
         r_lang.addStretch(1)
         l_dr.addLayout(r_lang)
 
@@ -1260,7 +1265,14 @@ class PreferencesDialog(QDialog):
                     self._parent_window.on_default_ffchain_paper_changed()
             except Exception:
                 pass
+        # 语言变了：**先关窗再提示**。在这里弹模态框会把 accept() 堵在后面
+        # （对话框是模态 + 无边框，消息框容易排在它后面，用户看到的就是"点保存没反应"），
+        # 所以只记下待提示内容，由 open_preferences() 在 exec() 返回后弹。
         if lang_changed:
-            show_darkroom_info(self, t("界面语言"), t("界面语言已保存，重启软件后生效。"))
+            self._pending_notice = (
+                t("界面语言"),
+                t("界面语言已保存"),
+                t("重新启动 SpektraDarkroom 后生效。"),
+            )
         self.accept()
 
