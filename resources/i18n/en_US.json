@@ -830,6 +830,5 @@
   "点在画布黑边上，请点照片内部": "That is the letterbox — click inside the photo",
   "这块区域没有可用像素，换个位置": "No usable pixels there — try another spot",
   "吸管：把指针移到画面内侧取色": "Eyedropper: move the pointer inside the photo to sample",
-  "吸管 R {r}  G {g}  B {b}　偏差 {pct:.1f}%": "Eyedropper  R {r}  G {g}  B {b}   deviation {pct:.1f}%",
-  "　✓ 中性": "  ✓ neutral"
+  "吸管 R {r}  G {g}  B {b}　　偏差 {pct:.1f}%": "Eyedropper  R {r}  G {g}  B {b}    deviation {pct:.1f}%"
 }

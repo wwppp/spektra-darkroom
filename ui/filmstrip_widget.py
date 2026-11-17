@@ -708,6 +708,8 @@ class FilmstripWidget(QWidget):
     """ACR-style bottom negative filmstrip with 35mm frames, multi-selection,
     horizontal wheel scrolling, and batch export right-click menu.
     """
+    # 格子之间的水平间距（内容宽度计算和布局间距必须用同一个值，否则末格会被算宽）
+    CELL_GAP = 3
     photoSelected = Signal(str)
     photoRemoved = Signal(str)
     photosRemoved = Signal(list)
@@ -1121,7 +1123,8 @@ class FilmstripWidget(QWidget):
         # 一条横向滚动条，实测内容高 118 / 格高 108 → 上下各 5 px，跟格间距 6 基本一致。
         # 所以左右也用 6，不再留 16 那一大截。
         self.scroll_layout.setContentsMargins(6, 0, 6, 0)
-        self.scroll_layout.setSpacing(6)
+        # 格子间距 6 -> 3（用户要求缩小一半）；左右留白保持 6，与上下留白对齐。
+        self.scroll_layout.setSpacing(self.CELL_GAP)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         self._empty_lbl = QLabel(t("底片槽路为空，点击右侧「＋ 添加」或拖入 RAW / 照片文件开始扫描"))
@@ -1586,7 +1589,7 @@ class FilmstripWidget(QWidget):
             if end_stretch is not None:
                 end_stretch.changeSize(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             # 12 = 左右各 6 的留白（见 scroll_layout 的 contentsMargins，与上下 5-6 px 对齐）
-            total_w = 12 + visible_count * item_w + max(0, visible_count - 1) * 6
+            total_w = 12 + visible_count * item_w + max(0, visible_count - 1) * self.CELL_GAP
             self.scroll_content.setMinimumWidth(total_w)
             self.scroll_layout.invalidate()
             self.scroll_layout.activate()

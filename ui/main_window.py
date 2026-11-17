@@ -2675,6 +2675,8 @@ class DarkroomMainWindow(QMainWindow):
         self.active_photo_id = None
         self._current_photo_path = None
         self._photo_is_dirty = False
+        # 吸管激活期间状态栏那条色值读数常驻，超时也不清（退出吸管才让位）
+        self._wb_probe_active = False
         self._current_worker = None
         self._import_worker = None
         self._single_photo_loader = None
@@ -6574,6 +6576,9 @@ class DarkroomMainWindow(QMainWindow):
     def _on_status_timeout(self):
         if getattr(self, "_is_importing", False) or getattr(self, "_is_multi_selecting", False):
             return
+        if getattr(self, "_wb_probe_active", False):
+            # 吸管没退出，读数就一直留着（用户要求：不要切回文件名）
+            return
         if hasattr(self, 'status_slot'):
             self.status_slot.transition_to("info", duration_ms=180, on_finished=self._clear_status_text)
         else:
@@ -8990,12 +8995,14 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.set_app_status(msg, timeout_ms=3000)
             return
         self.btn_wb_picker.set_active(True)
+        self._wb_probe_active = True
         self.set_app_status(
             t("吸管已就绪：在画布上点一下中性色（灰卡/白墙），右键或 Esc 退出"),
-            timeout_ms=4000)
+            timeout_ms=0)
 
     def _on_wb_picked(self, res):
         self.btn_wb_picker.set_active(False)
+        self._wb_probe_active = False
         from core import wb_pick
         if not isinstance(res, dict) or not res.get("ok"):
             return
@@ -9024,6 +9031,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
     def _on_wb_pick_cancelled(self, reason):
         self.btn_wb_picker.set_active(False)
+        self._wb_probe_active = False
         if reason == "picked":
             return
         if reason in ("right_click", "escape", "toggle"):
@@ -9032,18 +9040,21 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.set_app_status(t("吸管已退出：当前状态不能取色"), timeout_ms=3000)
 
     def _on_wb_probe(self, info):
-        """吸管悬停时在状态栏实时报色值，用来判断这块是不是中性灰。"""
+        """吸管悬停时在状态栏实时报色值，用来判断这块是不是中性灰。
+
+        吸管激活期间这条读数**常驻**（不退回文件名），退出吸管才让位。
+        """
         if not isinstance(info, dict):
             return
+        self._wb_probe_active = True
         if not info.get("ok"):
-            self.set_app_status(t("吸管：把指针移到画面内侧取色"), timeout_ms=600)
+            self.set_app_status(t("吸管：把指针移到画面内侧取色"), timeout_ms=0)
             return
         r, g, b = info.get("rgb8", (0, 0, 0))
         pct = float(info.get("delta_pct", 0.0))
-        body = t('吸管 R {r}  G {g}  B {b}　偏差 {pct:.1f}%', r=r, g=g, b=b, pct=pct)
-        if info.get("neutral"):
-            body += t("　✓ 中性")
-        self.set_app_status(body, timeout_ms=700)
+        self.set_app_status(
+            t('吸管 R {r}  G {g}  B {b}　　偏差 {pct:.1f}%', r=r, g=g, b=b, pct=pct),
+            timeout_ms=0)
 
     def _on_wb_pick_hint(self, reason):
         if reason == "outside":
@@ -9058,6 +9069,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.canvas.end_wb_pick(why or "abort", notify=False)
         except Exception:
             pass
+        self._wb_probe_active = False
         if hasattr(self, "btn_wb_picker"):
             self.btn_wb_picker.set_active(False)
 
