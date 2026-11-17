@@ -14,6 +14,8 @@ dist/
 # PyInstaller 的上一版备份目录（打包前 mv 出来的，别让 git add -A 吃进去）
 build_prev_v*/
 dist_prev_v*/
+# 待删除的旧产物（先改名再删，删不掉时留在这儿也不该进仓库）
+_trash_*/
 downloads/
 eggs/
 .eggs/
