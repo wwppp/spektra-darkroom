@@ -6116,6 +6116,7 @@ class DarkroomMainWindow(QMainWindow):
         self.canvas.wbPicked.connect(self._on_wb_picked)
         self.canvas.wbPickCancelled.connect(self._on_wb_pick_cancelled)
         self.canvas.wbPickHint.connect(self._on_wb_pick_hint)
+        self.canvas.wbProbe.connect(self._on_wb_probe)
 
     def _update_recent_menu(self):
         self.recent_menu.clear()
@@ -9029,6 +9030,20 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.set_app_status(t("已退出吸管"), timeout_ms=2000)
         else:
             self.set_app_status(t("吸管已退出：当前状态不能取色"), timeout_ms=3000)
+
+    def _on_wb_probe(self, info):
+        """吸管悬停时在状态栏实时报色值，用来判断这块是不是中性灰。"""
+        if not isinstance(info, dict):
+            return
+        if not info.get("ok"):
+            self.set_app_status(t("吸管：把指针移到画面内侧取色"), timeout_ms=600)
+            return
+        r, g, b = info.get("rgb8", (0, 0, 0))
+        pct = float(info.get("delta_pct", 0.0))
+        body = t('吸管 R {r}  G {g}  B {b}　偏差 {pct:.1f}%', r=r, g=g, b=b, pct=pct)
+        if info.get("neutral"):
+            body += t("　✓ 中性")
+        self.set_app_status(body, timeout_ms=700)
 
     def _on_wb_pick_hint(self, reason):
         if reason == "outside":

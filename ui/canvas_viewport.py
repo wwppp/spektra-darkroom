@@ -1730,6 +1730,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
     wbPicked = Signal(object)
     wbPickCancelled = Signal(str)
     wbPickHint = Signal(str)
+    # 吸管激活时，光标处的实时色值（给状态栏判断"这块是不是中性灰"）
+    wbProbe = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1893,6 +1895,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._wb_prev_cursor = None
         self._wb_press_armed = False
         self._wb_right_click_ts = 0.0
+        self._wb_probe_ts = 0.0
 
         # Floating HUD Badges for Before / After Compare (Native QLabels immune to OpenGL texture corruption)
         self.badge_before = QLabel(t("原片"), self)
@@ -3585,6 +3588,25 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 "samples": int(patch.reshape(-1, 3).shape[0]),
                 "texture": (int(w), int(h))}
 
+    def probe_wb_at(self, pos, radius=1):
+        """光标处的实时色值，供状态栏显示。返回 None 表示不在画面上。"""
+        res = self.pick_source_linear(pos, radius=radius)
+        if not res.get("ok"):
+            return {"ok": False, "reason": res.get("reason", "")}
+        lin = np.asarray(res["rgb"], dtype=np.float64)
+
+        def enc(v):
+            v = float(max(0.0, min(1.0, v)))
+            s = v * 12.92 if v <= 0.0031308 else 1.055 * (v ** (1.0 / 2.4)) - 0.055
+            return int(round(max(0.0, min(1.0, s)) * 255))
+
+        r8, g8, b8 = enc(lin[0]), enc(lin[1]), enc(lin[2])
+        hi, lo = max(r8, g8, b8), min(r8, g8, b8)
+        mean = max(1e-6, (r8 + g8 + b8) / 3.0)
+        return {"ok": True, "rgb8": (r8, g8, b8), "rgb_linear": tuple(float(v) for v in lin),
+                "delta": int(hi - lo), "delta_pct": float(hi - lo) / mean * 100.0,
+                "neutral": (hi - lo) <= 3}
+
     def begin_wb_pick(self, radius=2):
         """进入吸管取色模式：左键取色、右键 / Esc 退出，期间不允许拖动画面。"""
         ok, reason = self._wb_pick_available()
@@ -3631,6 +3653,20 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._wb_prev_cursor = None
         if was and notify:
             self.wbPickCancelled.emit(reason)
+
+    def _emit_wb_probe(self, pos):
+        """把光标处的色值发给状态栏；限流 ~30 Hz，取样本身只是数组索引，很便宜。"""
+        import time as _time
+        now = _time.monotonic()
+        if now - getattr(self, "_wb_probe_ts", 0.0) < 0.033:
+            return
+        self._wb_probe_ts = now
+        try:
+            info = self.probe_wb_at(pos, radius=1)
+        except Exception:
+            return
+        if info:
+            self.wbProbe.emit(info)
 
     def is_wb_picking(self):
         return bool(getattr(self, "_wb_picking", False))
@@ -4200,6 +4236,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
                 # 吸管期间光标必须一直是吸管，别被 hover 的抓手覆盖
                 from ui.wb_eyedropper import eyedropper_cursor
                 self.setCursor(eyedropper_cursor())
+                self._emit_wb_probe(event.position())
             elif self._is_hovering_split_line(event.position()):
                 self.setCursor(Qt.CursorShape.SplitHCursor)
             else:
