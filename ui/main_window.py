@@ -2139,6 +2139,9 @@ class FadingSplitterHandle(QSplitterHandle):
         # 指示线贴哪一侧：'trailing' = 竖 handle 贴右、横 handle 贴下（默认，贴着后面那个
         # pane）；'leading' = 竖 handle 贴左、横 handle 贴上。由 FadingSplitter 按索引下发。
         self.indicator_side = "trailing"
+        # 有些缝两侧都是深色（画布 ↔ 底片条），按主题画的浅色 gutter 会变成一条亮线 ——
+        # 这种情况下由 owner 指定填充色，让这条缝"消失"。
+        self.fill_override = None
         theme_manager.themeChanged.connect(lambda _: self.update())
 
     def enterEvent(self, ev):
@@ -2156,7 +2159,23 @@ class FadingSplitterHandle(QSplitterHandle):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         is_dark = theme_manager.is_dark()
         w, h = self.width(), self.height()
-        bg_col = QColor('#121316') if is_dark else QColor('#ebedf2')
+        fill = self.fill_override
+        if fill is None:
+            # 按约定读 owner 上的默认填充，**不做 index/身份判断**：QSplitter 在重建
+            # children 时会在列表外留下孤儿 handle，sp.handle(i) is self 可能永远为假。
+            fill = getattr(self.parent(), '_default_handle_fill', None)
+        if fill == 'filmstrip':
+            # 跟着**胶片槽路**的顶色走：这条缝夹在工具条和胶片槽路之间，按主题的浅灰
+            # 画出来就是一条悬在两者中间的亮缝；取槽路顶色后它变成槽路自己的上沿。
+            try:
+                from ui.theme_manager import theme_manager as _tm
+                fill = '#06070a' if _tm.is_dark() else '#d6dbe4'
+            except Exception:
+                fill = None
+        if fill:
+            bg_col = QColor(fill)
+        else:
+            bg_col = QColor('#121316') if is_dark else QColor('#ebedf2')
         painter.fillRect(0, 0, w, h, bg_col)
 
         # The indicator is a hover affordance only: it stays invisible until the pointer is
@@ -2204,9 +2223,24 @@ class FadingSplitter(QSplitter):
         self.setChildrenCollapsible(False)
         self.setStyleSheet("QSplitter { background: transparent; }")
         self._indicator_sides = {}
+        self._default_handle_fill = None
 
     def createHandle(self):
         return FadingSplitterHandle(self.orientation(), self)
+
+    def set_handle_fill(self, index, color):
+        """指定这条 splitter 上缝的填充色（None = 跟随主题）。
+
+        用来让"两侧都是深色"的缝彻底看不出来：画布/工具条与胶片条之间那条 4 px 的
+        gutter 按主题画成浅色时，就是用户看到的那条亮缝。
+
+        实现上只记一个默认填充，handle 在 paint 时自己读 —— **不要在这里调
+        `self.handle(index)`**：那会在布局建 handle 之前先造出一条孤儿 handle，
+        之后真正参与布局的是另一条，改不到它（实测踩过两次）。
+        """
+        self._default_handle_fill = color
+        # 只重绘，不碰 handle 列表
+        self.update()
 
     def set_indicator_side(self, index, side):
         """把第 index 条缝的指示线钉到某一侧（'leading' / 'trailing'）。"""
@@ -4586,6 +4620,8 @@ class DarkroomMainWindow(QMainWindow):
         self.center_splitter.setStretchFactor(0, 1)
         self.center_splitter.setStretchFactor(1, 0)
         self.center_splitter.setSizes([600, 100])
+        # 这条缝两头都是深色（画布/工具条 ↔ 胶片槽路），按主题画浅色会显出一条亮缝。
+        self.center_splitter.set_handle_fill(0, "filmstrip")
 
         self.main_splitter.addWidget(self.center_splitter)
 

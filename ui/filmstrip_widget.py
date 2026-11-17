@@ -1050,12 +1050,14 @@ class FilmstripWidget(QWidget):
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 2, 0, 2)
+        # 顶部不留白：上面那条 4 px 缝已经填成槽路的深色，再留 2 px 浅色面板底
+        # 就会在画布和胶片条之间重新显出一条亮线。
+        main_layout.setContentsMargins(0, 0, 0, 2)
         main_layout.setSpacing(6)
         is_dark = theme_manager.is_dark()
         top_border = "#1c1e28" if is_dark else "#c2c8d4"
         bg = theme_manager.color('filmstrip_bg')
-        self.setStyleSheet(f"FilmstripWidget {{ background: {bg}; border: none; border-top: 1px solid {top_border}; }}\n{theme_manager.widget_tooltip_stylesheet()}")
+        self.setStyleSheet(f"FilmstripWidget {{ background: {bg}; border: none; }}\n{theme_manager.widget_tooltip_stylesheet()}")
 
         # 1. Long Concave Film Track Channel (长条凹形胶片条槽路)
         self.track_container = FilmTrackContainer(self)
@@ -1236,7 +1238,7 @@ class FilmstripWidget(QWidget):
         top_border = "#1c1e28" if is_dark else "#c2c8d4"
         bg = theme_manager.color('filmstrip_bg')
         tt_ss = theme_manager.widget_tooltip_stylesheet()
-        self.setStyleSheet(f"FilmstripWidget {{ background: {bg}; border: none; border-top: 1px solid {top_border}; }}\n{tt_ss}")
+        self.setStyleSheet(f"FilmstripWidget {{ background: {bg}; border: none; }}\n{tt_ss}")
         if hasattr(self, "track_container") and self.track_container:
             self.track_container.setStyleSheet(f"background: transparent; border: none;\n{tt_ss}")
             self.track_container.update()
