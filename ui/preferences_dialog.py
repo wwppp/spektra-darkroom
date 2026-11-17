@@ -28,6 +28,10 @@ from core import session_cache_manager
 
 
 class PreferencesDialog(QDialog):
+    # 所有下拉框共用同一个宽度，右端才能对齐。单行改这里，别在下面各写一个数字
+    # （2026-11-17：语言那一行写的是 150，只有它短一截）。
+    COMBO_W = 180
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("首选项"))
@@ -562,7 +566,7 @@ class PreferencesDialog(QDialog):
         lbl_hw.setFixedWidth(100)
         r_hw.addWidget(lbl_hw)
         self.combo_hw_accel = QComboBox()
-        self.combo_hw_accel.setFixedWidth(180)
+        self.combo_hw_accel.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_hw_accel)
         self.combo_hw_accel.addItem(t("关闭"), "off")
         self.combo_hw_accel.addItem(t("视口与缩略图"), "preview_only")
@@ -576,7 +580,7 @@ class PreferencesDialog(QDialog):
         lbl_res.setFixedWidth(100)
         r_res.addWidget(lbl_res)
         self.combo_preview_res = QComboBox()
-        self.combo_preview_res.setFixedWidth(180)
+        self.combo_preview_res.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_preview_res)
         self.combo_preview_res.addItem("1080P", 1440)
         self.combo_preview_res.addItem("2K", 2048)
@@ -623,7 +627,7 @@ class PreferencesDialog(QDialog):
         lbl_theme.setFixedWidth(100)
         r_theme.addWidget(lbl_theme)
         self.combo_ui_theme = QComboBox()
-        self.combo_ui_theme.setFixedWidth(180)
+        self.combo_ui_theme.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_ui_theme)
         self.combo_ui_theme.addItem(t("浅色"), "light")
         self.combo_ui_theme.addItem(t("深色"), "dark")
@@ -638,7 +642,7 @@ class PreferencesDialog(QDialog):
         lbl_font.setFixedWidth(100)
         r_font.addWidget(lbl_font)
         self.combo_font_size = QComboBox()
-        self.combo_font_size.setFixedWidth(180)
+        self.combo_font_size.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_font_size)
         for _key in ("small", "medium", "large"):
             self.combo_font_size.addItem(ui_scale.LABELS[_key], _key)
@@ -654,7 +658,9 @@ class PreferencesDialog(QDialog):
         lbl_lang.setFixedWidth(100)
         r_lang.addWidget(lbl_lang)
         self.combo_language = QComboBox()
-        self.combo_language.setFixedWidth(150)
+        # 180，与上面几行（主题/字号/画幅/相纸）同一个宽度：之前写 150，只有这一行
+        # 比其他下拉框短一截，右端参差不齐。
+        self.combo_language.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_language)
         for _code, _name in i18n.available_languages().items():
             self.combo_language.addItem(_name, _code)
@@ -671,7 +677,7 @@ class PreferencesDialog(QDialog):
         lbl_fmt.setFixedWidth(100)
         r_fmt.addWidget(lbl_fmt)
         self.combo_default_fmt = QComboBox()
-        self.combo_default_fmt.setFixedWidth(180)
+        self.combo_default_fmt.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_default_fmt)
         self.combo_default_fmt.addItem("35mm", 35.0)
         self.combo_default_fmt.addItem("16mm", 16.0)
@@ -690,7 +696,7 @@ class PreferencesDialog(QDialog):
         lbl_dpaper.setFixedWidth(100)
         r_dpaper.addWidget(lbl_dpaper)
         self.combo_default_paper = QComboBox()
-        self.combo_default_paper.setFixedWidth(180)
+        self.combo_default_paper.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_default_paper)
         # 底片直扫（不印相）也是合法默认值：新底片先看原始负像，这是出厂默认。
         self.combo_default_paper.addItem(t("胶片直扫"), "none")
@@ -726,7 +732,7 @@ class PreferencesDialog(QDialog):
         lbl_fpaper.setFixedWidth(100)
         r_fpaper.addWidget(lbl_fpaper)
         self.combo_default_ffchain_paper = QComboBox()
-        self.combo_default_ffchain_paper.setFixedWidth(180)
+        self.combo_default_ffchain_paper.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_default_ffchain_paper)
         for item in papers:
             pid = str(item.get("id") or "")
@@ -847,7 +853,7 @@ class PreferencesDialog(QDialog):
         lbl_max_size.setFixedWidth(100)
         r_max_size.addWidget(lbl_max_size)
         self.combo_cache_max_size = QComboBox()
-        self.combo_cache_max_size.setFixedWidth(180)
+        self.combo_cache_max_size.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_cache_max_size)
         self.combo_cache_max_size.addItem("500 MB", 0.5)
         self.combo_cache_max_size.addItem("1 GB", 1.0)
@@ -864,7 +870,7 @@ class PreferencesDialog(QDialog):
         lbl_interval.setFixedWidth(100)
         r_interval.addWidget(lbl_interval)
         self.combo_clean_interval = QComboBox()
-        self.combo_clean_interval.setFixedWidth(180)
+        self.combo_clean_interval.setFixedWidth(self.COMBO_W)
         setup_solid_combobox(self.combo_clean_interval)
         self.combo_clean_interval.addItem(t("7 天"), 7)
         self.combo_clean_interval.addItem(t("10 天"), 10)
