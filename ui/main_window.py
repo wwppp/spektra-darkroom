@@ -8113,6 +8113,39 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         self.set_app_status(t('已应用暗房配方：{affected_count} 张底片', affected_count=affected_count), timeout_ms=3000)
 
+    def _paper_for_restore(self, film, paper):
+        """快照里的相纸 → 一张可以拿去做烘焙的纸 id。
+
+        空串是"这条链上还没选过相纸"（`.sdc` 与撤销快照都这么存，见
+        `_photo_paper_is_explicit`）。恢复画布时不能原样把空串交给烘焙：`paper_available()`
+        把空串当直扫放行，`_load_profile("")` 返回 None，Simulator 里 `params.print=None`
+        直接抛 —— 撤销会因此断在换纸那一步，缩略图已经刷完，画布和滑块停在原地。
+        """
+        paper = str(paper or "")
+        if paper:
+            return paper
+        return self._default_paper_for(film) or "none"
+
+    def _restore_stock_switches(self):
+        """撤销/快照恢复：重放「显影模式 → 胶卷 → 相纸」三次切换。
+
+        每一步都会重烘 LUT，一旦抛异常，后面的 `_sync_full_params_to_pipeline()` 就再也
+        不会执行 —— 用户看到的是"缩略图撤销了，画面和滑块一动不动"。这里逐步兜住：
+        失败只记日志、继续往下走，滑块同步和画布推送至少能落地。
+        """
+        steps = [("print_mode", lambda: self.on_switch_print_mode(self.current_print_mode, push_undo=False)),
+                 ("film", lambda: self.on_switch_film(self.current_film_stock, push_undo=False))]
+        if self.current_print_mode == "optical":
+            steps.append(("paper", lambda: self.on_switch_paper(self.current_paper_stock, push_undo=False)))
+        for name, step in steps:
+            try:
+                step()
+            except Exception as ex:               # noqa: BLE001 - 恢复链不许被单步拖垮
+                logger.exception(f"Undo/restore: {name} switch failed: {ex}")
+        if self.current_print_mode != "optical":
+            for pid, card in self.paper_cards.items():
+                card.set_active(pid == "none")
+
     def _apply_history_state(self, state):
         if not state:
             return
@@ -8138,7 +8171,10 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 logger.warning(f"Failed switching to {target_pid} during undo: {e}")
 
         self.current_film_stock = state.get("film", "none")
-        self.current_paper_stock = state.get("paper", "none")
+        # 快照里的空串是"没选过相纸"，恢复时落到默认纸：既要让面板有一张卡亮着，也要让
+        # 下面那一串换卷换纸的烘焙拿到真实 id（空串会让烘焙拿到 print=None 直接抛）。
+        _snapshot_paper = state.get("paper", "none")
+        self.current_paper_stock = self._paper_for_restore(state.get("film"), _snapshot_paper)
         self.current_print_mode = state.get("print_mode", "optical")
         self.current_params = dict(state.get("params") or {})
         self.current_params["print_mode"] = self.current_print_mode
@@ -8155,13 +8191,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
             self.current_params["crop"] = dict(default_crop)
 
         self._update_all_sliders_from_params()
-        self.on_switch_print_mode(self.current_print_mode, push_undo=False)
-        self.on_switch_film(self.current_film_stock, push_undo=False)
-        if self.current_print_mode == "optical":
-            self.on_switch_paper(self.current_paper_stock, push_undo=False)
-        else:
-            for pid, card in self.paper_cards.items():
-                card.set_active(pid == "none")
+        self._restore_stock_switches()
 
         if getattr(self.canvas, "is_crop_editing", False):
             self._exit_crop_workspace()
@@ -8182,7 +8212,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
             curr_p = next((p for p in self.photos if p and p.get("id") == self.active_photo_id), None)
             if curr_p:
                 curr_p["film_profile"] = self.current_film_stock
-                curr_p["paper_profile"] = self.current_paper_stock
+                # 存回快照里的原值：空串是"这张没选过相纸"，写成解析出来的默认纸会让
+                # `_photo_paper_is_explicit()` 把它当成用户的选择，之后改首选项不再跟随。
+                curr_p["paper_profile"] = _snapshot_paper
                 curr_p["print_mode"] = self.current_print_mode
                 curr_p["params"] = dict(self.current_params)
                 curr_p["crop"] = dict(crop_data)
@@ -8296,7 +8328,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
         if active_restored and self.active_photo_id in photos_data:
             act_data = photos_data[self.active_photo_id]
             self.current_film_stock = act_data.get("film", "none")
-            self.current_paper_stock = act_data.get("paper", "none")
+            self.current_paper_stock = self._paper_for_restore(self.current_film_stock,
+                                                               act_data.get("paper"))
             self.current_print_mode = act_data.get("print_mode", "optical")
             act_params = dict(act_data.get("params") or {})
             if not act_params:
@@ -8331,13 +8364,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.crop_sidebar.sync_from_overlay(dict(act_crop))
 
             self._update_stock_mode_ui()
-            self.on_switch_print_mode(self.current_print_mode, push_undo=False)
-            self.on_switch_film(self.current_film_stock, push_undo=False)
-            if self.current_print_mode == "optical":
-                self.on_switch_paper(self.current_paper_stock, push_undo=False)
-            else:
-                for pid_card, card in self.paper_cards.items():
-                    card.set_active(pid_card == "none")
+            self._restore_stock_switches()
             self._update_all_sliders_from_params()
             if hasattr(self, "sidebar_content") and self.sidebar_content:
                 self.sidebar_content.update()
@@ -10567,6 +10594,13 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self._saved_film_stock = None
         self._saved_paper_stock = None
         self._saved_print_mode = None
+
+        # 空串 = 「这张链上还没选过相纸」（`.sdc` / 撤销快照 / 旧会话都会这么存）。它是
+        # "未选择"而不是"直扫"，落点应该是这条链的默认纸。以前原样传下去：面板不亮任何
+        # 一张卡、烘焙拿到空串（引擎侧现已归一），撤销一次面板就和画面分叉了。
+        stock_id = str(stock_id or "")
+        if not stock_id:
+            stock_id = self._default_paper_for(self.current_film_stock) or "none"
 
         is_pos = self.engine.is_positive_film(self.current_film_stock) if hasattr(self.engine, 'is_positive_film') else False
         if is_pos and stock_id != "none":

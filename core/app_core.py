@@ -2516,6 +2516,11 @@ class SpektraEngine:
         The same three branches the build body takes, lifted out so the cache key can be settled
         first: the filtration below depends on this, and the filtration has to be in the key.
         """
+        # 与 `_build_3d_lut` 保持同一套空串归一：缓存键和烘焙分支必须对同一张纸，否则
+        # 空串会烘一张表、却按另一个键去存/找，每次撤销都白烘一遍。
+        paper_stock = str(paper_stock or "").strip().lower()
+        if not paper_stock:
+            paper_stock = "none"
         prof = self._load_profile(film_stock)
         info = getattr(prof, "info", None)
         is_pos = bool(getattr(prof, "is_positive", False)) or \
@@ -2900,6 +2905,15 @@ class SpektraEngine:
             print_mode = str(print_mode).lower()
         if print_mode not in ("optical", "scan"):
             print_mode = "optical"
+
+        # 空串是「这条链上还没选过相纸」的哨兵（`.sdc` 和撤销快照都这么存）。烘焙分支只认
+        # `none`，空串会被 `paper_available()` 放行（它把空串当直扫），于是直落
+        # `_load_profile("")` → None，Simulator 里 `params.print` 为 None 直接抛
+        # `'NoneType' object has no attribute 'data'`。撤销时这一抛会把后面整段恢复中断：
+        # 缩略图已经刷完，画布和滑块却停在原地（2026-11-17 用户报的"画布和滑块撤不掉"）。
+        paper_stock = str(paper_stock or "").strip().lower()
+        if not paper_stock:
+            paper_stock = "none"
 
         # 链条不支持的纸在这里就夹掉，**必须早于 cache_key**：`_resolve_base_paper` 的兜底
         # 只服务缓存键，烘焙分支用的是原始 `paper_stock`，以前这里会直接
