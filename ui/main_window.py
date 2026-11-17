@@ -5056,6 +5056,14 @@ class DarkroomMainWindow(QMainWindow):
         self.slider_temp.sliderReleased.connect(self._on_slider_committed)
         self.sec_exposure.addWidget(self.slider_temp)
 
+        # 色温吸管：与曝光行的 AU 芯片同一个插入位（标题之后、stretch 之前），所以两行
+        # 芯片左边缘对齐。吸管是**界面模式**：不进参数、不进 .sdc、不进撤销栈。
+        from ui.wb_eyedropper import EyedropperChip
+        self.btn_wb_picker = EyedropperChip(
+            tooltip=t("白平衡吸管：点击后在画布上取中性色，自动求色温与色调（右键或 Esc 退出）"))
+        self.btn_wb_picker.clicked.connect(self._toggle_wb_eyedropper)
+        self.slider_temp.add_header_widget(self.btn_wb_picker)
+
         self.slider_tint = AdobeScrubSlider(
             t("色调"), 0.70, 1.30, 1.0, step=0.01, unit="", decimals=2,
             tooltip=t("微调洋红与绿色光色平衡 (Tint)，左偏品红，右偏绿色"),
@@ -6100,6 +6108,9 @@ class DarkroomMainWindow(QMainWindow):
         self.canvas.requestCompareStart.connect(self._on_compare_long_press_start)
         self.canvas.requestCompareEnd.connect(self._on_compare_long_press_end)
         self.canvas.importRequested.connect(self.action_open_files)
+        self.canvas.wbPicked.connect(self._on_wb_picked)
+        self.canvas.wbPickCancelled.connect(self._on_wb_pick_cancelled)
+        self.canvas.wbPickHint.connect(self._on_wb_pick_hint)
 
     def _update_recent_menu(self):
         self.recent_menu.clear()
@@ -6952,6 +6963,7 @@ class DarkroomMainWindow(QMainWindow):
 
     def _perform_close_session(self):
         """Executes full clean teardown of current session and returns to startup welcome view."""
+        self._abort_wb_pick("close_session")
         # 1. Silently persist individual photo parameters to .sdc
         try:
             if self._photo_is_dirty and self._current_photo_path:
@@ -8954,6 +8966,81 @@ aspect_ratio=self._lens_frame_aspect(photo),
         base_ev = float(photo.get("base_ev", 0.0))
         self.set_app_status(t('基准测光：18% 中灰（基准 {base_ev:+.2f} EV）', base_ev=base_ev), timeout_ms=2500)
 
+    # ---- 白平衡吸管 -------------------------------------------------------
+    def _toggle_wb_eyedropper(self):
+        """芯片点击：进入 / 退出取色模式。"""
+        if getattr(self.canvas, "_wb_picking", False):
+            self.canvas.end_wb_pick("toggle")
+            return
+        ok, reason = self.canvas.begin_wb_pick(radius=2)
+        if not ok:
+            msg = {
+                "no_image": t("先在画布上打开一张底片再取色"),
+                "placeholder": t("预览还没解码完，稍后再取色"),
+                "crop_editing": t("裁切编辑中不能取色，先退出裁切"),
+                "compare_view": t("对比视图下不能取色，先切回单图"),
+                "no_texture": t("预览还没解码完，稍后再取色"),
+            }.get(reason, t("当前状态不能取色"))
+            self.set_app_status(msg, timeout_ms=3000)
+            return
+        self.btn_wb_picker.set_active(True)
+        self.set_app_status(
+            t("吸管已就绪：在画布上点一下中性色（灰卡/白墙），右键或 Esc 退出"),
+            timeout_ms=4000)
+
+    def _on_wb_picked(self, res):
+        self.btn_wb_picker.set_active(False)
+        from core import wb_pick
+        if not isinstance(res, dict) or not res.get("ok"):
+            return
+        base_temp = float(self.current_params.get("base_temp",
+                                                  getattr(self, "_active_base_temp", 5500.0)))
+        base_tint = float(self.current_params.get("base_tint", 1.0))
+        sol = wb_pick.solve_wb_from_linear(res.get("rgb"), base_temp, base_tint)
+        if not sol.get("valid"):
+            self.set_app_status(t("取样点太暗或通道退化，换个位置再试"), timeout_ms=3000)
+            return
+        temp = float(sol["temp"])
+        tint = float(sol["tint"])
+        self.current_params["color_temp"] = temp
+        self.current_params["tint"] = tint
+        if hasattr(self, "slider_temp"):
+            self.slider_temp.set_value(temp)
+        if hasattr(self, "slider_tint"):
+            self.slider_tint.set_value(tint)
+        self.canvas.update_params(color_temp=temp, tint=tint)
+        self._on_slider_committed(action="wb_eyedropper")
+
+        base_msg = t('吸管取色：色温 {temp:.0f} K · 色调 {tint:.2f}', temp=temp, tint=tint)
+        if sol.get("clipped_temp") or sol.get("clipped_tint"):
+            base_msg += t("（已到滑块边界）")
+        self.set_app_status(base_msg, timeout_ms=3500)
+
+    def _on_wb_pick_cancelled(self, reason):
+        self.btn_wb_picker.set_active(False)
+        if reason == "picked":
+            return
+        if reason in ("right_click", "escape", "toggle"):
+            self.set_app_status(t("已退出吸管"), timeout_ms=2000)
+        else:
+            self.set_app_status(t("吸管已退出：当前状态不能取色"), timeout_ms=3000)
+
+    def _on_wb_pick_hint(self, reason):
+        if reason == "outside":
+            self.set_app_status(t("点在画布黑边上，请点照片内部"), timeout_ms=2500)
+        else:
+            self.set_app_status(t("这块区域没有可用像素，换个位置"), timeout_ms=2500)
+
+    def _abort_wb_pick(self, why=""):
+        """被外部事件打断（切图/关会话/进裁切/清配置）：静默退出，不弹状态。"""
+        try:
+            if getattr(self.canvas, "_wb_picking", False):
+                self.canvas.end_wb_pick(why or "abort", notify=False)
+        except Exception:
+            pass
+        if hasattr(self, "btn_wb_picker"):
+            self.btn_wb_picker.set_active(False)
+
     def _get_track_defaults(self):
         # 基准白平衡以**这张照片**为准，不看滑块自己的 default_val：控件的默认值只在切图/
         # 解码两个时点被写一次，任何一条没走到就会停留在构造时的 5500 K，于是"色温 5750
@@ -9182,6 +9269,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
                 self.set_app_status(t("已重置裁切"), timeout_ms=2000)
             return
 
+        self._abort_wb_pick("reset_params")
         self._sync_wb_slider_defaults()
         defaults = self._get_track_defaults()
         all_defs = {}
@@ -9816,6 +9904,7 @@ aspect_ratio=self._lens_frame_aspect(photo),
 
         # 2. Start crop overlay session & sync controls
         cur_crop = self._normalize_crop(self.current_params.get("crop"))
+        self._abort_wb_pick("crop_enter")
         self._pre_crop_backup = copy.deepcopy(cur_crop)
         self.canvas.start_crop_mode(cur_crop)
         if hasattr(self, 'crop_sidebar'):
@@ -10467,6 +10556,9 @@ aspect_ratio=self._lens_frame_aspect(photo),
         self.on_switch_paper(paper_id)
 
     def set_view_mode(self, mode):
+        # 对比视图下画布只有半边宽度、uv 口径不同，吸管在里面会取错位置 → 直接退出
+        if mode:
+            self._abort_wb_pick("compare_view")
         # 对比视图的"原图"读的就是画布当前这张贴图。画布若还停在相机内嵌 JPEG 占位图上，
         # 两边都会是那张 jpg —— 进对比前先把真 RAW 补上。
         if mode:
@@ -13147,6 +13239,8 @@ aspect_ratio=self._lens_frame_aspect(photo),
             gc.collect()
 
     def on_switch_photo(self, photo_id, force=False):
+        # 吸管是界面模式，切图必须退出——否则光标卡在吸管、下一个底片会被误取色
+        self._abort_wb_pick("switch_photo")
         # 用户自己在导入期间点了照片：作废"导入结束后再切回首图"的约定。
         # `_activate_deferred_photo` 是先把 id 取走再调进来的，所以这里清空不会打断它自己。
         self._deferred_switch_id = None

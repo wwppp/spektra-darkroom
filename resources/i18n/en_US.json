@@ -814,5 +814,19 @@
   "所有文件": "All files",
   "界面语言已保存": "Interface language saved",
   "重新启动 SpektraDarkroom 后生效。": "It takes effect after restarting SpektraDarkroom.",
-  "切换后需重启生效": "Restart to apply"
+  "切换后需重启生效": "Restart to apply",
+  "白平衡吸管：点击后在画布上取中性色，自动求色温与色调（右键或 Esc 退出）": "White balance eyedropper: pick a neutral colour on the canvas to solve temperature and tint (right-click or Esc to exit)",
+  "先在画布上打开一张底片再取色": "Open a photo on the canvas first",
+  "预览还没解码完，稍后再取色": "Preview is still decoding, try again in a moment",
+  "裁切编辑中不能取色，先退出裁切": "Cannot sample while cropping — exit the crop tool first",
+  "对比视图下不能取色，先切回单图": "Cannot sample in compare view — switch back to single view",
+  "当前状态不能取色": "Cannot sample in the current state",
+  "吸管已就绪：在画布上点一下中性色（灰卡/白墙），右键或 Esc 退出": "Eyedropper ready: click a neutral spot (grey card / white wall). Right-click or Esc to exit",
+  "取样点太暗或通道退化，换个位置再试": "Sample is too dark or a channel collapsed — try another spot",
+  "吸管取色：色温 {temp:.0f} K · 色调 {tint:.2f}": "Eyedropper: temperature {temp:.0f} K · tint {tint:.2f}",
+  "（已到滑块边界）": " (at slider limit)",
+  "已退出吸管": "Eyedropper off",
+  "吸管已退出：当前状态不能取色": "Eyedropper cancelled: cannot sample in the current state",
+  "点在画布黑边上，请点照片内部": "That is the letterbox — click inside the photo",
+  "这块区域没有可用像素，换个位置": "No usable pixels there — try another spot"
 }

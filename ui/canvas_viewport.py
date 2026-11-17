@@ -1726,6 +1726,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
     requestCompareEnd = Signal()
     importRequested = Signal()
     proofChanged = Signal(object)          # proof.ProofSettings
+    # 白平衡吸管：取到一段线性色（dict: rgb / uv / row / col / samples）与取消事件
+    wbPicked = Signal(object)
+    wbPickCancelled = Signal(str)
+    wbPickHint = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1881,6 +1885,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._is_panning = False
         self._is_split_dragging = False
         self._last_mouse_pos = QPointF(0, 0)
+
+        # 白平衡吸管模式（左键取色 / 右键或 Esc 退出）
+        self._wb_picking = False
+        self._wb_pick_radius = 2
+        self._wb_pick_shortcut = None
+        self._wb_prev_cursor = None
 
         # Floating HUD Badges for Before / After Compare (Native QLabels immune to OpenGL texture corruption)
         self.badge_before = QLabel(t("原片"), self)
@@ -3518,6 +3528,109 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
         return img_left, img_right, img_top, img_bottom
 
+    # ------------------------------------------------------------------
+    # 白平衡吸管
+    # ------------------------------------------------------------------
+    def _wb_pick_available(self):
+        """当前状态能不能取色：有图、不是占位 JPEG、不在裁切编辑、不在对比视图。"""
+        if not getattr(self, "_has_image", False):
+            return False, "no_image"
+        if getattr(self, "_is_placeholder", False):
+            return False, "placeholder"
+        if getattr(self, "is_crop_editing", False) or getattr(self, "_is_crop_editing", False):
+            return False, "crop_editing"
+        if self.params.get("view_mode") == 2:
+            return False, "compare_view"
+        src = getattr(self, "_float_img_rgb", None)
+        if src is None or not hasattr(src, "shape"):
+            return False, "no_texture"
+        return True, ""
+
+    def pick_source_linear(self, pos, radius=2):
+        """读取屏幕点对应的**场景线性 ProPhoto** 纹理像素块。
+
+        绝对不能拿屏幕像素反解白平衡：屏幕上那一帧已经过 LUT / 相纸 / 颗粒 / 显示域，
+        不可逆。这里取的是 shader 采样之前的那张纹理。
+        """
+        from core import wb_pick
+
+        ok, reason = self._wb_pick_available()
+        if not ok:
+            return {"ok": False, "reason": reason}
+
+        src = self._float_img_rgb
+        h, w = src.shape[:2]
+        bounds = self.get_image_bounds_norm()
+        uv = wb_pick.quad_uv_from_widget(pos.x(), pos.y(), self.width(), self.height(), bounds)
+        if uv is None:
+            return {"ok": False, "reason": "outside"}
+
+        native_aspect = float(w) / float(max(1, h))
+        sample_uv = wb_pick.texture_uv_from_quad_uv(
+            uv[0], uv[1], self.params.get("crop", {}), native_aspect)
+        row, col = wb_pick.texture_pixel_index(sample_uv, w, h)
+
+        r = max(0, int(radius))
+        r0, r1 = max(0, row - r), min(h, row + r + 1)
+        c0, c1 = max(0, col - r), min(w, col + r + 1)
+        patch = np.asarray(src[r0:r1, c0:c1, :3], dtype=np.float32)
+        rgb = wb_pick.reduce_patch(patch)
+        if rgb is None:
+            return {"ok": False, "reason": "empty_patch"}
+        return {"ok": True, "rgb": rgb, "uv": (float(uv[0]), float(uv[1])),
+                "sample_uv": (float(sample_uv[0]), float(sample_uv[1])),
+                "row": row, "col": col,
+                "samples": int(patch.reshape(-1, 3).shape[0]),
+                "texture": (int(w), int(h))}
+
+    def begin_wb_pick(self, radius=2):
+        """进入吸管取色模式：左键取色、右键 / Esc 退出，期间不允许拖动画面。"""
+        ok, reason = self._wb_pick_available()
+        if not ok:
+            return False, reason
+        self._wb_picking = True
+        self._wb_pick_radius = max(0, int(radius))
+        self._is_panning = False
+        self._is_split_dragging = False
+        try:
+            from ui.wb_eyedropper import eyedropper_cursor
+            self._wb_prev_cursor = self.cursor()
+            self.setCursor(eyedropper_cursor())
+        except Exception:
+            self._wb_prev_cursor = None
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        if self._wb_pick_shortcut is None:
+            from PySide6.QtGui import QKeySequence, QShortcut
+            sc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self.window())
+            sc.setContext(Qt.ShortcutContext.WindowShortcut)
+            sc.activated.connect(lambda: self.end_wb_pick("escape"))
+            self._wb_pick_shortcut = sc
+        return True, ""
+
+    def end_wb_pick(self, reason="done", notify=True):
+        """退出吸管；`notify=False` 用于取色成功那条路（成功由 wbPicked 通知）。"""
+        was = getattr(self, "_wb_picking", False)
+        self._wb_picking = False
+        self._wb_pick_radius = 2
+        if self._wb_pick_shortcut is not None:
+            try:
+                self._wb_pick_shortcut.setEnabled(False)
+                self._wb_pick_shortcut.deleteLater()
+            except Exception:
+                pass
+            self._wb_pick_shortcut = None
+        try:
+            self.setCursor(self._wb_prev_cursor if self._wb_prev_cursor is not None
+                           else Qt.CursorShape.OpenHandCursor)
+        except Exception:
+            pass
+        self._wb_prev_cursor = None
+        if was and notify:
+            self.wbPickCancelled.emit(reason)
+
+    def is_wb_picking(self):
+        return bool(getattr(self, "_wb_picking", False))
+
     def get_image_visible_bounds_norm(self):
         """Calculate visible intersection of image with viewport boundaries [0.0, 1.0].
         Returns: (vis_left, vis_right, vis_top, vis_bottom)
@@ -3721,6 +3834,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.update()
 
     def contextMenuEvent(self, event):
+        if getattr(self, "_wb_picking", False):
+            # 吸管期间的右键是"退出"，不是要菜单
+            event.accept()
+            return
         if hasattr(self, '_canvas_long_press_timer') and self._canvas_long_press_timer.isActive():
             self._canvas_long_press_timer.stop()
         if getattr(self, '_is_canvas_long_pressing', False):
@@ -3986,6 +4103,29 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def mousePressEvent(self, event):
         btn = event.button()
+        # 吸管模式先手：左键取色、右键退出，都不能落到下面的平移逻辑里。
+        if getattr(self, "_wb_picking", False):
+            if btn == Qt.MouseButton.LeftButton:
+                radius = self._wb_pick_radius
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    radius = max(radius, 7)      # Shift = 15x15 平均，压噪点
+                res = self.pick_source_linear(event.position(), radius)
+                if res.get("ok"):
+                    self.end_wb_pick("picked", notify=False)
+                    self.wbPicked.emit(res)
+                else:
+                    reason = res.get("reason", "")
+                    if reason in ("outside", "empty_patch"):
+                        # 点在黑边上：不取色，但也不退出（用户多半是瞄歪了）
+                        self.wbPickHint.emit(reason)
+                    else:
+                        self.end_wb_pick(reason)
+                event.accept()
+                return
+            if btn == Qt.MouseButton.RightButton:
+                self.end_wb_pick("right_click")
+                event.accept()
+                return
         if btn == Qt.MouseButton.LeftButton:
             # A wheel glide or a view glide (fit / 1:1 / crop transition) writes pan_x/pan_y on
             # every tick.  If the user grabs the image while one is still running, the two fight:
@@ -4058,7 +4198,11 @@ class DarkroomGLCanvas(QOpenGLWidget):
             event.accept()
         else:
             # Hover cursor check: split cursor only within visible image area
-            if self._is_hovering_split_line(event.position()):
+            if getattr(self, "_wb_picking", False):
+                # 吸管期间光标必须一直是吸管，别被 hover 的抓手覆盖
+                from ui.wb_eyedropper import eyedropper_cursor
+                self.setCursor(eyedropper_cursor())
+            elif self._is_hovering_split_line(event.position()):
                 self.setCursor(Qt.CursorShape.SplitHCursor)
             else:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -4076,7 +4220,10 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if btn in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             self._is_panning = False
             self._is_split_dragging = False
-            if self._is_hovering_split_line(event.position()):
+            if getattr(self, "_wb_picking", False):
+                from ui.wb_eyedropper import eyedropper_cursor
+                self.setCursor(eyedropper_cursor())
+            elif self._is_hovering_split_line(event.position()):
                 self.setCursor(Qt.CursorShape.SplitHCursor)
             else:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
