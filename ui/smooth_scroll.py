@@ -586,6 +586,10 @@ class SmoothScrollArea(QScrollArea):
         # cost a relayout per frame -- the last few pixels of a wheel animation looked like the
         # panel twitched.  Only touch the stacking when the viewport actually changed size.
         target = self.rect() if self.is_horizontal else self.viewport().rect()
+        if self.is_horizontal:
+            # 横向（底片栏）的 overlay 原本盖满整个 scroll_area，渐隐条一路压到槽的外框上，
+            # 把凹槽的圆角边线糊掉了。内缩 2px：1px 边框 + 1px 抗锯齿，让渐变只落在槽内壁。
+            target = target.adjusted(2, 2, -2, -2)
         if getattr(self, "_overlay_geo", None) != target:
             self._overlay_geo = target
             overlay.setGeometry(target)

@@ -2570,6 +2570,11 @@ class CenteredViewToolbar(QFrame):
     """View toolbar frame that keeps its center_widget (canvas rating) at the absolute geometric center,
     automatically resolving collision with status messages when the window is narrow.
     """
+    # 内容整体下沉的像素数。几何居中（28px 条里 y=3）在视觉上仍然偏高 —— 字形上半部
+    # 笔画多、下方是空白（descender 区），眼睛会觉得整行贴在上面。文字和按钮一起下移
+    # 同样的量，视觉重心才落回中线。
+    CONTENT_DROP = 1
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.center_widget = None
@@ -2615,7 +2620,7 @@ class CenteredViewToolbar(QFrame):
         ch = h_hint if h_hint > 0 else (self.center_widget.height() if self.center_widget.height() > 0 else 22)
 
         x = (self.width() - cw) // 2
-        y = (self.height() - ch) // 2
+        y = (self.height() - ch) // 2 + int(getattr(self, 'CONTENT_DROP', 0))
         self.center_widget.setGeometry(x, y, cw, ch)
         self.center_widget.raise_()
 
@@ -4454,12 +4459,17 @@ class DarkroomMainWindow(QMainWindow):
         tb_layout = QHBoxLayout(self.view_toolbar)
         # Symmetric vertical margins: the old 2/1 split pushed the whole row half a pixel up,
         # which is what made the right-hand capsule sit slightly above the filename on the left.
-        tb_layout.setContentsMargins(10, 0, 10, 0)
+        _drop = int(getattr(CenteredViewToolbar, 'CONTENT_DROP', 0))
+        tb_layout.setContentsMargins(10, 2 * _drop, 10, 0)
         tb_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         tb_layout.setSpacing(5)
 
         # Left: Dynamic Unified Cross-Fading Status Slot (Unifies photo filename & zoom with transient notifications)
         self.status_slot = StatusSlotWidget(self.view_toolbar)
+        # 状态槽自身固定 28px（= 工具条高），内容下沉后可用区只有 26px，它溢出会让
+        # 文字比按钮多下移 1px —— 改成 26，两个元素才一起走同样的位移。
+        self.status_slot.setFixedHeight(
+            self.view_toolbar.height() - 2 * int(CenteredViewToolbar.CONTENT_DROP))
         self.lbl_photo_info = self.status_slot.lbl_photo_info
         self.status_label = self.status_slot.status_label
         self.spinner = self.status_slot.spinner
