@@ -12078,8 +12078,12 @@ aspect_ratio=self._lens_frame_aspect(photo),
         """
         if not hasattr(self, 'canvas') or not getattr(self.canvas, '_has_image', False):
             return
-        # Prevent rendering previous photo when switching to an un-decoded photo
-        if getattr(self.canvas, '_loaded_photo_id', None) != self.active_photo_id:
+        # Prevent rendering previous photo when switching to an un-decoded photo.
+        # 只拦"画布上确实是别的照片"这种情况：`_loaded_photo_id is None` 表示这条上传路径
+        # 没带 photo_id（换预览分辨率重新载入纹理那条就是这样），不是"照片不对"——
+        # 以前把它当不匹配，结果在当前底片上换完分辨率后缩略图永久停更，切一张图才恢复。
+        _loaded_pid = getattr(self.canvas, '_loaded_photo_id', None)
+        if _loaded_pid is not None and _loaded_pid != self.active_photo_id:
             return
         try:
             # Prefer loaded GPU texture dimensions for exact rendering aspect ratio
@@ -15063,7 +15067,8 @@ aspect_ratio=self._lens_frame_aspect(target_photo),
                             session_cache_manager.save_photo_preview(photo["path"], photo["float_img"])
                             m_w = photo.get("width") or (photo.get("meta", {}).get("width") if isinstance(photo.get("meta"), dict) else None)
                             m_h = photo.get("height") or (photo.get("meta", {}).get("height") if isinstance(photo.get("meta"), dict) else None)
-                            self.canvas.set_image(photo["float_img"], master_width=m_w, master_height=m_h, reset_zoom=False)
+                            self.canvas.set_image(photo["float_img"], master_width=m_w, master_height=m_h,
+                                                  reset_zoom=False, photo_id=photo.get("id"))
                             self._update_photo_info_display()
                             self.set_app_status(t("已按首选项重新载入全尺寸纹理"), timeout_ms=3000)
             if hasattr(self, 'canvas'):
