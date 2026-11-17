@@ -7500,7 +7500,23 @@ class DarkroomMainWindow(QMainWindow):
         if self._undo_stack:
             top = self._undo_stack[-1]
             top_pid = top.get("photo_id") if top.get("type") == "single_photo_state" else None
-            if top.get("type") in ("batch_photos_state", "library_photos_state") or (top_pid and top_pid != self.active_photo_id):
+            if top.get("type") in ("batch_photos_state", "library_photos_state"):
+                # 批量快照属于"哪张照片的历史"，看它记录的 active_photo_id：
+                #  · 就是当前照片（粘贴配方：pre/post 都是这张的）→ pop 它即回到上一步，
+                #    **不能再插 baseline**。baseline 是"这张照片打开时的状态"，插进去等于
+                #    把上一步换成原始值：粘贴后改一个参数，一次撤销直接跳回未编辑状态
+                #    （2026-11-17 用户报的"撤销把粘贴也撤了"）。
+                #  · 别的照片（删除/排序后切到新照片再改参数）→ 仍要补 baseline，
+                #    否则撤销会跨照片把另一张的批量状态套过来。
+                if top.get("active_photo_id") != self.active_photo_id:
+                    baseline = getattr(self, "_active_photo_baseline_state", None)
+                    if baseline and baseline.get("photo_id") == self.active_photo_id:
+                        if not (baseline.get("film") == state["film"] and
+                                baseline.get("paper") == state["paper"] and
+                                baseline.get("print_mode") == state["print_mode"] and
+                                baseline.get("params") == state["params"]):
+                            self._undo_stack.append(baseline)
+            elif top_pid and top_pid != self.active_photo_id:
                 baseline = getattr(self, "_active_photo_baseline_state", None)
                 if baseline and baseline.get("photo_id") == self.active_photo_id:
                     if not (baseline.get("film") == state["film"] and
