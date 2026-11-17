@@ -103,8 +103,8 @@ class EyedropperChip(QPushButton):
     与 AU 共用同一个 44 px 宽的水平槽位，两者中心对齐。
     """
 
-    SIZE = QSize(24, 24)
-    ICON_PX = 21
+    SIZE = QSize(36, 36)
+    ICON_PX = 32
 
     def __init__(self, parent=None, tooltip: str = ""):
         super().__init__(parent)
@@ -154,14 +154,25 @@ class EyedropperChip(QPushButton):
             is_dark = theme_manager.is_dark()
         except Exception:
             is_dark = True
-        # 无底无框：状态只靠图标颜色表达，避免在参数面板里多出一个方块
+        # 静止态无底无框；只给 hover 和激活态上色，避免参数面板里常年挂着一个方块。
+        panel_bg = "#1f2228" if is_dark else "#f4f6fa"
         if self._active:
             icon_color = ACCENT
+            bg = _mix(ACCENT, panel_bg, 0.20)
         elif self._hover:
             icon_color = "#f8fafc" if is_dark else "#0f172a"
+            bg = _mix(ACCENT, panel_bg, 0.16)
         else:
             icon_color = _normal_color(is_dark)
-        self.setStyleSheet("QPushButton { background: transparent; border: none; padding: 0px; }")
+            bg = "transparent"
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background: {bg};
+                border: none;
+                border-radius: 6px;
+                padding: 0px;
+            }}
+        """)
         pix = _tinted(get_icon_path(ICON_NAME), icon_color, self.ICON_PX)
         self.setIcon(QIcon(pix) if not pix.isNull() else QIcon())
         self.setIconSize(QSize(self.ICON_PX, self.ICON_PX))

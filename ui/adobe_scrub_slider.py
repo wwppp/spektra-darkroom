@@ -254,6 +254,12 @@ class RoundScrubSlider(QSlider):
         self.track_gradient = None
         self.has_center_detent = False
         self._hover_knob = False
+        # 单击定位要等"双击判定窗口"过去才落地：否则双击复位会先跳到点击位置、再跳到默认值，
+        # 肉眼就是跳变两下。QApplication.doubleClickInterval() 正是系统给的那段时间。
+        self._pending_tap_x = None
+        self._tap_timer = QTimer(self)
+        self._tap_timer.setSingleShot(True)
+        self._tap_timer.timeout.connect(self._commit_pending_tap)
         self.setFixedHeight(18)
         # No resize cursor here: the horizontal-arrows cursor belongs to the parameter title
         # (ScrubLabel), where dragging is a relative scrub.  The groove only follows the
@@ -357,6 +363,10 @@ class RoundScrubSlider(QSlider):
         self._set_hover_knob(False)
         super().leaveEvent(event)
 
+    def hideEvent(self, event):
+        self._cancel_pending_tap()
+        super().hideEvent(event)
+
     def _knob_cx(self):
         if self._smooth_x is not None:
             x_start, x_end, _ = self._track_span()
@@ -391,6 +401,10 @@ class RoundScrubSlider(QSlider):
             self._update_hover_cursor(pos.x(), pos.y())
             event.ignore()
             return
+        if self._pending_tap_x is not None:
+            # 这是一次**新的**手势（双击的第二次按下会被 Qt 派成 MouseButtonDblClick，
+            # 走不到这里），所以上一击的落点该立刻生效，别再等。
+            self._commit_pending_tap()
         self._pressed = True
         self._press_pos = pos
         self._intent = None
@@ -454,7 +468,9 @@ class RoundScrubSlider(QSlider):
             # A clean tap (never proved horizontal) commits the tapped value.  Pressing alone
             # still changes nothing, so the value only moves when the click is released.
             if self._pressed and self._intent is None:
-                self._update_from_mouse_x(event.position().x())
+                # 只记下落点，等双击窗口过去再落地（见 _tap_timer）
+                self._pending_tap_x = float(event.position().x())
+                self._tap_timer.start(int(QApplication.doubleClickInterval()))
             self._pressed = False
             self._intent = None
             self._press_pos = None
@@ -462,7 +478,8 @@ class RoundScrubSlider(QSlider):
             self._release_grab()
             self.update()
             self._update_hover_cursor()
-            self.sliderReleased.emit()
+            if self._pending_tap_x is None:
+                self.sliderReleased.emit()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -472,10 +489,28 @@ class RoundScrubSlider(QSlider):
             event.ignore()
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            # 双击复位：第一击排队的那次定位必须作废，否则会先跳到点击处再跳回默认值
+            self._cancel_pending_tap()
             self.doubleClicked.emit()
             event.accept()
         else:
             super().mouseDoubleClickEvent(event)
+
+    def _cancel_pending_tap(self):
+        if self._tap_timer.isActive():
+            self._tap_timer.stop()
+        self._pending_tap_x = None
+
+    def _commit_pending_tap(self):
+        """把排队中的单击落点补上（定时器到点，或用户已经开始新手势）。"""
+        if self._tap_timer.isActive():
+            self._tap_timer.stop()
+        x = self._pending_tap_x
+        self._pending_tap_x = None
+        if x is None or not self.isEnabled():
+            return
+        self._update_from_mouse_x(x)
+        self.sliderReleased.emit()
 
     def wheelEvent(self, event):
         event.ignore()
