@@ -585,11 +585,15 @@ class SmoothScrollArea(QScrollArea):
         # (and the scrollbar) sixty times a second during a settle made the edge fade flicker and
         # cost a relayout per frame -- the last few pixels of a wheel animation looked like the
         # panel twitched.  Only touch the stacking when the viewport actually changed size.
-        target = self.rect() if self.is_horizontal else self.viewport().rect()
         if self.is_horizontal:
-            # 横向（底片栏）的 overlay 原本盖满整个 scroll_area，渐隐条一路压到槽的外框上，
-            # 把凹槽的圆角边线糊掉了。内缩 2px：1px 边框 + 1px 抗锯齿，让渐变只落在槽内壁。
-            target = target.adjusted(2, 2, -2, -2)
+            # 横向（底片栏）的 overlay 跟着**视口**走，而不是整个 scroll_area：视口已经
+            # 让开了槽的外框与圆角（见 FilmstripWidget 的 setViewportMargins），渐隐条再
+            # 内缩 1px 就只会落在槽内壁上，既压不到边线，也能盖住滚到嘴边的格子。
+            target = self.viewport().geometry().adjusted(1, 0, -1, 0)
+        else:
+            # 垂直列表：viewport().geometry() 与 rect() 平时相同（无 margins），但一旦
+            # 有人给视口加过边距，rect() 会把 overlay 钉在控件左上角、盖到边距上。
+            target = self.viewport().geometry()
         if getattr(self, "_overlay_geo", None) != target:
             self._overlay_geo = target
             overlay.setGeometry(target)

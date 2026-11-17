@@ -2572,8 +2572,8 @@ class CenteredViewToolbar(QFrame):
     """
     # 内容整体下沉的像素数。几何居中（28px 条里 y=3）在视觉上仍然偏高 —— 字形上半部
     # 笔画多、下方是空白（descender 区），眼睛会觉得整行贴在上面。文字和按钮一起下移
-    # 同样的量，视觉重心才落回中线。
-    CONTENT_DROP = 1
+    # 同样的量，视觉重心才落回中线。1px 试过仍嫌高，按反馈取 3。
+    CONTENT_DROP = 3
 
     def __init__(self, parent=None):
         super().__init__(parent)

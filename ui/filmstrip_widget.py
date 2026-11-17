@@ -1070,6 +1070,9 @@ class FilmstripWidget(QWidget):
         # Scroll area for items (Smooth non-linear scrolling within the concave track)
         self.scroll_area = SmoothScrollArea(self.track_container, is_horizontal=True, enable_edge_fade=True)
         self.scroll_area.setWidgetResizable(True)
+        # 视口必须让开槽的外框和圆角（6 px）：内容按矩形排布，视口顶到槽边时格子会
+        # 直接画在凹槽的边线之上、并从 6 px 圆角里溢出来。左右 6 = 圆角半径，顶部 2 = 边框。
+        self.scroll_area.setViewportMargins(6, 2, 6, 0)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         if self.scroll_area.viewport():
