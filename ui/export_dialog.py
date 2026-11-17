@@ -951,7 +951,7 @@ class BaseExportDialog(QDialog):
                     color: #e2e8f0;
                     border: 1px solid #323542;
                     border-radius: 4px;
-                    padding: 4px 26px 4px 8px;
+                    padding: 4px 4px 4px 8px;
                     font-size: 11px;
                 }}
                 QComboBox:hover {{
@@ -1078,7 +1078,7 @@ class BaseExportDialog(QDialog):
                     color: #1e293b;
                     border: 1px solid #cbd5e1;
                     border-radius: 4px;
-                    padding: 4px 26px 4px 8px;
+                    padding: 4px 4px 4px 8px;
                     font-size: 11px;
                 }}
                 QComboBox:hover {{

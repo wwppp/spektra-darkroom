@@ -1499,7 +1499,7 @@ class ComboBoxRow(QWidget):
                 color: {combo_fg};
                 border: 1px solid {combo_border};
                 border-radius: 4px;
-                padding: 4px 24px 4px 8px;
+                padding: 4px 4px 4px 8px;
                 font-size: 12px;
                 min-width: 100px;
             }}
