@@ -2164,12 +2164,12 @@ class FadingSplitterHandle(QSplitterHandle):
             # 按约定读 owner 上的默认填充，**不做 index/身份判断**：QSplitter 在重建
             # children 时会在列表外留下孤儿 handle，sp.handle(i) is self 可能永远为假。
             fill = getattr(self.parent(), '_default_handle_fill', None)
-        if fill == 'filmstrip':
-            # 跟着**胶片槽路**的顶色走：这条缝夹在工具条和胶片槽路之间，按主题的浅灰
-            # 画出来就是一条悬在两者中间的亮缝；取槽路顶色后它变成槽路自己的上沿。
+        if fill == 'canvas_bg':
+            # 填成**上方工具条的背景色**，让这条缝并入工具条，看起来工具条只是高一点，
+            # 底片栏紧贴其下 —— 不再出现一条夹在两种颜色中间的过渡带。
             try:
                 from ui.theme_manager import theme_manager as _tm
-                fill = '#06070a' if _tm.is_dark() else '#d6dbe4'
+                fill = _tm.color('view_toolbar_bg')
             except Exception:
                 fill = None
         if fill:
@@ -4621,7 +4621,7 @@ class DarkroomMainWindow(QMainWindow):
         self.center_splitter.setStretchFactor(1, 0)
         self.center_splitter.setSizes([600, 100])
         # 这条缝两头都是深色（画布/工具条 ↔ 胶片槽路），按主题画浅色会显出一条亮缝。
-        self.center_splitter.set_handle_fill(0, "filmstrip")
+        self.center_splitter.set_handle_fill(0, "canvas_bg")
 
         self.main_splitter.addWidget(self.center_splitter)
 
