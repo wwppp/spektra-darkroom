@@ -5015,7 +5015,11 @@ class DarkroomMainWindow(QMainWindow):
             }
         """)
         self.btn_auto_ev.clicked.connect(self._on_auto_exposure)
-        self.slider_ev.add_header_widget(self.btn_auto_ev)
+        # AU 与色温吸管共用同一个 44 px 透明槽位，两者水平同心（子控件画不出父控件边界，
+        # 不能靠负偏移让大图标"溢"出来）。
+        from ui.wb_eyedropper import ChipSlot
+        self._auto_ev_slot = ChipSlot(self.btn_auto_ev)
+        self.slider_ev.add_header_widget(self._auto_ev_slot)
 
         self.slider_highlights = AdobeScrubSlider(
             t("高光"), -100.0, 100.0, 0.0, step=1.0, unit="", decimals=0,
@@ -5062,7 +5066,8 @@ class DarkroomMainWindow(QMainWindow):
         self.btn_wb_picker = EyedropperChip(
             tooltip=t("白平衡吸管：点击后在画布上取中性色，自动求色温与色调（右键或 Esc 退出）"))
         self.btn_wb_picker.clicked.connect(self._toggle_wb_eyedropper)
-        self.slider_temp.add_header_widget(self.btn_wb_picker)
+        self._wb_chip_slot = ChipSlot(self.btn_wb_picker)
+        self.slider_temp.add_header_widget(self._wb_chip_slot)
 
         self.slider_tint = AdobeScrubSlider(
             t("色调"), 0.70, 1.30, 1.0, step=0.01, unit="", decimals=2,

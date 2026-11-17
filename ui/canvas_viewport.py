@@ -1891,6 +1891,8 @@ class DarkroomGLCanvas(QOpenGLWidget):
         self._wb_pick_radius = 2
         self._wb_pick_shortcut = None
         self._wb_prev_cursor = None
+        self._wb_press_armed = False
+        self._wb_right_click_ts = 0.0
 
         # Floating HUD Badges for Before / After Compare (Native QLabels immune to OpenGL texture corruption)
         self.badge_before = QLabel(t("原片"), self)
@@ -3589,6 +3591,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         if not ok:
             return False, reason
         self._wb_picking = True
+        self._wb_press_armed = False
         self._wb_pick_radius = max(0, int(radius))
         self._is_panning = False
         self._is_split_dragging = False
@@ -3611,6 +3614,7 @@ class DarkroomGLCanvas(QOpenGLWidget):
         """退出吸管；`notify=False` 用于取色成功那条路（成功由 wbPicked 通知）。"""
         was = getattr(self, "_wb_picking", False)
         self._wb_picking = False
+        self._wb_press_armed = False
         self._wb_pick_radius = 2
         if self._wb_pick_shortcut is not None:
             try:
@@ -3834,8 +3838,12 @@ class DarkroomGLCanvas(QOpenGLWidget):
             self.update()
 
     def contextMenuEvent(self, event):
-        if getattr(self, "_wb_picking", False):
-            # 吸管期间的右键是"退出"，不是要菜单
+        # 吸管期间（以及刚用右键退出后的同一拍）右键是"退出"，不是要菜单。
+        # end_wb_pick 已经把 _wb_picking 置 False 了，所以要靠时间戳这道闸。
+        import time as _time
+        if getattr(self, "_wb_picking", False) or \
+                (_time.monotonic() - getattr(self, "_wb_right_click_ts", 0.0)) < 0.6:
+            self._wb_right_click_ts = 0.0
             event.accept()
             return
         if hasattr(self, '_canvas_long_press_timer') and self._canvas_long_press_timer.isActive():
@@ -4106,23 +4114,13 @@ class DarkroomGLCanvas(QOpenGLWidget):
         # 吸管模式先手：左键取色、右键退出，都不能落到下面的平移逻辑里。
         if getattr(self, "_wb_picking", False):
             if btn == Qt.MouseButton.LeftButton:
-                radius = self._wb_pick_radius
-                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                    radius = max(radius, 7)      # Shift = 15x15 平均，压噪点
-                res = self.pick_source_linear(event.position(), radius)
-                if res.get("ok"):
-                    self.end_wb_pick("picked", notify=False)
-                    self.wbPicked.emit(res)
-                else:
-                    reason = res.get("reason", "")
-                    if reason in ("outside", "empty_patch"):
-                        # 点在黑边上：不取色，但也不退出（用户多半是瞄歪了）
-                        self.wbPickHint.emit(reason)
-                    else:
-                        self.end_wb_pick(reason)
+                # 取色放在**松开**时生效：按下只记账，方便用户按住微调位置再放手。
+                self._wb_press_armed = True
                 event.accept()
                 return
             if btn == Qt.MouseButton.RightButton:
+                import time as _time
+                self._wb_right_click_ts = _time.monotonic()
                 self.end_wb_pick("right_click")
                 event.accept()
                 return
@@ -4210,6 +4208,26 @@ class DarkroomGLCanvas(QOpenGLWidget):
 
     def mouseReleaseEvent(self, event):
         btn = event.button()
+        # 吸管：左键松开才真正取色
+        if btn == Qt.MouseButton.LeftButton and getattr(self, "_wb_picking", False) \
+                and getattr(self, "_wb_press_armed", False):
+            self._wb_press_armed = False
+            radius = self._wb_pick_radius
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                radius = max(radius, 7)          # Shift = 15x15 平均，压噪点
+            res = self.pick_source_linear(event.position(), radius)
+            if res.get("ok"):
+                self.end_wb_pick("picked", notify=False)
+                self.wbPicked.emit(res)
+            else:
+                reason = res.get("reason", "")
+                if reason in ("outside", "empty_patch"):
+                    # 点在黑边上：不取色，但也不退出（用户多半是瞄歪了）
+                    self.wbPickHint.emit(reason)
+                else:
+                    self.end_wb_pick(reason)
+            event.accept()
+            return
         if btn == Qt.MouseButton.LeftButton:
             if hasattr(self, '_canvas_long_press_timer') and self._canvas_long_press_timer.isActive():
                 self._canvas_long_press_timer.stop()

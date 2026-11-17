@@ -9,7 +9,7 @@
 
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QPushButton, QWidget
 
 from core.path_utils import get_icon_path
 
@@ -66,7 +66,7 @@ def _tinted(path: str, color: str, size: int) -> QPixmap:
     return out
 
 
-def eyedropper_cursor(size: int = 28) -> QCursor:
+def eyedropper_cursor(size: int = 24) -> QCursor:
     """吸管光标：热点落在吸管左下尖端，而不是图像中心。"""
     path = get_icon_path(ICON_NAME)
     key = (path, size)
@@ -97,10 +97,14 @@ def eyedropper_cursor(size: int = 28) -> QCursor:
 
 
 class EyedropperChip(QPushButton):
-    """色温行标题后面的吸管按钮：hover 提亮，激活态保持主题色。"""
+    """色温行标题后面的吸管按钮：无底无框，只有图标本身。
 
-    SIZE = QSize(18, 18)
-    ICON_PX = 14
+    hover 提亮，激活态整枚图标转主题色。按钮比 AU 芯片大，靠 `SlotContainer`
+    与 AU 共用同一个 44 px 宽的水平槽位，两者中心对齐。
+    """
+
+    SIZE = QSize(24, 24)
+    ICON_PX = 21
 
     def __init__(self, parent=None, tooltip: str = ""):
         super().__init__(parent)
@@ -150,34 +154,37 @@ class EyedropperChip(QPushButton):
             is_dark = theme_manager.is_dark()
         except Exception:
             is_dark = True
-        panel_bg = "#1f2228" if is_dark else "#f4f6fa"
+        # 无底无框：状态只靠图标颜色表达，避免在参数面板里多出一个方块
         if self._active:
             icon_color = ACCENT
-            bg = _mix(ACCENT, panel_bg, 0.20)
-            border = ACCENT
-            hover_bg = _mix(ACCENT, panel_bg, 0.32)
-            hover_border = ACCENT
+        elif self._hover:
+            icon_color = "#f8fafc" if is_dark else "#0f172a"
         else:
             icon_color = _normal_color(is_dark)
-            bg = "transparent"
-            border = "transparent"
-            hover_bg = _mix(ACCENT if is_dark else "#64748b", panel_bg, 0.14)
-            hover_border = ACCENT if is_dark else "#94a3b8"
-        if self._hover:
-            bg, border = hover_bg, hover_border
-        pressed_bg = _mix(ACCENT, panel_bg, 0.38 if self._active else 0.24)
-        self.setStyleSheet(f"""
-            QPushButton {{
-                background: {bg};
-                border: 1px solid {border};
-                border-radius: 4px;
-                padding: 0px;
-            }}
-            QPushButton:pressed {{
-                background: {pressed_bg};
-                border: 1px solid {ACCENT};
-            }}
-        """)
+        self.setStyleSheet("QPushButton { background: transparent; border: none; padding: 0px; }")
         pix = _tinted(get_icon_path(ICON_NAME), icon_color, self.ICON_PX)
         self.setIcon(QIcon(pix) if not pix.isNull() else QIcon())
         self.setIconSize(QSize(self.ICON_PX, self.ICON_PX))
+
+
+class ChipSlot(QWidget):
+    """把一颗芯片放进固定宽度的透明槽位并水平居中。
+
+    子控件不能画出父控件边界（实测会被裁掉），所以"图标比 AU 大、又要和 AU 同心"
+    只能靠两边共用同一个槽宽：AU（30 宽）与吸管（44 宽）都以槽中心对齐。
+    """
+
+    WIDTH = 44
+
+    def __init__(self, child: QWidget, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(self.WIDTH)
+        self.setFixedHeight(max(1, child.height()))
+        self.setStyleSheet("background: transparent; border: none;")
+        child.setParent(self)
+        child.move(max(0, (self.WIDTH - child.width()) // 2), 0)
+        child.show()
+        self._child = child
+
+    def child(self) -> QWidget:
+        return self._child
