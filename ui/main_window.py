@@ -7571,7 +7571,11 @@ class DarkroomMainWindow(QMainWindow):
         prev_state = self._undo_stack[-1]
         self._apply_history_state(prev_state)
 
-        act = curr_state.get("action") or prev_state.get("action")
+        # 提示语描述的是"刚刚被撤销的那一步"= 弹出的 curr_state。别再回落到
+        # prev_state 的 action：那是"恢复到的状态"，它带着自己被创建时的动作名。
+        # 粘贴配方 → 改曝光 → 撤销，prev 是粘贴后的快照（action=paste_params），
+        # 回落后状态栏会喊"已撤销粘贴暗房配方"，可实际只退了那次曝光（2026-11-17 用户报）。
+        act = curr_state.get("action")
         if act == "clear_sdc":
             self.set_app_status(t("已撤销删除暗房配置"), timeout_ms=2000)
         elif act == "paste_params":
