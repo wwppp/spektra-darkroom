@@ -7508,7 +7508,12 @@ class DarkroomMainWindow(QMainWindow):
                 #    （2026-11-17 用户报的"撤销把粘贴也撤了"）。
                 #  · 别的照片（删除/排序后切到新照片再改参数）→ 仍要补 baseline，
                 #    否则撤销会跨照片把另一张的批量状态套过来。
-                if top.get("active_photo_id") != self.active_photo_id:
+                _top_photos = top.get("photos") or {}
+                if (top.get("active_photo_id") != self.active_photo_id
+                        or self.active_photo_id not in _top_photos):
+                    # 快照没覆盖当前照片（粘贴到别的底片、删除/排序后换了照片）→
+                    # 补 baseline 当上一步；否则撤销会落到一个不含这张照片的快照上，
+                    # 画面和滑块都不动（缩略图却已经被刷新，看着像"只撤了缩略图"）。
                     baseline = getattr(self, "_active_photo_baseline_state", None)
                     if baseline and baseline.get("photo_id") == self.active_photo_id:
                         if not (baseline.get("film") == state["film"] and
