@@ -695,6 +695,25 @@ def _discard_bad_preview(preview_path: str, reason: str) -> None:
         pass
 
 
+def has_photo_preview(file_path: str) -> bool:
+    """Is there a viewport preview on disk for this file? (cheap: stat only, no load)
+
+    The switch path uses this purely to word the status line: a cache read and a full
+    demosaic are an order of magnitude apart, and calling both "正在解析 RAW" made a
+    working cache look broken. It is **not** a promise that `get_photo_preview` will
+    succeed -- a corrupt payload is still discarded there and falls back to decoding.
+    """
+    if not file_path:
+        return False
+    try:
+        key = get_cache_key(file_path)
+        if not key:
+            return False
+        return os.path.isfile(os.path.join(get_cache_dir(), f"{key}_preview.npy"))
+    except Exception:
+        return False
+
+
 def get_photo_preview(file_path: str) -> np.ndarray | None:
     """Loads only the viewport float preview array (float32) from cache."""
     if not file_path:

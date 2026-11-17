@@ -13580,7 +13580,17 @@ aspect_ratio=self._lens_frame_aspect(photo),
                     # 以前"有缓存"走的是同步 `get_photo_preview`（读 .npy 60-70 ms）+ 同步
                     # 上传，于是有缓存的切起来反而比没缓存的卡；现在两条路合成一条。
                     if not getattr(self, "_is_importing", False) and not getattr(self, "_is_multi_selecting", False):
-                        self.set_app_status(t('正在解析 RAW：{fn}…', fn=fn), spinning=True, timeout_ms=0)
+                        # 有磁盘预览就走"读取"，没有才是"解析 RAW"：两件事耗时差一个量级
+                        # （读 .npy 几十毫秒 vs 完整去马赛克 2 s），含糊成一句会让人以为
+                        # 缓存没生效。只做一次 isfile，不读文件本身，主线程开销可忽略。
+                        try:
+                            _has_cache = session_cache_manager.has_photo_preview(photo.get("path"))
+                        except Exception:
+                            _has_cache = False
+                        if _has_cache:
+                            self.set_app_status(t('正在读取缓存：{fn}…', fn=fn), spinning=True, timeout_ms=0)
+                        else:
+                            self.set_app_status(t('正在解析 RAW：{fn}…', fn=fn), spinning=True, timeout_ms=0)
 
                     # Priority 2: Visual seamless placeholder in Direct sRGB Bypass mode (u_is_bypass = 2)
                     # Immediately present the bottom filmstrip or cached thumbnail with 0ms response,

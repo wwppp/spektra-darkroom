@@ -441,6 +441,7 @@
   "无法导入配置文件:\n{f_path}": "Could not import profile:\n{f_path}",
   "已导入镜头配置文件：{prof_display}": "Lens profile imported: {prof_display}",
   "正在解析 RAW：{fn}…": "Decoding RAW: {fn}…",
+  "正在读取缓存：{fn}…": "Loading cached preview: {fn}…",
   "底片已载入：{fn}": "Negative loaded: {fn}",
   "底片载入失败：{v}": "Failed to load negative: {v}",
   "底片载入失败：{v}（无可用的预览数据）": "Failed to load negative: {v} (no usable preview data)",
