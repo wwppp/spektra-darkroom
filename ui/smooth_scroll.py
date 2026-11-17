@@ -586,10 +586,10 @@ class SmoothScrollArea(QScrollArea):
         # cost a relayout per frame -- the last few pixels of a wheel animation looked like the
         # panel twitched.  Only touch the stacking when the viewport actually changed size.
         if self.is_horizontal:
-            # 横向（底片栏）的 overlay 跟着**视口**走，而不是整个 scroll_area：视口已经
-            # 让开了槽的外框与圆角（见 FilmstripWidget 的 setViewportMargins），渐隐条再
-            # 内缩 1px 就只会落在槽内壁上，既压不到边线，也能盖住滚到嘴边的格子。
-            target = self.viewport().geometry().adjusted(1, 0, -1, 0)
+            # 横向（底片栏）的 overlay 严格等于**视口**矩形，不再内缩：视口本身已经让开了
+            # 槽的外框与圆角（见 FilmstripWidget 的 setViewportMargins），overlay 再往里
+            # 收 1px 就会在视口最左/最右漏出一条没被渐隐盖住的格子。
+            target = self.viewport().geometry()
         else:
             # 垂直列表：viewport().geometry() 与 rect() 平时相同（无 margins），但一旦
             # 有人给视口加过边距，rect() 会把 overlay 钉在控件左上角、盖到边距上。
