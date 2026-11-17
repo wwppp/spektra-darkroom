@@ -1127,7 +1127,9 @@ class FilmstripWidget(QWidget):
         # 左右留白对齐**视觉上的**上下留白：格子按 `avail_h - 24` 算，但视口还要让出
         # 一条横向滚动条，实测内容高 118 / 格高 108 → 上下各 5 px，跟格间距 6 基本一致。
         # 所以左右也用 6，不再留 16 那一大截。
-        self.scroll_layout.setContentsMargins(6, 0, 6, 0)
+        # 左右留白交给**视口边距**（setViewportMargins(6, 2, 6, 0)，让开槽的圆角），
+        # 这里再加 6 就成了 12，首格会离槽壁过远。布局边距归零，首/末格距离槽内壁正好 6。
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
         # 格子间距 6 -> 3（用户要求缩小一半）；左右留白保持 6，与上下留白对齐。
         self.scroll_layout.setSpacing(self.CELL_GAP)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
@@ -1593,8 +1595,9 @@ class FilmstripWidget(QWidget):
         else:
             if end_stretch is not None:
                 end_stretch.changeSize(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-            # 12 = 左右各 6 的留白（见 scroll_layout 的 contentsMargins，与上下 5-6 px 对齐）
-            total_w = 12 + visible_count * item_w + max(0, visible_count - 1) * self.CELL_GAP
+            # 内容宽只算格子 + 间距：左右那 6px 留白由视口边距提供，不算进内容里，
+            # 否则末格右侧会多出一截空白（滚动条能拖到没有内容的地方）。
+            total_w = visible_count * item_w + max(0, visible_count - 1) * self.CELL_GAP
             self.scroll_content.setMinimumWidth(total_w)
             self.scroll_layout.invalidate()
             self.scroll_layout.activate()
