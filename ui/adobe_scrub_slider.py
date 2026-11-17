@@ -237,6 +237,9 @@ class RoundScrubSlider(QSlider):
     # edge lines up with the label above it (it used to be inset by r+2, which read as
     # "everything is indented by 11px and nothing is flush").
     KNOB_R = 6.5
+    # 单击定位的参数落地延时。手柄立刻跟着走（视觉即时），参数等这么久才提交，
+    # 这样双击复位不会先跳一下点击位置；同时又不用等满系统双击间隔（实测 500 ms 太长）。
+    TAP_DELAY_MS = 300
     # Vertical half-height of the band that actually reacts to the pointer.  The groove is a
     # 3 px line in the middle of an 18 px row; the knob is 13 px across.  Everything outside
     # this band is dead air, so it must not wear a hand cursor and must not swallow clicks.
@@ -467,19 +470,27 @@ class RoundScrubSlider(QSlider):
         if event.button() == Qt.MouseButton.LeftButton:
             # A clean tap (never proved horizontal) commits the tapped value.  Pressing alone
             # still changes nothing, so the value only moves when the click is released.
-            if self._pressed and self._intent is None:
-                # 只记下落点，等双击窗口过去再落地（见 _tap_timer）
-                self._pending_tap_x = float(event.position().x())
-                self._tap_timer.start(int(QApplication.doubleClickInterval()))
+            tapped = self._pressed and self._intent is None
+            if tapped:
+                # 落点先记下，参数延后落地（见 _tap_timer）
+                x_start, x_end, _span = self._track_span()
+                tap_x = max(x_start, min(x_end, float(event.position().x())))
+                self._pending_tap_x = tap_x
+                self._tap_timer.start(self._tap_delay_ms())
             self._pressed = False
             self._intent = None
             self._press_pos = None
-            self._smooth_x = None
             self._release_grab()
-            self.update()
-            self._update_hover_cursor()
-            if self._pending_tap_x is None:
+            if tapped:
+                # 手柄**立刻**停在点击位置：视觉即时，参数还在排队。
+                # 只挪手柄不改 value，所以滑块/画布都不会出现中间状态。
+                self._smooth_x = self._pending_tap_x
+                self.update()
+            else:
+                self._smooth_x = None
+                self.update()
                 self.sliderReleased.emit()
+            self._update_hover_cursor()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -496,9 +507,19 @@ class RoundScrubSlider(QSlider):
         else:
             super().mouseDoubleClickEvent(event)
 
+    def _tap_delay_ms(self) -> int:
+        try:
+            return int(min(self.TAP_DELAY_MS, QApplication.doubleClickInterval()))
+        except Exception:
+            return int(self.TAP_DELAY_MS)
+
     def _cancel_pending_tap(self):
         if self._tap_timer.isActive():
             self._tap_timer.stop()
+        if self._pending_tap_x is not None:
+            # 手柄刚才被移到了点击位置，双击复位要把视觉也还回去
+            self._smooth_x = None
+            self.update()
         self._pending_tap_x = None
 
     def _commit_pending_tap(self):
